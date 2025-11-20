@@ -1,0 +1,94 @@
+services:
+  # PostgreSQL Master
+  postgres:
+    image: postgres:16-alpine
+    container_name: podiogo-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-podiogo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-podiogo123}
+      POSTGRES_DB: ${POSTGRES_DB:-podiogo}
+      PGDATA: /var/lib/postgresql/data/pgdata
+      REPLICA_PASSWORD: ${REPLICA_PASSWORD:-replicator123}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres-master-init.sh:/docker-entrypoint-initdb.d/01-master-init.sh:ro
+    networks:
+      - podiogo-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-podiogo}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    # Configurações para permitir replicação
+    command: >
+      postgres
+      -c wal_level=replica
+      -c max_wal_senders=3
+      -c max_replication_slots=3
+      -c hot_standby=on
+      -c archive_mode=on
+      -c archive_command=''
+      -c listen_addresses='*'
+
+  # PostgreSQL Read Replica com Streaming Replication
+  postgres-replica:
+    image: postgres:16-alpine
+    container_name: podiogo-postgres-replica
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-podiogo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-podiogo123}
+      POSTGRES_DB: ${POSTGRES_DB:-podiogo}
+      PGDATA: /var/lib/postgresql/data/pgdata
+      REPLICA_PASSWORD: ${REPLICA_PASSWORD:-replicator123}
+    ports:
+      - "${POSTGRES_REPLICA_PORT:-5433}:5432"
+    volumes:
+      - postgres_replica_data:/var/lib/postgresql/data
+      - ./docker/postgres-replica-setup.sh:/docker-entrypoint-initdb.d/01-replica-setup.sh:ro
+      - ./docker/postgres-replica-init.sh:/docker-entrypoint-initdb.d/02-replica-init.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - podiogo-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-podiogo}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: podiogo-redis
+    command: redis-server /usr/local/etc/redis/redis.conf
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+      - ./docker/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      - podiogo-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "podiogo123", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  postgres_replica_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  podiogo-network:
+    driver: bridge

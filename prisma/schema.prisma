@@ -1,0 +1,388 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+  PREFER_NOT_TO_SAY
+}
+
+enum DocumentType {
+  CPF
+  PASSPORT
+}
+
+enum Language {
+  PT
+  ES
+  EN
+}
+
+enum EventStatus {
+  DRAFT
+  PUBLISHED
+  CANCELLED
+  COMPLETED
+}
+
+enum RegistrationStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+enum PaymentMethod {
+  PIX
+  CREDIT_CARD
+  CRYPTO
+  BOLETO
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum UserRole {
+  USER
+  ORGANIZER
+  PODIOGO_STAFF
+  ADMIN
+}
+
+model User {
+  id                    String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email                 String        @unique
+  password              String
+  firstName             String
+  lastName              String
+  gender                Gender?
+  phone                 String?
+  dateOfBirth           DateTime?
+  country               String?
+  state                 String?
+  city                  String?
+  documentType          DocumentType?
+  documentNumber        String?       @unique
+  sex                   String?
+  acceptedTerms         Boolean       @default(false)
+  acceptedPrivacyPolicy Boolean       @default(false)
+  receiveCalendarEvents Boolean       @default(false)
+  receivePartnerPromos  Boolean       @default(false)
+  language              Language      @default(PT)
+  isActive              Boolean       @default(true)
+  role                  UserRole      @default(USER)
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  // Relations
+  registrations        Registration[]
+  organizer            Organizer?
+  contactMessages      ContactMessage[]
+  payments             Payment[]
+  invitedRegistrations Registration[]   @relation("InvitedBy")
+}
+
+model Organizer {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String   @unique @db.Uuid
+  name        String
+  email       String
+  phone       String?
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  events          Event[]
+  contactMessages ContactMessage[]
+}
+
+model Event {
+  id                  String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizerId         String      @db.Uuid
+  name                String
+  description         String?
+  bannerUrl           String?
+  location            String
+  city                String
+  state               String
+  country             String
+  googleMapsLink      String?
+  eventDate           DateTime
+  registrationEndDate DateTime
+  status              EventStatus @default(DRAFT)
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+
+  organizer      Organizer        @relation(fields: [organizerId], references: [id], onDelete: Cascade)
+  topics         EventTopic[]
+  modalities     Modality[]
+  kits           Kit[]
+  registrations  Registration[]
+  questions      Question[]
+  locations      EventLocation[]
+  ModalityGroup  ModalityGroup[]
+  ContactMessage ContactMessage[]
+
+  @@index([status, eventDate]) // Para buscar eventos publicados futuros
+  @@index([country, state, city, status]) // Para filtros de localização
+  @@index([organizerId, createdAt]) // Para listar eventos do organizador
+}
+
+model EventTopic {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId   String   @db.Uuid
+  title     String
+  content   String
+  isEnabled Boolean  @default(true)
+  isDefault Boolean  @default(false) // Tópicos padrão: Descrição, Kit, Premiação, Regulamento
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([eventId])
+}
+
+model EventLocation {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId        String   @db.Uuid
+  name           String?
+  address        String
+  city           String
+  state          String
+  country        String
+  zipCode        String?
+  googleMapsLink String?
+  latitude       Float?
+  longitude      Float?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([eventId])
+}
+
+model ModalityGroup {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId     String   @db.Uuid
+  name        String
+  description String?
+  order       Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  event      Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  modalities Modality[]
+
+  @@index([eventId])
+}
+
+model Modality {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  groupId             String   @db.Uuid
+  eventId             String   @db.Uuid
+  name                String
+  description         String?
+  price               Float
+  maxParticipants     Int?
+  currentParticipants Int      @default(0)
+  isActive            Boolean  @default(true)
+  order               Int      @default(0)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  group         ModalityGroup          @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  event         Event                  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  registrations RegistrationModality[]
+
+  @@index([eventId])
+  @@index([groupId])
+}
+
+model Kit {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId     String   @db.Uuid
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  event Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  items KitItem[]
+
+  @@index([eventId])
+}
+
+model KitItem {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  kitId       String   @db.Uuid
+  name        String
+  description String?
+  sizes       Json // Array de objetos com {size: "G", stock: 100}
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  kit           Kit                   @relation(fields: [kitId], references: [id], onDelete: Cascade)
+  registrations RegistrationKitItem[]
+
+  @@index([kitId])
+}
+
+model Registration {
+  id            String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId       String             @db.Uuid
+  userId        String             @db.Uuid
+  invitedById   String?            @db.Uuid // Se foi inscrito por outro usuário
+  status        RegistrationStatus @default(PENDING)
+  qrCode        String? // QR Code como Data URL (muito grande para índice único)
+  purchaseDate  DateTime           @default(now())
+  termsAccepted Boolean            @default(false)
+  rulesAccepted Boolean            @default(false)
+  totalAmount   Float
+  serviceFee    Float
+  discount      Float              @default(0)
+  finalAmount   Float
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  event           Event                  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user            User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  invitedBy       User?                  @relation("InvitedBy", fields: [invitedById], references: [id])
+  modalities      RegistrationModality[]
+  kitItems        RegistrationKitItem[]
+  questionAnswers QuestionAnswer[]
+  payment         Payment?
+
+  @@index([eventId])
+  @@index([userId])
+  @@index([invitedById])
+  // qrCode não pode ter índice devido ao tamanho (Data URL)
+  @@index([eventId, status]) // Para filtrar inscrições por evento e status
+  @@index([userId, createdAt]) // Para histórico do usuário
+  @@index([status, createdAt]) // Para relatórios
+}
+
+model RegistrationModality {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  registrationId String   @db.Uuid
+  modalityId     String   @db.Uuid
+  createdAt      DateTime @default(now())
+
+  registration Registration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  modality     Modality     @relation(fields: [modalityId], references: [id], onDelete: Cascade)
+
+  @@unique([registrationId, modalityId])
+  @@index([registrationId])
+  @@index([modalityId])
+}
+
+model RegistrationKitItem {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  registrationId String   @db.Uuid
+  kitItemId      String   @db.Uuid
+  selectedSize   String
+  quantity       Int      @default(1)
+  createdAt      DateTime @default(now())
+
+  registration Registration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  kitItem      KitItem      @relation(fields: [kitItemId], references: [id], onDelete: Cascade)
+
+  @@index([registrationId])
+  @@index([kitItemId])
+}
+
+model Question {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId    String   @db.Uuid
+  question   String
+  type       String   @default("text") // text, select, checkbox, radio
+  options    Json? // Para tipos select, radio, checkbox
+  isRequired Boolean  @default(false)
+  order      Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  event   Event            @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  answers QuestionAnswer[]
+
+  @@index([eventId])
+}
+
+model QuestionAnswer {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  registrationId String   @db.Uuid
+  questionId     String   @db.Uuid
+  answer         String
+  createdAt      DateTime @default(now())
+
+  registration Registration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  question     Question     @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([registrationId, questionId])
+  @@index([registrationId])
+  @@index([questionId])
+}
+
+model Payment {
+  id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  registrationId String        @unique @db.Uuid
+  userId         String        @db.Uuid
+  method         PaymentMethod
+  status         PaymentStatus @default(PENDING)
+  amount         Float
+  transactionId  String?
+  paymentDate    DateTime?
+  metadata       Json? // Dados adicionais do pagamento
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  registration Registration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@index([transactionId])
+  @@index([status, createdAt]) // Para relatórios de pagamento
+  @@index([method, status]) // Para análise por método
+}
+
+model ContactMessage {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId     String?  @db.Uuid
+  organizerId String   @db.Uuid
+  userId      String?  @db.Uuid
+  name        String
+  email       String
+  phone       String?
+  message     String
+  isRead      Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  event     Event?    @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  organizer Organizer @relation(fields: [organizerId], references: [id], onDelete: Cascade)
+  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizerId])
+  @@index([eventId])
+  @@index([isRead])
+}
