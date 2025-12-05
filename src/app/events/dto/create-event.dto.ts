@@ -21,7 +21,6 @@ export class CreateEventDto {
   description?: string;
 
   @IsOptional()
-  @IsUrl()
   bannerUrl?: string;
 
   @IsString()
@@ -37,7 +36,6 @@ export class CreateEventDto {
   country: string;
 
   @IsOptional()
-  @IsUrl()
   googleMapsLink?: string;
 
   @IsDateString()
@@ -57,7 +55,6 @@ export class UpdateEventDto {
   description?: string;
 
   @IsOptional()
-  @IsUrl()
   bannerUrl?: string;
 
   @IsOptional()
@@ -77,7 +74,6 @@ export class UpdateEventDto {
   country?: string;
 
   @IsOptional()
-  @IsUrl()
   googleMapsLink?: string;
 
   @IsOptional()
@@ -152,4 +148,3 @@ export class FilterEventsDto {
   @Type(() => Number)
   limit?: number = 10;
 }
-

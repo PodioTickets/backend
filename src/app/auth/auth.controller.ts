@@ -8,6 +8,7 @@ import {
   HttpStatus,
   Res,
   BadRequestException,
+  UnauthorizedException,
   Request,
 } from '@nestjs/common';
 import * as crypto from 'crypto';
@@ -53,7 +54,7 @@ export class AuthController {
     }
   }
 
-  @Post('login/email')
+  @Post('login')
   @UseGuards(LocalAuthGuard)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Login with email/CPF and password' })
@@ -80,6 +81,7 @@ export class AuthController {
   async loginEmail(@Request() req) {
     return this.authService.login(req.user);
   }
+
 
   @Post('refresh')
   @HttpCode(HttpStatus.OK)

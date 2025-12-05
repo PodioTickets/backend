@@ -1,13 +1,26 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { CreateModalityGroupDto, UpdateModalityGroupDto, CreateModalityDto, UpdateModalityDto } from './dto/create-modality.dto';
+import {
+  CreateModalityGroupDto,
+  UpdateModalityGroupDto,
+  CreateModalityDto,
+  UpdateModalityDto,
+} from './dto/create-modality.dto';
 
 @Injectable()
 export class ModalitiesService {
   constructor(private readonly prisma: PrismaService) {}
 
   // Modality Groups
-  async createGroup(userId: string, eventId: string, createGroupDto: CreateModalityGroupDto) {
+  async createGroup(
+    userId: string,
+    eventId: string,
+    createGroupDto: CreateModalityGroupDto,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -25,7 +38,12 @@ export class ModalitiesService {
     };
   }
 
-  async updateGroup(userId: string, eventId: string, groupId: string, updateGroupDto: UpdateModalityGroupDto) {
+  async updateGroup(
+    userId: string,
+    eventId: string,
+    groupId: string,
+    updateGroupDto: UpdateModalityGroupDto,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -66,7 +84,9 @@ export class ModalitiesService {
     }
 
     if (group.modalities.length > 0) {
-      throw new BadRequestException('Cannot delete group with modalities. Delete modalities first.');
+      throw new BadRequestException(
+        'Cannot delete group with modalities. Delete modalities first.',
+      );
     }
 
     await prismaWrite.modalityGroup.delete({
@@ -79,7 +99,11 @@ export class ModalitiesService {
   }
 
   // Modalities
-  async create(userId: string, eventId: string, createModalityDto: CreateModalityDto) {
+  async create(
+    userId: string,
+    eventId: string,
+    createModalityDto: CreateModalityDto,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -109,7 +133,7 @@ export class ModalitiesService {
 
   async findAll(eventId: string) {
     const prismaRead = this.prisma.getReadClient();
-    
+
     const modalities = await prismaRead.modality.findMany({
       where: {
         eventId,
@@ -118,10 +142,7 @@ export class ModalitiesService {
       include: {
         group: true,
       },
-      orderBy: [
-        { group: { order: 'asc' } },
-        { order: 'asc' },
-      ],
+      orderBy: [{ group: { order: 'asc' } }, { order: 'asc' }],
     });
 
     return {
@@ -132,7 +153,7 @@ export class ModalitiesService {
 
   async findOne(id: string) {
     const prismaRead = this.prisma.getReadClient();
-    
+
     const modality = await prismaRead.modality.findUnique({
       where: { id },
       include: {
@@ -157,7 +178,12 @@ export class ModalitiesService {
     };
   }
 
-  async update(userId: string, eventId: string, modalityId: string, updateModalityDto: UpdateModalityDto) {
+  async update(
+    userId: string,
+    eventId: string,
+    modalityId: string,
+    updateModalityDto: UpdateModalityDto,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -198,7 +224,9 @@ export class ModalitiesService {
     }
 
     if (modality.registrations.length > 0) {
-      throw new BadRequestException('Cannot delete modality with registrations');
+      throw new BadRequestException(
+        'Cannot delete modality with registrations',
+      );
     }
 
     await prismaWrite.modality.delete({
@@ -211,9 +239,11 @@ export class ModalitiesService {
   }
 
   private async verifyOrganizerAccess(userId: string, eventId: string) {
+    // Verificações de acesso críticas devem usar write client para consistência
     const prismaRead = this.prisma.getReadClient();
+    const prismaWrite = this.prisma.getWriteClient();
 
-    const organizer = await prismaRead.organizer.findUnique({
+    const organizer = await prismaWrite.organizer.findUnique({
       where: { userId },
     });
 
@@ -234,4 +264,3 @@ export class ModalitiesService {
     }
   }
 }
-

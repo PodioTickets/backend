@@ -14,16 +14,7 @@ import { UserService } from './user.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 
-// 🔥 Controller atualizado - hot reload testado com sucesso!
-import { SellItemDto } from './dto/sell-item.dto';
-import { updateConfigUserDto } from './dto/user-items-response.dto';
-import {
-  ApiTags,
-  ApiOperation,
-  ApiParam,
-  ApiResponse,
-  ApiBody,
-} from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiBody } from '@nestjs/swagger';
 import { MFAService } from '../../common/services/mfa.service';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -47,7 +38,6 @@ export class UserController {
   @NoCache()
   @UseGuards(JwtAuthGuard, AdminGuard)
   findAll(@Query('page') page?: string, @Query('limit') limit?: string) {
-    console.log('🔥 HOT RELOAD: Método findAll chamado!');
     const pageNum = page ? parseInt(page) : 1;
     const limitNum = limit ? parseInt(limit) : 50;
     if (pageNum < 1) throw new Error('Página deve ser maior que 0');

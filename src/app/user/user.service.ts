@@ -2,10 +2,12 @@ import {
   Injectable,
   BadRequestException,
   NotFoundException,
+  ConflictException,
 } from '@nestjs/common';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { PrismaService } from '../../prisma/prisma.service';
+import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 
 @Injectable()
@@ -83,7 +85,7 @@ export class UserService {
     });
 
     if (existingUserByEmail) {
-      throw new BadRequestException('User with this email already exists');
+      throw new ConflictException('User with this email already exists');
     }
 
     // Verificar se CPF já existe (se fornecido)
@@ -93,37 +95,57 @@ export class UserService {
       });
 
       if (existingUserByCpf) {
-        throw new BadRequestException('User with this document number already exists');
+        throw new ConflictException('User with this document number already exists');
       }
     }
 
-    const hashedPassword = createUserDto.password
-      ? await bcrypt.hash(createUserDto.password, 12)
-      : undefined;
+    try {
+      const hashedPassword = createUserDto.password
+        ? await bcrypt.hash(createUserDto.password, 12)
+        : undefined;
 
-    const user = await prismaWrite.user.create({
-      data: {
-        ...createUserDto,
-        password: hashedPassword || '',
-        dateOfBirth: createUserDto.dateOfBirth
-          ? new Date(createUserDto.dateOfBirth)
-          : null,
-      },
-      select: {
-        id: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        phone: true,
-        documentNumber: true,
-        role: true,
-        isActive: true,
-      },
-    });
-    return {
-      message: 'User created successfully',
-      data: { user },
-    };
+      const user = await prismaWrite.user.create({
+        data: {
+          ...createUserDto,
+          password: hashedPassword || '',
+          dateOfBirth: createUserDto.dateOfBirth
+            ? new Date(createUserDto.dateOfBirth)
+            : null,
+        },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          lastName: true,
+          phone: true,
+          documentNumber: true,
+          role: true,
+          isActive: true,
+        },
+      });
+      return {
+        message: 'User created successfully',
+        data: { user },
+      };
+    } catch (error) {
+      // Handle Prisma unique constraint violations
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        const target = error.meta?.target as string[];
+        if (target?.includes('email')) {
+          throw new ConflictException('User with this email already exists');
+        }
+        if (target?.includes('documentNumber')) {
+          throw new ConflictException('User with this document number already exists');
+        }
+        throw new ConflictException('User already exists');
+      }
+
+      // Log do erro completo para debug
+      console.error('User creation error:', error);
+      throw new BadRequestException(
+        error?.message || 'Failed to create user',
+      );
+    }
   }
 
   async findAll(params?: { page?: number; limit?: number }) {

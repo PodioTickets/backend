@@ -288,10 +288,11 @@ export class KitsService {
   }
 
   private async verifyOrganizerAccess(userId: string, eventId: string) {
-    // Verificações de acesso podem usar read replica (são leituras)
+    // Verificações de acesso críticas devem usar write client para consistência
+    const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
-    const organizer = await prismaRead.organizer.findUnique({
+    const organizer = await prismaWrite.organizer.findUnique({
       where: { userId },
     });
 

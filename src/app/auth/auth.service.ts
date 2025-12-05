@@ -7,6 +7,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
+import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 import {
@@ -42,10 +43,10 @@ export class AuthService {
       const isEmail = emailOrCpf.includes('@');
       let user;
 
-      const prismaRead = this.prisma.getReadClient();
-      
+      const prismaWrite = this.prisma.getWriteClient();
+
       if (isEmail) {
-        user = await prismaRead.user.findUnique({
+        user = await prismaWrite.user.findUnique({
           where: { email: emailOrCpf },
           select: {
             id: true,
@@ -60,7 +61,7 @@ export class AuthService {
         });
       } else {
         // Buscar por CPF/documentNumber
-        user = await prismaRead.user.findUnique({
+        user = await prismaWrite.user.findUnique({
           where: { documentNumber: emailOrCpf },
           select: {
             id: true,
@@ -223,6 +224,19 @@ export class AuthService {
       ) {
         throw error;
       }
+
+      // Handle Prisma unique constraint violations
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        const target = error.meta?.target as string[];
+        if (target?.includes('email')) {
+          throw new ConflictException('User with this email already exists');
+        }
+        if (target?.includes('documentNumber')) {
+          throw new ConflictException('User with this document number already exists');
+        }
+        throw new ConflictException('User already exists');
+      }
+
       // Log do erro completo para debug
       console.error('Registration error:', error);
       throw new BadRequestException(

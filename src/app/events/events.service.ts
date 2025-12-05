@@ -266,7 +266,7 @@ export class EventsService {
       }
     }
 
-    // Usar read replica para queries de leitura
+    // Usar read client para operações de leitura
     const prismaRead = this.prisma.getReadClient();
 
     const [events, total] = await Promise.all([
@@ -598,10 +598,10 @@ export class EventsService {
   }
 
   private async verifyOrganizerAccess(userId: string, eventId: string) {
-    // Verificações de acesso podem usar read replica (são leituras)
-    const prismaRead = this.prisma.getReadClient();
-    
-    const organizer = await prismaRead.organizer.findUnique({
+    // Verificações de acesso críticas devem usar write client para consistência
+    const prismaWrite = this.prisma.getWriteClient();
+
+    const organizer = await prismaWrite.organizer.findUnique({
       where: { userId },
     });
 
@@ -609,7 +609,7 @@ export class EventsService {
       throw new BadRequestException('User is not an organizer');
     }
 
-    const event = await prismaRead.event.findUnique({
+    const event = await prismaWrite.event.findUnique({
       where: { id: eventId },
     });
 
