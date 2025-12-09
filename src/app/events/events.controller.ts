@@ -20,7 +20,7 @@ import {
   ApiBody,
 } from '@nestjs/swagger';
 import { EventsService } from './events.service';
-import { CreateEventDto, UpdateEventDto, FilterEventsDto } from './dto/create-event.dto';
+import { CreateEventDto, UpdateEventDto, FilterEventsDto, SearchEventsDto } from './dto/create-event.dto';
 import { CreateEventTopicDto, UpdateEventTopicDto, CreateEventLocationDto } from './dto/event-topic.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 
@@ -41,6 +41,26 @@ export class EventsController {
     return this.eventsService.create(req.user.id, createEventDto);
   }
 
+  @Get('search')
+  @ApiOperation({ 
+    summary: 'Search events', 
+    description: 'Advanced search for events with text search, location filters, and date ranges. Optimized for performance.' 
+  })
+  @ApiQuery({ name: 'q', required: false, description: 'Search query (searches in name, description, location, city, state)' })
+  @ApiQuery({ name: 'country', required: false, description: 'Filter by country' })
+  @ApiQuery({ name: 'state', required: false, description: 'Filter by state' })
+  @ApiQuery({ name: 'city', required: false, description: 'Filter by city' })
+  @ApiQuery({ name: 'startDate', required: false, description: 'Filter events from date (ISO string)' })
+  @ApiQuery({ name: 'endDate', required: false, description: 'Filter events to date (ISO string)' })
+  @ApiQuery({ name: 'status', required: false, enum: ['DRAFT', 'PUBLISHED', 'CANCELLED', 'COMPLETED'], description: 'Filter by event status' })
+  @ApiQuery({ name: 'includePast', required: false, type: Boolean, description: 'Include past events (default: false)' })
+  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20, max: 100)' })
+  @ApiResponse({ status: 200, description: 'Events search completed successfully' })
+  search(@Query() searchDto: SearchEventsDto) {
+    return this.eventsService.search(searchDto);
+  }
+
   @Get()
   @ApiOperation({ summary: 'Get all events', description: 'Retrieves a list of events with optional filters' })
   @ApiQuery({ name: 'status', required: false, description: 'Filter by event status' })
@@ -53,7 +73,6 @@ export class EventsController {
   @ApiQuery({ name: 'includePast', required: false, description: 'Include past events (default: false, only future events)' })
   @ApiResponse({ status: 200, description: 'Events retrieved successfully' })
   findAll(@Request() req, @Query() filterDto: FilterEventsDto) {
-    // Passar userId se estiver autenticado
     const userId = req.user?.id;
     return this.eventsService.findAll(filterDto, userId);
   }

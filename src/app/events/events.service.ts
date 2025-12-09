@@ -8,6 +8,7 @@ import {
   CreateEventDto,
   UpdateEventDto,
   FilterEventsDto,
+  type SearchEventsDto,
 } from './dto/create-event.dto';
 import {
   CreateEventTopicDto,
@@ -19,6 +20,26 @@ import { EventStatus } from '@prisma/client';
 @Injectable()
 export class EventsService {
   constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Valida se uma string é um UUID válido
+   */
+  private isValidUUID(id: string): boolean {
+    const uuidRegex =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    return uuidRegex.test(id);
+  }
+
+  /**
+   * Valida UUID e lança exceção se inválido
+   */
+  private validateUUID(id: string, fieldName: string = 'ID'): void {
+    if (!this.isValidUUID(id)) {
+      throw new BadRequestException(
+        `Invalid ${fieldName} format. Expected UUID.`,
+      );
+    }
+  }
 
   async create(userId: string, createEventDto: CreateEventDto) {
     // Verificar se o usuário é organizador - usar write client
@@ -56,6 +77,7 @@ export class EventsService {
         ...createEventDto,
         organizerId: organizer.id,
         eventDate: new Date(createEventDto.eventDate),
+        registrationStartDate: new Date(createEventDto.registrationStartDate),
         registrationEndDate: new Date(createEventDto.registrationEndDate),
       },
       include: {
@@ -74,56 +96,150 @@ export class EventsService {
       },
     });
 
-    // Criar tópicos padrão
-    await this.createDefaultTopics(event.id);
-
     return {
       message: 'Event created successfully',
       data: { event },
     };
   }
 
-  private async createDefaultTopics(eventId: string) {
-    const defaultTopics = [
-      {
-        title: 'Descrição do Evento',
-        content: '',
-        isDefault: true,
-        isEnabled: true,
-        order: 1,
-      },
-      {
-        title: 'KIT',
-        content: '',
-        isDefault: true,
-        isEnabled: true,
-        order: 2,
-      },
-      {
-        title: 'PREMIAÇÃO',
-        content: '',
-        isDefault: true,
-        isEnabled: true,
-        order: 3,
-      },
-      {
-        title: 'REGULAMENTO',
-        content: '',
-        isDefault: true,
-        isEnabled: true,
-        order: 4,
-      },
-    ];
+  async search(searchDto: SearchEventsDto) {
+    const {
+      q,
+      country,
+      state,
+      city,
+      startDate,
+      endDate,
+      status,
+      includePast = false,
+      page = 1,
+      limit = 20,
+    } = searchDto;
 
-    // Usar write client para criação
-    const prismaWrite = this.prisma.getWriteClient();
+    const where: any = {
+      status: status || EventStatus.PUBLISHED,
+    };
 
-    await prismaWrite.eventTopic.createMany({
-      data: defaultTopics.map((topic) => ({
-        ...topic,
-        eventId,
-      })),
-    });
+    if (q && q.trim().length > 0) {
+      const searchTerm = q.trim();
+      where.OR = [
+        {
+          name: {
+            contains: searchTerm,
+            mode: 'insensitive',
+          },
+        },
+        {
+          description: {
+            contains: searchTerm,
+            mode: 'insensitive',
+          },
+        },
+        {
+          location: {
+            contains: searchTerm,
+            mode: 'insensitive',
+          },
+        },
+        {
+          city: {
+            contains: searchTerm,
+            mode: 'insensitive',
+          },
+        },
+        {
+          state: {
+            contains: searchTerm,
+            mode: 'insensitive',
+          },
+        },
+      ];
+    }
+
+    // Filtros de localização
+    if (country) {
+      where.country = country;
+    }
+
+    if (state) {
+      where.state = state;
+    }
+
+    if (city) {
+      where.city = city;
+    }
+
+    // Filtro de data
+    if (startDate && endDate) {
+      where.eventDate = {
+        gte: new Date(startDate),
+        lte: new Date(endDate),
+      };
+    } else if (!includePast) {
+      // Por padrão, apenas eventos futuros
+      where.eventDate = {
+        gte: new Date(),
+      };
+    }
+
+    // Usar read replica para performance
+    const prismaRead = this.prisma.getReadClient();
+
+    // Buscar eventos e total em paralelo
+    const [events, total] = await Promise.all([
+      prismaRead.event.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          bannerUrl: true,
+          logoUrl: true,
+          location: true,
+          city: true,
+          state: true,
+          country: true,
+          eventDate: true,
+          registrationStartDate: true,
+          registrationEndDate: true,
+          status: true,
+          createdAt: true,
+          organizer: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+          _count: {
+            select: {
+              registrations: true,
+              modalities: true,
+            },
+          },
+        },
+        orderBy: {
+          eventDate: 'asc',
+        },
+      }),
+      prismaRead.event.count({ where }),
+    ]);
+
+    return {
+      message: 'Events search completed successfully',
+      data: {
+        events,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        },
+        query: q || null,
+      },
+    };
   }
 
   async findAll(filterDto: FilterEventsDto, userId?: string) {
@@ -304,7 +420,130 @@ export class EventsService {
     };
   }
 
+  /**
+   * Busca eventos de um organizador de forma performática
+   * Usa read replica e índice [organizerId, createdAt]
+   */
+  async findByOrganizer(
+    userId: string,
+    filterDto: {
+      page?: number;
+      limit?: number;
+      status?: EventStatus;
+      includePast?: boolean;
+      startDate?: string;
+      endDate?: string;
+      name?: string;
+    } = {},
+  ) {
+    const {
+      page = 1,
+      limit = 20,
+      status,
+      includePast = false,
+      startDate,
+      endDate,
+      name,
+    } = filterDto;
+
+    const prismaRead = this.prisma.getReadClient();
+
+    // Buscar organizerId do userId
+    const organizer = await prismaRead.organizer.findUnique({
+      where: { userId },
+      select: { id: true },
+    });
+
+    if (!organizer) {
+      throw new BadRequestException('User is not an organizer');
+    }
+
+    // Construir where clause otimizado para usar índice [organizerId, createdAt]
+    const where: any = {
+      organizerId: organizer.id, // Usa o índice
+    };
+
+    // Filtro por status
+    if (status) {
+      where.status = status;
+    }
+
+    // Filtro por data
+    if (startDate && endDate) {
+      where.eventDate = {
+        gte: new Date(startDate),
+        lte: new Date(endDate),
+      };
+    } else if (!includePast) {
+      // Por padrão, apenas eventos futuros
+      where.eventDate = {
+        gte: new Date(),
+      };
+    }
+
+    // Filtro por nome
+    if (name) {
+      where.name = {
+        contains: name,
+        mode: 'insensitive',
+      };
+    }
+
+    // Query performática usando Promise.all para paralelizar
+    const [events, total] = await Promise.all([
+      prismaRead.event.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        select: {
+          // Selecionar apenas campos necessários para performance
+          id: true,
+          name: true,
+          description: true,
+          bannerUrl: true,
+          logoUrl: true,
+          location: true,
+          city: true,
+          state: true,
+          country: true,
+          eventDate: true,
+          registrationEndDate: true,
+          status: true,
+          createdAt: true,
+          updatedAt: true,
+          // Contadores úteis sem carregar relações completas
+          _count: {
+            select: {
+              registrations: true,
+              modalities: true,
+            },
+          },
+        },
+        // Ordenar por createdAt desc para usar índice [organizerId, createdAt]
+        orderBy: {
+          createdAt: 'desc',
+        },
+      }),
+      prismaRead.event.count({ where }),
+    ]);
+
+    return {
+      message: 'Organizer events fetched successfully',
+      data: {
+        events,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        },
+      },
+    };
+  }
+
   async findOne(id: string) {
+    this.validateUUID(id, 'event ID');
+
     // Usar read replica para query de leitura
     const prismaRead = this.prisma.getReadClient();
 
@@ -333,10 +572,17 @@ export class EventsService {
         },
         modalities: {
           include: {
-            group: true,
+            template: {
+              select: {
+                id: true,
+                code: true,
+                label: true,
+                icon: true,
+              },
+            },
           },
           where: { isActive: true },
-          orderBy: [{ group: { order: 'asc' } }, { order: 'asc' }],
+          orderBy: { order: 'asc' },
         },
         kits: {
           where: { isActive: true },
@@ -364,16 +610,14 @@ export class EventsService {
   }
 
   async update(userId: string, id: string, updateEventDto: UpdateEventDto) {
-    // Verificar se o usuário é organizador e dono do evento
+    this.validateUUID(id, 'event ID');
     const prismaWrite = this.prisma.getWriteClient();
-    
+
     const organizer = await prismaWrite.organizer.findUnique({
       where: { userId },
     });
 
-    if (!organizer) {
-      throw new BadRequestException('User is not an organizer');
-    }
+    if (!organizer) throw new BadRequestException('User is not an organizer');
 
     const event = await prismaWrite.event.findUnique({
       where: { id },
@@ -391,12 +635,16 @@ export class EventsService {
     if (updateEventDto.eventDate) {
       updateData.eventDate = new Date(updateEventDto.eventDate);
     }
+    if (updateEventDto.registrationStartDate) {
+      updateData.registrationStartDate = new Date(
+        updateEventDto.registrationStartDate,
+      );
+    }
     if (updateEventDto.registrationEndDate) {
       updateData.registrationEndDate = new Date(
         updateEventDto.registrationEndDate,
       );
     }
-
     const updatedEvent = await prismaWrite.event.update({
       where: { id },
       data: updateData,
@@ -404,7 +652,6 @@ export class EventsService {
         organizer: true,
       },
     });
-
     return {
       message: 'Event updated successfully',
       data: { event: updatedEvent },
@@ -412,8 +659,10 @@ export class EventsService {
   }
 
   async remove(userId: string, id: string) {
+    this.validateUUID(id, 'event ID');
+
     const prismaWrite = this.prisma.getWriteClient();
-    
+
     const organizer = await prismaWrite.organizer.findUnique({
       where: { userId },
     });
@@ -452,7 +701,7 @@ export class EventsService {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
-    
+
     const topic = await prismaWrite.eventTopic.create({
       data: {
         ...createTopicDto,
@@ -472,10 +721,11 @@ export class EventsService {
     topicId: string,
     updateTopicDto: UpdateEventTopicDto,
   ) {
+    this.validateUUID(topicId, 'topic ID');
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
-    
+
     const topic = await prismaWrite.eventTopic.findUnique({
       where: { id: topicId },
     });
@@ -496,10 +746,11 @@ export class EventsService {
   }
 
   async deleteTopic(userId: string, eventId: string, topicId: string) {
+    this.validateUUID(topicId, 'topic ID');
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
-    
+
     const topic = await prismaWrite.eventTopic.findUnique({
       where: { id: topicId },
     });
@@ -532,7 +783,7 @@ export class EventsService {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
-    
+
     const location = await prismaWrite.eventLocation.create({
       data: {
         ...createLocationDto,
@@ -552,10 +803,11 @@ export class EventsService {
     locationId: string,
     updateLocationDto: CreateEventLocationDto,
   ) {
+    this.validateUUID(locationId, 'location ID');
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
-    
+
     const location = await prismaWrite.eventLocation.findUnique({
       where: { id: locationId },
     });
@@ -576,10 +828,11 @@ export class EventsService {
   }
 
   async deleteLocation(userId: string, eventId: string, locationId: string) {
+    this.validateUUID(locationId, 'location ID');
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
-    
+
     const location = await prismaWrite.eventLocation.findUnique({
       where: { id: locationId },
     });
@@ -598,6 +851,8 @@ export class EventsService {
   }
 
   private async verifyOrganizerAccess(userId: string, eventId: string) {
+    this.validateUUID(eventId, 'event ID');
+
     // Verificações de acesso críticas devem usar write client para consistência
     const prismaWrite = this.prisma.getWriteClient();
 

@@ -28,15 +28,10 @@ export class EmailRegisterDto {
   @MinLength(8)
   password: string;
 
-  @ApiProperty({ description: 'First name' })
+  @ApiProperty({ description: 'Complete name' })
   @IsString()
   @IsNotEmpty()
-  firstName: string;
-
-  @ApiProperty({ description: 'Last name' })
-  @IsString()
-  @IsNotEmpty()
-  lastName: string;
+  complete_name: string;
 
   @ApiPropertyOptional({ description: 'Gender', enum: Gender })
   @IsOptional()
@@ -47,6 +42,11 @@ export class EmailRegisterDto {
   @IsOptional()
   @IsString()
   phone?: string;
+
+  @ApiPropertyOptional({ description: 'Phone number' })
+  @IsOptional()
+  @IsString()
+  reserve_phone?: string;
 
   @ApiPropertyOptional({ description: 'Date of birth', format: 'date' })
   @IsOptional()

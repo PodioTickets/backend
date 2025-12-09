@@ -6,6 +6,7 @@ import {
   IsBoolean,
   IsInt,
   Min,
+  Max,
   IsUrl,
   ValidateNested,
 } from 'class-validator';
@@ -40,6 +41,9 @@ export class CreateEventDto {
 
   @IsDateString()
   eventDate: string;
+
+  @IsDateString()
+  registrationStartDate: string;
 
   @IsDateString()
   registrationEndDate: string;
@@ -79,6 +83,10 @@ export class UpdateEventDto {
   @IsOptional()
   @IsDateString()
   eventDate?: string;
+
+  @IsOptional()
+  @IsDateString()
+  registrationStartDate?: string;
 
   @IsOptional()
   @IsDateString()
@@ -147,4 +155,52 @@ export class FilterEventsDto {
   @Min(1)
   @Type(() => Number)
   limit?: number = 10;
+}
+
+export class SearchEventsDto {
+  @IsOptional()
+  @IsString()
+  q?: string; // Query de busca livre (busca em nome, descrição, localização)
+
+  @IsOptional()
+  @IsString()
+  country?: string;
+
+  @IsOptional()
+  @IsString()
+  state?: string;
+
+  @IsOptional()
+  @IsString()
+  city?: string;
+
+  @IsOptional()
+  @IsDateString()
+  startDate?: string;
+
+  @IsOptional()
+  @IsDateString()
+  endDate?: string;
+
+  @IsOptional()
+  @IsEnum(EventStatus)
+  status?: EventStatus;
+
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  includePast?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Type(() => Number)
+  page?: number = 1;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @Type(() => Number)
+  limit?: number = 20;
 }

@@ -71,6 +71,7 @@ model User {
   lastName              String
   gender                Gender?
   phone                 String?
+  reservePhone          String?
   dateOfBirth           DateTime?
   country               String?
   state                 String?
@@ -112,21 +113,23 @@ model Organizer {
 }
 
 model Event {
-  id                  String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  organizerId         String      @db.Uuid
-  name                String
-  description         String?
-  bannerUrl           String?
-  location            String
-  city                String
-  state               String
-  country             String
-  googleMapsLink      String?
-  eventDate           DateTime
-  registrationEndDate DateTime
-  status              EventStatus @default(DRAFT)
-  createdAt           DateTime    @default(now())
-  updatedAt           DateTime    @updatedAt
+  id                    String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizerId           String      @db.Uuid
+  name                  String
+  description           String?
+  bannerUrl             String?
+  logoUrl               String?
+  location              String
+  city                  String
+  state                 String
+  country               String
+  googleMapsLink        String?
+  eventDate             DateTime
+  registrationStartDate DateTime
+  registrationEndDate   DateTime
+  status                EventStatus @default(DRAFT)
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
 
   organizer      Organizer        @relation(fields: [organizerId], references: [id], onDelete: Cascade)
   topics         EventTopic[]
@@ -135,7 +138,6 @@ model Event {
   registrations  Registration[]
   questions      Question[]
   locations      EventLocation[]
-  ModalityGroup  ModalityGroup[]
   ContactMessage ContactMessage[]
 
   @@index([status, eventDate]) // Para buscar eventos publicados futuros
@@ -179,25 +181,25 @@ model EventLocation {
   @@index([eventId])
 }
 
-model ModalityGroup {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  eventId     String   @db.Uuid
-  name        String
-  description String?
-  order       Int      @default(0)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+model ModalityTemplate {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code      String   @unique // código único da modalidade (ex: "corrida-de-rua")
+  label     String // nome exibido (ex: "Corrida de rua")
+  icon      String? // caminho do ícone
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  event      Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
   modalities Modality[]
 
-  @@index([eventId])
+  @@index([code])
+  @@index([isActive])
 }
 
 model Modality {
   id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  groupId             String   @db.Uuid
   eventId             String   @db.Uuid
+  templateId          String?  @db.Uuid // Referência ao template (opcional)
   name                String
   description         String?
   price               Float
@@ -208,12 +210,13 @@ model Modality {
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
-  group         ModalityGroup          @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  template      ModalityTemplate?      @relation(fields: [templateId], references: [id], onDelete: SetNull)
   event         Event                  @relation(fields: [eventId], references: [id], onDelete: Cascade)
   registrations RegistrationModality[]
 
   @@index([eventId])
-  @@index([groupId])
+  @@index([templateId])
+  @@index([eventId, isActive])
 }
 
 model Kit {

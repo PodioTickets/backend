@@ -20,7 +20,7 @@
     "db:push": "prisma db push",
     "db:push:replica": "cross-env DATABASE_URL=postgresql://podiogo:podiogo123@localhost:5433/podiogo prisma db push --skip-generate",
     "db:sync": "pnpm db:push && pnpm db:generate",
-    "db:seed": "ts-node src/scripts/seed.ts",
+    "db:seed": "ts-node prisma/seed.ts",
     "db:studio": "prisma studio",
     "docker:up": "docker-compose -f docker-compose.dev.yml up -d",
     "docker:down": "docker-compose -f docker-compose.dev.yml down",

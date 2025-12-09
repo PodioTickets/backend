@@ -128,10 +128,10 @@ export class AuthService {
       const {
         email,
         password,
-        firstName,
-        lastName,
+        complete_name,
         gender,
         phone,
+        reserve_phone,
         dateOfBirth,
         country,
         state,
@@ -156,7 +156,7 @@ export class AuthService {
       // Verificar se email já existe
       const prismaWrite = this.prisma.getWriteClient();
       const prismaRead = this.prisma.getReadClient();
-      
+
       const existingUserByEmail = await prismaRead.user.findUnique({
         where: { email },
       });
@@ -184,10 +184,11 @@ export class AuthService {
         data: {
           email,
           password: hashedPassword,
-          firstName,
-          lastName,
+          firstName: complete_name.split(' ')[0],
+          lastName: complete_name.split(' ').slice(1).join(' '),
           gender,
           phone,
+          reservePhone: reserve_phone,
           dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
           country,
           state,
@@ -226,22 +227,25 @@ export class AuthService {
       }
 
       // Handle Prisma unique constraint violations
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
         const target = error.meta?.target as string[];
         if (target?.includes('email')) {
           throw new ConflictException('User with this email already exists');
         }
         if (target?.includes('documentNumber')) {
-          throw new ConflictException('User with this document number already exists');
+          throw new ConflictException(
+            'User with this document number already exists',
+          );
         }
         throw new ConflictException('User already exists');
       }
 
       // Log do erro completo para debug
       console.error('Registration error:', error);
-      throw new BadRequestException(
-        error?.message || 'Failed to create user',
-      );
+      throw new BadRequestException(error?.message || 'Failed to create user');
     }
   }
 
@@ -293,7 +297,7 @@ export class AuthService {
       });
 
       const prismaRead = this.prisma.getReadClient();
-      
+
       const user = await prismaRead.user.findUnique({
         where: { id: decoded.sub },
         select: {

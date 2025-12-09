@@ -19,8 +19,6 @@ import {
 } from '@nestjs/swagger';
 import { ModalitiesService } from './modalities.service';
 import {
-  CreateModalityGroupDto,
-  UpdateModalityGroupDto,
   CreateModalityDto,
   UpdateModalityDto,
 } from './dto/create-modality.dto';
@@ -31,54 +29,37 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 export class ModalitiesController {
   constructor(private readonly modalitiesService: ModalitiesService) {}
 
-  // Modality Groups
-  @Post('events/:eventId/groups')
-  @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
-  createGroup(
-    @Request() req,
-    @Param('eventId') eventId: string,
-    @Body() createGroupDto: CreateModalityGroupDto,
-  ) {
-    return this.modalitiesService.createGroup(
-      req.user.id,
-      eventId,
-      createGroupDto,
-    );
+  @Get('templates')
+  @ApiOperation({
+    summary: 'Get all modality templates',
+    description:
+      'Retrieves all available modality templates that can be used when creating event modalities',
+  })
+  @ApiResponse({ status: 200, description: 'Templates retrieved successfully' })
+  findAllTemplates() {
+    return this.modalitiesService.findAllTemplates();
   }
 
-  @Patch('events/:eventId/groups/:groupId')
-  @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
-  updateGroup(
-    @Request() req,
-    @Param('eventId') eventId: string,
-    @Param('groupId') groupId: string,
-    @Body() updateGroupDto: UpdateModalityGroupDto,
-  ) {
-    return this.modalitiesService.updateGroup(
-      req.user.id,
-      eventId,
-      groupId,
-      updateGroupDto,
-    );
-  }
-
-  @Delete('events/:eventId/groups/:groupId')
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
-  deleteGroup(
-    @Request() req,
-    @Param('eventId') eventId: string,
-    @Param('groupId') groupId: string,
-  ) {
-    return this.modalitiesService.deleteGroup(req.user.id, eventId, groupId);
-  }
-
-  // Modalities
+  /**
+   * Cria uma modalidade para um evento
+   */
   @Post('events/:eventId')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Create modality for event',
+    description:
+      'Creates a new modality for an event. Can optionally use a modality template.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiBody({ type: CreateModalityDto })
+  @ApiResponse({ status: 201, description: 'Modality created successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - Only organizer can create modalities',
+  })
+  @ApiResponse({ status: 404, description: 'Event or template not found' })
   create(
     @Request() req,
     @Param('eventId') eventId: string,
@@ -91,12 +72,34 @@ export class ModalitiesController {
     );
   }
 
+  /**
+   * Busca todas as modalidades de um evento
+   */
   @Get('events/:eventId')
+  @ApiOperation({
+    summary: 'Get all event modalities',
+    description: 'Retrieves all active modalities for a specific event',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Modalities retrieved successfully',
+  })
   findAll(@Param('eventId') eventId: string) {
     return this.modalitiesService.findAll(eventId);
   }
 
+  /**
+   * Busca uma modalidade específica
+   */
   @Get(':id')
+  @ApiOperation({
+    summary: 'Get modality by ID',
+    description: 'Retrieves a single modality by its ID',
+  })
+  @ApiParam({ name: 'id', description: 'Modality UUID' })
+  @ApiResponse({ status: 200, description: 'Modality retrieved successfully' })
+  @ApiResponse({ status: 404, description: 'Modality not found' })
   findOne(@Param('id') id: string) {
     return this.modalitiesService.findOne(id);
   }

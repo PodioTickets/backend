@@ -97,6 +97,7 @@ Authorization: Bearer {token}
   "state": "SP",
   "country": "BR",
   "eventDate": "2025-06-15T08:00:00Z",
+  "registrationStartDate": "2025-06-10T23:59:59Z",
   "registrationEndDate": "2025-06-10T23:59:59Z",
   "googleMapsLink": "https://maps.google.com"
 }

@@ -241,7 +241,14 @@ async function bootstrap() {
     new SSRFProtectionMiddleware().use.bind(new SSRFProtectionMiddleware()),
   );
 
-  app.use('/uploads', express.static(join(__dirname, '..', 'uploads')));
+  // Servir arquivos estáticos de uploads
+  // Funciona tanto em desenvolvimento quanto em produção
+  const uploadsPath = join(process.cwd(), 'uploads');
+  app.use('/uploads', express.static(uploadsPath, {
+    maxAge: '30d', // Cache por 30 dias
+    etag: true,
+    lastModified: true,
+  }));
 
   useContainer(app.select(AppModule), { fallbackOnErrors: true });
   app.useGlobalPipes(

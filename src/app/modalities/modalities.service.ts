@@ -5,8 +5,6 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
-  CreateModalityGroupDto,
-  UpdateModalityGroupDto,
   CreateModalityDto,
   UpdateModalityDto,
 } from './dto/create-modality.dto';
@@ -15,90 +13,30 @@ import {
 export class ModalitiesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  // Modality Groups
-  async createGroup(
-    userId: string,
-    eventId: string,
-    createGroupDto: CreateModalityGroupDto,
-  ) {
-    await this.verifyOrganizerAccess(userId, eventId);
+  /**
+   * Busca todos os templates de modalidades disponíveis
+   */
+  async findAllTemplates() {
+    const prismaRead = this.prisma.getReadClient();
 
-    const prismaWrite = this.prisma.getWriteClient();
-
-    const group = await prismaWrite.modalityGroup.create({
-      data: {
-        ...createGroupDto,
-        eventId,
+    const templates = await prismaRead.modalityTemplate.findMany({
+      where: {
+        isActive: true,
+      },
+      orderBy: {
+        label: 'asc',
       },
     });
 
     return {
-      message: 'Modality group created successfully',
-      data: { group },
+      message: 'Modality templates fetched successfully',
+      data: { templates },
     };
   }
 
-  async updateGroup(
-    userId: string,
-    eventId: string,
-    groupId: string,
-    updateGroupDto: UpdateModalityGroupDto,
-  ) {
-    await this.verifyOrganizerAccess(userId, eventId);
-
-    const prismaWrite = this.prisma.getWriteClient();
-
-    const group = await prismaWrite.modalityGroup.findUnique({
-      where: { id: groupId },
-    });
-
-    if (!group || group.eventId !== eventId) {
-      throw new NotFoundException('Modality group not found');
-    }
-
-    const updatedGroup = await prismaWrite.modalityGroup.update({
-      where: { id: groupId },
-      data: updateGroupDto,
-    });
-
-    return {
-      message: 'Modality group updated successfully',
-      data: { group: updatedGroup },
-    };
-  }
-
-  async deleteGroup(userId: string, eventId: string, groupId: string) {
-    await this.verifyOrganizerAccess(userId, eventId);
-
-    const prismaWrite = this.prisma.getWriteClient();
-
-    const group = await prismaWrite.modalityGroup.findUnique({
-      where: { id: groupId },
-      include: {
-        modalities: true,
-      },
-    });
-
-    if (!group || group.eventId !== eventId) {
-      throw new NotFoundException('Modality group not found');
-    }
-
-    if (group.modalities.length > 0) {
-      throw new BadRequestException(
-        'Cannot delete group with modalities. Delete modalities first.',
-      );
-    }
-
-    await prismaWrite.modalityGroup.delete({
-      where: { id: groupId },
-    });
-
-    return {
-      message: 'Modality group deleted successfully',
-    };
-  }
-
-  // Modalities
+  /**
+   * Cria uma modalidade para um evento
+   */
   async create(
     userId: string,
     eventId: string,
@@ -109,19 +47,30 @@ export class ModalitiesService {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
-    // Verificar se o grupo pertence ao evento
-    const group = await prismaRead.modalityGroup.findUnique({
-      where: { id: createModalityDto.groupId },
-    });
+    // Se templateId foi fornecido, verificar se existe
+    if (createModalityDto.templateId) {
+      const template = await prismaRead.modalityTemplate.findUnique({
+        where: { id: createModalityDto.templateId },
+      });
 
-    if (!group || group.eventId !== eventId) {
-      throw new NotFoundException('Modality group not found');
+      if (!template) {
+        throw new NotFoundException('Modality template not found');
+      }
     }
 
     const modality = await prismaWrite.modality.create({
       data: {
-        ...createModalityDto,
+        name: createModalityDto.name,
+        description: createModalityDto.description,
+        price: createModalityDto.price,
+        maxParticipants: createModalityDto.maxParticipants,
+        isActive: createModalityDto.isActive ?? true,
+        order: createModalityDto.order ?? 0,
         eventId,
+        templateId: createModalityDto.templateId,
+      },
+      include: {
+        template: true,
       },
     });
 
@@ -131,6 +80,9 @@ export class ModalitiesService {
     };
   }
 
+  /**
+   * Busca todas as modalidades de um evento
+   */
   async findAll(eventId: string) {
     const prismaRead = this.prisma.getReadClient();
 
@@ -140,9 +92,18 @@ export class ModalitiesService {
         isActive: true,
       },
       include: {
-        group: true,
+        template: {
+          select: {
+            id: true,
+            code: true,
+            label: true,
+            icon: true,
+          },
+        },
       },
-      orderBy: [{ group: { order: 'asc' } }, { order: 'asc' }],
+      orderBy: {
+        order: 'asc',
+      },
     });
 
     return {
@@ -151,13 +112,23 @@ export class ModalitiesService {
     };
   }
 
+  /**
+   * Busca uma modalidade específica
+   */
   async findOne(id: string) {
     const prismaRead = this.prisma.getReadClient();
 
     const modality = await prismaRead.modality.findUnique({
       where: { id },
       include: {
-        group: true,
+        template: {
+          select: {
+            id: true,
+            code: true,
+            label: true,
+            icon: true,
+          },
+        },
         event: {
           select: {
             id: true,
