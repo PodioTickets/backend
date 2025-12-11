@@ -23,5 +23,6 @@ import { SecurityAlertsService } from 'src/common/services/security-alerts.servi
   ],
   controllers: [UploadController],
   providers: [UploadService, SecurityMonitoringService, SecurityAlertsService],
+  exports: [UploadService],
 })
 export class UploadModule {}

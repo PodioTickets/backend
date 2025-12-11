@@ -93,6 +93,11 @@ export class CreateUserDto {
   @IsEnum(Language)
   @ApiProperty({ description: 'User language', enum: Language })
   language?: Language;
+
+  @IsOptional()
+  @IsString()
+  @ApiProperty({ description: 'User avatar URL' })
+  avatarUrl?: string;
 }
 
 export class UpdateUserDto {
@@ -151,4 +156,8 @@ export class UpdateUserDto {
   @IsOptional()
   @IsEnum(Language)
   language?: Language;
+
+  @IsOptional()
+  @IsString()
+  avatarUrl?: string;
 }

@@ -121,6 +121,7 @@ export class UserService {
           documentNumber: true,
           role: true,
           isActive: true,
+          avatarUrl: true,
         },
       });
       return {
@@ -165,6 +166,7 @@ export class UserService {
         documentNumber: true,
         role: true,
         isActive: true,
+        avatarUrl: true,
         createdAt: true,
       },
     });
@@ -200,6 +202,7 @@ export class UserService {
         language: true,
         role: true,
         isActive: true,
+        avatarUrl: true,
       },
     });
 

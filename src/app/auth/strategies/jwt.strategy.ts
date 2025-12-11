@@ -30,6 +30,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         isActive: true,
         phone: true,
         language: true,
+        avatarUrl: true,
       },
     });
 
@@ -46,6 +47,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       role: user.role,
       phone: user.phone,
       language: user.language,
+      avatarUrl: user.avatarUrl,
     };
   }
 }

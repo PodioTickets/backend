@@ -10,4 +10,12 @@ export class UpdateUserDto extends PartialType(CreateUserDto) {
   })
   @IsOptional()
   walletAddress?: string;
+
+  @ApiPropertyOptional({
+    description: 'URL do avatar do usuário',
+    example: '/uploads/images/1234567890-123456789.webp',
+    required: false,
+  })
+  @IsOptional()
+  avatarUrl?: string;
 }

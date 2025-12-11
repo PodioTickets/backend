@@ -211,6 +211,7 @@ export class AuthService {
           documentNumber: true,
           role: true,
           isActive: true,
+          avatarUrl: true,
         },
       });
 
@@ -273,6 +274,7 @@ export class AuthService {
             lastName: user.lastName,
             documentNumber: user.documentNumber,
             role: user.role,
+            avatarUrl: user.avatarUrl,
           },
         },
       };
