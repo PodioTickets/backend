@@ -1,15 +1,26 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleInit,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 
 @Injectable()
-export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
+export class PrismaService
+  extends PrismaClient
+  implements OnModuleInit, OnModuleDestroy
+{
   private readonly logger = new Logger(PrismaService.name);
   private readonly readReplica: PrismaClient | null = null;
 
   constructor(private configService: ConfigService) {
     super({
-      log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
+      log:
+        process.env.NODE_ENV === 'development'
+          ? ['query', 'error', 'warn']
+          : ['error'],
       datasources: {
         db: {
           url: configService.get<string>('DATABASE_URL'),
@@ -18,7 +29,9 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     });
 
     // Configurar read replica se disponível
-    const readReplicaUrl = configService.get<string>('DATABASE_READ_REPLICA_URL');
+    const readReplicaUrl = configService.get<string>(
+      'DATABASE_READ_REPLICA_URL',
+    );
     if (readReplicaUrl) {
       this.readReplica = new PrismaClient({
         log: ['error'],
@@ -74,6 +87,8 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     // Em desenvolvimento, não sincronizamos automaticamente após cada escrita
     // pois seria muito custoso. O read replica deve ser sincronizado manualmente
     // usando `pnpm db:sync` ou via streaming replication quando configurado corretamente
-    this.logger.debug('Read replica sync skipped in development (manual sync required)');
+    this.logger.debug(
+      'Read replica sync skipped in development (manual sync required)',
+    );
   }
 }

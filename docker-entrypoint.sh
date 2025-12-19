@@ -9,8 +9,5 @@ done
 
 echo "✅ Postgres disponível"
 
-echo "📦 Rodando migrations..."
-npx prisma migrate deploy
-
 echo "🚀 Iniciando aplicação"
-exec node dist/main.js
+exec node dist/src/main.js

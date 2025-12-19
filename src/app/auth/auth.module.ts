@@ -5,8 +5,6 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { LocalStrategy } from './strategies/local.strategy';
-// import { GoogleStrategy } from './strategies/google.strategy'; // Commented - method doesn't exist
-// import { SteamStrategy } from './strategies/steam.strategy'; // Removed - not part of PodioGo
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 

@@ -1,77 +1,87 @@
-# Multi-stage build para otimizar tamanho da imagem
 FROM node:20-alpine AS base
 
-# Instalar dependências do sistema necessárias
+ENV PRISMA_CLI_BINARY_TARGETS=linux-musl
+
 RUN apk add --no-cache \
     postgresql-client \
     openssl \
     netcat-openbsd
 
-# Instalar pnpm globalmente
 RUN npm install -g pnpm
 
-# Stage 1: Dependencies
-FROM base AS dependencies
 WORKDIR /usr/src/app
 
-# Copiar arquivos de dependências
-COPY package.json pnpm-lock.yaml* ./
+# -----------------------------
+# Dependencies (build deps)
+# -----------------------------
+FROM base AS dependencies
 
-# Instalar dependências (incluindo devDependencies para build)
+COPY package.json pnpm-lock.yaml* ./
 RUN pnpm install --frozen-lockfile
 
-# Stage 2: Build
+# -----------------------------
+# Build
+# -----------------------------
 FROM dependencies AS build
-WORKDIR /usr/src/app
 
-# Copiar arquivos de configuração necessários para build
 COPY tsconfig.json tsconfig.build.json nest-cli.json ./
-COPY prisma ./prisma/
-
-# Copiar código fonte
+COPY prisma ./prisma
 COPY src ./src
 
-# Gerar Prisma Client
-RUN pnpm db:generate
+# 🔑 Prisma Client PARA O BUILD
+RUN pnpm prisma generate
 
-# Build da aplicação
 RUN pnpm build
+RUN ls -la dist/ && echo "--- Contents of dist ---" && find dist -type f | head -20
 
-# Stage 3: Production
+# -----------------------------
+# Production deps only
+# -----------------------------
+FROM base AS prod-deps
+
+COPY package.json pnpm-lock.yaml* ./
+RUN pnpm install --prod --frozen-lockfile
+
+# -----------------------------
+# Production
+# -----------------------------
 FROM base AS production
+
+ENV NODE_ENV=production
 WORKDIR /usr/src/app
 
-# Criar usuário não-root
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nestjs -u 1001
 
-# Copiar apenas arquivos necessários
-COPY --from=dependencies /usr/src/app/node_modules ./node_modules
+# Deps de runtime
+COPY --from=prod-deps /usr/src/app/node_modules ./node_modules
+
+# App buildado
 COPY --from=build /usr/src/app/dist ./dist
 COPY --from=build /usr/src/app/prisma ./prisma
-COPY package.json pnpm-lock.yaml* ./
 
-# Copiar script de entrada ANTES de gerar Prisma Client
+# Copia o client gerado que está dentro da estrutura virtual do pnpm
+COPY --from=build /usr/src/app/node_modules/.pnpm/@prisma+client*/node_modules/.prisma/client ./node_modules/.prisma/client
+
+# Copia o pacote @prisma/client (necessário para o runtime)
+COPY --from=build /usr/src/app/node_modules/.pnpm/@prisma+client*/node_modules/@prisma/client ./node_modules/@prisma/client
+
+COPY package.json ./
 COPY docker-entrypoint.sh ./
-RUN chmod +x docker-entrypoint.sh && \
-    sed -i 's/\r$//' docker-entrypoint.sh || true
+RUN chmod +x docker-entrypoint.sh
 
-# Gerar Prisma Client no stage de produção (necessário para runtime)
-# Deve ser feito antes de mudar para usuário não-root
-RUN pnpm db:generate
+RUN apk add --no-cache dos2unix && \
+    dos2unix docker-entrypoint.sh && \
+    apk del dos2unix && \
+    chmod +x docker-entrypoint.sh
 
-# Criar diretório para uploads e logs
 RUN mkdir -p uploads logs && chown -R nestjs:nodejs /usr/src/app
 
-# Mudar para usuário não-root
 USER nestjs
 
-# Expor porta
 EXPOSE 3333
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3333/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+  CMD node -e "require('http').get('http://localhost:3333/health', r => process.exit(r.statusCode === 200 ? 0 : 1))"
 
-# Usar script de entrada
 ENTRYPOINT ["./docker-entrypoint.sh"]
