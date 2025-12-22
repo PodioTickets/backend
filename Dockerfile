@@ -70,13 +70,13 @@ COPY package.json ./
 COPY docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
 
+USER root
 RUN apk add --no-cache dos2unix && \
     dos2unix docker-entrypoint.sh && \
     apk del dos2unix && \
-    chmod +x docker-entrypoint.sh
-
-RUN mkdir -p uploads logs && chown -R nestjs:nodejs /usr/src/app
-
+    chmod +x docker-entrypoint.sh && \
+    mkdir -p uploads logs && \
+    chown -R nestjs:nodejs /usr/src/app
 USER nestjs
 
 EXPOSE 3333
