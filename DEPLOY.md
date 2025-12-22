@@ -75,8 +75,12 @@ REDIS_PASSWORD=<senha-forte-redis>
 NODE_ENV=production
 PORT=3333
 
-# Database URL (usado pela aplicação)
+# Database URL (usado pela aplicação DENTRO do Docker)
 DATABASE_URL=postgresql://podiogo:<senha-forte-postgres>@postgres:5432/podiogo?schema=public&connection_limit=20&pool_timeout=20
+
+# Database URL para migrações executadas FORA do Docker (use localhost)
+# Descomente a linha abaixo quando for executar migrações manualmente na VPS:
+# DATABASE_URL=postgresql://podiogo:<senha-forte-postgres>@localhost:5432/podiogo?schema=public
 
 # Adicione outras variáveis necessárias (JWT_SECRET, API_KEYS, etc.)
 JWT_SECRET=<seu-jwt-secret>
@@ -87,39 +91,60 @@ JWT_SECRET=<seu-jwt-secret>
 
 ### 4. Executar migrações do banco de dados
 
-**Antes de subir os containers**, você precisa ter o banco rodando. Você tem duas opções:
+**IMPORTANTE:** Como o PostgreSQL está rodando dentro do Docker, você precisa executar as migrações de uma forma que consiga acessar o container.
 
-**Opção A: Subir apenas PostgreSQL primeiro**
+**Opção A: Executar migrações DENTRO do container (RECOMENDADO)**
+
 ```bash
-# Criar um docker-compose temporário só com PostgreSQL
+# 1. Subir apenas PostgreSQL primeiro
 docker compose up -d postgres
 
-# Aguardar o banco estar pronto
+# 2. Aguardar o banco estar pronto
 sleep 10
 
-# Executar migrações localmente na VPS (com Node.js instalado)
-pnpm install
-pnpm prisma migrate deploy
-# ou
-pnpm prisma db push
+# 3. Executar migrações dentro do container backend (mesmo que ainda não esteja rodando)
+# Primeiro, precisamos ter o Prisma CLI disponível. Você pode:
+# a) Instalar temporariamente no container, ou
+# b) Usar um container temporário com Node.js
 
-# Depois subir tudo
-docker compose up -d
+# Opção mais simples: usar um container temporário com Node.js
+docker run --rm \
+  -v $(pwd):/app \
+  -w /app \
+  --network podiogo_podiogo-network \
+  -e DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public" \
+  node:20-alpine sh -c "npm install -g pnpm && pnpm install && pnpm prisma migrate deploy"
+
+# Depois subir o backend
+docker compose up -d --build
 ```
 
-**Opção B: Subir tudo e executar migrações depois**
+**Opção B: Executar migrações FORA do container (requer configuração)**
+
+Se você quiser executar migrações diretamente na VPS (fora do Docker), você precisa:
+
+1. **Configurar a DATABASE_URL corretamente no `.env`** para apontar para o container:
+
+```env
+# Para acessar o PostgreSQL do container de fora, use o IP do container ou localhost
+# Se o PostgreSQL está exposto na porta 5432 do host:
+DATABASE_URL=postgresql://podiogo:<sua-senha>@localhost:5432/podiogo?schema=public
+
+# OU use o IP do container (mais confiável)
+# Primeiro descubra o IP: docker inspect podiogo-postgres | grep IPAddress
+# DATABASE_URL=postgresql://podiogo:<sua-senha>@<ip-do-container>:5432/podiogo?schema=public
+```
+
+2. **Garantir que a porta 5432 está acessível** (o docker-compose.yml já expõe)
+
+3. **Executar as migrações:**
 ```bash
-# Subir todos os containers
-docker compose up -d
-
-# Aguardar o banco estar pronto
-sleep 10
-
-# Executar migrações (com Node.js instalado na VPS)
 cd /opt/podiogo/backend
 pnpm install
 pnpm prisma migrate deploy
 ```
+
+**⚠️ ATENÇÃO:** A Opção B requer que você tenha as mesmas credenciais no `.env` que foram usadas para criar o container PostgreSQL. Se você mudou `POSTGRES_USER` ou `POSTGRES_PASSWORD` depois de criar o container, você precisa recriar o volume do banco ou ajustar as credenciais.
 
 ### 5. Build e subir os containers
 

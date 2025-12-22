@@ -66,13 +66,6 @@ case "$1" in
   migrate)
     echo "🗄️  Executando migrações..."
     
-    # Verificar se pnpm está instalado
-    if ! command -v pnpm &> /dev/null; then
-      echo "❌ pnpm não está instalado!"
-      echo "💡 Instale com: npm install -g pnpm"
-      exit 1
-    fi
-    
     # Verificar se o banco está rodando
     if ! docker compose -f "$COMPOSE_FILE" ps postgres | grep -q "Up"; then
       echo "⚠️  PostgreSQL não está rodando. Iniciando..."
@@ -81,17 +74,49 @@ case "$1" in
       sleep 10
     fi
     
-    # Instalar dependências se necessário
-    if [ ! -d "node_modules" ]; then
-      echo "📦 Instalando dependências..."
-      pnpm install
+    # Carregar variáveis do .env
+    if [ -f .env ]; then
+      export $(grep -v '^#' .env | xargs)
+    else
+      echo "❌ Arquivo .env não encontrado!"
+      exit 1
     fi
     
-    # Executar migrações
-    echo "🔄 Aplicando migrações..."
-    pnpm prisma migrate deploy
+    # Construir DATABASE_URL se não estiver definida
+    if [ -z "$DATABASE_URL" ]; then
+      DATABASE_URL="postgresql://${POSTGRES_USER:-podiogo}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-podiogo}?schema=public"
+    fi
     
-    echo "✅ Migrações aplicadas"
+    # Obter nome da rede Docker
+    NETWORK_NAME=$(docker compose -f "$COMPOSE_FILE" config | grep -A 5 "networks:" | grep -v "networks:" | head -1 | awk '{print $1}' | tr -d ':')
+    if [ -z "$NETWORK_NAME" ]; then
+      # Tentar obter do nome do projeto
+      PROJECT_NAME=$(basename $(pwd))
+      NETWORK_NAME="${PROJECT_NAME}_podiogo-network"
+    fi
+    
+    echo "🌐 Usando rede: $NETWORK_NAME"
+    echo "🔗 DATABASE_URL: postgresql://${POSTGRES_USER:-podiogo}:***@postgres:5432/${POSTGRES_DB:-podiogo}"
+    
+    # Executar migrações usando container temporário
+    echo "🔄 Aplicando migrações..."
+    docker run --rm \
+      -v "$(pwd):/app" \
+      -w /app \
+      --network "$NETWORK_NAME" \
+      -e DATABASE_URL="$DATABASE_URL" \
+      node:20-alpine sh -c "
+        npm install -g pnpm && \
+        pnpm install && \
+        pnpm prisma migrate deploy
+      "
+    
+    if [ $? -eq 0 ]; then
+      echo "✅ Migrações aplicadas com sucesso"
+    else
+      echo "❌ Erro ao aplicar migrações"
+      exit 1
+    fi
     ;;
     
   backup)
