@@ -42,7 +42,10 @@ async function bootstrap() {
   app.use(compression());
   app.use(cookieParser());
 
-  const allowedOrigins = ['http://localhost:3000', 'http://localhost:3333'];
+  const allowedOrigins = [
+    'http://localhost:3000',
+    'https://www.podioticket.com.br',
+  ];
 
   app.use((req, res, next) => {
     if (req.method === 'OPTIONS') {
@@ -241,14 +244,15 @@ async function bootstrap() {
     new SSRFProtectionMiddleware().use.bind(new SSRFProtectionMiddleware()),
   );
 
-  // Servir arquivos estáticos de uploads
-  // Funciona tanto em desenvolvimento quanto em produção
   const uploadsPath = join(process.cwd(), 'uploads');
-  app.use('/uploads', express.static(uploadsPath, {
-    maxAge: '30d', // Cache por 30 dias
-    etag: true,
-    lastModified: true,
-  }));
+  app.use(
+    '/uploads',
+    express.static(uploadsPath, {
+      maxAge: '30d',
+      etag: true,
+      lastModified: true,
+    }),
+  );
 
   useContainer(app.select(AppModule), { fallbackOnErrors: true });
   app.useGlobalPipes(
