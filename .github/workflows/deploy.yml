@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - main
 
 jobs:
   deploy:
@@ -20,8 +21,71 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd srv/app/server/ || exit
-            git pull origin master
-            pnpm install --legacy-peer-deps
-            pnpm run build
-            pm2 restart nest
+            set -e
+            echo "🚀 Iniciando deploy..."
+            
+            # Navegar para o diretório do projeto
+            cd /srv/backend || exit 1
+            
+            # Fazer pull das mudanças
+            echo "📥 Atualizando código do repositório..."
+            git pull origin master || git pull origin main
+            
+            # Carregar variáveis do .env se existir
+            if [ -f .env ]; then
+              export $(grep -v '^#' .env | xargs)
+            fi
+            
+            # Verificar se o PostgreSQL está rodando
+            echo "🗄️  Verificando PostgreSQL..."
+            if ! docker compose ps postgres | grep -q "Up"; then
+              echo "⚠️  PostgreSQL não está rodando. Iniciando..."
+              docker compose up -d postgres
+              echo "⏳ Aguardando PostgreSQL estar pronto..."
+              sleep 15
+            fi
+            
+            # Executar migrações
+            echo "🔄 Executando migrações do banco de dados..."
+            NETWORK_NAME=$(docker compose config | grep -A 5 "networks:" | grep -v "networks:" | head -1 | awk '{print $1}' | tr -d ':')
+            if [ -z "$NETWORK_NAME" ]; then
+              NETWORK_NAME="podiogo_podiogo-network"
+            fi
+            
+            DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public"
+            
+            docker run --rm \
+              -v "$(pwd):/app" \
+              -w /app \
+              --network "$NETWORK_NAME" \
+              -e DATABASE_URL="$DATABASE_URL" \
+              node:20-alpine sh -c "
+                npm install -g pnpm && \
+                pnpm install --frozen-lockfile && \
+                pnpm prisma migrate deploy
+              " || {
+              echo "⚠️  Erro ao executar migrações, continuando com rebuild..."
+            }
+            
+            # Rebuild da imagem Docker
+            echo "🔨 Rebuild da imagem Docker..."
+            docker compose build backend
+            
+            # Reiniciar containers
+            echo "🔄 Reiniciando containers..."
+            docker compose up -d backend
+            
+            # Aguardar um pouco para o container iniciar
+            sleep 5
+            
+            # Verificar saúde do container
+            echo "🏥 Verificando saúde do container..."
+            if docker compose ps backend | grep -q "healthy\|Up"; then
+              echo "✅ Deploy concluído com sucesso!"
+              echo "📋 Últimas linhas de log:"
+              docker compose logs --tail=20 backend
+            else
+              echo "⚠️  Container pode não estar saudável. Verifique os logs:"
+              docker compose logs --tail=50 backend
+              exit 1
+            fi

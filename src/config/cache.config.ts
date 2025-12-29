@@ -95,14 +95,13 @@ export function getCacheConfig() {
           
           return {
             store,
-            ttl: 600 * 1000, // 10 minutos em milissegundos
-            max: 10000, // Máximo de itens no cache
+            ttl: 600 * 1000,
+            max: 10000,
           };
         } catch (error: any) {
           logger.error('[CacheConfig] ❌ Failed to connect to Redis:', error.message);
           logger.error('[CacheConfig] Full error:', error);
           logger.error('[CacheConfig] Error stack:', error.stack);
-          // Re-throw para que o NestJS saiba que falhou
           throw error;
         }
       },
@@ -116,7 +115,7 @@ export function getCacheConfig() {
   const isProduction = process.env.NODE_ENV === 'production';
   return CacheModule.register({
     isGlobal: true,
-    ttl: 600000, // 10 minutos em milissegundos
+    ttl: 600000,
     max: isProduction ? 10000 : 1000,
   });
 }

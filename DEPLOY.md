@@ -280,15 +280,113 @@ docker compose exec postgres pg_dump -U podiogo podiogo > backup_$(date +%Y%m%d_
 docker compose exec -T postgres psql -U podiogo podiogo < backup.sql
 ```
 
-## Atualizações Futuras
+## Deploy Automático via GitHub Actions
+
+O projeto está configurado para fazer deploy automático sempre que você fizer push para a branch `master` ou `main` no GitHub.
+
+### Configuração Inicial
+
+1. **Configurar Secrets no GitHub:**
+   - Vá em: `Settings` → `Secrets and variables` → `Actions`
+   - Adicione os seguintes secrets:
+     - `SERVER_IP`: IP do seu servidor VPS
+     - `SERVER_USER`: Usuário SSH (ex: `root` ou `ubuntu`)
+     - `SSH_PRIVATE_KEY`: Chave privada SSH para acessar o servidor
+
+2. **Gerar chave SSH (se ainda não tiver):**
+   ```bash
+   # No seu computador local
+   ssh-keygen -t ed25519 -C "github-actions-deploy"
+   
+   # Copiar a chave pública para o servidor
+   ssh-copy-id -i ~/.ssh/id_ed25519.pub usuario@seu-servidor-ip
+   
+   # Copiar a chave privada para adicionar no GitHub Secrets
+   cat ~/.ssh/id_ed25519
+   ```
+
+3. **Configurar o repositório Git no servidor:**
+   ```bash
+   # Na VPS
+   cd /opt/podiogo/backend
+   
+   # Se ainda não tiver o repositório clonado:
+   git clone <seu-repositorio-github> /opt/podiogo/backend
+   
+   # Ou se já tiver, configurar o remote:
+   git remote set-url origin <seu-repositorio-github>
+   git checkout master  # ou main, dependendo da sua branch padrão
+   ```
+
+### Como Funciona
+
+Quando você fizer `git push` para a branch `master` ou `main`:
+
+1. ✅ O GitHub Actions detecta o push
+2. ✅ Conecta via SSH no servidor
+3. ✅ Faz `git pull` para atualizar o código
+4. ✅ Verifica se o PostgreSQL está rodando
+5. ✅ Executa migrações do banco de dados automaticamente
+6. ✅ Faz rebuild da imagem Docker
+7. ✅ Reinicia o container do backend
+8. ✅ Verifica a saúde do container
+
+### Verificar Deploy
+
+Após fazer push, você pode:
+
+1. **Ver o progresso no GitHub:**
+   - Vá em `Actions` no seu repositório
+   - Clique no workflow em execução para ver os logs
+
+2. **Verificar no servidor:**
+   ```bash
+   # Ver logs do último deploy
+   docker compose logs --tail=50 backend
+   
+   # Ver status dos containers
+   docker compose ps
+   ```
+
+### Deploy Manual (Alternativa)
+
+Se preferir fazer deploy manualmente ou se o GitHub Actions falhar:
+
+**Opção A: Usando o script deploy.sh**
+```bash
+cd /opt/podiogo/backend
+./deploy.sh update
+```
+
+**Opção B: Manualmente**
+```bash
+cd /opt/podiogo/backend
+
+# 1. Atualizar código
+git pull
+
+# 2. Executar migrações
+./deploy.sh migrate
+
+# 3. Rebuild e restart
+docker compose build --no-cache backend
+docker compose up -d backend
+
+# 4. Verificar logs
+docker compose logs -f backend
+```
+
+## Atualizações Futuras (Manual)
+
+Se você não estiver usando o deploy automático, siga estes passos:
 
 ```bash
 # 1. Fazer pull das mudanças
-cd /opt/podiogo/backend
+cd /srv/backend
 git pull
 
 # 2. Executar novas migrações (se houver)
-pnpm prisma migrate deploy
+./deploy.sh migrate
 
 # 3. Rebuild e restart
 docker compose build --no-cache backend
