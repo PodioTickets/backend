@@ -1,5 +1,11 @@
 .PHONY: help up down build restart logs ps shell migrate studio test clean
 
+# Carregar variáveis do .env se existir
+ifneq (,$(wildcard ./.env))
+    include .env
+    export
+endif
+
 help: ## Mostra esta ajuda
 	@echo "Comandos disponíveis:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -43,11 +49,41 @@ shell-db: ## Abre shell no PostgreSQL
 shell-redis: ## Abre shell no Redis
 	docker-compose exec redis redis-cli -a podiogo123
 
-migrate: ## Executa migrações do banco
-	docker-compose exec backend pnpm db:migrate deploy
+migrate: ## Executa migrações do banco (usa container temporário)
+	@echo "Executando migrations em container temporário..."
+	@echo "Garantindo que o PostgreSQL está rodando..."
+	@docker-compose up -d postgres || true
+	@echo "Aguardando PostgreSQL estar pronto..."
+	@sleep 5
+	@NETWORK_NAME=$$(docker inspect podiogo-postgres 2>/dev/null | grep -oP '"NetworkMode": "\K[^"]+' | head -1 || echo "podiogo_podiogo-network"); \
+	if [ -z "$$NETWORK_NAME" ]; then \
+		NETWORK_NAME=$$(docker network ls | grep podiogo | awk '{print $$2}' | head -1 || echo "podiogo_podiogo-network"); \
+	fi; \
+	echo "Usando rede: $$NETWORK_NAME"; \
+	docker run --rm \
+		-v $(PWD):/app \
+		-w /app \
+		--network $$NETWORK_NAME \
+		-e DATABASE_URL="postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)?schema=public" \
+		node:20-alpine sh -c "npm install -g pnpm && pnpm install && pnpm prisma migrate deploy"
 
-migrate-dev: ## Executa migrações em modo dev
-	docker-compose exec backend pnpm db:migrate
+migrate-dev: ## Executa migrações em modo dev (usa container temporário)
+	@echo "Executando migrations em modo dev..."
+	@echo "Garantindo que o PostgreSQL está rodando..."
+	@docker-compose up -d postgres || true
+	@echo "Aguardando PostgreSQL estar pronto..."
+	@sleep 5
+	@NETWORK_NAME=$$(docker inspect podiogo-postgres 2>/dev/null | grep -oP '"NetworkMode": "\K[^"]+' | head -1 || echo "podiogo_podiogo-network"); \
+	if [ -z "$$NETWORK_NAME" ]; then \
+		NETWORK_NAME=$$(docker network ls | grep podiogo | awk '{print $$2}' | head -1 || echo "podiogo_podiogo-network"); \
+	fi; \
+	echo "Usando rede: $$NETWORK_NAME"; \
+	docker run --rm \
+		-v $(PWD):/app \
+		-w /app \
+		--network $$NETWORK_NAME \
+		-e DATABASE_URL="postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)?schema=public" \
+		node:20-alpine sh -c "npm install -g pnpm && pnpm install && pnpm prisma migrate dev"
 
 push: ## Faz push do schema Prisma
 	docker-compose exec backend pnpm db:push
