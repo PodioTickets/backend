@@ -117,6 +117,7 @@ model Event {
   id                    String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   organizerId           String      @db.Uuid
   name                  String
+  slug                  String?     @unique
   description           String?
   bannerUrl             String?
   logoUrl               String?
@@ -144,6 +145,7 @@ model Event {
   @@index([status, eventDate]) // Para buscar eventos publicados futuros
   @@index([country, state, city, status]) // Para filtros de localização
   @@index([organizerId, createdAt]) // Para listar eventos do organizador
+  @@index([slug]) // Para busca rápida por slug
 }
 
 model EventTopic {

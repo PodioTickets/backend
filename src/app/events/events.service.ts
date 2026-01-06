@@ -16,6 +16,7 @@ import {
   CreateEventLocationDto,
 } from './dto/event-topic.dto';
 import { EventStatus } from '@prisma/client';
+import { generateSlug, generateUniqueSlug } from '../../helpers/SlugHelper';
 
 @Injectable()
 export class EventsService {
@@ -39,6 +40,40 @@ export class EventsService {
         `Invalid ${fieldName} format. Expected UUID.`,
       );
     }
+  }
+
+  /**
+   * Verifica se um slug já existe no banco de dados
+   */
+  private async slugExists(slug: string, excludeEventId?: string): Promise<boolean> {
+    const prismaRead = this.prisma.getReadClient();
+    const event = await prismaRead.event.findUnique({
+      where: { slug },
+      select: { id: true },
+    });
+    
+    if (!event) return false;
+    
+    // Se estamos atualizando um evento, ignorar o próprio evento
+    if (excludeEventId && event.id === excludeEventId) {
+      return false;
+    }
+    
+    return true;
+  }
+
+  /**
+   * Gera um slug único para o evento
+   */
+  private async generateEventSlug(
+    name: string,
+    customSlug?: string,
+    excludeEventId?: string,
+  ): Promise<string> {
+    const baseSlug = customSlug || name;
+    return generateUniqueSlug(baseSlug, (slug) =>
+      this.slugExists(slug, excludeEventId),
+    );
   }
 
   async create(userId: string, createEventDto: CreateEventDto) {
@@ -72,9 +107,16 @@ export class EventsService {
       );
     }
 
+    // Gerar slug único
+    const slug = await this.generateEventSlug(
+      createEventDto.name,
+      createEventDto.slug,
+    );
+
     const event = await prismaWrite.event.create({
       data: {
         ...createEventDto,
+        slug,
         organizerId: organizer.id,
         eventDate: new Date(createEventDto.eventDate),
         registrationStartDate: new Date(createEventDto.registrationStartDate),
@@ -609,6 +651,76 @@ export class EventsService {
     };
   }
 
+  async findBySlug(slug: string) {
+    if (!slug || slug.trim().length === 0) {
+      throw new BadRequestException('Slug is required');
+    }
+
+    // Usar read replica para query de leitura
+    const prismaRead = this.prisma.getReadClient();
+
+    const event = await prismaRead.event.findUnique({
+      where: { slug },
+      include: {
+        organizer: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+                phone: true,
+              },
+            },
+          },
+        },
+        topics: {
+          where: { isEnabled: true },
+          orderBy: { order: 'asc' },
+        },
+        locations: {
+          orderBy: { createdAt: 'asc' },
+        },
+        modalities: {
+          include: {
+            template: {
+              select: {
+                id: true,
+                code: true,
+                label: true,
+                icon: true,
+              },
+            },
+          },
+          where: { isActive: true },
+          orderBy: { order: 'asc' },
+        },
+        kits: {
+          where: { isActive: true },
+          include: {
+            items: {
+              where: { isActive: true },
+            },
+          },
+        },
+        questions: {
+          where: { isRequired: true },
+          orderBy: { order: 'asc' },
+        },
+      },
+    });
+
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
+
+    return {
+      message: 'Event fetched successfully',
+      data: { event },
+    };
+  }
+
   async update(userId: string, id: string, updateEventDto: UpdateEventDto) {
     this.validateUUID(id, 'event ID');
     const prismaWrite = this.prisma.getWriteClient();
@@ -632,6 +744,18 @@ export class EventsService {
     }
 
     const updateData: any = { ...updateEventDto };
+    
+    // Gerar slug se o nome ou slug foi alterado
+    if (updateEventDto.name || updateEventDto.slug) {
+      const nameForSlug = updateEventDto.name || event.name;
+      const customSlug = updateEventDto.slug;
+      updateData.slug = await this.generateEventSlug(
+        nameForSlug,
+        customSlug,
+        id,
+      );
+    }
+    
     if (updateEventDto.eventDate) {
       updateData.eventDate = new Date(updateEventDto.eventDate);
     }

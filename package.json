@@ -21,6 +21,7 @@
     "db:sync": "docker compose exec backend pnpm db:push && docker compose exec backend pnpm db:generate",
     "db:seed": "ts-node prisma/seed.ts",
     "db:seed:prod": "node prisma/seed.js",
+    "db:populate-slugs": "ts-node prisma/populate-event-slugs.ts",
     "db:studio": "prisma studio",
     "docker:up": "docker-compose -f docker-compose.yml up -d",
     "docker:down": "docker-compose -f docker-compose.yml down",

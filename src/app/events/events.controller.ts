@@ -77,6 +77,15 @@ export class EventsController {
     return this.eventsService.findAll(filterDto, userId);
   }
 
+  @Get('slug/:slug')
+  @ApiOperation({ summary: 'Get event by slug', description: 'Retrieves a single event by its slug (URL-friendly identifier)' })
+  @ApiParam({ name: 'slug', description: 'Event slug' })
+  @ApiResponse({ status: 200, description: 'Event retrieved successfully' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  findBySlug(@Param('slug') slug: string) {
+    return this.eventsService.findBySlug(slug);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get event by ID', description: 'Retrieves a single event by its ID' })
   @ApiParam({ name: 'id', description: 'Event UUID' })
