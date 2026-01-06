@@ -23,7 +23,7 @@ logs: ## Mostra logs de todos os serviços
 	docker-compose logs -f
 
 logs-app: ## Mostra logs da aplicação
-	docker-compose logs -f app
+	docker-compose logs -f backend
 
 logs-db: ## Mostra logs do PostgreSQL
 	docker-compose logs -f postgres
@@ -35,7 +35,7 @@ ps: ## Mostra status dos serviços
 	docker-compose ps
 
 shell: ## Abre shell no container da aplicação
-	docker-compose exec app sh
+	docker-compose exec backend sh
 
 shell-db: ## Abre shell no PostgreSQL
 	docker-compose exec postgres psql -U podiogo -d podiogo
@@ -44,22 +44,22 @@ shell-redis: ## Abre shell no Redis
 	docker-compose exec redis redis-cli -a podiogo123
 
 migrate: ## Executa migrações do banco
-	docker-compose exec app pnpm db:migrate deploy
+	docker-compose exec backend pnpm db:migrate deploy
 
 migrate-dev: ## Executa migrações em modo dev
-	docker-compose exec app pnpm db:migrate
+	docker-compose exec backend pnpm db:migrate
 
 push: ## Faz push do schema Prisma
-	docker-compose exec app pnpm db:push
+	docker-compose exec backend pnpm db:push
 
 generate: ## Gera Prisma Client
-	docker-compose exec app pnpm db:generate
+	docker-compose exec backend pnpm db:generate
 
 studio: ## Abre Prisma Studio
-	docker-compose exec app pnpm db:studio
+	docker-compose exec backend pnpm db:studio
 
 test: ## Executa testes
-	docker-compose exec app pnpm test
+	docker-compose exec backend pnpm test
 
 clean: ## Remove containers e volumes (CUIDADO: apaga dados!)
 	docker-compose down -v
