@@ -93,6 +93,7 @@ export class UserController {
                   phone: { type: 'string', example: '(11) 99999-9999' },
                   dateOfBirth: { type: 'string', example: '1990-01-15' },
                   gender: { type: 'string', example: 'masculino' },
+                  avatarUrl: { type: 'string', example: 'https://example.com/avatar.jpg', nullable: true },
                   isMainUser: { type: 'boolean', example: true },
                 },
               },

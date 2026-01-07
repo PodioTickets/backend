@@ -294,6 +294,7 @@ export class UserService {
         phone: true,
         dateOfBirth: true,
         gender: true,
+        avatarUrl: true,
       },
     });
 
@@ -315,6 +316,7 @@ export class UserService {
             phone: true,
             dateOfBirth: true,
             gender: true,
+            avatarUrl: true,
           },
         },
       },
