@@ -18,6 +18,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { UserService } from './user.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { CreateLinkedUserDto } from './dto/create-linked-user.dto';
 import { UploadService } from '../upload/upload.service';
 
 import {
@@ -60,6 +61,94 @@ export class UserController {
     }
     if (limitNum > 100) throw new Error('Limite deve estar entre 1 e 100');
     return this.userService.findAll({ page: pageNum, limit: limitNum });
+  }
+
+  @Get('linked-users')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get linked users',
+    description: 'Retorna todos os usuários vinculados ao perfil do usuário autenticado, incluindo o próprio usuário principal',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Lista de usuários vinculados retornada com sucesso',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean', example: true },
+        data: {
+          type: 'object',
+          properties: {
+            users: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string', example: 'user-uuid-1' },
+                  firstName: { type: 'string', example: 'João' },
+                  lastName: { type: 'string', example: 'Silva' },
+                  email: { type: 'string', example: 'joao@example.com' },
+                  documentNumber: { type: 'string', example: '12345678900' },
+                  phone: { type: 'string', example: '(11) 99999-9999' },
+                  dateOfBirth: { type: 'string', example: '1990-01-15' },
+                  gender: { type: 'string', example: 'masculino' },
+                  isMainUser: { type: 'boolean', example: true },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 404, description: 'User not found' })
+  async getLinkedUsers(@Request() req) {
+    return this.userService.getLinkedUsers(req.user.id);
+  }
+
+  @Post('linked-users')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Create or link user',
+    description: 'Cria um novo usuário ou vincula um usuário existente ao perfil do usuário autenticado. Usado quando o usuário preenche manualmente os dados de um participante no checkout.',
+  })
+  @ApiBody({ type: CreateLinkedUserDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Usuário criado ou vinculado com sucesso',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean', example: true },
+        data: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', example: 'user-uuid-2' },
+            firstName: { type: 'string', example: 'Maria' },
+            lastName: { type: 'string', example: 'Silva' },
+            email: { type: 'string', example: 'maria@example.com' },
+            documentNumber: { type: 'string', example: '98765432100' },
+            phone: { type: 'string', example: '11988888888' },
+            dateOfBirth: { type: 'string', example: '1992-05-20' },
+            gender: { type: 'string', example: 'feminino' },
+            wasCreated: { type: 'boolean', example: true },
+            wasLinked: { type: 'boolean', example: true },
+          },
+        },
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Dados inválidos' })
+  @ApiResponse({ status: 409, description: 'Email já cadastrado para outro CPF' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  async createOrLinkUser(
+    @Request() req,
+    @Body() createLinkedUserDto: CreateLinkedUserDto,
+  ) {
+    return this.userService.createOrLinkUser(req.user.id, createLinkedUserDto);
   }
 
   @Get(':id')

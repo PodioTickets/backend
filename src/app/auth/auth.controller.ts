@@ -30,6 +30,7 @@ import {
 } from './dto/auth.dto';
 import { Response } from 'express';
 import { LocalAuthGuard } from './guards/local-auth.guard';
+import { GoogleAuthGuard } from './guards/google-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 
 @ApiTags('Authentication')
@@ -82,6 +83,56 @@ export class AuthController {
     return this.authService.login(req.user);
   }
 
+  @Get('google')
+  @UseGuards(GoogleAuthGuard)
+  @ApiOperation({ 
+    summary: 'Initiate Google OAuth login',
+    description: 'Redirects to Google OAuth consent screen. Frontend should configure redirect_uri to point to frontend callback page.'
+  })
+  @ApiResponse({ status: 302, description: 'Redirects to Google OAuth consent screen' })
+  async googleAuth() {
+    // Guard handles the redirect to Google
+    // Google will redirect back to frontend with code
+  } 
+
+  @Post('google/validate')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ 
+    summary: 'Validate Google OAuth code',
+    description: 'Receives Google OAuth code from frontend, validates with Google, and returns JWT tokens'
+  })
+  @ApiResponse({ status: 200, description: 'Login successful, returns tokens and user data' })
+  @ApiResponse({ status: 400, description: 'Invalid or expired Google code' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        code: {
+          type: 'string',
+          description: 'Google OAuth authorization code received from Google redirect',
+          example: '4/0ATX87lO8nvcAqU_MVyDPWPTKOHjxuiz2uTq7EKMO1xOrdJgVumhVwIB8CPfXJiIQ1vVARQ',
+        },
+        redirectUri: {
+          type: 'string',
+          description: 'Redirect URI used in the OAuth flow (must match Google Cloud Console)',
+          example: 'http://localhost:3000/auth/callback',
+        },
+      },
+      required: ['code', 'redirectUri'],
+    },
+  })
+  async validateGoogleCode(@Body() body: { code: string; redirectUri: string }) {
+    if (!body.code) {
+      throw new BadRequestException('Google authorization code is required');
+    }
+
+    if (!body.redirectUri) {
+      throw new BadRequestException('Redirect URI is required');
+    }
+
+    const result = await this.authService.validateGoogleCode(body.code, body.redirectUri);
+    return result;
+  }
 
   @Post('refresh')
   @HttpCode(HttpStatus.OK)

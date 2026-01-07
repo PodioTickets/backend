@@ -87,6 +87,8 @@ model User {
   isActive              Boolean       @default(true)
   role                  UserRole      @default(USER)
   avatarUrl             String?
+  googleId              String?       @unique
+  googleEmail           String?
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
 
@@ -96,6 +98,8 @@ model User {
   contactMessages      ContactMessage[]
   payments             Payment[]
   invitedRegistrations Registration[]   @relation("InvitedBy")
+  linkedUsersAsMain    LinkedUser[]     @relation("MainUser")
+  linkedUsersAsLinked  LinkedUser[]     @relation("LinkedUser")
 }
 
 model Organizer {
@@ -391,4 +395,20 @@ model ContactMessage {
   @@index([organizerId])
   @@index([eventId])
   @@index([isRead])
+}
+
+model LinkedUser {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  mainUserId       String   @db.Uuid
+  linkedUserId     String   @db.Uuid
+  relationshipType String? // ex: "dependente", "familiar", "outro"
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  mainUser   User @relation("MainUser", fields: [mainUserId], references: [id], onDelete: Cascade)
+  linkedUser User @relation("LinkedUser", fields: [linkedUserId], references: [id], onDelete: Cascade)
+
+  @@unique([mainUserId, linkedUserId])
+  @@index([mainUserId])
+  @@index([linkedUserId])
 }

@@ -18,6 +18,20 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const { httpAdapter } = this.httpAdapterHost;
     const ctx = host.switchToHttp();
     const request = ctx.getRequest();
+    const response = ctx.getResponse();
+
+    // Ignorar erros de autenticação JWT no callback do Google (o GoogleAuthGuard já trata)
+    // Esses erros são esperados porque o Passport tenta JWT antes do Google
+    const url = request.url || httpAdapter.getRequestUrl(request);
+    if (
+      (url?.includes('/auth/google/callback') ||
+        url?.includes('/api/v1/auth/google/callback')) &&
+      exception instanceof HttpException &&
+      exception.getStatus() === HttpStatus.UNAUTHORIZED
+    ) {
+      if (response.headersSent || response.finished) return;
+      return;
+    }
 
     let httpStatus = HttpStatus.INTERNAL_SERVER_ERROR;
     let message = 'Internal server error';
@@ -30,7 +44,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       // Se a resposta é um objeto com mensagem
       if (typeof exceptionResponse === 'object' && exceptionResponse !== null) {
         const responseObj = exceptionResponse as any;
-        
+
         // Capturar mensagem principal
         if (responseObj.message) {
           if (Array.isArray(responseObj.message)) {
@@ -48,7 +62,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
         if (responseObj.errors) {
           errors = responseObj.errors;
         }
-        
+
         // Capturar detalhes se existirem
         if (responseObj.details) {
           errors = responseObj.details;
@@ -89,6 +103,14 @@ export class AllExceptionsFilter implements ExceptionFilter {
       responseBody.stack = exception.stack;
     }
 
-    httpAdapter.reply(ctx.getResponse(), responseBody, httpStatus);
+    // Verificar se a resposta já foi enviada (ex: redirect)
+    if (response.headersSent || response.finished) {
+      this.logger.warn(
+        `Cannot send error response: headers already sent for ${request.url}`,
+      );
+      return;
+    }
+
+    httpAdapter.reply(response, responseBody, httpStatus);
   }
 }

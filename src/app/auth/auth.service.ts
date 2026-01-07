@@ -10,6 +10,11 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Inject } from '@nestjs/common';
+import { Cache } from 'cache-manager';
+import { HttpService } from '@nestjs/axios';
+import { firstValueFrom } from 'rxjs';
 import {
   EmailLoginDto,
   EmailRegisterDto,
@@ -24,6 +29,8 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
+    @Inject(CACHE_MANAGER) private cacheManager: Cache,
+    private readonly httpService: HttpService,
   ) {}
 
   /**
@@ -407,5 +414,188 @@ export class AuthService {
       secret: refreshSecret,
       expiresIn: refreshExpiresIn,
     } as any);
+  }
+
+  /**
+   * Valida ou cria usuário a partir dos dados do Google
+   */
+  async validateGoogleUser(googleUser: any) {
+    const prismaWrite = this.prisma.getWriteClient();
+
+    try {
+      // Verificar se já existe um usuário com esse googleId
+      let user = await prismaWrite.user.findUnique({
+        where: { googleId: googleUser.googleId },
+      });
+
+      if (user) {
+        // Atualizar dados se necessário
+        if (user.email !== googleUser.email || user.avatarUrl !== googleUser.avatarUrl) {
+          user = await prismaWrite.user.update({
+            where: { id: user.id },
+            data: {
+              email: googleUser.email,
+              googleEmail: googleUser.email,
+              avatarUrl: googleUser.avatarUrl || user.avatarUrl,
+            },
+          });
+        }
+        return user;
+      }
+
+      // Verificar se já existe um usuário com esse email
+      const existingUser = await prismaWrite.user.findUnique({
+        where: { email: googleUser.email },
+      });
+
+      if (existingUser) {
+        // Vincular conta Google a usuário existente
+        user = await prismaWrite.user.update({
+          where: { id: existingUser.id },
+          data: {
+            googleId: googleUser.googleId,
+            googleEmail: googleUser.email,
+            avatarUrl: googleUser.avatarUrl || existingUser.avatarUrl,
+          },
+        });
+        return user;
+      }
+
+      // Criar novo usuário
+      // Gerar senha aleatória (usuários do Google não precisam de senha, mas o campo é obrigatório)
+      const randomPassword = crypto.randomBytes(32).toString('hex');
+      const hashedPassword = await bcrypt.hash(randomPassword, 10);
+
+      user = await prismaWrite.user.create({
+        data: {
+          email: googleUser.email,
+          password: hashedPassword, // Senha aleatória, usuário não poderá fazer login tradicional
+          firstName: googleUser.firstName || 'Usuário',
+          lastName: googleUser.lastName || 'Google',
+          googleId: googleUser.googleId,
+          googleEmail: googleUser.email,
+          avatarUrl: googleUser.avatarUrl,
+          acceptedTerms: true, // Assumindo que ao fazer login com Google, aceita os termos
+          acceptedPrivacyPolicy: true,
+        },
+      });
+
+      return user;
+    } catch (error) {
+      console.error('Error validating Google user:', error);
+      throw new BadRequestException('Failed to authenticate with Google');
+    }
+  }
+
+  /**
+   * Gera um código temporário para trocar por tokens (mais seguro que passar tokens na URL)
+   */
+  async generateAuthCode(loginResult: any): Promise<string> {
+    const code = crypto.randomBytes(32).toString('hex');
+    // Armazenar tokens no cache por 5 minutos
+    await this.cacheManager.set(`auth_code:${code}`, loginResult, 5 * 60 * 1000);
+    return code;
+  }
+
+  /**
+   * Troca código temporário por tokens
+   */
+  async exchangeCodeForTokens(code: string): Promise<any> {
+    if (!code) {
+      throw new BadRequestException('Authorization code is required');
+    }
+
+    // Verificar se o código tem formato válido (deve ser hex de 64 caracteres)
+    // O código do Google tem formato diferente (ex: "4/0ATX87l..."), então detectamos isso
+    if (code.includes('/') || code.length < 60) {
+      throw new BadRequestException(
+        'Invalid authorization code format. This appears to be a Google OAuth code. ' +
+        'Please use the temporary code provided by the callback redirect. ' +
+        'The Google code is already processed by the backend.'
+      );
+    }
+
+    if (code.length !== 64 || !/^[a-f0-9]+$/i.test(code)) {
+      throw new BadRequestException(
+        'Invalid authorization code format. Expected a 64-character hexadecimal string. ' +
+        `Received: ${code.substring(0, 20)}... (length: ${code.length})`
+      );
+    }
+
+    const cached = await this.cacheManager.get(`auth_code:${code}`);
+    
+    if (!cached) {
+      throw new BadRequestException(
+        'Invalid or expired authorization code. The code may have already been used or expired. ' +
+        'Please try logging in again.'
+      );
+    }
+
+    // Remover código do cache (uso único)
+    await this.cacheManager.del(`auth_code:${code}`);
+
+    return cached;
+  }
+
+  /**
+   * Valida código do Google OAuth diretamente (sem Passport)
+   * Recebe código do frontend e valida com Google
+   */
+  async validateGoogleCode(code: string, redirectUri: string): Promise<any> {
+    const clientId = this.configService.get<string>('GOOGLE_CLIENT_ID');
+    const clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET');
+
+    if (!clientId || !clientSecret) {
+      throw new BadRequestException('Google OAuth not configured');
+    }
+
+    try {
+      // Trocar código por tokens do Google
+      const tokenResponse = await firstValueFrom(
+        this.httpService.post('https://oauth2.googleapis.com/token', {
+          code,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: redirectUri,
+          grant_type: 'authorization_code',
+        }),
+      );
+
+      const { access_token, id_token } = tokenResponse.data;
+
+      if (!access_token) {
+        throw new BadRequestException('Failed to exchange Google code for tokens');
+      }
+
+      // Obter dados do usuário usando o access_token
+      const userInfoResponse = await firstValueFrom(
+        this.httpService.get('https://www.googleapis.com/oauth2/v2/userinfo', {
+          headers: {
+            Authorization: `Bearer ${access_token}`,
+          },
+        }),
+      );
+
+      const googleUser = userInfoResponse.data;
+
+      // Validar ou criar usuário
+      const user = await this.validateGoogleUser({
+        googleId: googleUser.id,
+        email: googleUser.email,
+        firstName: googleUser.given_name || '',
+        lastName: googleUser.family_name || '',
+        avatarUrl: googleUser.picture || null,
+        accessToken: access_token,
+      });
+
+      // Fazer login e retornar tokens JWT
+      return await this.login(user);
+    } catch (error: any) {
+      console.error('Error validating Google code:', error.response?.data || error.message);
+      throw new BadRequestException(
+        error.response?.data?.error_description || 
+        'Failed to validate Google authorization code'
+      );
+    }
   }
 }

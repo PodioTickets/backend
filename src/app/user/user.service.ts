@@ -6,9 +6,11 @@ import {
 } from '@nestjs/common';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { CreateLinkedUserDto } from './dto/create-linked-user.dto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
+import * as crypto from 'crypto';
 
 @Injectable()
 export class UserService {
@@ -272,6 +274,221 @@ export class UserService {
     return {
       message: 'User removed successfully',
     };
+  }
+
+  /**
+   * Busca todos os usuários vinculados ao usuário principal (incluindo o próprio)
+   */
+  async getLinkedUsers(mainUserId: string) {
+    const prismaRead = this.prisma.getReadClient();
+
+    // Buscar usuário principal
+    const mainUser = await prismaRead.user.findUnique({
+      where: { id: mainUserId },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        documentNumber: true,
+        phone: true,
+        dateOfBirth: true,
+        gender: true,
+      },
+    });
+
+    if (!mainUser) {
+      throw new NotFoundException('User not found');
+    }
+
+    // Buscar usuários vinculados
+    const linkedUsers = await prismaRead.linkedUser.findMany({
+      where: { mainUserId },
+      include: {
+        linkedUser: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            documentNumber: true,
+            phone: true,
+            dateOfBirth: true,
+            gender: true,
+          },
+        },
+      },
+    });
+
+    // Montar lista de usuários
+    const users = [
+      {
+        ...mainUser,
+        isMainUser: true,
+        dateOfBirth: mainUser.dateOfBirth
+          ? mainUser.dateOfBirth.toISOString().split('T')[0]
+          : null,
+      },
+      ...linkedUsers.map((lu) => ({
+        ...lu.linkedUser,
+        isMainUser: false,
+        dateOfBirth: lu.linkedUser.dateOfBirth
+          ? lu.linkedUser.dateOfBirth.toISOString().split('T')[0]
+          : null,
+      })),
+    ];
+
+    // Ordenar: principal primeiro, depois alfabeticamente
+    users.sort((a, b) => {
+      if (a.isMainUser) return -1;
+      if (b.isMainUser) return 1;
+      const nameA = `${a.firstName} ${a.lastName}`.toLowerCase();
+      const nameB = `${b.firstName} ${b.lastName}`.toLowerCase();
+      return nameA.localeCompare(nameB);
+    });
+
+    return {
+      success: true,
+      data: { users },
+    };
+  }
+
+  /**
+   * Cria ou vincula um usuário ao usuário principal
+   */
+  async createOrLinkUser(
+    mainUserId: string,
+    createLinkedUserDto: CreateLinkedUserDto,
+  ) {
+    const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
+
+    // Validar data de nascimento não é futura
+    const dateOfBirth = new Date(createLinkedUserDto.dateOfBirth);
+    if (dateOfBirth > new Date()) {
+      throw new BadRequestException('Data de nascimento não pode ser futura');
+    }
+
+    let existingUser = await prismaRead.user.findUnique({
+      where: { documentNumber: createLinkedUserDto.documentNumber },
+    });
+
+    let wasCreated = false;
+    let wasLinked = false;
+
+    if (!existingUser) {
+      // Verificar se email já está em uso
+      const userWithEmail = await prismaRead.user.findUnique({
+        where: { email: createLinkedUserDto.email },
+      });
+
+      if (userWithEmail) {
+        throw new ConflictException(
+          'Este email já está cadastrado para outro CPF',
+        );
+      }
+
+      // Criar novo usuário
+      const randomPassword = crypto.randomBytes(32).toString('hex');
+      const hashedPassword = await bcrypt.hash(randomPassword, 10);
+
+      existingUser = await prismaWrite.user.create({
+        data: {
+          firstName: createLinkedUserDto.firstName,
+          lastName: createLinkedUserDto.lastName,
+          email: createLinkedUserDto.email,
+          documentNumber: createLinkedUserDto.documentNumber,
+          phone: createLinkedUserDto.phone,
+          dateOfBirth: dateOfBirth,
+          gender: this.mapGenderToEnum(createLinkedUserDto.gender),
+          password: hashedPassword, // Senha aleatória (não pode fazer login)
+          acceptedTerms: false,
+          acceptedPrivacyPolicy: false,
+        },
+      });
+
+      wasCreated = true;
+    } else {
+      // Verificar se email corresponde ao CPF
+      if (existingUser.email !== createLinkedUserDto.email) {
+        throw new ConflictException(
+          'Este email já está cadastrado para outro CPF',
+        );
+      }
+    }
+
+    // Verificar se já está vinculado
+    const existingLink = await prismaRead.linkedUser.findUnique({
+      where: {
+        mainUserId_linkedUserId: {
+          mainUserId,
+          linkedUserId: existingUser.id,
+        },
+      },
+    });
+
+    if (!existingLink) {
+      // Criar vínculo
+      await prismaWrite.linkedUser.create({
+        data: {
+          mainUserId,
+          linkedUserId: existingUser.id,
+          relationshipType: 'outro',
+        },
+      });
+
+      wasLinked = true;
+    } else {
+      wasLinked = true; // Já estava vinculado
+    }
+
+    return {
+      success: true,
+      data: {
+        id: existingUser.id,
+        firstName: existingUser.firstName,
+        lastName: existingUser.lastName,
+        email: existingUser.email,
+        documentNumber: existingUser.documentNumber,
+        phone: existingUser.phone,
+        dateOfBirth: existingUser.dateOfBirth
+          ? existingUser.dateOfBirth.toISOString().split('T')[0]
+          : null,
+        gender: this.mapGenderFromEnum(existingUser.gender),
+        wasCreated,
+        wasLinked,
+      },
+    };
+  }
+
+  /**
+   * Mapeia gênero do DTO para enum do Prisma
+   */
+  private mapGenderToEnum(
+    gender: string,
+  ): 'MALE' | 'FEMALE' | 'OTHER' | 'PREFER_NOT_TO_SAY' | null {
+    const mapping = {
+      masculino: 'MALE' as const,
+      feminino: 'FEMALE' as const,
+      outro: 'OTHER' as const,
+      'prefiro-nao-dizer': 'PREFER_NOT_TO_SAY' as const,
+    };
+    return mapping[gender.toLowerCase()] || null;
+  }
+
+  /**
+   * Mapeia enum do Prisma para gênero do DTO
+   */
+  private mapGenderFromEnum(
+    gender: 'MALE' | 'FEMALE' | 'OTHER' | 'PREFER_NOT_TO_SAY' | null,
+  ): string {
+    const mapping = {
+      MALE: 'masculino',
+      FEMALE: 'feminino',
+      OTHER: 'outro',
+      PREFER_NOT_TO_SAY: 'prefiro-nao-dizer',
+    };
+    return gender ? mapping[gender] : 'prefiro-nao-dizer';
   }
 }
 

@@ -94,6 +94,25 @@ generate: ## Gera Prisma Client
 studio: ## Abre Prisma Studio
 	docker-compose exec backend pnpm db:studio
 
+populate-slugs: ## Popular slugs de eventos existentes
+	@echo "Populando slugs de eventos..."
+	@echo "Garantindo que o PostgreSQL está rodando..."
+	@docker-compose up -d postgres || true
+	@echo "Aguardando PostgreSQL estar pronto..."
+	@sleep 5
+	@NETWORK_NAME=$$(docker inspect podiogo-postgres 2>/dev/null | grep -oP '"NetworkMode": "\K[^"]+' | head -1 || echo "podiogo_podiogo-network"); \
+	if [ -z "$$NETWORK_NAME" ]; then \
+		NETWORK_NAME=$$(docker network ls | grep podiogo | awk '{print $$2}' | head -1 || echo "podiogo_podiogo-network"); \
+	fi; \
+	echo "Usando rede: $$NETWORK_NAME"; \
+	echo "Regenerando Prisma Client para Alpine..."; \
+	docker run --rm \
+		-v $(PWD):/app \
+		-w /app \
+		--network $$NETWORK_NAME \
+		-e DATABASE_URL="postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)?schema=public" \
+		node:20-alpine sh -c "npm install -g pnpm && pnpm install && pnpm prisma generate && pnpm db:populate-slugs"
+
 test: ## Executa testes
 	docker-compose exec backend pnpm test
 
