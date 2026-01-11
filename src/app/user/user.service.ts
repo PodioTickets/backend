@@ -17,12 +17,6 @@ export class UserService {
   constructor(private readonly prisma: PrismaService) {}
 
   private validatePasswordStrength(password: string): void {
-    // Requisitos de senha forte:
-    // - Pelo menos 8 caracteres
-    // - Pelo menos uma letra minúscula
-    // - Pelo menos uma letra maiúscula
-    // - Pelo menos um dígito
-    // - Pelo menos um caractere especial
     const passwordRegex =
       /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
 
@@ -190,6 +184,7 @@ export class UserService {
         lastName: true,
         gender: true,
         phone: true,
+        reservePhone: true,
         dateOfBirth: true,
         country: true,
         state: true,
@@ -241,6 +236,13 @@ export class UserService {
     }
 
     const updateData: any = { ...updateUserDto };
+    
+    // Mapear emergencyPhone para reservePhone se fornecido
+    if (updateData.emergencyPhone) {
+      updateData.reservePhone = updateData.emergencyPhone;
+      delete updateData.emergencyPhone;
+    }
+    
     if (updateData.dateOfBirth) {
       updateData.dateOfBirth = new Date(updateData.dateOfBirth);
     }

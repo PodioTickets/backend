@@ -30,6 +30,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         role: true,
         isActive: true,
         phone: true,
+        reservePhone: true,
+        dateOfBirth: true,
+        sex: true,
         language: true,
         avatarUrl: true,
       },
@@ -47,6 +50,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       documentNumber: user.documentNumber,
       role: user.role,
       phone: user.phone,
+      emergencyPhone: user.reservePhone, // Alias para compatibilidade
+      reservePhone: user.reservePhone,
+      dateOfBirth: user.dateOfBirth,
+      sex: user.sex,
       language: user.language,
       avatarUrl: user.avatarUrl,
     };
