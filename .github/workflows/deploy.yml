@@ -14,6 +14,18 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # Validação: Verificar se a chave privada corresponde à pública
+      # Execute no seu computador: ssh-keygen -y -f ~/.ssh/github_actions
+      # Deve mostrar: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC84IFu4cPY75V+XyaBeq8oNvNA7SKBezb0BfL/G3qHs github-actions
+      - name: Validate SSH Key Format
+        run: |
+          echo "🔍 Validando formato da chave SSH..."
+          if [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
+            echo "❌ SSH_PRIVATE_KEY não está configurado!"
+            exit 1
+          fi
+          echo "✅ SSH_PRIVATE_KEY está configurado"
+
       # Deploy via SSH
       # IMPORTANTE: Se a autenticação falhar, verifique:
       # 1. A chave privada no GitHub Secret SSH_PRIVATE_KEY deve ser a mesma que gerou github_actions.pub
