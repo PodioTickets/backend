@@ -13,10 +13,7 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
-      # Validação: Verificar se a chave privada corresponde à pública
-      # Execute no seu computador: ssh-keygen -y -f ~/.ssh/github_actions
-      # Deve mostrar: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC84IFu4cPY75V+XyaBeq8oNvNA7SKBezb0BfL/G3qHs github-actions
+        
       - name: Validate SSH Key Format
         run: |
           echo "🔍 Validando formato da chave SSH..."
@@ -26,16 +23,6 @@ jobs:
           fi
           echo "✅ SSH_PRIVATE_KEY está configurado"
 
-      # Deploy via SSH
-      # IMPORTANTE: Se a autenticação falhar, verifique:
-      # 1. A chave privada no GitHub Secret SSH_PRIVATE_KEY deve ser a mesma que gerou github_actions.pub
-      #    Para verificar: ssh-keygen -y -f ~/.ssh/github_actions (deve mostrar a mesma chave pública)
-      # 2. SSH_PRIVATE_KEY deve incluir TODAS as linhas, incluindo:
-      #    -----BEGIN OPENSSH PRIVATE KEY----- (ou -----BEGIN RSA PRIVATE KEY-----)
-      #    [todo o conteúdo da chave]
-      #    -----END OPENSSH PRIVATE KEY----- (ou -----END RSA PRIVATE KEY-----)
-      # 3. No servidor, verifique: cat ~/.ssh/authorized_keys | grep github_actions
-      # 4. Teste local: ssh -i ~/.ssh/github_actions root@IP_DA_VPS
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -51,22 +38,14 @@ jobs:
           script: |
             set -e
 
-            echo "🚀 Iniciando deploy..."
+            echo "Iniciando deploy..."
             cd .. && cd /srv/backend
 
-            echo "📥 Atualizando código (${GITHUB_REF_NAME})..."
+            echo "Atualizando código"
             git fetch origin
-            git checkout ${GITHUB_REF_NAME}
             git pull origin ${GITHUB_REF_NAME}
 
-            echo "🗄️ Verificando PostgreSQL..."
-            if ! docker compose ps postgres | grep -q "Up"; then
-              docker compose up -d postgres
-              echo "⏳ Aguardando PostgreSQL..."
-              sleep 15
-            fi
-
-            echo "🔄 Executando migrações..."
+            echo "Executando migrações..."
             DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public"
 
             docker run --rm \
