@@ -14,20 +14,16 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Test SSH Connection
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_IP }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          passphrase: ${{ secrets.SSH_KEY_PASSPHRASE }}
-          port: ${{ secrets.SSH_PORT || 22 }}
-          timeout: 10s
-          script: |
-            echo "✅ SSH Connection successful!"
-            whoami
-            pwd
-
+      # Deploy via SSH
+      # IMPORTANTE: Se a autenticação falhar, verifique:
+      # 1. A chave privada no GitHub Secret SSH_PRIVATE_KEY deve ser a mesma que gerou github_actions.pub
+      #    Para verificar: ssh-keygen -y -f ~/.ssh/github_actions (deve mostrar a mesma chave pública)
+      # 2. SSH_PRIVATE_KEY deve incluir TODAS as linhas, incluindo:
+      #    -----BEGIN OPENSSH PRIVATE KEY----- (ou -----BEGIN RSA PRIVATE KEY-----)
+      #    [todo o conteúdo da chave]
+      #    -----END OPENSSH PRIVATE KEY----- (ou -----END RSA PRIVATE KEY-----)
+      # 3. No servidor, verifique: cat ~/.ssh/authorized_keys | grep github_actions
+      # 4. Teste local: ssh -i ~/.ssh/github_actions root@IP_DA_VPS
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -39,6 +35,7 @@ jobs:
           timeout: 60s
           script_stop: true
           debug: true
+          use_insecure_cipher: false
           script: |
             set -e
 
