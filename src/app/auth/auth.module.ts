@@ -21,7 +21,7 @@ import { HttpModule } from '@nestjs/axios';
       inject: [ConfigService],
       useFactory: async (configService: ConfigService) => {
         const secret = configService.get('JWT_SECRET');
-        const expiresIn = configService.get('JWT_EXPIRES_IN', '1h');
+        const expiresIn = configService.get('JWT_EXPIRES_IN', '30d');
         if (!secret) {
           throw new Error('JWT_SECRET environment variable is required');
         }
