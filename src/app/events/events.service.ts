@@ -63,16 +63,32 @@ export class EventsService {
   }
 
   /**
-   * Gera um slug único para o evento
+   * Extrai a segunda parte do UUID (ex: 2ba25f04-4b98-4e5e-9da6-ddb4e272ded4 -> 4b98)
+   */
+  private extractUuidSecondPart(uuid: string): string {
+    const parts = uuid.split('-');
+    return parts.length >= 2 ? parts[1] : '';
+  }
+
+  /**
+   * Gera um slug único para o evento incluindo a segunda parte do UUID
    */
   private async generateEventSlug(
     name: string,
+    eventId: string,
     customSlug?: string,
     excludeEventId?: string,
   ): Promise<string> {
     const baseSlug = customSlug || name;
-    return generateUniqueSlug(baseSlug, (slug) =>
-      this.slugExists(slug, excludeEventId),
+    const uuidPart = this.extractUuidSecondPart(eventId);
+    const slugWithUuid = uuidPart ? `${baseSlug}-${uuidPart}` : baseSlug;
+    
+    // Gerar slug amigável
+    const slug = generateSlug(slugWithUuid);
+    
+    // Verificar se já existe e gerar único se necessário
+    return generateUniqueSlug(slug, (s) =>
+      this.slugExists(s, excludeEventId),
     );
   }
 
@@ -107,16 +123,11 @@ export class EventsService {
       );
     }
 
-    // Gerar slug único
-    const slug = await this.generateEventSlug(
-      createEventDto.name,
-      createEventDto.slug,
-    );
-
+    // Criar evento primeiro para ter o ID
     const event = await prismaWrite.event.create({
       data: {
         ...createEventDto,
-        slug,
+        slug: null, // Será gerado depois com o ID
         organizerId: organizer.id,
         eventDate: new Date(createEventDto.eventDate),
         registrationStartDate: new Date(createEventDto.registrationStartDate),
@@ -138,9 +149,36 @@ export class EventsService {
       },
     });
 
+    // Gerar slug único com a segunda parte do UUID
+    const slug = await this.generateEventSlug(
+      createEventDto.name,
+      event.id,
+      createEventDto.slug,
+    );
+
+    // Atualizar o evento com o slug gerado
+    const updatedEvent = await prismaWrite.event.update({
+      where: { id: event.id },
+      data: { slug },
+      include: {
+        organizer: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
     return {
       message: 'Event created successfully',
-      data: { event },
+      data: { event: updatedEvent },
     };
   }
 
@@ -638,6 +676,9 @@ export class EventsService {
           where: { isRequired: true },
           orderBy: { order: 'asc' },
         },
+        coupons: {
+          orderBy: { createdAt: 'desc' },
+        },
       },
     });
 
@@ -708,6 +749,61 @@ export class EventsService {
           where: { isRequired: true },
           orderBy: { order: 'asc' },
         },
+        coupons: {
+          orderBy: { createdAt: 'desc' },
+        },
+        ticketCategories: {
+          include: {
+            tickets: {
+              where: { isActive: true },
+              include: {
+                batches: true,
+                products: {
+                  include: {
+                    product: true,
+                  },
+                },
+              },
+            },
+          },
+          orderBy: { order: 'asc' },
+        },
+        tickets: {
+          where: { isActive: true },
+          include: {
+            batches: {
+              orderBy: { price: 'asc' },
+            },
+            products: {
+              include: {
+                product: {
+                  include: {
+                    variations: true,
+                  },
+                },
+              },
+            },
+            category: true,
+            kit: {
+              include: {
+                items: {
+                  include: {
+                    product: true,
+                  },
+                },
+              },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+        },
+        products: {
+          include: {
+            variations: {
+              orderBy: { name: 'asc' },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+        },
       },
     });
 
@@ -751,8 +847,9 @@ export class EventsService {
       const customSlug = updateEventDto.slug;
       updateData.slug = await this.generateEventSlug(
         nameForSlug,
+        id, // eventId para extrair a segunda parte do UUID
         customSlug,
-        id,
+        id, // excludeEventId
       );
     }
     
@@ -999,5 +1096,155 @@ export class EventsService {
     if (event.organizerId !== organizer.id) {
       throw new BadRequestException('User is not the organizer of this event');
     }
+  }
+
+  async publish(userId: string, eventId: string) {
+    await this.verifyOrganizerAccess(userId, eventId);
+
+    const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
+
+    const event = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      include: {
+        modalities: {
+          where: { isActive: true },
+        },
+      },
+    });
+
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
+
+    // Validações antes de publicar
+    if (event.modalities.length === 0) {
+      throw new BadRequestException('Event must have at least one active modality before publishing');
+    }
+
+    if (!event.eventDate || new Date(event.eventDate) < new Date()) {
+      throw new BadRequestException('Event date must be in the future');
+    }
+
+    if (!event.location || !event.city || !event.state || !event.country) {
+      throw new BadRequestException('Event must have complete location information before publishing');
+    }
+
+    // Atualizar status para PUBLISHED
+    const updatedEvent = await prismaWrite.event.update({
+      where: { id: eventId },
+      data: {
+        status: EventStatus.PUBLISHED,
+      },
+    });
+
+    return {
+      message: 'Event published successfully',
+      data: { event: updatedEvent },
+    };
+  }
+
+  async getStats(userId: string, eventId: string) {
+    await this.verifyOrganizerAccess(userId, eventId);
+
+    const prismaRead = this.prisma.getReadClient();
+
+    const [registrations, modalities] = await Promise.all([
+      prismaRead.registration.findMany({
+        where: { eventId },
+        include: {
+          payment: true,
+          modalities: true,
+        },
+      }),
+      prismaRead.modality.findMany({
+        where: { eventId, isActive: true },
+      }),
+    ]);
+
+    const totalRegistrations = registrations.length;
+    const confirmedRegistrations = registrations.filter((r) => r.status === 'CONFIRMED').length;
+    const totalRevenue = registrations
+      .filter((r) => r.payment && r.payment.status === 'PAID')
+      .reduce((sum, r) => sum + r.finalAmount, 0);
+
+    const ticketsSold = registrations.reduce((sum, r) => {
+      return sum + (r.modalities?.length || 0);
+    }, 0);
+
+    const ticketsAvailable = modalities.reduce((sum, m) => {
+      return sum + (m.maxParticipants || 0) - m.currentParticipants;
+    }, 0);
+
+    return {
+      message: 'Event statistics retrieved successfully',
+      data: {
+        totalRegistrations,
+        confirmedRegistrations,
+        totalRevenue,
+        ticketsSold,
+        ticketsAvailable,
+      },
+    };
+  }
+
+  async getRevenue(userId: string, eventId: string) {
+    await this.verifyOrganizerAccess(userId, eventId);
+
+    const prismaRead = this.prisma.getReadClient();
+
+    const registrations = await prismaRead.registration.findMany({
+      where: {
+        eventId,
+        payment: {
+          status: 'PAID',
+        },
+      },
+      include: {
+        modalities: {
+          include: {
+            modality: true,
+          },
+        },
+        payment: true,
+      },
+    });
+
+    const total = registrations.reduce((sum, r) => sum + r.finalAmount, 0);
+
+    // Agrupar por modalidade
+    const breakdownMap = new Map<string, { ticketId: string; ticketName: string; revenue: number; quantity: number }>();
+
+    registrations.forEach((registration) => {
+      registration.modalities.forEach((rm) => {
+        const modalityId = rm.modalityId;
+        const modality = rm.modality;
+
+        if (!breakdownMap.has(modalityId)) {
+          breakdownMap.set(modalityId, {
+            ticketId: modalityId,
+            ticketName: modality.name,
+            revenue: 0,
+            quantity: 0,
+          });
+        }
+
+        const entry = breakdownMap.get(modalityId)!;
+        // Distribuir o valor proporcionalmente (simplificado - pode ser melhorado)
+        const modalityPrice = modality.price;
+        entry.revenue += modalityPrice;
+        entry.quantity += 1;
+      });
+    });
+
+    const breakdown = Array.from(breakdownMap.values());
+
+    return {
+      message: 'Event revenue retrieved successfully',
+      data: {
+        total,
+        breakdown,
+      },
+    };
   }
 }

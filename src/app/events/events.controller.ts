@@ -219,5 +219,54 @@ export class EventsController {
   deleteLocation(@Request() req, @Param('eventId') eventId: string, @Param('locationId') locationId: string) {
     return this.eventsService.deleteLocation(req.user.id, eventId, locationId);
   }
+
+  @Post(':eventId/publish')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Publish event',
+    description: 'Publishes an event. Validates that event has required data before publishing.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiResponse({ status: 200, description: 'Event published successfully' })
+  @ApiResponse({ status: 400, description: 'Bad request - validation failed' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can publish events' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  publish(@Request() req, @Param('eventId') eventId: string) {
+    return this.eventsService.publish(req.user.id, eventId);
+  }
+
+  @Get(':eventId/stats')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get event statistics',
+    description: 'Retrieves statistics for an event (registrations, revenue, tickets sold, etc.)',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiResponse({ status: 200, description: 'Event statistics retrieved successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can view statistics' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  getStats(@Request() req, @Param('eventId') eventId: string) {
+    return this.eventsService.getStats(req.user.id, eventId);
+  }
+
+  @Get(':eventId/revenue')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get event revenue',
+    description: 'Retrieves revenue breakdown for an event by modality',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiResponse({ status: 200, description: 'Event revenue retrieved successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can view revenue' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  getRevenue(@Request() req, @Param('eventId') eventId: string) {
+    return this.eventsService.getRevenue(req.user.id, eventId);
+  }
 }
 

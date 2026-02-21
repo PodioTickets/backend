@@ -8,9 +8,11 @@ import * as ClamScan from 'clamscan';
 @Injectable()
 export class UploadService {
   private readonly uploadDir = path.join(process.cwd(), 'uploads', 'images');
+  private readonly pdfUploadDir = path.join(process.cwd(), 'uploads', 'pdfs');
 
   constructor() {
     this.ensureUploadDirectory();
+    this.ensurePdfUploadDirectory();
   }
 
   private async ensureUploadDirectory() {
@@ -19,6 +21,15 @@ export class UploadService {
     } catch {
       await fs.mkdir(this.uploadDir, { recursive: true });
       console.log('📁 Upload directory created:', this.uploadDir);
+    }
+  }
+
+  private async ensurePdfUploadDirectory() {
+    try {
+      await fs.access(this.pdfUploadDir);
+    } catch {
+      await fs.mkdir(this.pdfUploadDir, { recursive: true });
+      console.log('📁 PDF upload directory created:', this.pdfUploadDir);
     }
   }
 
@@ -55,6 +66,44 @@ export class UploadService {
     } catch (error) {
       console.error('❌ Failed to compress and save image:', error);
       throw new Error(`Failed to process image: ${error.message}`);
+    }
+  }
+
+  async uploadPdf(file: any) {
+    try {
+      if (!file || !file.buffer) {
+        throw new Error('No file uploaded or file buffer missing');
+      }
+
+      // Verificar se é PDF
+      const fileExtension = path.extname(file.originalname || '').toLowerCase();
+      if (fileExtension !== '.pdf') {
+        throw new Error('File must be a PDF');
+      }
+
+      // Verificar malware antes do processamento
+      await this.scanForMalware(
+        file.buffer,
+        file.originalname || 'uploaded-file',
+      );
+
+      // Limitar tamanho do PDF (ex: 10MB)
+      const maxSize = 10 * 1024 * 1024; // 10MB
+      if (file.buffer.length > maxSize) {
+        throw new Error(`PDF file size exceeds maximum allowed size of ${this.formatFileSize(maxSize)}`);
+      }
+
+      const filename = `${Date.now()}-${Math.round(Math.random() * 1e9)}.pdf`;
+      const filePath = path.join(this.pdfUploadDir, filename);
+      await fs.writeFile(filePath, file.buffer);
+
+      console.log(
+        `✅ PDF uploaded and saved: ${filename} (${this.formatFileSize(file.buffer.length)})`,
+      );
+      return `/uploads/pdfs/${filename}`;
+    } catch (error) {
+      console.error('❌ Failed to upload PDF:', error);
+      throw new Error(`Failed to upload PDF: ${error.message}`);
     }
   }
 

@@ -10,6 +10,7 @@ import {
 import { QuestionsService } from './questions.service';
 import { CreateQuestionDto, UpdateQuestionDto } from './dto/create-question.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { NoCache } from 'src/common/decorators/cache.decorator';
 
 @ApiTags('Questions')
 @Controller('api/v1/questions')
@@ -31,6 +32,7 @@ export class QuestionsController {
   }
 
   @Get('events/:eventId')
+  @NoCache()
   @ApiOperation({ summary: 'Get all questions for event', description: 'Retrieves all custom questions for a specific event' })
   @ApiParam({ name: 'eventId', description: 'Event UUID' })
   @ApiResponse({ status: 200, description: 'Questions retrieved successfully' })

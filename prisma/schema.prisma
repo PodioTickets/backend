@@ -63,6 +63,35 @@ enum UserRole {
   ADMIN
 }
 
+enum CouponType {
+  DISCOUNT
+  QUANTITY
+  AGE
+}
+
+enum CouponDiscountType {
+  PERCENTAGE
+  FIXED
+}
+
+enum CouponStatus {
+  ACTIVE
+  INACTIVE
+  EXPIRED
+}
+
+enum CpfListStatus {
+  DISABLED
+  ENABLED
+}
+
+enum VoucherStatus {
+  ACTIVE
+  USED
+  EXPIRED
+  INACTIVE
+}
+
 model User {
   id                    String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email                 String        @unique
@@ -130,6 +159,7 @@ model Event {
   state                 String
   country               String
   googleMapsLink        String?
+  regulationUrl         String? // URL do PDF do regulamento
   eventDate             DateTime
   registrationStartDate DateTime
   registrationEndDate   DateTime
@@ -137,19 +167,26 @@ model Event {
   createdAt             DateTime    @default(now())
   updatedAt             DateTime    @updatedAt
 
-  organizer      Organizer        @relation(fields: [organizerId], references: [id], onDelete: Cascade)
-  topics         EventTopic[]
-  modalities     Modality[]
-  kits           Kit[]
-  registrations  Registration[]
-  questions      Question[]
-  locations      EventLocation[]
-  ContactMessage ContactMessage[]
+  organizer        Organizer        @relation(fields: [organizerId], references: [id], onDelete: Cascade)
+  topics           EventTopic[]
+  modalities       Modality[]
+  kits             Kit[]
+  registrations    Registration[]
+  questions        Question[]
+  locations        EventLocation[]
+  ContactMessage   ContactMessage[]
+  modalityGroups   ModalityGroup[]
+  coupons          Coupon[]
+  ticketCategories TicketCategory[]
+  tickets          Ticket[]
+  products         Product[]
+  // slug já tem índice automático via @unique, não precisa de índice explícito
+  vouchers         Voucher[]
 
   @@index([status, eventDate]) // Para buscar eventos publicados futuros
-  @@index([country, state, city, status]) // Para filtros de localização
+  @@index([status, country, state, city]) // Para filtros de localização (status primeiro para melhor seletividade)
   @@index([organizerId, createdAt]) // Para listar eventos do organizador
-  @@index([slug]) // Para busca rápida por slug
+  @@index([eventDate]) // Para ordenação e filtros por data
 }
 
 model EventTopic {
@@ -203,10 +240,26 @@ model ModalityTemplate {
   @@index([isActive])
 }
 
+model ModalityGroup {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId   String   @db.Uuid
+  name      String
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  event      Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  modalities Modality[]
+
+  @@index([eventId])
+  @@index([eventId, order])
+}
+
 model Modality {
   id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   eventId             String   @db.Uuid
   templateId          String?  @db.Uuid // Referência ao template (opcional)
+  groupId             String?  @db.Uuid // Referência ao grupo (opcional)
   name                String
   description         String?
   price               Float
@@ -218,11 +271,13 @@ model Modality {
   updatedAt           DateTime @updatedAt
 
   template      ModalityTemplate?      @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  group         ModalityGroup?         @relation(fields: [groupId], references: [id], onDelete: SetNull)
   event         Event                  @relation(fields: [eventId], references: [id], onDelete: Cascade)
   registrations RegistrationModality[]
 
   @@index([eventId])
   @@index([templateId])
+  @@index([groupId])
   @@index([eventId, isActive])
 }
 
@@ -235,8 +290,9 @@ model Kit {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  event Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  items KitItem[]
+  event   Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  items   KitItem[]
+  tickets Ticket[]
 
   @@index([eventId])
 }
@@ -244,6 +300,7 @@ model Kit {
 model KitItem {
   id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   kitId       String   @db.Uuid
+  productId   String?  @db.Uuid // Vinculação opcional a um produto
   name        String
   description String?
   sizes       Json // Array de objetos com {size: "G", stock: 100}
@@ -252,9 +309,11 @@ model KitItem {
   updatedAt   DateTime @updatedAt
 
   kit           Kit                   @relation(fields: [kitId], references: [id], onDelete: Cascade)
+  product       Product?              @relation(fields: [productId], references: [id], onDelete: SetNull)
   registrations RegistrationKitItem[]
 
   @@index([kitId])
+  @@index([productId])
 }
 
 model Registration {
@@ -271,23 +330,29 @@ model Registration {
   serviceFee    Float
   discount      Float              @default(0)
   finalAmount   Float
+  couponId      String?            @db.Uuid // Cupom aplicado
+  voucherId     String?            @db.Uuid // Voucher aplicado
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
 
   event           Event                  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  coupon          Coupon?               @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  voucher         Voucher?              @relation(fields: [voucherId], references: [id], onDelete: SetNull)
   user            User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
   invitedBy       User?                  @relation("InvitedBy", fields: [invitedById], references: [id])
   modalities      RegistrationModality[]
   kitItems        RegistrationKitItem[]
   questionAnswers QuestionAnswer[]
   payment         Payment?
+  tickets         RegistrationTicket[]
 
   @@index([eventId])
   @@index([userId])
   @@index([invitedById])
   // qrCode não pode ter índice devido ao tamanho (Data URL)
   @@index([eventId, status]) // Para filtrar inscrições por evento e status
-  @@index([userId, createdAt]) // Para histórico do usuário
+  @@index([userId, purchaseDate]) // Para histórico ordenado do usuário (otimizado para orderBy)
+  @@index([invitedById, purchaseDate]) // Para inscrições convidadas ordenadas (otimiza query com OR)
   @@index([status, createdAt]) // Para relatórios
 }
 
@@ -411,4 +476,182 @@ model LinkedUser {
   @@unique([mainUserId, linkedUserId])
   @@index([mainUserId])
   @@index([linkedUserId])
+}
+
+model Coupon {
+  id            String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId       String             @db.Uuid
+  code          String? // Obrigatório para DISCOUNT, opcional para QUANTITY e AGE
+  couponType    CouponType
+  type          CouponDiscountType
+  value         Float
+  note          String?
+  appliesTo     String? // 'all' ou ID de modalidade específica
+  expiryDate    DateTime?
+  minCartValue  Float?
+  cpfListStatus CpfListStatus      @default(DISABLED)
+  cpfList       Json? // Array de CPFs
+  minQuantity   Int? // Para couponType QUANTITY
+  ageRule       String? // 'MIN' ou 'MAX' para couponType AGE
+  ageValue      String? // Ex: '9 anos'
+  status        CouponStatus       @default(ACTIVE)
+  usageCount    Int                @default(0)
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  event         Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  registrations Registration[]
+
+  @@unique([eventId, code])
+  @@index([eventId])
+  @@index([code])
+  @@index([status])
+  @@index([eventId, status])
+}
+
+model Voucher {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId       String        @db.Uuid
+  name          String // Nome do lote de vouchers
+  code          String        @unique // Código único gerado automaticamente
+  appliesTo     String? // 'all' ou JSON array de ticket IDs
+  expiryDate    DateTime?
+  cpfListStatus CpfListStatus @default(DISABLED)
+  cpfList       Json? // Array de CPFs
+  status        VoucherStatus @default(ACTIVE)
+  usedAt        DateTime? // Data em que foi usado
+  usedBy        String?       @db.Uuid // ID do usuário que usou
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  event         Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  registrations Registration[]
+
+  @@unique([eventId, code])
+  @@index([eventId])
+  @@index([code])
+  @@index([status])
+  @@index([eventId, status])
+  @@index([code, status]) // Para busca rápida por código e status
+}
+
+model TicketCategory {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId   String   @db.Uuid
+  name      String
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  event   Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  tickets Ticket[]
+
+  @@index([eventId])
+  @@index([eventId, order])
+}
+
+model Ticket {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId      String   @db.Uuid
+  categoryId   String?  @db.Uuid
+  name         String
+  modality     String // Valor do template selecionado (ex: 'Corrida de rua')
+  distance     String?
+  distanceUnit String?  @default("KM")
+  gender       String? // 'all', 'male', 'female'
+  ageLimitMin  Int?
+  ageLimitMax  Int?
+  hasKit       Boolean  @default(false)
+  kitId        String?  @db.Uuid
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  event         Event                @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  category      TicketCategory?      @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  kit           Kit?                 @relation(fields: [kitId], references: [id], onDelete: SetNull)
+  batches       TicketBatch[]
+  products      TicketProduct[]
+  registrations RegistrationTicket[]
+
+  @@index([eventId])
+  @@index([categoryId])
+  @@index([eventId, isActive])
+}
+
+model TicketBatch {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticketId  String    @db.Uuid
+  quantity  Int
+  price     Float
+  startDate DateTime?
+  endDate   DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId])
+  @@index([ticketId, startDate, endDate])
+}
+
+model Product {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId            String   @db.Uuid
+  name               String
+  image              String?
+  isIncludedInTicket Boolean  @default(false)
+  basePrice          Float    @default(0)
+  isRequired         Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  event      Event              @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  variations ProductVariation[]
+  tickets    TicketProduct[]
+  kitItems   KitItem[]
+
+  @@index([eventId])
+}
+
+model ProductVariation {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String   @db.Uuid
+  name      String
+  price     Float
+  stock     Int      @default(0) // 0 = ilimitado
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+}
+
+model TicketProduct {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticketId  String   @db.Uuid
+  productId String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  ticket  Ticket  @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([ticketId, productId])
+  @@index([ticketId])
+  @@index([productId])
+}
+
+model RegistrationTicket {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  registrationId String   @db.Uuid
+  ticketId       String   @db.Uuid
+  createdAt      DateTime @default(now())
+
+  registration Registration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  ticket       Ticket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@unique([registrationId, ticketId])
+  @@index([registrationId])
+  @@index([ticketId])
 }

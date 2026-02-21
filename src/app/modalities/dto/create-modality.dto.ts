@@ -16,6 +16,11 @@ export class CreateModalityDto {
   @ApiProperty()
   templateId?: string; // ID do template de modalidade pré-setada (opcional)
 
+  @IsOptional()
+  @IsUUID()
+  @ApiPropertyOptional()
+  groupId?: string; // ID do grupo de modalidades (opcional)
+
   @IsString()
   @ApiProperty()
   name: string;
@@ -81,4 +86,8 @@ export class UpdateModalityDto {
   @Min(0)
   @Type(() => Number)
   order?: number;
+
+  @IsOptional()
+  @IsUUID()
+  groupId?: string;
 }

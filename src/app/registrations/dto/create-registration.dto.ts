@@ -57,6 +57,14 @@ export class CreateRegistrationDto {
   @IsOptional()
   @IsString()
   invitedUserId?: string; // Para convidar outro usuário
+
+  @IsOptional()
+  @IsString()
+  couponCode?: string; // Código do cupom de desconto
+
+  @IsOptional()
+  @IsString()
+  voucherCode?: string; // Código do voucher
 }
 
 export class CreateInvitedUserDto {

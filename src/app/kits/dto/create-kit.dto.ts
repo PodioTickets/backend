@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsBoolean, IsArray, ValidateNested, IsNumber } from 'class-validator';
+import { IsString, IsOptional, IsBoolean, IsArray, ValidateNested, IsNumber, IsUUID } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class KitItemSizeDto {
@@ -16,6 +16,10 @@ export class CreateKitItemDto {
   @IsOptional()
   @IsString()
   description?: string;
+
+  @IsOptional()
+  @IsUUID()
+  productId?: string; // Optional product ID to link to an existing product
 
   @IsArray()
   @ValidateNested({ each: true })
@@ -68,6 +72,10 @@ export class UpdateKitItemDto {
   @IsOptional()
   @IsString()
   description?: string;
+
+  @IsOptional()
+  @IsUUID()
+  productId?: string; // Optional product ID to link/unlink product
 
   @IsOptional()
   @IsArray()

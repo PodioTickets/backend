@@ -10,9 +10,11 @@ import {
   UseInterceptors,
   UploadedFile,
   UploadedFiles,
+  BadRequestException,
 } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import {
   ApiBody,
   ApiConsumes,
@@ -561,16 +563,49 @@ export class UploadController {
   async uploadImage(@UploadedFile() file: any) {
     try {
       if (!file) {
-        return { message: 'No file uploaded', success: false };
+        throw new BadRequestException('No file uploaded');
       }
       const imageUrl = await this.uploadService.compressImage(file);
-      return { message: 'Success!', imageUrl, success: true };
+      return { url: imageUrl };
     } catch (error) {
       console.error('❌ Upload error:', error);
-      return {
-        message: `Failed to process image: ${error.message}`,
-        success: false,
-      };
+      throw error;
+    }
+  }
+
+  @Post('pdf')
+  @SkipThrottle()
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+      fileFilter: (req, file, cb) => {
+        // Permitir apenas PDFs
+        if (file.mimetype === 'application/pdf' || file.originalname.toLowerCase().endsWith('.pdf')) {
+          cb(null, true);
+        } else {
+          cb(new Error('Only PDF files are allowed!'), false);
+        }
+      },
+    }),
+  )
+  @ApiOperation({ summary: 'Upload de PDF' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({ description: 'Arquivo PDF', type: UploadDto })
+  @ApiResponse({
+    status: 201,
+    description: 'PDF carregado com sucesso',
+  })
+  async uploadPdf(@UploadedFile() file: any) {
+    try {
+      if (!file) {
+        throw new BadRequestException('No file uploaded');
+      }
+      const pdfUrl = await this.uploadService.uploadPdf(file);
+      return { url: pdfUrl };
+    } catch (error) {
+      console.error('❌ PDF upload error:', error);
+      throw error;
     }
   }
 

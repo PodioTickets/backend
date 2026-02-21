@@ -389,7 +389,7 @@ git pull
 ./deploy.sh migrate
 
 # 3. Rebuild e restart
-docker compose build --no-cache backend
+docker compose build backend
 docker compose up -d backend
 
 # 4. Verificar logs

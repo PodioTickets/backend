@@ -21,6 +21,12 @@ import { PaymentsModule } from './app/payments/payments.module';
 import { KitsModule } from './app/kits/kits.module';
 import { ModalitiesModule } from './app/modalities/modalities.module';
 import { QuestionsModule } from './app/questions/questions.module';
+import { CouponsModule } from './app/coupons/coupons.module';
+import { VouchersModule } from './app/vouchers/vouchers.module';
+import { TicketCategoriesModule } from './app/ticket-categories/ticket-categories.module';
+import { TicketsModule } from './app/tickets/tickets.module';
+import { ProductsModule } from './app/products/products.module';
+import { CheckoutModule } from './app/checkout/checkout.module';
 
 @Module({
   imports: [
@@ -61,6 +67,12 @@ import { QuestionsModule } from './app/questions/questions.module';
     KitsModule,
     ModalitiesModule,
     QuestionsModule,
+    CouponsModule,
+    VouchersModule,
+    TicketCategoriesModule,
+    TicketsModule,
+    ProductsModule,
+    CheckoutModule,
   ],
   controllers: [],
   providers: [

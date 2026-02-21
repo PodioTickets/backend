@@ -23,6 +23,7 @@ export class KitsService {
               create: createKitDto.items.map((item) => ({
                 name: item.name,
                 description: item.description,
+                productId: item.productId,
                 sizes: item.sizes as any,
                 isActive: item.isActive ?? true,
               })),
@@ -52,6 +53,9 @@ export class KitsService {
       include: {
         items: {
           where: { isActive: true },
+          include: {
+            product: true,
+          },
         },
       },
     });
@@ -69,7 +73,11 @@ export class KitsService {
     const kit = await prismaRead.kit.findUnique({
       where: { id },
       include: {
-        items: true,
+        items: {
+          include: {
+            product: true,
+          },
+        },
         event: {
           select: {
             id: true,
@@ -152,6 +160,7 @@ export class KitsService {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
 
     const kit = await prismaWrite.kit.findUnique({
       where: { id: kitId },
@@ -161,11 +170,27 @@ export class KitsService {
       throw new NotFoundException('Kit not found');
     }
 
+    // Validar productId se fornecido
+    if (createItemDto.productId) {
+      const product = await prismaRead.product.findUnique({
+        where: { id: createItemDto.productId },
+      });
+      if (!product || product.eventId !== eventId) {
+        throw new NotFoundException('Product not found or does not belong to this event');
+      }
+    }
+
     const item = await prismaWrite.kitItem.create({
       data: {
-        ...createItemDto,
+        name: createItemDto.name,
+        description: createItemDto.description,
+        productId: createItemDto.productId,
         kitId,
         sizes: createItemDto.sizes as any,
+        isActive: createItemDto.isActive ?? true,
+      },
+      include: {
+        product: true,
       },
     });
 
@@ -179,6 +204,7 @@ export class KitsService {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
 
     const item = await prismaWrite.kitItem.findUnique({
       where: { id: itemId },
@@ -186,6 +212,18 @@ export class KitsService {
 
     if (!item || item.kitId !== kitId) {
       throw new NotFoundException('Kit item not found');
+    }
+
+    // Validar productId se fornecido
+    if (updateItemDto.productId !== undefined) {
+      if (updateItemDto.productId) {
+        const product = await prismaRead.product.findUnique({
+          where: { id: updateItemDto.productId },
+        });
+        if (!product || product.eventId !== eventId) {
+          throw new NotFoundException('Product not found or does not belong to this event');
+        }
+      }
     }
 
     const updateData: any = { ...updateItemDto };
@@ -196,6 +234,9 @@ export class KitsService {
     const updatedItem = await prismaWrite.kitItem.update({
       where: { id: itemId },
       data: updateData,
+      include: {
+        product: true,
+      },
     });
 
     return {

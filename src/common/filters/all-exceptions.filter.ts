@@ -81,10 +81,27 @@ export class AllExceptionsFilter implements ExceptionFilter {
     }
 
     // Log detalhado para debug
-    this.logger.error(
-      `Exception: ${message}`,
-      exception instanceof Error ? exception.stack : undefined,
-    );
+    const requestUrl = httpAdapter.getRequestUrl(request);
+    const requestMethod = request.method;
+    
+    if (httpStatus === HttpStatus.BAD_REQUEST && errors) {
+      // Log mais detalhado para erros de validação
+      this.logger.error(
+        `Validation failed on ${requestMethod} ${requestUrl}`,
+        {
+          message,
+          errors,
+          body: request.body,
+          query: request.query,
+          params: request.params,
+        },
+      );
+    } else {
+      this.logger.error(
+        `Exception: ${message} on ${requestMethod} ${requestUrl}`,
+        exception instanceof Error ? exception.stack : undefined,
+      );
+    }
 
     const responseBody: any = {
       statusCode: httpStatus,
