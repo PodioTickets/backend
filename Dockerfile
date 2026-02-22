@@ -86,13 +86,12 @@ RUN cd /tmp/build-pnpm && \
       fi; \
     done && \
     rm -rf /tmp/build-pnpm
-USER nestjs
 
+# Copia arquivos de configuração e script de entrada
 COPY package.json ./
 COPY docker-entrypoint.sh ./
-RUN chmod +x docker-entrypoint.sh
 
-USER root
+# Configura permissões e formatação do script de entrada
 RUN apk add --no-cache dos2unix && \
     dos2unix docker-entrypoint.sh && \
     apk del dos2unix && \
