@@ -43,7 +43,10 @@ RUN ls -la dist/ && echo "--- Contents of dist ---" && find dist -type f | head 
 FROM base AS prod-deps
 
 COPY package.json pnpm-lock.yaml* ./
-RUN pnpm install --prod --frozen-lockfile
+COPY prisma ./prisma
+RUN pnpm install --prod --frozen-lockfile && \
+    # Garante que o Prisma CLI e os engines sejam instalados corretamente
+    pnpm prisma generate || true
 
 # -----------------------------
 # Production
@@ -68,6 +71,9 @@ COPY --from=build /usr/src/app/node_modules/.pnpm/@prisma+client*/node_modules/.
 
 # Copia o pacote @prisma/client (necessário para o runtime)
 COPY --from=build /usr/src/app/node_modules/.pnpm/@prisma+client*/node_modules/@prisma/client ./node_modules/@prisma/client
+
+# O Prisma CLI e os engines já devem estar instalados no stage prod-deps
+# Se ainda houver problemas, podemos copiar do build stage explicitamente
 
 COPY package.json ./
 COPY docker-entrypoint.sh ./
