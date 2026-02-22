@@ -280,31 +280,59 @@ export class TicketsService {
 
     // Atualizar products se fornecido
     if (updateTicketDto.productIds !== undefined) {
-      await prismaWrite.ticketProduct.deleteMany({
-        where: { ticketId },
-      });
+      // Validar productIds se fornecido
       if (updateTicketDto.productIds.length > 0) {
-        updateData.products = {
-          create: updateTicketDto.productIds.map((productId) => ({
-            productId,
-          })),
-        };
+        const products = await prismaRead.product.findMany({
+          where: {
+            id: { in: updateTicketDto.productIds },
+            eventId,
+          },
+        });
+        if (products.length !== updateTicketDto.productIds.length) {
+          throw new NotFoundException('One or more products not found');
+        }
       }
+      
+      // Remove products do updateData para atualizar separadamente
+      // Isso evita problemas de constraint ao fazer delete + create na mesma operação
+      updateData.products = undefined;
     }
 
-    const updatedTicket = await prismaWrite.ticket.update({
-      where: { id: ticketId },
-      data: updateData,
-      include: {
-        batches: true,
-        products: {
-          include: {
-            product: true,
+    // Usa transação para garantir atomicidade
+    const updatedTicket = await prismaWrite.$transaction(async (tx) => {
+      // Atualizar produtos primeiro, se necessário
+      if (updateTicketDto.productIds !== undefined) {
+        // Deletar produtos existentes
+        await tx.ticketProduct.deleteMany({
+          where: { ticketId },
+        });
+        
+        // Criar novos produtos se houver
+        if (updateTicketDto.productIds.length > 0) {
+          await tx.ticketProduct.createMany({
+            data: updateTicketDto.productIds.map((productId) => ({
+              ticketId,
+              productId,
+            })),
+          });
+        }
+      }
+
+      // Atualizar o ticket
+      return await tx.ticket.update({
+        where: { id: ticketId },
+        data: updateData,
+        include: {
+          batches: true,
+          products: {
+            include: {
+              product: true,
+            },
           },
+          category: true,
+          kit: true,
         },
-        category: true,
-        kit: true,
-      },
+      });
     });
 
     const transformed = {
