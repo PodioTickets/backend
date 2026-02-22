@@ -282,14 +282,34 @@ export class TicketsService {
     if (updateTicketDto.productIds !== undefined) {
       // Validar productIds se fornecido
       if (updateTicketDto.productIds.length > 0) {
-        const products = await prismaRead.product.findMany({
+        // Usa prismaWrite para evitar problemas de réplica de leitura
+        // Primeiro verifica se os produtos existem (independente do evento)
+        const allProducts = await prismaWrite.product.findMany({
           where: {
             id: { in: updateTicketDto.productIds },
-            eventId,
+          },
+          select: {
+            id: true,
+            eventId: true,
+            name: true,
           },
         });
-        if (products.length !== updateTicketDto.productIds.length) {
-          throw new NotFoundException('One or more products not found');
+        
+        // Verifica se todos os produtos foram encontrados
+        const foundIds = allProducts.map(p => p.id);
+        const missingIds = updateTicketDto.productIds.filter(id => !foundIds.includes(id));
+        
+        if (missingIds.length > 0) {
+          throw new NotFoundException(`Products not found: ${missingIds.join(', ')}`);
+        }
+        
+        // Verifica se todos os produtos pertencem ao mesmo evento
+        const wrongEventProducts = allProducts.filter(p => p.eventId !== eventId);
+        if (wrongEventProducts.length > 0) {
+          const productNames = wrongEventProducts.map(p => p.name).join(', ');
+          throw new BadRequestException(
+            `Products do not belong to this event: ${productNames}`
+          );
         }
       }
       
