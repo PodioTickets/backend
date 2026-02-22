@@ -72,8 +72,21 @@ COPY --from=build /usr/src/app/node_modules/.pnpm/@prisma+client*/node_modules/.
 # Copia o pacote @prisma/client (necessário para o runtime)
 COPY --from=build /usr/src/app/node_modules/.pnpm/@prisma+client*/node_modules/@prisma/client ./node_modules/@prisma/client
 
-# O Prisma CLI e os engines já devem estar instalados no stage prod-deps
-# Se ainda houver problemas, podemos copiar do build stage explicitamente
+# Copia o Prisma CLI e os engines do stage de build (onde sabemos que funcionam)
+# Isso garante que os binários estejam disponíveis para executar migrações
+USER root
+RUN mkdir -p ./node_modules/.pnpm
+# Copia o diretório .pnpm inteiro do build (necessário para encontrar os diretórios corretos)
+COPY --from=build /usr/src/app/node_modules/.pnpm /tmp/build-pnpm/
+# Copia apenas os diretórios do Prisma e engines
+RUN cd /tmp/build-pnpm && \
+    for dir in prisma@* @prisma+engines@*; do \
+      if [ -d "$dir" ]; then \
+        cp -r "$dir" /usr/src/app/node_modules/.pnpm/ 2>/dev/null || true; \
+      fi; \
+    done && \
+    rm -rf /tmp/build-pnpm
+USER nestjs
 
 COPY package.json ./
 COPY docker-entrypoint.sh ./
