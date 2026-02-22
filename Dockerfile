@@ -77,9 +77,10 @@ COPY --from=build /usr/src/app/node_modules/.pnpm/@prisma+client*/node_modules/@
 # Também copia iconv-lite completo para evitar erro de módulo '../encodings' faltando
 USER root
 RUN mkdir -p ./node_modules/.pnpm
-# Copia o diretório .pnpm inteiro do build (necessário para encontrar os diretórios corretos)
-COPY --from=build /usr/src/app/node_modules/.pnpm /tmp/build-pnpm/
-# Copia os diretórios do Prisma, engines e iconv-lite (que precisa do diretório encodings)
+# Copia o diretório .pnpm do build (necessário para encontrar os diretórios corretos)
+# Usa --chown para evitar problemas de permissão e reduzir operações
+COPY --from=build --chown=nestjs:nodejs /usr/src/app/node_modules/.pnpm /tmp/build-pnpm/
+# Copia apenas os diretórios necessários (Prisma, engines e iconv-lite)
 RUN cd /tmp/build-pnpm && \
     for dir in prisma@* @prisma+engines@* iconv-lite@*; do \
       if [ -d "$dir" ]; then \
