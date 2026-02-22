@@ -336,8 +336,8 @@ model Registration {
   updatedAt     DateTime           @updatedAt
 
   event           Event                  @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  coupon          Coupon?               @relation(fields: [couponId], references: [id], onDelete: SetNull)
-  voucher         Voucher?              @relation(fields: [voucherId], references: [id], onDelete: SetNull)
+  coupon          Coupon?                @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  voucher         Voucher?               @relation(fields: [voucherId], references: [id], onDelete: SetNull)
   user            User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
   invitedBy       User?                  @relation("InvitedBy", fields: [invitedById], references: [id])
   modalities      RegistrationModality[]

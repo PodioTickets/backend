@@ -74,13 +74,14 @@ COPY --from=build /usr/src/app/node_modules/.pnpm/@prisma+client*/node_modules/@
 
 # Copia o Prisma CLI e os engines do stage de build (onde sabemos que funcionam)
 # Isso garante que os binários estejam disponíveis para executar migrações
+# Também copia iconv-lite completo para evitar erro de módulo '../encodings' faltando
 USER root
 RUN mkdir -p ./node_modules/.pnpm
 # Copia o diretório .pnpm inteiro do build (necessário para encontrar os diretórios corretos)
 COPY --from=build /usr/src/app/node_modules/.pnpm /tmp/build-pnpm/
-# Copia apenas os diretórios do Prisma e engines
+# Copia os diretórios do Prisma, engines e iconv-lite (que precisa do diretório encodings)
 RUN cd /tmp/build-pnpm && \
-    for dir in prisma@* @prisma+engines@*; do \
+    for dir in prisma@* @prisma+engines@* iconv-lite@*; do \
       if [ -d "$dir" ]; then \
         cp -r "$dir" /usr/src/app/node_modules/.pnpm/ 2>/dev/null || true; \
       fi; \
