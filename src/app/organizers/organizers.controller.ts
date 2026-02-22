@@ -14,6 +14,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EventsService } from '../events/events.service';
 import { EventStatus } from '@prisma/client';
+import { NoCache } from 'src/common/decorators/cache.decorator';
 
 @ApiTags('Organizers')
 @Controller('api/v1/organizers')
@@ -22,7 +23,7 @@ export class OrganizersController {
     private readonly organizersService: OrganizersService,
     private readonly prisma: PrismaService,
     private readonly eventsService: EventsService,
-  ) {}
+  ) { }
 
   @Post()
   @UseGuards(JwtAuthGuard)
@@ -61,10 +62,11 @@ export class OrganizersController {
 
   @Get('me/events')
   @UseGuards(JwtAuthGuard)
+  @NoCache()
   @ApiBearerAuth()
-  @ApiOperation({ 
-    summary: 'Get my organizer events', 
-    description: 'Retrieves all events of the authenticated organizer with pagination and filters. Optimized for performance using database indexes.' 
+  @ApiOperation({
+    summary: 'Get my organizer events',
+    description: 'Retrieves all events of the authenticated organizer with pagination and filters. Optimized for performance using database indexes.'
   })
   @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20, max: 100)' })
