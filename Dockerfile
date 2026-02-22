@@ -24,6 +24,9 @@ RUN pnpm install --frozen-lockfile
 # -----------------------------
 FROM dependencies AS build
 
+# Aumenta o limite de memória do Node.js para evitar "heap out of memory"
+ENV NODE_OPTIONS=--max-old-space-size=4096
+
 COPY tsconfig.json tsconfig.build.json nest-cli.json ./
 COPY prisma ./prisma
 COPY src ./src
