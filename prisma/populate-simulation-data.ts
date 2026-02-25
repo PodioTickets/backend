@@ -34,9 +34,77 @@ async function resetEventData(eventId: string) {
 async function main() {
   console.log('🚀 Iniciando população de dados de simulação...\n');
 
-  // 1. Buscar um evento existente (obrigatório)
-  const event = await prisma.event.findFirst({
+  // 1. Buscar eventos disponíveis
+  const events = await prisma.event.findMany({
     where: { status: 'PUBLISHED' },
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+      eventDate: true,
+      _count: {
+        select: {
+          tickets: { where: { isActive: true } },
+          modalities: { where: { isActive: true } },
+        },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  if (events.length === 0) {
+    throw new Error('❌ Nenhum evento publicado encontrado. Crie um evento publicado primeiro.');
+  }
+
+  // 2. Permitir escolha do evento via argumento de linha de comando ou interativo
+  let selectedEventId: string | null = null;
+  
+  // Verificar se foi passado um ID de evento como argumento
+  const eventIdArg = process.argv[2];
+  if (eventIdArg) {
+    const foundEvent = events.find(e => e.id === eventIdArg || e.slug === eventIdArg);
+    if (foundEvent) {
+      selectedEventId = foundEvent.id;
+      console.log(`✅ Evento selecionado via argumento: ${foundEvent.name} (${foundEvent.id})\n`);
+    } else {
+      console.log(`⚠️  Evento "${eventIdArg}" não encontrado. Listando eventos disponíveis...\n`);
+    }
+  }
+
+  // Se não foi passado argumento ou não foi encontrado, listar eventos
+  if (!selectedEventId) {
+    console.log('📋 Eventos disponíveis:\n');
+    events.forEach((event, index) => {
+      console.log(`   ${index + 1}. ${event.name}`);
+      console.log(`      ID: ${event.id}`);
+      console.log(`      Slug: ${event.slug || 'N/A'}`);
+      console.log(`      Data: ${event.eventDate.toLocaleDateString('pt-BR')}`);
+      console.log(`      Tickets: ${event._count.tickets} | Modalidades: ${event._count.modalities}\n`);
+    });
+
+    // Se foi passado um argumento mas não encontrado, perguntar se quer continuar
+    if (eventIdArg) {
+      console.log(`⚠️  Evento "${eventIdArg}" não encontrado.`);
+      console.log('💡 Use: pnpm ts-node prisma/populate-simulation-data.ts <eventId ou slug>');
+      console.log('💡 Ou execute sem argumentos para ver a lista de eventos.\n');
+      throw new Error('Evento não encontrado');
+    }
+
+    // Se não foi passado argumento, usar o primeiro evento
+    if (events.length === 1) {
+      selectedEventId = events[0].id;
+      console.log(`✅ Usando o único evento disponível: ${events[0].name}\n`);
+    } else {
+      console.log('💡 Para escolher um evento específico, execute:');
+      console.log('   pnpm ts-node prisma/populate-simulation-data.ts <eventId ou slug>\n');
+      console.log('⚠️  Usando o primeiro evento da lista por padrão.\n');
+      selectedEventId = events[0].id;
+    }
+  }
+
+  // 3. Buscar evento completo com todos os dados necessários
+  const event = await prisma.event.findUnique({
+    where: { id: selectedEventId },
     include: {
       tickets: {
         where: { isActive: true },
@@ -62,16 +130,16 @@ async function main() {
   });
 
   if (!event) {
-    throw new Error('❌ Nenhum evento publicado encontrado. Crie um evento publicado primeiro.');
+    throw new Error('❌ Evento não encontrado.');
   }
-
-  console.log(`✅ Evento encontrado: ${event.name} (${event.id})`);
-  console.log(`   📋 Tickets disponíveis: ${event.tickets.length}`);
-  console.log(`   🏃 Modalidades disponíveis: ${event.modalities.length}\n`);
 
   if (event.tickets.length === 0) {
     throw new Error('❌ O evento não possui tickets. Crie tickets para o evento primeiro.');
   }
+
+  console.log(`✅ Evento selecionado: ${event.name} (${event.id})`);
+  console.log(`   📋 Tickets disponíveis: ${event.tickets.length}`);
+  console.log(`   🏃 Modalidades disponíveis: ${event.modalities.length}\n`);
 
   // Resetar dados existentes do evento
   await resetEventData(event.id);
@@ -236,109 +304,6 @@ async function main() {
   let userIndex = 0;
   let registrationCount = 0;
 
-  // 20 pedidos pagos
-  console.log('📦 Criando 20 pedidos pagos...');
-  for (let i = 0; i < 20; i++) {
-    const buyer = users[userIndex % users.length];
-    userIndex++;
-
-    // Selecionar ticket aleatório do evento
-    const selectedTicket = tickets[Math.floor(Math.random() * tickets.length)];
-    const ticketPrice = getTicketPrice(selectedTicket);
-
-    // Selecionar modality aleatória (se houver)
-    const selectedModality = modalities.length > 0
-      ? modalities[Math.floor(Math.random() * modalities.length)]
-      : null;
-    const modalityPrice = selectedModality ? getModalityPrice(selectedModality) : 0;
-
-    // Calcular valores (em centavos)
-    const baseAmount = Math.round((ticketPrice + modalityPrice) * 100);
-    const serviceFee = Math.round(baseAmount * 0.05); // 5% de taxa
-    const totalAmount = baseAmount;
-    const finalAmount = totalAmount + serviceFee;
-
-    const order = await prisma.order.create({
-      data: {
-        userId: buyer.id,
-        eventId: event.id,
-        totalAmount: totalAmount / 100, // Converter para reais
-        serviceFee: serviceFee / 100,
-        discount: 0,
-        finalAmount: finalAmount / 100,
-        createdAt: new Date(now.getTime() - (20 - i) * 24 * 60 * 60 * 1000), // Distribuir ao longo de 20 dias
-      },
-    });
-
-    const payment = await prisma.payment.create({
-      data: {
-        orderId: order.id,
-        userId: buyer.id,
-        method: PaymentMethod.CREDIT_CARD,
-        status: PaymentStatus.PAID,
-        amount: finalAmount / 100,
-        transactionId: `TXN-${Date.now()}-${i}`,
-        paymentDate: order.createdAt,
-        metadata: {
-          creditCard: {
-            installments: Math.random() > 0.5 ? 1 : Math.floor(Math.random() * 3) + 2, // 1, 2 ou 3 parcelas
-            installmentValue: (finalAmount / 100) / (Math.random() > 0.5 ? 1 : Math.floor(Math.random() * 3) + 2),
-          },
-        },
-      },
-    });
-
-    // Determinar quantas inscrições criar para este pedido
-    let registrationsToCreate = 1;
-    if (i < 3) {
-      registrationsToCreate = 2; // Primeiros 3 pedidos têm 2 inscrições
-    } else if (i === 3 || i === 4) {
-      registrationsToCreate = 3; // Próximos 2 pedidos têm 3 inscrições
-    }
-
-    // Criar as inscrições
-    for (let j = 0; j < registrationsToCreate; j++) {
-      const participant = users[userIndex % users.length];
-      userIndex++;
-
-      const registration = await prisma.registration.create({
-        data: {
-          eventId: event.id,
-          orderId: order.id,
-          userId: participant.id,
-          status: RegistrationStatus.CONFIRMED,
-          qrCode: `QR-${order.id}-${j}`,
-          termsAccepted: true,
-          rulesAccepted: true,
-          createdAt: order.createdAt,
-        },
-      });
-
-      // Vincular ticket à inscrição
-      await prisma.registrationTicket.create({
-        data: {
-          registrationId: registration.id,
-          ticketId: selectedTicket.id,
-        },
-      });
-
-      // Vincular modality à inscrição (se houver)
-      if (selectedModality) {
-        await prisma.registrationModality.create({
-          data: {
-            registrationId: registration.id,
-            modalityId: selectedModality.id,
-          },
-        });
-      }
-
-      registrationCount++;
-    }
-
-    orders.push({ order, payment, registrationsCount: registrationsToCreate });
-  }
-  console.log(`✅ 20 pedidos pagos criados (${registrationCount} inscrições)\n`);
-
   // 5 pedidos cancelados
   console.log('📦 Criando 5 pedidos cancelados...');
   for (let i = 0; i < 5; i++) {
@@ -362,10 +327,10 @@ async function main() {
       data: {
         userId: buyer.id,
         eventId: event.id,
-        totalAmount: totalAmount / 100,
-        serviceFee: serviceFee / 100,
+        totalAmount: totalAmount, // Já está em centavos
+        serviceFee: serviceFee, // Já está em centavos
         discount: 0,
-        finalAmount: finalAmount / 100,
+        finalAmount: finalAmount, // Já está em centavos
         createdAt: new Date(now.getTime() - (5 - i) * 24 * 60 * 60 * 1000),
       },
     });
@@ -376,7 +341,7 @@ async function main() {
         userId: buyer.id,
         method: PaymentMethod.CREDIT_CARD,
         status: PaymentStatus.PAID, // Pagamento foi feito, mas depois cancelado
-        amount: finalAmount / 100,
+        amount: finalAmount, // Já está em centavos
         transactionId: `TXN-${Date.now()}-${20 + i}`,
         paymentDate: order.createdAt,
       },
@@ -444,10 +409,10 @@ async function main() {
       data: {
         userId: buyer.id,
         eventId: event.id,
-        totalAmount: totalAmount / 100,
-        serviceFee: serviceFee / 100,
+        totalAmount: totalAmount, // Já está em centavos
+        serviceFee: serviceFee, // Já está em centavos
         discount: 0,
-        finalAmount: finalAmount / 100,
+        finalAmount: finalAmount, // Já está em centavos
         createdAt: new Date(now.getTime() - (3 - i) * 24 * 60 * 60 * 1000),
       },
     });
@@ -458,7 +423,7 @@ async function main() {
         userId: buyer.id,
         method: PaymentMethod.CREDIT_CARD,
         status: PaymentStatus.REFUNDED, // Chargeback = refunded com metadata específico
-        amount: finalAmount / 100,
+        amount: finalAmount, // Já está em centavos
         transactionId: `TXN-CHARGEBACK-${Date.now()}-${25 + i}`,
         paymentDate: order.createdAt,
         metadata: {
@@ -531,10 +496,10 @@ async function main() {
       data: {
         userId: buyer.id,
         eventId: event.id,
-        totalAmount: totalAmount / 100,
-        serviceFee: serviceFee / 100,
+        totalAmount: totalAmount, // Já está em centavos
+        serviceFee: serviceFee, // Já está em centavos
         discount: 0,
-        finalAmount: finalAmount / 100,
+        finalAmount: finalAmount, // Já está em centavos
         createdAt: new Date(now.getTime() - (2 - i) * 24 * 60 * 60 * 1000),
       },
     });
@@ -545,7 +510,7 @@ async function main() {
         userId: buyer.id,
         method: PaymentMethod.CREDIT_CARD,
         status: PaymentStatus.REFUNDED, // Estornado = refunded com metadata REFUND
-        amount: finalAmount / 100,
+        amount: finalAmount, // Já está em centavos
         transactionId: `TXN-REFUND-${Date.now()}-${28 + i}`,
         paymentDate: order.createdAt,
         metadata: {
