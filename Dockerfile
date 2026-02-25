@@ -44,9 +44,14 @@ FROM base AS prod-deps
 
 COPY package.json pnpm-lock.yaml* ./
 COPY prisma ./prisma
+# Instala dependências de produção + Prisma CLI (como dev dependency para ter acesso aos binários)
+# O Prisma precisa ser instalado para ter acesso aos binários (schema-engine, query-engine, etc.)
 RUN pnpm install --prod --frozen-lockfile && \
-    # Garante que o Prisma CLI e os engines sejam instalados corretamente
-    pnpm prisma generate || true
+    pnpm add -D prisma@^6.16.1 && \
+    # Força o download dos binários do Prisma para a plataforma correta
+    PRISMA_CLI_BINARY_TARGETS=linux-musl pnpm prisma generate || true && \
+    # Verifica se os binários foram baixados
+    find node_modules -name "schema-engine-linux-musl*" -o -name "query-engine-linux-musl*" | head -5 || echo "Binários não encontrados"
 
 # -----------------------------
 # Production
@@ -59,7 +64,7 @@ WORKDIR /usr/src/app
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nestjs -u 1001
 
-# Deps de runtime
+# Deps de runtime (inclui Prisma CLI instalado como dev dependency)
 COPY --from=prod-deps /usr/src/app/node_modules ./node_modules
 
 # App buildado
@@ -72,22 +77,11 @@ COPY --from=build /usr/src/app/node_modules/.pnpm/@prisma+client*/node_modules/.
 # Copia o pacote @prisma/client (necessário para o runtime)
 COPY --from=build /usr/src/app/node_modules/.pnpm/@prisma+client*/node_modules/@prisma/client ./node_modules/@prisma/client
 
-# Copia o Prisma CLI e os engines do stage de build (onde sabemos que funcionam)
-# Isso garante que os binários estejam disponíveis para executar migrações
-# Também copia iconv-lite completo para evitar erro de módulo '../encodings' faltando
+# Garante que o Prisma CLI e os engines estejam acessíveis
+# O node_modules do prod-deps já inclui o Prisma, mas precisamos garantir que os binários estejam corretos
 USER root
-RUN mkdir -p ./node_modules/.pnpm
-# Copia o diretório .pnpm do build (necessário para encontrar os diretórios corretos)
-# Usa --chown para evitar problemas de permissão e reduzir operações
-COPY --from=build --chown=nestjs:nodejs /usr/src/app/node_modules/.pnpm /tmp/build-pnpm/
-# Copia apenas os diretórios necessários (Prisma, engines e iconv-lite)
-RUN cd /tmp/build-pnpm && \
-    for dir in prisma@* @prisma+engines@* iconv-lite@*; do \
-      if [ -d "$dir" ]; then \
-        cp -r "$dir" /usr/src/app/node_modules/.pnpm/ 2>/dev/null || true; \
-      fi; \
-    done && \
-    rm -rf /tmp/build-pnpm
+RUN chown -R nestjs:nodejs /usr/src/app/node_modules
+USER nestjs
 
 # Copia arquivos de configuração e script de entrada
 COPY package.json ./
