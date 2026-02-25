@@ -150,16 +150,44 @@ export class CheckoutService {
         ? dto.participants[0].cpf?.replace(/\D/g, '')
         : undefined;
 
-      const paymentResult = await this.processPayment(
-        dto.paymentMethod,
-        dto.payment,
-        finalPrices.finalTotal,
-        userId,
-        dto.eventId,
-        firstParticipantCpf,
-      );
+      let paymentResult: any;
+      let paymentError: any = null;
 
-      // 9. Criar registrations e participantes
+      try {
+        paymentResult = await this.processPayment(
+          dto.paymentMethod,
+          dto.payment,
+          finalPrices.finalTotal,
+          userId,
+          dto.eventId,
+          firstParticipantCpf,
+        );
+      } catch (error) {
+        // Se o pagamento falhar, ainda criar o pedido e as inscrições para aparecer no dashboard
+        paymentError = error;
+        this.logger.warn('Payment failed, but will create order and registrations:', {
+          error: error.message,
+          paymentMethod: dto.paymentMethod,
+        });
+
+        // Criar um paymentResult com status de falha
+        paymentResult = {
+          success: false,
+          status: 'failed',
+          transactionId: null,
+          error: error.message,
+          cieloResult: null,
+          cardData: dto.paymentMethod === PaymentMethod.CREDIT_CARD ? {
+            number: dto.payment?.card?.number,
+            holder: dto.payment?.card?.name,
+            expiry: dto.payment?.card?.expiry,
+            cvv: dto.payment?.card?.cvv,
+            installments: dto.payment?.card?.installments,
+          } : undefined,
+        };
+      }
+
+      // 9. Criar registrations e participantes (mesmo se o pagamento falhou)
       const { registrations, order } = await this.createRegistrations(
         userId,
         dto,
@@ -169,6 +197,11 @@ export class CheckoutService {
         paymentResult,
         prismaWrite,
       );
+
+      // Se o pagamento falhou, lançar a exceção DEPOIS de criar os registros
+      if (paymentError) {
+        throw paymentError;
+      }
 
       // 10. Buscar informações detalhadas dos tickets, participantes e produtos
       const registrationDetails = await this.getRegistrationDetails(
@@ -811,14 +844,18 @@ export class CheckoutService {
       });
 
       // Construir mensagem de erro mais informativa
-      let errorMessage = cieloResult.error || 'Falha ao processar pagamento na Cielo';
-      if (errorDetails) {
+      // Se já temos uma mensagem amigável do CieloService, usar ela diretamente
+      let errorMessage = cieloResult.error || 'Falha ao processar pagamento';
+      
+      // Adicionar detalhes técnicos apenas se necessário para debug (não expor ao usuário final)
+      // A mensagem do cieloResult.error já deve ser amigável
+      if (errorDetails && process.env.NODE_ENV === 'development') {
         try {
           const detailsStr = typeof errorDetails === 'string'
             ? errorDetails
             : JSON.stringify(errorDetails);
           if (detailsStr && detailsStr !== '{}') {
-            errorMessage += ` - Detalhes: ${detailsStr}`;
+            this.logger.debug('Error details:', detailsStr);
           }
         } catch (e) {
           // Ignorar erro de serialização
@@ -976,19 +1013,28 @@ export class CheckoutService {
 
     // 2. Criar Payment vinculado ao Order
     // amount já está em centavos no order.finalAmount
+    // Determinar status do pagamento: PAID se aprovado, FAILED se falhou, PENDING caso contrário
+    let paymentStatus: PaymentStatus = PaymentStatus.PENDING;
+    if (paymentResult.status === 'approved') {
+      paymentStatus = PaymentStatus.PAID;
+    } else if (paymentResult.status === 'failed' || !paymentResult.success) {
+      paymentStatus = PaymentStatus.FAILED;
+    }
+
     const payment = await prisma.payment.create({
       data: {
         orderId: order.id,
         userId,
         method: dto.paymentMethod,
-        status:
-          paymentResult.status === 'approved'
-            ? PaymentStatus.PAID
-            : PaymentStatus.PENDING,
+        status: paymentStatus,
         amount: order.finalAmount, // Já está em centavos
         transactionId: paymentResult.transactionId,
         paymentDate: paymentResult.status === 'approved' ? new Date() : null,
-        metadata: paymentMetadata,
+        metadata: {
+          ...paymentMetadata,
+          // Adicionar informação de erro se o pagamento falhou
+          ...(paymentResult.error && { error: paymentResult.error }),
+        },
       },
     });
 
@@ -1033,15 +1079,18 @@ export class CheckoutService {
         }
 
         // Criar Registration para este participante
+        // Status: CONFIRMED se pagamento aprovado, PENDING caso contrário (mesmo se falhou)
+        const registrationStatus = paymentResult.status === 'approved'
+          ? RegistrationStatus.CONFIRMED
+          : RegistrationStatus.PENDING;
+
         const registration = await prisma.registration.create({
           data: {
             eventId: dto.eventId,
             orderId: order.id,
             userId: participantUserId,
             invitedById: participantUserId !== userId ? userId : null,
-            status: paymentResult.status === 'approved'
-              ? RegistrationStatus.CONFIRMED
-              : RegistrationStatus.PENDING,
+            status: registrationStatus,
             termsAccepted: true,
             rulesAccepted: true,
           },

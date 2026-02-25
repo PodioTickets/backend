@@ -28,23 +28,10 @@ export class EventsService {
   /**
    * Normaliza valor monetário para centavos
    * Se o valor parece estar em reais (tem decimais e é menor que 1000), converte para centavos
-   * Se o valor parece estar multiplicado duas vezes (muito grande), tenta corrigir dividindo por 100
+   * Caso contrário, assume que já está em centavos
    */
   private normalizeToCents(value: number | null | undefined): number {
     if (!value || value === 0) return 0;
-
-    // Se o valor é muito grande (>= 1000000), pode ter sido multiplicado duas vezes
-    // Tenta corrigir dividindo por 100 e verifica se o resultado faz sentido para um ticket comum
-    // Exemplo: 1299000 -> 12990 (R$ 129,90) - faz sentido para um ticket
-    // Usamos uma faixa conservadora (R$ 10 a R$ 500) para evitar corrigir valores legítimos altos
-    if (value >= 1000000) {
-      const normalized = Math.round(value / 100);
-      // Se o valor normalizado está em uma faixa comum para tickets (R$ 10,00 a R$ 500,00 em centavos)
-      // E o valor original é exatamente 100x maior, provavelmente foi multiplicado duas vezes
-      if (normalized >= 1000 && normalized <= 50000 && Math.abs(value - normalized * 100) < 1) {
-        return normalized;
-      }
-    }
 
     // Se o valor tem decimais significativos e é menor que 1000, provavelmente está em reais
     // Converte para centavos multiplicando por 100

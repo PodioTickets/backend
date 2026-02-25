@@ -465,9 +465,48 @@ export class CieloService {
         returnMessage: payment.ReturnMessage,
       } as any;
 
-      // Se houver erro, adicionar informações de erro
+      // Se houver erro, adicionar informações de erro com mensagens amigáveis
       if (isError) {
-        result.error = returnMessage || `Pagamento negado (Status: ${payment.Status}, ReturnCode: ${returnCode})`;
+        // Mapear códigos de erro comuns para mensagens mais amigáveis
+        let userFriendlyMessage = returnMessage || `Pagamento negado`;
+        
+        if (returnCode) {
+          const codeStr = returnCode.toString();
+          // Mapear códigos de erro conhecidos
+          switch (codeStr) {
+            case '77':
+              userFriendlyMessage = 'Cartão cancelado ou bloqueado. Entre em contato com seu banco ou use outro cartão.';
+              break;
+            case '51':
+              userFriendlyMessage = 'Saldo insuficiente ou limite excedido. Verifique seu limite ou use outro cartão.';
+              break;
+            case '57':
+              userFriendlyMessage = 'Transação não permitida para este cartão. Entre em contato com seu banco.';
+              break;
+            case '78':
+              userFriendlyMessage = 'Cartão bloqueado. Entre em contato com seu banco.';
+              break;
+            case '82':
+              userFriendlyMessage = 'Erro no processamento do cartão. Tente novamente ou use outro cartão.';
+              break;
+            case '83':
+              userFriendlyMessage = 'Erro na validação do cartão. Verifique os dados e tente novamente.';
+              break;
+            case '96':
+              userFriendlyMessage = 'Falha no processamento. Tente novamente em alguns instantes.';
+              break;
+            case 'AA':
+              userFriendlyMessage = 'Timeout na comunicação. Tente novamente.';
+              break;
+            default:
+              // Manter mensagem original se não houver mapeamento específico
+              if (returnMessage) {
+                userFriendlyMessage = returnMessage;
+              }
+          }
+        }
+        
+        result.error = userFriendlyMessage;
         result.errorDetails = {
           status: payment.Status,
           returnCode,
