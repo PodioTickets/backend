@@ -11,6 +11,7 @@ import { RegistrationsService } from './registrations.service';
 import { CreateRegistrationWithInvitedUserDto } from './dto/create-registration.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PaymentsService } from '../payments/payments.service';
+import { NoCache } from 'src/common/decorators/cache.decorator';
 
 @ApiTags('Registrations')
 @Controller('api/v1/registrations')
@@ -18,7 +19,7 @@ export class RegistrationsController {
   constructor(
     private readonly registrationsService: RegistrationsService,
     private readonly paymentsService: PaymentsService,
-  ) {}
+  ) { }
 
   @Post()
   @UseGuards(JwtAuthGuard)
@@ -34,6 +35,7 @@ export class RegistrationsController {
   }
 
   @Get('me')
+  @NoCache()
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get my registrations', description: 'Retrieves all registrations for the authenticated user' })

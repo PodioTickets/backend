@@ -84,10 +84,33 @@ DATABASE_URL=postgresql://podiogo:<senha-forte-postgres>@postgres:5432/podiogo?s
 
 # Adicione outras variáveis necessárias (JWT_SECRET, API_KEYS, etc.)
 JWT_SECRET=<seu-jwt-secret>
+
+# Cielo Payment Gateway (obrigatório para processar pagamentos)
+CIELO_MERCHANT_ID=<seu-merchant-id-da-cielo>
+CIELO_MERCHANT_KEY=<sua-merchant-key-da-cielo>
+CIELO_ENV=production  # Use "production" para produção ou deixe vazio/outro valor para sandbox
+CIELO_WEBHOOK_SECRET=<seu-webhook-secret-da-cielo>  # Opcional, mas recomendado
+
 # ... outras variáveis da sua aplicação
 ```
 
 **Importante:** Use senhas fortes e únicas em produção!
+
+#### Configuração da Cielo (Gateway de Pagamento)
+
+Para processar pagamentos, você precisa configurar as credenciais da Cielo:
+
+1. **Acesse o painel da Cielo**: https://cieloecommerce.cielo.com.br/
+2. **Obtenha suas credenciais**:
+   - `CIELO_MERCHANT_ID`: Seu Merchant ID (disponível no painel)
+   - `CIELO_MERCHANT_KEY`: Sua Merchant Key (disponível no painel)
+3. **Configure o ambiente**:
+   - `CIELO_ENV=production` para usar a API de produção
+   - Deixe vazio ou use outro valor para usar o ambiente sandbox (testes)
+4. **Webhook Secret** (opcional mas recomendado):
+   - `CIELO_WEBHOOK_SECRET`: Chave secreta para validar webhooks da Cielo
+
+**⚠️ IMPORTANTE**: Sem essas variáveis configuradas, você receberá o erro "Cielo is not configured" ao tentar processar pagamentos.
 
 ### 4. Executar migrações do banco de dados
 
