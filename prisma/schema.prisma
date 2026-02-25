@@ -216,6 +216,8 @@ model Event {
   city                  String
   state                 String
   country               String
+  zipCode               String? // CEP
+  neighborhood          String? // Bairro
   googleMapsLink        String?
   regulationUrl         String? // URL do PDF do regulamento
   eventDate             DateTime

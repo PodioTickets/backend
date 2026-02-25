@@ -29,6 +29,7 @@ import { DashboardQueryDto } from './dto/dashboard.dto';
 import { FinancialQueryDto } from './dto/financial.dto';
 import { RegistrationsQueryDto } from './dto/registrations.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { NoCache } from 'src/common/decorators/cache.decorator';
 
 @ApiTags('Events')
 @Controller('api/v1/events')
@@ -93,6 +94,7 @@ export class EventsController {
   }
 
   @Get(':id')
+  @NoCache()
   @ApiOperation({ summary: 'Get event by ID', description: 'Retrieves a single event by its ID' })
   @ApiParam({ name: 'id', description: 'Event UUID' })
   @ApiResponse({ status: 200, description: 'Event retrieved successfully' })

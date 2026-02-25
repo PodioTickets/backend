@@ -41,6 +41,14 @@ export class CreateEventDto {
   country: string;
 
   @IsOptional()
+  @IsString()
+  zipCode?: string;
+
+  @IsOptional()
+  @IsString()
+  neighborhood?: string;
+
+  @IsOptional()
   @IsUrl({ require_protocol: true }, { message: 'googleMapsLink must be a valid URL' })
   googleMapsLink?: string;
 
@@ -89,6 +97,14 @@ export class UpdateEventDto {
   @IsOptional()
   @IsString()
   country?: string;
+
+  @IsOptional()
+  @IsString()
+  zipCode?: string;
+
+  @IsOptional()
+  @IsString()
+  neighborhood?: string;
 
   @IsOptional()
   @IsUrl({ require_protocol: true }, { message: 'googleMapsLink must be a valid URL' })
