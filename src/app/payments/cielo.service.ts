@@ -125,7 +125,9 @@ export class CieloService {
       throw new Error('Cielo is not configured');
     }
 
-    const amountInCents = Math.round(amount * 100);
+    // Normalizar para centavos: se o valor é menor que 1000, assume que está em reais e converte
+    // Caso contrário, assume que já está em centavos
+    const amountInCents = amount < 1000 ? Math.round(amount * 100) : Math.round(amount);
 
     try {
       // Campos base do payment - alguns campos são específicos por método
