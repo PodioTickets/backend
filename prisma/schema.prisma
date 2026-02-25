@@ -63,6 +63,11 @@ enum UserRole {
   ADMIN
 }
 
+enum OrganizationMemberRole {
+  OWNER
+  EMPLOYEE
+}
+
 enum CouponType {
   DISCOUNT
   QUANTITY
@@ -99,6 +104,7 @@ model User {
   firstName             String
   lastName              String
   gender                Gender?
+  genderDetails         String? // Para "outro: especificar" quando gender não cobre
   phone                 String?
   reservePhone          String?
   dateOfBirth           DateTime?
@@ -106,8 +112,8 @@ model User {
   state                 String?
   city                  String?
   documentType          DocumentType?
-  documentNumber        String?       @unique
-  sex                   String?
+  documentNumber        String? // CPF/CNPJ com formatação (ex: "123.456.789-00")
+  documentNumberClean   String?       @unique // CPF/CNPJ sem formatação (ex: "12345678900") - usado para validação de unicidade
   acceptedTerms         Boolean       @default(false)
   acceptedPrivacyPolicy Boolean       @default(false)
   receiveCalendarEvents Boolean       @default(false)
@@ -118,37 +124,88 @@ model User {
   avatarUrl             String?
   googleId              String?       @unique
   googleEmail           String?
+  totpSecret            String? // Secret TOTP para 2FA
+  mfaEnabled            Boolean       @default(false) // Se 2FA está habilitado
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
 
   // Relations
-  registrations        Registration[]
-  organizer            Organizer?
+  registrations        Registration[]       @relation("Participant")
   contactMessages      ContactMessage[]
   payments             Payment[]
-  invitedRegistrations Registration[]   @relation("InvitedBy")
-  linkedUsersAsMain    LinkedUser[]     @relation("MainUser")
-  linkedUsersAsLinked  LinkedUser[]     @relation("LinkedUser")
+  invitedRegistrations Registration[]       @relation("InvitedBy")
+  linkedUsersAsMain    LinkedUser[]         @relation("MainUser")
+  linkedUsersAsLinked  LinkedUser[]         @relation("LinkedUser")
+  organizationMembers  OrganizationMember[]
+  orders               Order[]
 }
 
-model Organizer {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId      String   @unique @db.Uuid
-  name        String
+model Organization {
+  id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name        String // Razão social
+  tradeName   String? // Nome fantasia
+  document    String? @unique // CPF ou CNPJ (apenas números)
+  logoUrl     String? // Foto/logo da organização
   email       String
   phone       String?
+  whatsapp    String?
+  siteUrl     String?
+  instagram   String?
   description String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
 
-  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Endereço
+  zipCode      String? // CEP
+  street       String? // Rua
+  number       String? // Número
+  neighborhood String? // Bairro
+  city         String? // Cidade
+  state        String? // Estado
+
+  // Nome do responsável (owner)
+  ownerName String? // Nome do responsável (owner)
+
+  // Informações bancárias
+  pix                   String? // Chave PIX
+  bankName              String? // Nome do banco
+  bankCode              String? // Código do banco (ex: 001, 237)
+  agency                String? // Agência
+  account               String? // Conta
+  accountType           String? // Tipo de conta: CORRENTE, POUPANCA
+  accountHolderName     String? // Nome do titular da conta
+  accountHolderDocument String? // CPF/CNPJ do titular
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members         OrganizationMember[]
   events          Event[]
   contactMessages ContactMessage[]
+
+  @@index([name])
+  @@index([document])
+  @@index([email])
+}
+
+model OrganizationMember {
+  id             String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String                 @db.Uuid
+  userId         String                 @db.Uuid
+  role           OrganizationMemberRole @default(EMPLOYEE)
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([organizationId])
+  @@index([userId])
+  @@index([organizationId, role])
 }
 
 model Event {
   id                    String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  organizerId           String      @db.Uuid
+  organizationId        String      @db.Uuid
   name                  String
   slug                  String?     @unique
   description           String?
@@ -167,11 +224,12 @@ model Event {
   createdAt             DateTime    @default(now())
   updatedAt             DateTime    @updatedAt
 
-  organizer        Organizer        @relation(fields: [organizerId], references: [id], onDelete: Cascade)
+  organization     Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   topics           EventTopic[]
   modalities       Modality[]
   kits             Kit[]
   registrations    Registration[]
+  orders           Order[]
   questions        Question[]
   locations        EventLocation[]
   ContactMessage   ContactMessage[]
@@ -185,7 +243,7 @@ model Event {
 
   @@index([status, eventDate]) // Para buscar eventos publicados futuros
   @@index([status, country, state, city]) // Para filtros de localização (status primeiro para melhor seletividade)
-  @@index([organizerId, createdAt]) // Para listar eventos do organizador
+  @@index([organizationId, createdAt]) // Para listar eventos da organização
   @@index([eventDate]) // Para ordenação e filtros por data
 }
 
@@ -214,6 +272,7 @@ model EventLocation {
   state          String
   country        String
   zipCode        String?
+  neighborhood   String? // Bairro
   googleMapsLink String?
   latitude       Float?
   longitude      Float?
@@ -319,40 +378,33 @@ model KitItem {
 model Registration {
   id            String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   eventId       String             @db.Uuid
-  userId        String             @db.Uuid
-  invitedById   String?            @db.Uuid // Se foi inscrito por outro usuário
+  orderId       String             @db.Uuid // Pedido ao qual esta inscrição pertence (obrigatório)
+  userId        String             @db.Uuid // Usuário participante (pode ser diferente do comprador do pedido)
   status        RegistrationStatus @default(PENDING)
-  qrCode        String? // QR Code como Data URL (muito grande para índice único)
-  purchaseDate  DateTime           @default(now())
+  qrCode        String? // Código/payload do QR (UUID ou código curto de 36-64 chars) - QR é gerado dinamicamente no frontend/backend
   termsAccepted Boolean            @default(false)
   rulesAccepted Boolean            @default(false)
-  totalAmount   Float
-  serviceFee    Float
-  discount      Float              @default(0)
-  finalAmount   Float
-  couponId      String?            @db.Uuid // Cupom aplicado
-  voucherId     String?            @db.Uuid // Voucher aplicado
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
 
   event           Event                  @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  coupon          Coupon?                @relation(fields: [couponId], references: [id], onDelete: SetNull)
-  voucher         Voucher?               @relation(fields: [voucherId], references: [id], onDelete: SetNull)
-  user            User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  invitedBy       User?                  @relation("InvitedBy", fields: [invitedById], references: [id])
+  order           Order                  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user            User                   @relation("Participant", fields: [userId], references: [id], onDelete: Cascade)
+  invitedBy       User?                  @relation("InvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
+  invitedById     String?                @db.Uuid
   modalities      RegistrationModality[]
   kitItems        RegistrationKitItem[]
   questionAnswers QuestionAnswer[]
-  payment         Payment?
   tickets         RegistrationTicket[]
 
   @@index([eventId])
+  @@index([orderId])
   @@index([userId])
   @@index([invitedById])
   // qrCode não pode ter índice devido ao tamanho (Data URL)
   @@index([eventId, status]) // Para filtrar inscrições por evento e status
-  @@index([userId, purchaseDate]) // Para histórico ordenado do usuário (otimizado para orderBy)
-  @@index([invitedById, purchaseDate]) // Para inscrições convidadas ordenadas (otimiza query com OR)
+  @@index([userId, createdAt]) // Para histórico ordenado do usuário
+  @@index([orderId, createdAt]) // Para ordenar inscrições por pedido
   @@index([status, createdAt]) // Para relatórios
 }
 
@@ -417,21 +469,46 @@ model QuestionAnswer {
   @@index([questionId])
 }
 
-model Payment {
-  id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  registrationId String        @unique @db.Uuid
-  userId         String        @db.Uuid
-  method         PaymentMethod
-  status         PaymentStatus @default(PENDING)
-  amount         Float
-  transactionId  String?
-  paymentDate    DateTime?
-  metadata       Json? // Dados adicionais do pagamento
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
+model Order {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String   @db.Uuid // Usuário que fez o pedido (comprador)
+  eventId     String   @db.Uuid // Evento ao qual o pedido pertence
+  totalAmount Float // Valor total do pedido
+  serviceFee  Float // Taxa de serviço total
+  discount    Float    @default(0) // Desconto total (cupom/voucher)
+  finalAmount Float // Valor final a pagar
+  couponId    String?  @db.Uuid // Cupom aplicado no pedido
+  voucherId   String?  @db.Uuid // Voucher aplicado no pedido
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  registration Registration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
-  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  event         Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  coupon        Coupon?        @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  voucher       Voucher?       @relation(fields: [voucherId], references: [id], onDelete: SetNull)
+  payment       Payment?
+  registrations Registration[]
+
+  @@index([userId])
+  @@index([eventId])
+  @@index([createdAt])
+}
+
+model Payment {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId       String        @unique @db.Uuid // Um pagamento por pedido
+  userId        String        @db.Uuid // Usuário que fez o pagamento
+  method        PaymentMethod
+  status        PaymentStatus @default(PENDING)
+  amount        Float
+  transactionId String?
+  paymentDate   DateTime?
+  metadata      Json? // Dados adicionais do pagamento
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([status])
@@ -441,23 +518,23 @@ model Payment {
 }
 
 model ContactMessage {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  eventId     String?  @db.Uuid
-  organizerId String   @db.Uuid
-  userId      String?  @db.Uuid
-  name        String
-  email       String
-  phone       String?
-  message     String
-  isRead      Boolean  @default(false)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId        String?  @db.Uuid
+  organizationId String   @db.Uuid
+  userId         String?  @db.Uuid
+  name           String
+  email          String
+  phone          String?
+  message        String
+  isRead         Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  event     Event?    @relation(fields: [eventId], references: [id], onDelete: SetNull)
-  organizer Organizer @relation(fields: [organizerId], references: [id], onDelete: Cascade)
-  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  event        Event?       @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
 
-  @@index([organizerId])
+  @@index([organizationId])
   @@index([eventId])
   @@index([isRead])
 }
@@ -499,8 +576,8 @@ model Coupon {
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
 
-  event         Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  registrations Registration[]
+  event  Event   @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  orders Order[]
 
   @@unique([eventId, code])
   @@index([eventId])
@@ -524,8 +601,8 @@ model Voucher {
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
-  event         Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  registrations Registration[]
+  event  Event   @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  orders Order[]
 
   @@unique([eventId, code])
   @@index([eventId])

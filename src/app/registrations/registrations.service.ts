@@ -2,7 +2,7 @@ import { Injectable, NotFoundException, BadRequestException } from '@nestjs/comm
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateRegistrationDto, CreateRegistrationWithInvitedUserDto } from './dto/create-registration.dto';
 import { RegistrationStatus } from '@prisma/client';
-import * as QRCode from 'qrcode';
+// QR Code é gerado dinamicamente no frontend/backend usando o payload salvo em qrCode
 import { KitsService } from '../kits/kits.service';
 
 @Injectable()
@@ -174,15 +174,11 @@ export class RegistrationsService {
         });
       }
 
-      // Criar a inscrição
-      const newRegistration = await prisma.registration.create({
+      // Criar o pedido (Order) primeiro
+      const order = await prisma.order.create({
         data: {
+          userId,
           eventId,
-          userId: registrationUserId,
-          invitedById: (invitedUser || invitedUserId) ? userId : null,
-          status: RegistrationStatus.PENDING,
-          termsAccepted,
-          rulesAccepted,
           totalAmount,
           serviceFee,
           discount,
@@ -192,17 +188,30 @@ export class RegistrationsService {
         },
       });
 
-      // Criar QR Code
-      const qrCodeData = JSON.stringify({
+      // Criar a inscrição vinculada ao pedido
+      const newRegistration = await prisma.registration.create({
+        data: {
+          eventId,
+          orderId: order.id,
+          userId: registrationUserId,
+          invitedById: (invitedUser || invitedUserId) ? userId : null,
+          status: RegistrationStatus.PENDING,
+          termsAccepted,
+          rulesAccepted,
+        },
+      });
+
+      // Criar QR Code payload (apenas dados, não Data URL)
+      // O QR Code será gerado dinamicamente no frontend/backend usando este payload
+      const qrCodePayload = JSON.stringify({
         registrationId: newRegistration.id,
         eventId,
         userId: registrationUserId,
       });
-      const qrCode = await QRCode.toDataURL(qrCodeData);
 
       await prisma.registration.update({
         where: { id: newRegistration.id },
-        data: { qrCode },
+        data: { qrCode: qrCodePayload },
       });
 
       // Adicionar modalidades
@@ -291,7 +300,7 @@ export class RegistrationsService {
       include: {
         event: {
           include: {
-            organizer: {
+            organization: {
               select: {
                 id: true,
                 name: true,
@@ -320,10 +329,14 @@ export class RegistrationsService {
             kitItem: true,
           },
         },
-        payment: true,
+        order: {
+          include: {
+            payment: true,
+          },
+        },
       },
       orderBy: {
-        purchaseDate: 'desc',
+        createdAt: 'desc',
       },
     });
 
@@ -341,7 +354,7 @@ export class RegistrationsService {
       include: {
         event: {
           include: {
-            organizer: {
+            organization: {
               select: {
                 id: true,
                 name: true,
@@ -362,8 +375,13 @@ export class RegistrationsService {
             id: true,
             firstName: true,
             lastName: true,
+            email: true,
             documentNumber: true,
+            avatarUrl: true,
             dateOfBirth: true,
+            gender: true,
+            phone: true,
+            reservePhone: true,
           },
         },
         modalities: {
@@ -371,27 +389,144 @@ export class RegistrationsService {
             modality: true,
           },
         },
-        kitItems: {
+        tickets: {
           include: {
-            kitItem: true,
+            ticket: {
+              include: {
+                category: {
+                  select: {
+                    id: true,
+                    name: true,
+                  },
+                },
+                products: {
+                  include: {
+                    product: {
+                      include: {
+                        variations: true,
+                      },
+                    },
+                  },
+                },
+              },
+            },
           },
         },
-        payment: true,
+        questionAnswers: {
+          include: {
+            question: {
+              select: {
+                id: true,
+                question: true,
+              },
+            },
+          },
+        },
+        kitItems: {
+          include: {
+            kitItem: {
+              include: {
+                product: {
+                  select: {
+                    id: true,
+                    name: true,
+                    image: true,
+                    basePrice: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+        order: {
+          include: {
+            payment: true,
+          },
+        },
       },
     });
 
     if (!registration) {
       throw new NotFoundException('Registration not found');
     }
-
-    // Verificar se o usuário tem acesso a esta inscrição
-    if (registration.userId !== userId && registration.invitedById !== userId) {
-      throw new BadRequestException('Access denied');
-    }
+    // Formatar a resposta conforme especificação
+    // Usar type assertion para contornar problemas de tipagem do Prisma
+    const reg = registration as any;
+    
+    const formattedRegistration = {
+      id: reg.id,
+      qrCode: reg.qrCode,
+      user: {
+        id: reg.user.id,
+        firstName: reg.user.firstName,
+        lastName: reg.user.lastName,
+        email: reg.user.email,
+        documentNumber: reg.user.documentNumber,
+        avatarUrl: reg.user.avatarUrl,
+        dateOfBirth: reg.user.dateOfBirth?.toISOString() || null,
+        gender: reg.user.gender,
+        phone: reg.user.phone,
+        reservePhone: reg.user.reservePhone,
+        fullName: `${reg.user.firstName} ${reg.user.lastName}`,
+      },
+      modalities: (reg.modalities || []).map((rm: any) => ({
+        id: rm.id,
+        modality: {
+          id: rm.modality.id,
+          name: rm.modality.name,
+          distance: null, // Modality não tem campo distance no schema
+          category: null, // Modality não tem category no schema
+        },
+      })),
+      ticket: reg.tickets && reg.tickets.length > 0 ? {
+        id: reg.tickets[0].ticket.id,
+        name: reg.tickets[0].ticket.name,
+        distance: reg.tickets[0].ticket.distance ? 
+          (reg.tickets[0].ticket.distanceUnit ? 
+            `${reg.tickets[0].ticket.distance} ${reg.tickets[0].ticket.distanceUnit}` : 
+            reg.tickets[0].ticket.distance) : 
+          null,
+        category: reg.tickets[0].ticket.category ? {
+          id: reg.tickets[0].ticket.category.id,
+          name: reg.tickets[0].ticket.category.name,
+        } : null,
+        includedProducts: (reg.tickets[0].ticket.products || []).map((tp: any) => ({
+          id: tp.product.id,
+          name: tp.product.name,
+          image: tp.product.image,
+          basePrice: tp.product.basePrice ? Math.round(tp.product.basePrice * 100) : 0, // Em centavos
+          variations: (tp.product.variations || []).map((v: any) => ({
+            id: v.id,
+            name: v.name,
+            price: Math.round(v.price * 100), // Em centavos
+            stock: v.stock,
+          })),
+        })),
+      } : null,
+      questionAnswers: (reg.questionAnswers || []).map((qa: any) => ({
+        id: qa.id,
+        question: {
+          id: qa.question.id,
+          question: qa.question.question,
+        },
+        answer: qa.answer as string,
+      })),
+      kitItems: (reg.kitItems || []).map((ki: any) => ({
+        id: ki.id,
+        kitItem: {
+          id: ki.kitItem.id,
+          name: ki.kitItem.name || ki.kitItem.product?.name || 'Item',
+          price: ki.kitItem.product?.basePrice ? Math.round(ki.kitItem.product.basePrice * 100) : 0, // Converter para centavos (KitItem não tem price, usa product.basePrice)
+          image: ki.kitItem.product?.image || null,
+        },
+        selectedSize: ki.selectedSize,
+        quantity: ki.quantity,
+      })),
+    };
 
     return {
       message: 'Registration fetched successfully',
-      data: { registration },
+      data: { registration: formattedRegistration },
     };
   }
 
@@ -402,7 +537,11 @@ export class RegistrationsService {
     const registration = await prismaRead.registration.findUnique({
       where: { id },
       include: {
-        payment: true,
+        order: {
+          include: {
+            payment: true,
+          },
+        },
         modalities: {
           include: {
             modality: true,
@@ -423,7 +562,7 @@ export class RegistrationsService {
       throw new BadRequestException('Registration already cancelled');
     }
 
-    if (registration.payment && registration.payment.status === 'PAID') {
+    if (registration.order?.payment && registration.order.payment.status === 'PAID') {
       throw new BadRequestException('Cannot cancel paid registration');
     }
 

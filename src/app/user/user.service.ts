@@ -16,6 +16,16 @@ import * as crypto from 'crypto';
 export class UserService {
   constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * Limpa o documentNumber removendo formatação (pontos, traços, barras, espaços)
+   * @param documentNumber - CPF/CNPJ com ou sem formatação
+   * @returns Documento limpo (apenas números) ou null se não fornecido
+   */
+  private cleanDocumentNumber(documentNumber?: string | null): string | null {
+    if (!documentNumber) return null;
+    return documentNumber.replace(/\D/g, '');
+  }
+
   private validatePasswordStrength(password: string): void {
     const passwordRegex =
       /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
@@ -86,8 +96,9 @@ export class UserService {
 
     // Verificar se CPF já existe (se fornecido)
     if (createUserDto.documentNumber) {
+      const documentNumberClean = this.cleanDocumentNumber(createUserDto.documentNumber);
       const existingUserByCpf = await prismaRead.user.findUnique({
-        where: { documentNumber: createUserDto.documentNumber },
+        where: { documentNumberClean },
       });
 
       if (existingUserByCpf) {
@@ -191,7 +202,8 @@ export class UserService {
         city: true,
         documentType: true,
         documentNumber: true,
-        sex: true,
+        documentNumberClean: true,
+        genderDetails: true,
         acceptedTerms: true,
         acceptedPrivacyPolicy: true,
         receiveCalendarEvents: true,
@@ -222,20 +234,28 @@ export class UserService {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
-    if (updateUserDto.documentNumber) {
-      const existingUser = await prismaRead.user.findFirst({
-        where: {
-          documentNumber: updateUserDto.documentNumber,
-          id: { not: id },
-        },
-      });
-
-      if (existingUser) {
-        throw new BadRequestException('This document number is already in use');
-      }
-    }
-
     const updateData: any = { ...updateUserDto };
+    
+    // Se documentNumber foi atualizado, limpar e validar unicidade
+    if (updateData.documentNumber !== undefined) {
+      const documentNumberClean = this.cleanDocumentNumber(updateData.documentNumber);
+      
+      if (documentNumberClean) {
+        const existingUser = await prismaRead.user.findFirst({
+          where: {
+            documentNumberClean: documentNumberClean,
+            id: { not: id },
+          },
+        });
+
+        if (existingUser) {
+          throw new BadRequestException('This document number is already in use');
+        }
+      }
+      
+      // Adicionar documentNumberClean ao updateData
+      updateData.documentNumberClean = documentNumberClean;
+    }
     
     // Mapear emergencyPhone para reservePhone se fornecido
     if (updateData.emergencyPhone) {
@@ -373,8 +393,9 @@ export class UserService {
       throw new BadRequestException('Data de nascimento não pode ser futura');
     }
 
+    const documentNumberClean = this.cleanDocumentNumber(createLinkedUserDto.documentNumber);
     let existingUser = await prismaRead.user.findUnique({
-      where: { documentNumber: createLinkedUserDto.documentNumber },
+      where: { documentNumberClean: documentNumberClean },
     });
 
     let wasCreated = false;
@@ -396,12 +417,14 @@ export class UserService {
       const randomPassword = crypto.randomBytes(32).toString('hex');
       const hashedPassword = await bcrypt.hash(randomPassword, 10);
 
+      const documentNumberClean = this.cleanDocumentNumber(createLinkedUserDto.documentNumber);
       existingUser = await prismaWrite.user.create({
         data: {
           firstName: createLinkedUserDto.firstName,
           lastName: createLinkedUserDto.lastName,
           email: createLinkedUserDto.email,
           documentNumber: createLinkedUserDto.documentNumber,
+          documentNumberClean: documentNumberClean,
           phone: createLinkedUserDto.phone,
           dateOfBirth: dateOfBirth,
           gender: this.mapGenderToEnum(createLinkedUserDto.gender),

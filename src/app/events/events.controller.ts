@@ -9,6 +9,7 @@ import {
   Query,
   UseGuards,
   Request,
+  BadRequestException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -19,9 +20,14 @@ import {
   ApiQuery,
   ApiBody,
 } from '@nestjs/swagger';
+import { plainToClass } from 'class-transformer';
+import { validate } from 'class-validator';
 import { EventsService } from './events.service';
 import { CreateEventDto, UpdateEventDto, FilterEventsDto, SearchEventsDto } from './dto/create-event.dto';
 import { CreateEventTopicDto, UpdateEventTopicDto, CreateEventLocationDto } from './dto/event-topic.dto';
+import { DashboardQueryDto } from './dto/dashboard.dto';
+import { FinancialQueryDto } from './dto/financial.dto';
+import { RegistrationsQueryDto } from './dto/registrations.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 
 @ApiTags('Events')
@@ -267,6 +273,198 @@ export class EventsController {
   @ApiResponse({ status: 404, description: 'Event not found' })
   getRevenue(@Request() req, @Param('eventId') eventId: string) {
     return this.eventsService.getRevenue(req.user.id, eventId);
+  }
+
+  // ========== DASHBOARD ==========
+  @Get(':eventId/dashboard')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get event dashboard',
+    description: 'Retrieves comprehensive dashboard data for an event including metrics, trends, rankings, and heatmaps. Only organization owner can access.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiQuery({ name: 'period', required: false, enum: ['geral', '24h', '7d', '15d', '1m', '2m'], description: 'Time period filter' })
+  @ApiQuery({ name: 'ticketIds', required: false, type: [String], description: 'Filter by ticket IDs' })
+  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number for rankings (default: 1)' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 10)' })
+  @ApiResponse({ status: 200, description: 'Dashboard data fetched successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Only organization owner can access' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  async getDashboard(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Query() rawQuery: any,
+  ) {
+    // Normalizar ticketIds[] para ticketIds antes da validação
+    const normalizedQuery: any = { ...rawQuery };
+    if (rawQuery['ticketIds[]']) {
+      normalizedQuery.ticketIds = Array.isArray(rawQuery['ticketIds[]'])
+        ? rawQuery['ticketIds[]']
+        : [rawQuery['ticketIds[]']];
+      delete normalizedQuery['ticketIds[]'];
+    }
+    
+    // Transformar e validar manualmente para evitar erro de whitelist
+    const queryDto = plainToClass(DashboardQueryDto, normalizedQuery);
+    const errors = await validate(queryDto);
+    if (errors.length > 0) {
+      throw new BadRequestException('Validation failed');
+    }
+    
+    return this.eventsService.getDashboard(req.user.id, eventId, queryDto);
+  }
+
+  // ========== FINANCIAL ==========
+  @Get(':eventId/financial')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get event financial data',
+    description: 'Retrieves financial summary, revenue chart, and tickets table. Only organization owner can access.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiQuery({ name: 'period', required: false, enum: ['hoje', '7d', '15d', '1m', '2m'], description: 'Time period filter' })
+  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20)' })
+  @ApiResponse({ status: 200, description: 'Financial data fetched successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Only organization owner can access' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  getFinancial(@Request() req, @Param('eventId') eventId: string, @Query() queryDto: FinancialQueryDto) {
+    return this.eventsService.getFinancial(req.user.id, eventId, queryDto);
+  }
+
+  @Get(':eventId/financial/transfers')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get transfer history',
+    description: 'Retrieves history of financial transfers. Only organization owner can access.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiResponse({ status: 200, description: 'Transfer history fetched successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Only organization owner can access' })
+  getFinancialTransfers(@Request() req, @Param('eventId') eventId: string) {
+    return this.eventsService.getFinancialTransfers(req.user.id, eventId);
+  }
+
+  @Get(':eventId/financial/installments')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get installments to receive',
+    description: 'Retrieves pending installments. Only organization owner can access.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiResponse({ status: 200, description: 'Installments fetched successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Only organization owner can access' })
+  getFinancialInstallments(@Request() req, @Param('eventId') eventId: string) {
+    return this.eventsService.getFinancialInstallments(req.user.id, eventId);
+  }
+
+  @Get(':eventId/financial/pending')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get pending releases',
+    description: 'Retrieves amounts awaiting release. Only organization owner can access.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiResponse({ status: 200, description: 'Pending releases fetched successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Only organization owner can access' })
+  getFinancialPending(@Request() req, @Param('eventId') eventId: string) {
+    return this.eventsService.getFinancialPending(req.user.id, eventId);
+  }
+
+  @Get(':eventId/financial/refunded')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get refunded payments',
+    description: 'Retrieves list of refunded payments. Only organization owner can access.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20, max: 100)' })
+  @ApiResponse({ status: 200, description: 'Refunded payments fetched successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Only organization owner can access' })
+  getFinancialRefunded(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ) {
+    return this.eventsService.getFinancialRefunded(req.user.id, eventId, page || 1, limit || 20);
+  }
+
+  @Get(':eventId/financial/chargebacks')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get chargebacks',
+    description: 'Retrieves list of chargebacks. Only organization owner can access.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20, max: 100)' })
+  @ApiResponse({ status: 200, description: 'Chargebacks fetched successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Only organization owner can access' })
+  getFinancialChargebacks(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ) {
+    return this.eventsService.getFinancialChargebacks(req.user.id, eventId, page || 1, limit || 20);
+  }
+
+  // ========== REGISTRATIONS ==========
+  @Get(':eventId/registrations')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get event registrations',
+    description: 'Retrieves registrations with advanced filters, search, and pagination. Only organization owner can access.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20, max: 100)' })
+  @ApiQuery({ name: 'status', required: false, enum: ['PENDING', 'CONFIRMED', 'CANCELLED', 'COMPLETED', 'CHARGEBACK', 'REFUNDED'], description: 'Filter by status' })
+  @ApiQuery({ name: 'search', required: false, type: String, description: 'Search by name, CPF, email, or order ID' })
+  @ApiQuery({ name: 'ticketIds', required: false, type: [String], description: 'Filter by ticket IDs' })
+  @ApiQuery({ name: 'startDate', required: false, type: String, description: 'Start date (ISO string)' })
+  @ApiQuery({ name: 'endDate', required: false, type: String, description: 'End date (ISO string)' })
+  @ApiQuery({ name: 'sortBy', required: false, enum: ['purchaseDate', 'amount', 'status'], description: 'Sort field' })
+  @ApiQuery({ name: 'sortOrder', required: false, enum: ['asc', 'desc'], description: 'Sort order (default: desc)' })
+  @ApiResponse({ status: 200, description: 'Registrations fetched successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Only organization owner can access' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  getRegistrations(@Request() req, @Param('eventId') eventId: string, @Query() queryDto: RegistrationsQueryDto) {
+    return this.eventsService.getRegistrations(req.user.id, eventId, queryDto);
+  }
+
+  @Get(':eventId/registrations/stats')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get registration statistics',
+    description: 'Retrieves aggregated registration statistics. Only organization owner can access.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiResponse({ status: 200, description: 'Registration stats fetched successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Only organization owner can access' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  getRegistrationStats(@Request() req, @Param('eventId') eventId: string) {
+    return this.eventsService.getRegistrationStats(req.user.id, eventId);
   }
 }
 

@@ -16,49 +16,77 @@ export class OrganizersService {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
-    // Verificar se o usuário já é organizador
-    const existingOrganizer = await prismaRead.organizer.findUnique({
-      where: { userId },
+    // Verificar se o usuário já é organizador (já tem uma organização como OWNER)
+    const existingMember = await prismaRead.organizationMember.findFirst({
+      where: {
+        userId,
+        role: 'OWNER',
+      },
     });
 
-    if (existingOrganizer) {
+    if (existingMember) {
       throw new BadRequestException('User is already an organizer');
     }
 
-    const organizer = await prismaWrite.organizer.create({
-      data: {
-        ...createOrganizerDto,
-        userId,
-      },
-      include: {
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-          },
+    // Criar organização e membro OWNER em uma transação
+    const result = await prismaWrite.$transaction(async (tx) => {
+      // Criar a organização
+      const organization = await tx.organization.create({
+        data: {
+          name: createOrganizerDto.name,
+          email: createOrganizerDto.email,
+          phone: createOrganizerDto.phone,
+          description: createOrganizerDto.description,
         },
-      },
-    });
+      });
 
-    // Atualizar role do usuário
-    await prismaWrite.user.update({
-      where: { id: userId },
-      data: { role: 'ORGANIZER' },
+      // Criar o membro da organização com role OWNER (o organizador)
+      const member = await tx.organizationMember.create({
+        data: {
+          organizationId: organization.id,
+          userId,
+          role: 'OWNER',
+        },
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+            },
+          },
+          organization: true,
+        },
+      });
+
+      // Atualizar role do usuário
+      await tx.user.update({
+        where: { id: userId },
+        data: { role: 'ORGANIZER' },
+      });
+
+      return { organization, member };
     });
 
     return {
       message: 'Organizer created successfully',
-      data: { organizer },
+      data: {
+        organization: result.organization,
+        member: result.member,
+      },
     };
   }
 
   async findOne(userId: string) {
     const prismaRead = this.prisma.getReadClient();
     
-    const organizer = await prismaRead.organizer.findUnique({
-      where: { userId },
+    // Buscar o membro OWNER (organizador) do usuário
+    const member = await prismaRead.organizationMember.findFirst({
+      where: {
+        userId,
+        role: 'OWNER',
+      },
       include: {
         user: {
           select: {
@@ -69,28 +97,47 @@ export class OrganizersService {
             phone: true,
           },
         },
-        events: {
+        organization: {
           include: {
-            _count: {
-              select: {
-                registrations: true,
+            members: {
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    email: true,
+                  },
+                },
               },
             },
-          },
-          orderBy: {
-            createdAt: 'desc',
+            events: {
+              include: {
+                _count: {
+                  select: {
+                    registrations: true,
+                  },
+                },
+              },
+              orderBy: {
+                createdAt: 'desc',
+              },
+            },
           },
         },
       },
     });
 
-    if (!organizer) {
+    if (!member) {
       throw new NotFoundException('Organizer not found');
     }
 
     return {
       message: 'Organizer fetched successfully',
-      data: { organizer },
+      data: {
+        organization: member.organization,
+        member,
+      },
     };
   }
 
@@ -98,24 +145,36 @@ export class OrganizersService {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
-    const organizer = await prismaRead.organizer.findUnique({
-      where: { userId },
+    // Buscar o membro OWNER (organizador) do usuário
+    const member = await prismaRead.organizationMember.findFirst({
+      where: {
+        userId,
+        role: 'OWNER',
+      },
+      include: {
+        organization: true,
+      },
     });
 
-    if (!organizer) {
+    if (!member) {
       throw new NotFoundException('Organizer not found');
     }
 
-    const updatedOrganizer = await prismaWrite.organizer.update({
-      where: { userId },
+    // Atualizar a organização
+    const updatedOrganization = await prismaWrite.organization.update({
+      where: { id: member.organizationId },
       data: updateOrganizerDto,
       include: {
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
+        members: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+              },
+            },
           },
         },
       },
@@ -123,11 +182,13 @@ export class OrganizersService {
 
     return {
       message: 'Organizer updated successfully',
-      data: { organizer: updatedOrganizer },
+      data: {
+        organization: updatedOrganization,
+      },
     };
   }
 
-  async sendContactMessage(organizerId: string, contactData: {
+  async sendContactMessage(organizationId: string, contactData: {
     name: string;
     email: string;
     phone?: string;
@@ -138,14 +199,20 @@ export class OrganizersService {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
-    const organizer = await prismaRead.organizer.findUnique({
-      where: { id: organizerId },
+    const organization = await prismaRead.organization.findUnique({
+      where: { id: organizationId },
       include: {
-        user: {
-          select: {
-            email: true,
-            phone: true,
+        members: {
+          where: { role: 'OWNER' },
+          include: {
+            user: {
+              select: {
+                email: true,
+                phone: true,
+              },
+            },
           },
+          take: 1,
         },
         events: {
           where: contactData.eventId ? { id: contactData.eventId } : undefined,
@@ -157,21 +224,22 @@ export class OrganizersService {
       },
     });
 
-    if (!organizer) {
-      throw new NotFoundException('Organizer not found');
+    if (!organization) {
+      throw new NotFoundException('Organization not found');
     }
 
-    const event = contactData.eventId ? organizer.events[0] : undefined;
+    const owner = organization.members[0];
+    const event = contactData.eventId ? organization.events[0] : undefined;
 
     // Criar mensagem no banco
     const contactMessage = await prismaWrite.contactMessage.create({
       data: {
-        organizerId,
-        userId: contactData.userId,
-        eventId: contactData.eventId,
+        organizationId: organization.id,
+        userId: contactData.userId || null,
+        eventId: contactData.eventId || null,
         name: contactData.name,
         email: contactData.email,
-        phone: contactData.phone,
+        phone: contactData.phone || null,
         message: contactData.message,
       },
     });
@@ -179,8 +247,8 @@ export class OrganizersService {
     // Enviar email
     try {
       await this.emailService.sendContactMessageToOrganizer({
-        organizerEmail: organizer.email,
-        organizerName: organizer.name,
+        organizerEmail: organization.email,
+        organizerName: organization.name,
         userName: contactData.name,
         userEmail: contactData.email,
         userPhone: contactData.phone,
@@ -193,11 +261,11 @@ export class OrganizersService {
     }
 
     // Enviar WhatsApp se disponível
-    if (organizer.user.phone) {
+    if (owner?.user.phone) {
       try {
         await this.whatsappService.sendContactMessageToOrganizer({
-          organizerPhone: organizer.user.phone,
-          organizerName: organizer.name,
+          organizerPhone: owner.user.phone,
+          organizerName: organization.name,
           userName: contactData.name,
           userEmail: contactData.email,
           userPhone: contactData.phone,

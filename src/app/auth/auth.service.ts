@@ -67,9 +67,10 @@ export class AuthService {
           },
         });
       } else {
-        // Buscar por CPF/documentNumber
+        // Buscar por CPF/documentNumber (limpar formatação)
+        const documentNumberClean = emailOrCpf.replace(/\D/g, '');
         user = await prismaWrite.user.findUnique({
-          where: { documentNumber: emailOrCpf },
+          where: { documentNumberClean },
           select: {
             id: true,
             email: true,
@@ -119,8 +120,10 @@ export class AuthService {
         });
         return user !== null && user.isActive;
       } else {
+        // Buscar por CPF/documentNumber (limpar formatação)
+        const documentNumberClean = emailOrCpf.replace(/\D/g, '');
         const user = await prismaRead.user.findUnique({
-          where: { documentNumber: emailOrCpf },
+          where: { documentNumberClean },
           select: { id: true, isActive: true },
         });
         return user !== null && user.isActive;
@@ -174,8 +177,9 @@ export class AuthService {
 
       // Verificar se CPF já existe (se fornecido)
       if (documentNumber) {
+        const documentNumberClean = documentNumber.replace(/\D/g, '');
         const existingUserByCpf = await prismaRead.user.findUnique({
-          where: { documentNumber },
+          where: { documentNumberClean },
         });
 
         if (existingUserByCpf) {
@@ -186,6 +190,9 @@ export class AuthService {
       }
 
       const hashedPassword = await bcrypt.hash(password, 12);
+
+      // Limpar documentNumber para validação de unicidade
+      const documentNumberClean = documentNumber ? documentNumber.replace(/\D/g, '') : null;
 
       const user = await prismaWrite.user.create({
         data: {
@@ -202,7 +209,7 @@ export class AuthService {
           city,
           documentType,
           documentNumber,
-          sex,
+          documentNumberClean,
           acceptedTerms,
           acceptedPrivacyPolicy,
           receiveCalendarEvents: receiveCalendarEvents ?? false,

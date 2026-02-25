@@ -481,14 +481,6 @@ export class TicketsService {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
-    const organizer = await prismaWrite.organizer.findUnique({
-      where: { userId },
-    });
-
-    if (!organizer) {
-      throw new BadRequestException('User is not an organizer');
-    }
-
     const event = await prismaRead.event.findUnique({
       where: { id: eventId },
     });
@@ -497,8 +489,18 @@ export class TicketsService {
       throw new NotFoundException('Event not found');
     }
 
-    if (event.organizerId !== organizer.id) {
-      throw new BadRequestException('User is not the organizer of this event');
+    // Verificar se o usuário é membro da organização do evento
+    const member = await prismaRead.organizationMember.findUnique({
+      where: {
+        organizationId_userId: {
+          organizationId: event.organizationId,
+          userId,
+        },
+      },
+    });
+
+    if (!member) {
+      throw new BadRequestException('User is not a member of this event\'s organization');
     }
   }
 }

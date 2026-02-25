@@ -22,14 +22,13 @@
     "db:seed": "ts-node prisma/seed.ts",
     "db:seed:prod": "node prisma/seed.js",
     "db:populate-slugs": "ts-node prisma/populate-event-slugs.ts",
+    "db:populate-simulation": "ts-node prisma/populate-simulation-data.ts",
     "db:studio": "prisma studio",
     "docker:up": "docker-compose -f docker-compose.yml up -d",
     "docker:down": "docker-compose -f docker-compose.yml down",
     "docker:logs": "docker-compose -f docker-compose.yml logs -f",
     "docker:ps": "docker-compose -f docker-compose.yml ps",
-    "docker:restart": "docker-compose -f docker-compose.yml restart",
-    "dev:local": "cross-env NODE_ENV=development nest start --watch",
-    "dev:setup": "pnpm docker:up && sleep 5 && pnpm db:sync"
+    "docker:restart": "docker-compose -f docker-compose.yml restart"
   },
   "dependencies": {
     "@nestjs/axios": "^4.0.1",

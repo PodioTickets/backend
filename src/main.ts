@@ -262,17 +262,26 @@ async function bootstrap() {
       whitelist: true,
       forbidUnknownValues: true,
       exceptionFactory: (errors) => {
-        const formattedErrors = errors.map((error) => {
+        const formatError = (error: any): any => {
           const constraints = error.constraints || {};
           const messages = Object.values(constraints);
-          return {
+          const formatted: any = {
             property: error.property,
             value: error.value,
             message:
               messages[0] || `Validation failed for property ${error.property}`,
             constraints: constraints,
           };
-        });
+
+          // Incluir erros aninhados (children)
+          if (error.children && error.children.length > 0) {
+            formatted.children = error.children.map((child: any) => formatError(child));
+          }
+
+          return formatted;
+        };
+
+        const formattedErrors = errors.map(formatError);
 
         return new BadRequestException({
           message: 'Validation failed',

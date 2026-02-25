@@ -10,8 +10,12 @@ import {
   IsDateString,
   Min,
   Max,
+  IsNotEmpty,
+  ValidateIf,
+  IsDefined,
+  Matches,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Type, Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PaymentMethod } from '@prisma/client';
 
@@ -51,9 +55,23 @@ export class CheckoutProductDto {
 
 export class CheckoutQuestionAnswerDto {
   @IsString()
+  @IsNotEmpty()
   @ApiProperty({ description: 'Question ID', example: 'uuid' })
   questionId: string;
 
+  @Transform(({ value }) => {
+    // Converter strings "true"/"false" para boolean
+    if (typeof value === 'string') {
+      const lowerValue = value.toLowerCase().trim();
+      if (lowerValue === 'true' || lowerValue === 'verdadeiro') return true;
+      if (lowerValue === 'false' || lowerValue === 'falso') return false;
+      // Tentar converter para número se possível
+      const numValue = Number(value);
+      if (!isNaN(numValue) && value.trim() !== '') return numValue;
+    }
+    return value;
+  })
+  @IsDefined({ message: 'answer must be defined' })
   @ApiProperty({ description: 'Answer (string, boolean, or number)', example: 'Resposta' })
   answer: string | boolean | number;
 }
@@ -80,16 +98,36 @@ export class CheckoutParticipantDto {
   phone: string;
 
   @IsOptional()
-  @IsEnum(['MALE', 'FEMALE', 'OTHER', 'PREFER_NOT_TO_SAY'])
-  @ApiPropertyOptional({ description: 'Gender', enum: ['MALE', 'FEMALE', 'OTHER', 'PREFER_NOT_TO_SAY'] })
+  @Transform(({ value }) => {
+    // Converter strings vazias em undefined
+    if (value === '' || value === null) return undefined;
+    // Mapear valores comuns do frontend para o enum
+    const genderMap: Record<string, string> = {
+      'Masculino': 'MALE',
+      'Feminino': 'FEMALE',
+      'Outro': 'OTHER',
+      'Prefiro não informar': 'PREFER_NOT_TO_SAY',
+    };
+    return genderMap[value] || value;
+  })
+  @IsEnum(['MALE', 'FEMALE', 'OTHER', 'PREFER_NOT_TO_SAY'], {
+    message: 'gender must be one of: MALE, FEMALE, OTHER, PREFER_NOT_TO_SAY',
+  })
+  @ApiPropertyOptional({ 
+    description: 'Gender', 
+    enum: ['MALE', 'FEMALE', 'OTHER', 'PREFER_NOT_TO_SAY'],
+    example: 'MALE'
+  })
   gender?: string;
 
   @IsOptional()
+  @Transform(({ value }) => (value === '' || value === null ? undefined : value))
   @IsString()
   @ApiPropertyOptional({ description: 'Emergency contact name', example: 'Maria Silva' })
   emergencyContactName?: string;
 
   @IsOptional()
+  @Transform(({ value }) => (value === '' || value === null ? undefined : value))
   @IsString()
   @ApiPropertyOptional({ description: 'Emergency phone', example: '11988888888' })
   emergencyPhone?: string;
@@ -128,7 +166,9 @@ export class CheckoutCardDto {
   expiry: string;
 
   @IsString()
-  @ApiProperty({ description: 'CVV', example: '123' })
+  @IsNotEmpty()
+  @Matches(/^\d{3,4}$/, { message: 'CVV deve conter apenas 3 ou 4 dígitos numéricos' })
+  @ApiProperty({ description: 'CVV (3 ou 4 dígitos)', example: '123' })
   cvv: string;
 
   @IsNumber()
@@ -184,4 +224,10 @@ export class ProcessCheckoutDto {
   @IsString()
   @ApiPropertyOptional({ description: 'Voucher code', example: 'ABC12345' })
   voucherCode?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Type(() => Number)
+  @ApiPropertyOptional({ description: 'Service fee amount (in cents). If not provided, will be calculated as 0.', example: 0 })
+  serviceFee?: number;
 }

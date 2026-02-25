@@ -102,19 +102,19 @@ export class OrganizersController {
     });
   }
 
-  @Post(':organizerId/contact')
-  @ApiOperation({ summary: 'Contact organizer', description: 'Sends a contact message to an organizer. Authentication is optional.' })
-  @ApiParam({ name: 'organizerId', description: 'Organizer UUID' })
+  @Post(':organizationId/contact')
+  @ApiOperation({ summary: 'Contact organizer', description: 'Sends a contact message to an organization. Authentication is optional.' })
+  @ApiParam({ name: 'organizationId', description: 'Organization UUID' })
   @ApiBody({ type: ContactOrganizerDto })
   @ApiResponse({ status: 201, description: 'Contact message sent successfully' })
-  @ApiResponse({ status: 404, description: 'Organizer not found' })
+  @ApiResponse({ status: 404, description: 'Organization not found' })
   async contactOrganizer(
-    @Param('organizerId') organizerId: string,
+    @Param('organizationId') organizationId: string,
     @Body() contactDto: ContactOrganizerDto,
     @Request() req?: any,
   ) {
     const userId = req?.user?.id || null;
-    return this.organizersService.sendContactMessage(organizerId, {
+    return this.organizersService.sendContactMessage(organizationId, {
       name: contactDto.name,
       email: contactDto.email,
       phone: contactDto.phone,
@@ -124,25 +124,31 @@ export class OrganizersController {
     });
   }
 
-  @Get(':organizerId/messages')
+  @Get(':organizationId/messages')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get organizer messages', description: 'Retrieves all contact messages for an organizer. Only the organizer can access their messages.' })
-  @ApiParam({ name: 'organizerId', description: 'Organizer UUID' })
+  @ApiOperation({ summary: 'Get organization messages', description: 'Retrieves all contact messages for an organization. Only organization members can access messages.' })
+  @ApiParam({ name: 'organizationId', description: 'Organization UUID' })
   @ApiResponse({ status: 200, description: 'Messages retrieved successfully' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can access messages' })
-  async getOrganizerMessages(@Request() req, @Param('organizerId') organizerId: string) {
-    const organizer = await this.prisma.organizer.findUnique({
-      where: { userId: req.user.id },
+  @ApiResponse({ status: 403, description: 'Forbidden - Only organization members can access messages' })
+  async getOrganizerMessages(@Request() req, @Param('organizationId') organizationId: string) {
+    // Verificar se o usuário é membro da organização
+    const member = await this.prisma.organizationMember.findUnique({
+      where: {
+        organizationId_userId: {
+          organizationId,
+          userId: req.user.id,
+        },
+      },
     });
 
-    if (!organizer || organizer.id !== organizerId) {
+    if (!member) {
       throw new BadRequestException('Access denied');
     }
 
     const messages = await this.prisma.contactMessage.findMany({
-      where: { organizerId },
+      where: { organizationId },
       include: {
         user: {
           select: {

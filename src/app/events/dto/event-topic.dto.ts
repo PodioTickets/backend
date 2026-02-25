@@ -122,6 +122,14 @@ export class CreateEventLocationDto {
   zipCode?: string;
 
   @IsOptional()
+  @IsString()
+  @ApiPropertyOptional({
+    description: 'The neighborhood of the event location',
+    example: 'Centro',
+  })
+  neighborhood?: string;
+
+  @IsOptional()
   @IsUrl()
   @ApiPropertyOptional({
     description: 'The Google Maps link of the event location',
@@ -174,6 +182,11 @@ export class UpdateEventLocationDto {
   @IsString()
   @ApiPropertyOptional()
   zipCode?: string;
+
+  @IsOptional()
+  @IsString()
+  @ApiPropertyOptional()
+  neighborhood?: string;
 
   @IsOptional()
   @IsUrl()

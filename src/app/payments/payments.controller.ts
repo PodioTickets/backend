@@ -123,5 +123,53 @@ export class PaymentsController {
   findOne(@Request() req, @Param('id') id: string) {
     return this.paymentsService.findOne(id, req.user.id);
   }
+
+  @Get('transaction/:transactionId/details')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get payment details by transaction ID',
+    description: 'Retrieves complete payment details including buyer, payment, event, and organizer information. Accessible by payment owner or event organizer.',
+  })
+  @ApiParam({ name: 'transactionId', description: 'Transaction ID from payment gateway' })
+  @ApiResponse({ status: 200, description: 'Payment details retrieved successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Access denied' })
+  @ApiResponse({ status: 404, description: 'Payment not found' })
+  getPaymentDetailsByTransaction(@Request() req, @Param('transactionId') transactionId: string) {
+    return this.paymentsService.getPaymentDetails(transactionId, 'transaction', req.user.id);
+  }
+
+  @Get('order/:orderId/details')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get payment details by order ID',
+    description: 'Retrieves complete payment details including buyer, payment, event, and organizer information. Accessible by payment owner or event organizer.',
+  })
+  @ApiParam({ name: 'orderId', description: 'Order UUID' })
+  @ApiResponse({ status: 200, description: 'Payment details retrieved successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Access denied' })
+  @ApiResponse({ status: 404, description: 'Payment not found' })
+  getPaymentDetailsByOrder(@Request() req, @Param('orderId') orderId: string) {
+    return this.paymentsService.getPaymentDetails(orderId, 'order', req.user.id);
+  }
+
+  @Get('payment/:paymentId/details')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get payment details by payment ID',
+    description: 'Retrieves complete payment details including buyer, payment, event, and organizer information. Accessible by payment owner or event organizer.',
+  })
+  @ApiParam({ name: 'paymentId', description: 'Payment UUID' })
+  @ApiResponse({ status: 200, description: 'Payment details retrieved successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Access denied' })
+  @ApiResponse({ status: 404, description: 'Payment not found' })
+  getPaymentDetailsByPaymentId(@Request() req, @Param('paymentId') paymentId: string) {
+    return this.paymentsService.getPaymentDetails(paymentId, 'payment', req.user.id);
+  }
 }
 

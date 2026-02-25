@@ -68,8 +68,8 @@ export class CreateUserDto {
 
   @IsOptional()
   @IsString()
-  @ApiProperty({ description: 'User sex' })
-  sex?: string;
+  @ApiProperty({ description: 'User gender details (for "other" gender)' })
+  genderDetails?: string;
 
   @IsBoolean()
   @ApiProperty({ description: 'User accepted terms' })

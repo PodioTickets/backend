@@ -9,7 +9,7 @@ import { ProcessCheckoutDto } from './dto/process-checkout.dto';
 import { PaymentMethod, PaymentStatus, RegistrationStatus } from '@prisma/client';
 import { CieloService } from '../payments/cielo.service';
 import { RegistrationsService } from '../registrations/registrations.service';
-import * as QRCode from 'qrcode';
+// QR Code é gerado dinamicamente no frontend/backend usando o payload salvo em qrCode
 
 interface PriceCalculation {
   ticketsSubtotal: number;
@@ -45,20 +45,30 @@ export class CheckoutService {
     private readonly prisma: PrismaService,
     private readonly cieloService: CieloService,
     private readonly registrationsService: RegistrationsService,
-  ) {}
+  ) { }
 
   async processCheckout(userId: string, dto: ProcessCheckoutDto) {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
     try {
-      // 1. Validação inicial
+      // 1. Buscar informações do evento para o retorno
+      const event = await prismaRead.event.findUnique({
+        where: { id: dto.eventId },
+        select: { name: true },
+      });
+
+      if (!event) {
+        throw new NotFoundException('Evento não encontrado');
+      }
+
+      // 2. Validação inicial
       await this.validateInitialData(dto, prismaRead);
 
-      // 2. Validar estoque
+      // 3. Validar estoque
       await this.validateStock(dto, prismaRead);
 
-      // 3. Calcular preços iniciais (sem descontos)
+      // 4. Calcular preços iniciais (sem descontos)
       const initialPrices = await this.calculatePrices(
         dto.eventId,
         dto.tickets,
@@ -67,9 +77,10 @@ export class CheckoutService {
         0, // sem voucher
         dto.paymentMethod,
         prismaRead,
+        dto.serviceFee, // serviceFee do frontend (em centavos)
       );
 
-      // 4. Validar e aplicar cupom
+      // 5. Validar e aplicar cupom
       let couponResult: CouponValidationResult = {
         isValid: false,
         discount: 0,
@@ -92,7 +103,7 @@ export class CheckoutService {
         }
       }
 
-      // 5. Validar e aplicar voucher
+      // 6. Validar e aplicar voucher
       let voucherResult: VoucherValidationResult = {
         isValid: false,
         discount: 0,
@@ -121,7 +132,7 @@ export class CheckoutService {
         }
       }
 
-      // 6. Recalcular preços com descontos
+      // 7. Recalcular preços com descontos
       const finalPrices = await this.calculatePrices(
         dto.eventId,
         dto.tickets,
@@ -130,19 +141,26 @@ export class CheckoutService {
         voucherResult.discount,
         dto.paymentMethod,
         prismaRead,
+        dto.serviceFee, // serviceFee do frontend (em centavos)
       );
 
-      // 7. Processar pagamento
+      // 8. Processar pagamento
+      // Obter CPF do primeiro participante para enviar à Cielo (limpar caracteres não numéricos)
+      const firstParticipantCpf = dto.participants && dto.participants.length > 0
+        ? dto.participants[0].cpf?.replace(/\D/g, '')
+        : undefined;
+
       const paymentResult = await this.processPayment(
         dto.paymentMethod,
         dto.payment,
         finalPrices.finalTotal,
         userId,
         dto.eventId,
+        firstParticipantCpf,
       );
 
-      // 8. Criar registrations e participantes
-      const registrations = await this.createRegistrations(
+      // 9. Criar registrations e participantes
+      const { registrations, order } = await this.createRegistrations(
         userId,
         dto,
         finalPrices,
@@ -152,12 +170,65 @@ export class CheckoutService {
         prismaWrite,
       );
 
-      // 9. Retornar resposta
+      // 10. Buscar informações detalhadas dos tickets, participantes e produtos
+      const registrationDetails = await this.getRegistrationDetails(
+        registrations[0]?.id,
+        dto,
+        prismaRead,
+      );
+
+      // 11. Gerar número do pedido (formato PT-YYYY-XXXX)
+      const orderNumber = this.generateOrderNumber(registrations[0]?.id || userId);
+
+      // 12. Contar participantes e produtos
+      const participantsCount = dto.participants.length;
+      const productsSubtotal = finalPrices.productsSubtotal || 0;
+
+      // 13. Formatar forma de pagamento
+      const paymentMethodLabel = this.getPaymentMethodLabel(dto.paymentMethod);
+
+      // 14. Retornar resposta completa com extrato
       return {
         success: true,
-        registrations: registrations.map((r) => ({
+        orderNumber, // Número do pedido (PT-2025-0348)
+        eventName: event.name, // Nome do evento
+        date: new Date().toLocaleDateString('pt-BR'), // Data do pagamento
+        paymentMethod: paymentMethodLabel, // Forma de pagamento
+        participants: participantsCount, // Número de participantes
+        // Detalhes dos ingressos comprados
+        tickets: registrationDetails.tickets,
+        // Informações de todos os participantes (com respostas das perguntas e produtos)
+        participantsDetails: registrationDetails.participants,
+        // Informações dos produtos adicionais inclusos
+        products: {
+          items: registrationDetails.products,
+          subtotal: Math.round(finalPrices.productsSubtotal), // Produtos adicionais em centavos
+        },
+        // Itens dos kits selecionados
+        kitItems: registrationDetails.kitItems || [],
+        // Modalidades do evento selecionadas
+        modalities: registrationDetails.modalities || [],
+        // Respostas das perguntas do evento
+        questionAnswers: registrationDetails.questionAnswers || [],
+        pricing: {
+          subtotal: Math.round(finalPrices.ticketsSubtotal + finalPrices.productsSubtotal), // Subtotal em centavos (ambos já estão em centavos)
+          serviceFee: Math.round(finalPrices.serviceFee), // Taxa de serviço em centavos
+          couponDiscount: Math.round((couponResult.discount || 0) * 100), // Desconto cupom em centavos
+          voucherDiscount: Math.round((voucherResult.discount || 0) * 100), // Desconto voucher em centavos
+          total: Math.round(finalPrices.finalTotal), // Total pago em centavos
+        },
+        orderId: order.id, // ID do pedido
+        registrations: registrations.map((r, index) => ({
           id: r.id,
           status: r.status,
+          qrCode: r.qrCode, // QR Code do registration
+          participant: {
+            // Informações do participante correspondente
+            id: registrationDetails.participants[index]?.id,
+            name: registrationDetails.participants[index]?.name,
+            email: registrationDetails.participants[index]?.email,
+            includedProducts: registrationDetails.participants[index]?.includedProducts || [], // Produtos inclusos no ingresso
+          },
         })),
         payment: {
           method: dto.paymentMethod,
@@ -167,7 +238,6 @@ export class CheckoutService {
           boleto: paymentResult.boleto,
           creditCard: paymentResult.creditCard,
         },
-        total: finalPrices.finalTotal,
       };
     } catch (error) {
       this.logger.error('Checkout processing error:', error);
@@ -242,10 +312,10 @@ export class CheckoutService {
       let batch = ticketItem.batchId
         ? ticket.batches.find((b) => b.id === ticketItem.batchId)
         : ticket.batches.find(
-            (b) =>
-              (!b.startDate || new Date(b.startDate) <= now) &&
-              (!b.endDate || new Date(b.endDate) >= now),
-          );
+          (b) =>
+            (!b.startDate || new Date(b.startDate) <= now) &&
+            (!b.endDate || new Date(b.endDate) >= now),
+        );
 
       if (!batch) {
         throw new BadRequestException(
@@ -307,6 +377,7 @@ export class CheckoutService {
     voucherDiscount: number,
     paymentMethod: PaymentMethod,
     prisma: any,
+    serviceFee?: number,
   ): Promise<PriceCalculation> {
     // 1. Calcular subtotal dos tickets
     let ticketsSubtotal = 0;
@@ -328,10 +399,10 @@ export class CheckoutService {
       const batch = ticketItem.batchId
         ? ticket.batches.find((b) => b.id === ticketItem.batchId)
         : ticket.batches.find(
-            (b) =>
-              (!b.startDate || new Date(b.startDate) <= now) &&
-              (!b.endDate || new Date(b.endDate) >= now),
-          );
+          (b) =>
+            (!b.startDate || new Date(b.startDate) <= now) &&
+            (!b.endDate || new Date(b.endDate) >= now),
+        );
 
       if (!batch) {
         throw new BadRequestException(
@@ -373,16 +444,19 @@ export class CheckoutService {
       }
     }
 
-    // 3. Calcular taxa de serviço (5% padrão)
-    // Nota: Você pode adicionar campo serviceFee no Event no futuro
-    const serviceFeePercent = 0.05; // 5% padrão
-    const serviceFee = (ticketsSubtotal + productsSubtotal) * serviceFeePercent;
+    // 3. Calcular taxa de serviço
+    // Se serviceFee for fornecido, converter de centavos para reais
+    // Caso contrário, usar 0 (sem taxa de serviço)
+    let calculatedServiceFee = 0;
+    if (serviceFee !== undefined && serviceFee !== null) {
+      calculatedServiceFee = serviceFee / 100; // Converter de centavos para reais
+    }
 
-    // 4. Calcular subtotal
-    const subtotal = ticketsSubtotal + productsSubtotal + serviceFee;
+    // 4. Calcular subtotal (todos em reais)
+    const subtotal = ticketsSubtotal + productsSubtotal + calculatedServiceFee;
 
-    // 5. Aplicar descontos
-    const total = Math.max(0, subtotal - couponDiscount - voucherDiscount);
+    // 5. Aplicar descontos (converter de centavos para reais)
+    const total = Math.max(0, subtotal - (couponDiscount / 100) - (voucherDiscount / 100));
 
     // 6. Aplicar desconto PIX (5%)
     let pixDiscount = 0;
@@ -392,16 +466,17 @@ export class CheckoutService {
       finalTotal = total - pixDiscount;
     }
 
+    // Converter todos os valores para centavos (multiplicar por 100) mantendo precisão
     return {
-      ticketsSubtotal: Math.round(ticketsSubtotal * 100) / 100,
-      productsSubtotal: Math.round(productsSubtotal * 100) / 100,
-      serviceFee: Math.round(serviceFee * 100) / 100,
-      couponDiscount: Math.round(couponDiscount * 100) / 100,
-      voucherDiscount: Math.round(voucherDiscount * 100) / 100,
-      subtotal: Math.round(subtotal * 100) / 100,
-      total: Math.round(total * 100) / 100,
-      pixDiscount: Math.round(pixDiscount * 100) / 100,
-      finalTotal: Math.round(finalTotal * 100) / 100,
+      ticketsSubtotal: ticketsSubtotal * 100,
+      productsSubtotal: productsSubtotal * 100,
+      serviceFee: calculatedServiceFee * 100,
+      couponDiscount: couponDiscount, // Já está em centavos
+      voucherDiscount: voucherDiscount, // Já está em centavos
+      subtotal: subtotal * 100,
+      total: total * 100,
+      pixDiscount: pixDiscount * 100,
+      finalTotal: finalTotal * 100,
     };
   }
 
@@ -540,7 +615,7 @@ export class CheckoutService {
       }
     }
 
-    // Calcular desconto
+    // Calcular desconto (subtotal está em reais, converter para centavos)
     let discount = 0;
     if (coupon.type === 'PERCENTAGE') {
       discount = subtotal * (coupon.value / 100);
@@ -548,9 +623,10 @@ export class CheckoutService {
       discount = Math.min(coupon.value, subtotal);
     }
 
+    // Converter desconto para centavos
     return {
       isValid: true,
-      discount: Math.round(discount * 100) / 100,
+      discount: discount * 100, // Converter para centavos
       couponId: coupon.id,
     };
   }
@@ -649,12 +725,12 @@ export class CheckoutService {
     }
 
     // Voucher aplica desconto de 100% em um ingresso (mais barato)
-    // Por enquanto, aplicamos 100% no subtotal de tickets
+    // ticketsSubtotal já está em centavos (vem do calculatePrices)
     const discount = ticketsSubtotal;
 
     return {
       isValid: true,
-      discount: Math.round(discount * 100) / 100,
+      discount: discount, // Já está em centavos
       voucherId: voucher.id,
     };
   }
@@ -665,21 +741,15 @@ export class CheckoutService {
     finalTotal: number,
     userId: string,
     eventId: string,
+    customerCpf?: string,
   ) {
-    // Converter PaymentMethod para o formato esperado pelo CieloService
-    let cieloMethod: any;
-    switch (paymentMethod) {
-      case PaymentMethod.CREDIT_CARD:
-        cieloMethod = 'CREDIT_CARD';
-        break;
-      case PaymentMethod.PIX:
-        cieloMethod = 'PIX';
-        break;
-      case PaymentMethod.BOLETO:
-        cieloMethod = 'BOLETO';
-        break;
-      default:
-        throw new BadRequestException('Método de pagamento não suportado');
+    // Validar método de pagamento suportado
+    if (
+      paymentMethod !== PaymentMethod.CREDIT_CARD &&
+      paymentMethod !== PaymentMethod.PIX &&
+      paymentMethod !== PaymentMethod.BOLETO
+    ) {
+      throw new BadRequestException('Método de pagamento não suportado');
     }
 
     // Criar merchantOrderId único
@@ -691,48 +761,116 @@ export class CheckoutService {
       select: { firstName: true, lastName: true, email: true },
     });
 
-    // Processar pagamento na Cielo
+    // Preparar dados do cartão se for cartão de crédito
+    let cardData = undefined;
+    if (paymentMethod === PaymentMethod.CREDIT_CARD) {
+      if (!paymentData.card) {
+        throw new BadRequestException('Dados do cartão são obrigatórios para pagamento com cartão de crédito');
+      }
+
+      cardData = {
+        number: paymentData.card.number,
+        holder: paymentData.card.name,
+        expiry: paymentData.card.expiry,
+        cvv: paymentData.card.cvv,
+        installments: paymentData.card.installments,
+      };
+
+      this.logger.debug('Card data prepared:', {
+        hasNumber: !!cardData.number,
+        hasHolder: !!cardData.holder,
+        hasExpiry: !!cardData.expiry,
+        hasCvv: !!cardData.cvv,
+        installments: cardData.installments,
+      });
+    }
+
+    // Processar pagamento na Cielo (passar o enum diretamente)
     const cieloResult = await this.cieloService.createPayment(
       finalTotal,
       'BRL',
-      cieloMethod,
+      paymentMethod, // Passar o enum diretamente, não converter para string
       merchantOrderId,
       {
         name: `${user?.firstName} ${user?.lastName}`,
         email: user?.email,
+        identity: customerCpf, // CPF do primeiro participante (obrigatório para Cielo)
+        identityType: customerCpf ? 'CPF' : undefined,
       },
+      cardData, // Passar dados do cartão se for cartão de crédito
     );
 
     if (!cieloResult.success) {
-      throw new BadRequestException(
-        cieloResult.error || 'Falha ao processar pagamento',
-      );
+      const errorDetails = (cieloResult as any).errorDetails;
+      this.logger.error('Payment processing failed:', {
+        error: cieloResult.error,
+        errorDetails,
+        paymentMethod,
+        finalTotal,
+        merchantOrderId,
+      });
+
+      // Construir mensagem de erro mais informativa
+      let errorMessage = cieloResult.error || 'Falha ao processar pagamento na Cielo';
+      if (errorDetails) {
+        try {
+          const detailsStr = typeof errorDetails === 'string'
+            ? errorDetails
+            : JSON.stringify(errorDetails);
+          if (detailsStr && detailsStr !== '{}') {
+            errorMessage += ` - Detalhes: ${detailsStr}`;
+          }
+        } catch (e) {
+          // Ignorar erro de serialização
+        }
+      }
+
+      throw new BadRequestException(errorMessage);
+    }
+
+    // Determinar status do pagamento:
+    // - PIX e Boleto: sempre 'pending' inicialmente (aguardam webhook para confirmação)
+    // - Cartão de crédito: 'approved' se autorizado, caso contrário 'pending'
+    let paymentStatus: 'approved' | 'pending';
+    if (paymentMethod === PaymentMethod.PIX || paymentMethod === PaymentMethod.BOLETO) {
+      // PIX e Boleto sempre começam como pending - o webhook confirma depois
+      paymentStatus = 'pending';
+    } else if (paymentMethod === PaymentMethod.CREDIT_CARD) {
+      // Cartão de crédito pode ser aprovado imediatamente se autorizado
+      paymentStatus = cieloResult.cieloStatus === 'Authorized' || cieloResult.cieloStatus === 'PaymentConfirmed'
+        ? 'approved'
+        : 'pending';
+    } else {
+      // Fallback para outros métodos
+      paymentStatus = 'pending';
     }
 
     return {
       success: true,
       transactionId: cieloResult.paymentId,
-      status: cieloResult.cieloStatus === 'Approved' ? 'approved' : 'pending',
+      status: paymentStatus,
       pix: cieloResult.qrCode
         ? {
-            qrCode: cieloResult.qrCode,
-            qrCodeBase64: cieloResult.qrCode,
-            expirationDate: cieloResult.expiresAt || new Date(),
-          }
+          qrCode: cieloResult.qrCode,
+          qrCodeBase64: cieloResult.qrCode,
+          expirationDate: cieloResult.expiresAt || new Date(),
+        }
         : undefined,
       boleto: cieloResult.barcode
         ? {
-            barcode: cieloResult.barcode,
-            digitableLine: cieloResult.barcode,
-            expirationDate: cieloResult.expiresAt || new Date(),
-          }
+          barcode: cieloResult.barcode,
+          digitableLine: cieloResult.barcode,
+          expirationDate: cieloResult.expiresAt || new Date(),
+        }
         : undefined,
       creditCard: paymentData.card
         ? {
-            installments: paymentData.card.installments,
-            installmentValue: finalTotal / paymentData.card.installments,
-          }
+          installments: paymentData.card.installments,
+          installmentValue: finalTotal / paymentData.card.installments,
+        }
         : undefined,
+      cieloResult, // Retornar resultado completo da Cielo para salvar no banco
+      cardData, // Dados do cartão (para salvar informações mascaradas)
     };
   }
 
@@ -747,73 +885,116 @@ export class CheckoutService {
   ) {
     const registrations = [];
 
-    // Criar uma registration por participante ou uma geral?
-    // Vou criar uma registration geral com múltiplos tickets
-    // Você pode ajustar isso conforme sua lógica de negócio
-
-    // Criar registration principal
-    const registration = await prisma.registration.create({
+    // 1. Criar o Order primeiro com todos os dados financeiros
+    // Converter valores para centavos (multiplicar por 100)
+    const order = await prisma.order.create({
       data: {
-        eventId: dto.eventId,
         userId,
-        status:
-          paymentResult.status === 'approved'
-            ? RegistrationStatus.CONFIRMED
-            : RegistrationStatus.PENDING,
-        termsAccepted: true, // Assumindo que foi aceito no checkout
-        rulesAccepted: true,
-        totalAmount: prices.ticketsSubtotal + prices.productsSubtotal,
-        serviceFee: prices.serviceFee,
-        discount: prices.couponDiscount + prices.voucherDiscount,
-        finalAmount: prices.finalTotal,
-        couponId: couponResult.couponId || null,
-        voucherId: voucherResult.voucherId || null,
+        eventId: dto.eventId,
+        totalAmount: Math.round(prices.ticketsSubtotal + prices.productsSubtotal), // Já está em centavos
+        serviceFee: Math.round(prices.serviceFee), // Já está em centavos
+        discount: Math.round(prices.couponDiscount + prices.voucherDiscount), // Já está em centavos
+        finalAmount: Math.round(prices.finalTotal), // Já está em centavos
+        ...(couponResult.couponId && { couponId: couponResult.couponId }),
+        ...(voucherResult.voucherId && { voucherId: voucherResult.voucherId }),
       },
     });
 
-    // Criar QR Code
-    const qrCodeData = JSON.stringify({
-      registrationId: registration.id,
-      eventId: dto.eventId,
-      userId,
-    });
-    const qrCode = await QRCode.toDataURL(qrCodeData);
-    await prisma.registration.update({
-      where: { id: registration.id },
-      data: { qrCode },
-    });
+    // Preparar metadata completo do pagamento para extrato
+    const cieloResultData = paymentResult.cieloResult;
+    const cardData = paymentResult.cardData;
 
-    // Criar payment
-    await prisma.payment.create({
+    // Preparar informações do cartão (mascaradas)
+    const creditCardInfo = cardData ? {
+      last4Digits: cardData.number?.replace(/\D/g, '').slice(-4) || null,
+      brand: this.detectCardBrandFromNumber(cardData.number) || null,
+      holder: cardData.holder ? cardData.holder.toUpperCase() : null,
+      installments: cardData.installments || 1,
+      installmentValue: prices.finalTotal / (cardData.installments || 1),
+    } : null;
+
+    // Preparar informações completas do pagamento
+    const paymentMetadata: any = {
+      // Informações básicas
+      cieloPaymentId: cieloResultData?.paymentId,
+      cieloStatus: cieloResultData?.cieloStatus,
+      merchantOrderId: cieloResultData?.paymentId ? `checkout-${Date.now()}-${userId}` : null,
+
+      // Informações de autorização (cartão de crédito)
+      authorizationCode: cieloResultData?.authorizationCode || null,
+      proofOfSale: cieloResultData?.proofOfSale || null,
+      returnCode: cieloResultData?.returnCode || null,
+      returnMessage: cieloResultData?.returnMessage || null,
+
+      // Informações do cartão de crédito (mascaradas)
+      creditCard: creditCardInfo || paymentResult.creditCard,
+
+      // Informações de PIX
+      pix: paymentResult.pix ? {
+        ...paymentResult.pix,
+        qrCode: cieloResultData?.qrCode || paymentResult.pix.qrCode,
+        pixCode: cieloResultData?.pixCode || null,
+        expiresAt: cieloResultData?.expiresAt?.toISOString() || paymentResult.pix.expirationDate?.toISOString(),
+      } : null,
+
+      // Informações de Boleto
+      boleto: paymentResult.boleto ? {
+        ...paymentResult.boleto,
+        barcode: cieloResultData?.barcode || paymentResult.boleto.barcode,
+        digitableLine: cieloResultData?.barcode || paymentResult.boleto.digitableLine,
+        expiresAt: cieloResultData?.expiresAt?.toISOString() || paymentResult.boleto.expirationDate?.toISOString(),
+        instructions: cieloResultData?.instructions || null,
+        assignor: cieloResultData?.assignor || null,
+        address: cieloResultData?.address || null,
+      } : null,
+
+      // Informações de cupons e vouchers
+      discounts: {
+        coupon: couponResult.couponId ? {
+          couponId: couponResult.couponId,
+          discount: couponResult.discount,
+        } : null,
+        voucher: voucherResult.voucherId ? {
+          voucherId: voucherResult.voucherId,
+          discount: voucherResult.discount,
+        } : null,
+        totalDiscount: prices.couponDiscount + prices.voucherDiscount,
+      },
+
+      // Informações de preços
+      pricing: {
+        ticketsSubtotal: prices.ticketsSubtotal,
+        productsSubtotal: prices.productsSubtotal,
+        serviceFee: prices.serviceFee,
+        discount: prices.couponDiscount + prices.voucherDiscount,
+        finalTotal: prices.finalTotal,
+      },
+
+      // Timestamps
+      createdAt: new Date().toISOString(),
+    };
+
+    // 2. Criar Payment vinculado ao Order
+    // amount já está em centavos no order.finalAmount
+    const payment = await prisma.payment.create({
       data: {
-        registrationId: registration.id,
+        orderId: order.id,
         userId,
         method: dto.paymentMethod,
         status:
           paymentResult.status === 'approved'
             ? PaymentStatus.PAID
             : PaymentStatus.PENDING,
-        amount: prices.finalTotal,
+        amount: order.finalAmount, // Já está em centavos
         transactionId: paymentResult.transactionId,
-        metadata: {
-          pix: paymentResult.pix,
-          boleto: paymentResult.boleto,
-          creditCard: paymentResult.creditCard,
-        } as any,
+        paymentDate: paymentResult.status === 'approved' ? new Date() : null,
+        metadata: paymentMetadata,
       },
     });
 
-    // Criar tickets e participantes
+    // 3. Criar uma Registration por participante vinculada ao Order
     let participantIndex = 0;
     for (const ticketItem of dto.tickets) {
-      // Criar RegistrationTicket
-      await prisma.registrationTicket.create({
-        data: {
-          registrationId: registration.id,
-          ticketId: ticketItem.ticketId,
-        },
-      });
-
       // Criar participantes para este ticket
       for (let i = 0; i < ticketItem.quantity; i++) {
         const participantData = dto.participants[participantIndex];
@@ -833,13 +1014,16 @@ export class CheckoutService {
 
           if (!invitedUser) {
             // Criar usuário convidado
+            const documentNumber = participantData.cpf.replace(/\D/g, '');
+            const documentNumberClean = documentNumber; // Já está limpo
             invitedUser = await prisma.user.create({
               data: {
                 email: participantData.email,
                 firstName: participantData.name.split(' ')[0],
                 lastName:
                   participantData.name.split(' ').slice(1).join(' ') || '',
-                documentNumber: participantData.cpf.replace(/\D/g, ''),
+                documentNumber: participantData.cpf, // Manter formatação original se houver
+                documentNumberClean: documentNumberClean, // Versão limpa para validação
                 password: '', // Senha será definida depois
                 isActive: false,
               },
@@ -847,6 +1031,46 @@ export class CheckoutService {
           }
           participantUserId = invitedUser.id;
         }
+
+        // Criar Registration para este participante
+        const registration = await prisma.registration.create({
+          data: {
+            eventId: dto.eventId,
+            orderId: order.id,
+            userId: participantUserId,
+            invitedById: participantUserId !== userId ? userId : null,
+            status: paymentResult.status === 'approved'
+              ? RegistrationStatus.CONFIRMED
+              : RegistrationStatus.PENDING,
+            termsAccepted: true,
+            rulesAccepted: true,
+          },
+        });
+
+        // Criar QR Code payload (apenas dados, não Data URL)
+        const qrCodePayload = JSON.stringify({
+          registrationId: registration.id,
+          eventId: dto.eventId,
+          userId: participantUserId,
+        });
+        const updatedRegistration = await prisma.registration.update({
+          where: { id: registration.id },
+          data: { qrCode: qrCodePayload },
+          select: {
+            id: true,
+            qrCode: true,
+            status: true,
+            userId: true,
+          },
+        });
+
+        // Criar RegistrationTicket
+        await prisma.registrationTicket.create({
+          data: {
+            registrationId: registration.id,
+            ticketId: ticketItem.ticketId,
+          },
+        });
 
         // Criar question answers se houver
         if (participantData.questionAnswers) {
@@ -861,11 +1085,12 @@ export class CheckoutService {
           }
         }
 
+        registrations.push(updatedRegistration);
         participantIndex++;
       }
     }
 
-    // Atualizar uso de cupom
+    // 4. Atualizar uso de cupom
     if (couponResult.couponId) {
       await prisma.coupon.update({
         where: { id: couponResult.couponId },
@@ -875,7 +1100,7 @@ export class CheckoutService {
       });
     }
 
-    // Marcar voucher como usado
+    // 5. Marcar voucher como usado
     if (voucherResult.voucherId) {
       await prisma.voucher.update({
         where: { id: voucherResult.voucherId },
@@ -887,8 +1112,7 @@ export class CheckoutService {
       });
     }
 
-    registrations.push(registration);
-    return registrations;
+    return { registrations, order };
   }
 
   private calculateAge(birthDate: string): number {
@@ -903,5 +1127,383 @@ export class CheckoutService {
       age--;
     }
     return age;
+  }
+
+  /**
+   * Detecta a bandeira do cartão baseado no número
+   * Helper para salvar informações do cartão no extrato
+   */
+  private detectCardBrandFromNumber(cardNumber: string): string | null {
+    if (!cardNumber) return null;
+
+    const number = cardNumber.replace(/\D/g, ''); // Remove caracteres não numéricos
+
+    // Visa: começa com 4
+    if (/^4/.test(number)) return 'Visa';
+
+    // Mastercard: começa com 5
+    if (/^5[1-5]/.test(number)) return 'Mastercard';
+
+    // Amex: começa com 34 ou 37
+    if (/^3[47]/.test(number)) return 'Amex';
+
+    // Elo: começa com vários prefixos
+    if (/^(401178|401179|431274|438935|451416|457393|457631|457632|504175|627780|636297|636368|636369)/.test(number)) return 'Elo';
+
+    // Hipercard: começa com 38 ou 60
+    if (/^(38|60)/.test(number)) return 'Hipercard';
+
+    // Diners: começa com 30, 36 ou 38
+    if (/^3[068]/.test(number)) return 'Diners';
+
+    // Discover: começa com 6011 ou 65
+    if (/^(6011|65)/.test(number)) return 'Discover';
+
+    return 'Unknown';
+  }
+
+  /**
+   * Gera número do pedido no formato PT-YYYY-XXXX
+   * Exemplo: PT-2025-0348
+   */
+  private generateOrderNumber(registrationId: string): string {
+    const year = new Date().getFullYear();
+    // Usar últimos 4 caracteres do UUID como número sequencial
+    const sequence = registrationId.replace(/-/g, '').slice(-4).toUpperCase();
+    return `PT-${year}-${sequence}`;
+  }
+
+  /**
+   * Retorna label formatado do método de pagamento
+   */
+  private getPaymentMethodLabel(method: PaymentMethod): string {
+    const labels: Partial<Record<PaymentMethod, string>> = {
+      CREDIT_CARD: 'Cartão de crédito',
+      PIX: 'PIX',
+      BOLETO: 'Boleto',
+    };
+    return labels[method] || method;
+  }
+
+  /**
+   * Busca informações detalhadas dos tickets, participantes e produtos da registration
+   */
+  private async getRegistrationDetails(
+    registrationId: string,
+    dto: ProcessCheckoutDto,
+    prisma: any,
+  ) {
+    // Buscar tickets da registration
+    const registrationTickets = await prisma.registrationTicket.findMany({
+      where: { registrationId },
+      include: {
+        ticket: {
+          include: {
+            batches: {
+              orderBy: { startDate: 'desc' },
+            },
+          },
+        },
+      },
+    });
+
+    // Buscar participantes - como não há tabela RegistrationParticipant,
+    // vamos usar os dados do DTO e buscar informações dos usuários relacionados
+    // Buscar usuários convidados (participantes) pelo email do DTO
+    const participantEmails = dto.participants.map((p) => p.email);
+    const participantUsers = await prisma.user.findMany({
+      where: {
+        email: { in: participantEmails },
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phone: true,
+        documentNumber: true,  // CPF está em documentNumber
+        dateOfBirth: true,     // Data de nascimento está em dateOfBirth
+        gender: true,
+      },
+    });
+
+    // Buscar produtos (kit items) da registration ou usar dados do DTO
+    let registrationKitItems: any[] = [];
+    try {
+      registrationKitItems = await prisma.registrationKitItem.findMany({
+        where: { registrationId },
+        include: {
+          kitItem: {
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                  basePrice: true,
+                },
+              },
+            },
+          },
+        },
+      });
+    } catch (e) {
+      // Se não houver RegistrationKitItem, vamos buscar dos produtos do DTO
+      this.logger.debug('No RegistrationKitItem found, using DTO data');
+    }
+
+    // Buscar modalidades da registration
+    const registrationModalities = await prisma.registrationModality.findMany({
+      where: { registrationId },
+      include: {
+        modality: {
+          select: {
+            id: true,
+            name: true,
+            description: true,
+            price: true,
+          },
+        },
+      },
+    });
+
+    // Buscar respostas das perguntas da registration
+    const questionAnswers = await prisma.questionAnswer.findMany({
+      where: { registrationId },
+      include: {
+        question: {
+          select: {
+            id: true,
+            question: true,
+            type: true,
+          },
+        },
+      },
+    });
+
+    // Formatar informações dos tickets
+    const tickets = registrationTickets.map((rt: any) => {
+      const ticket = rt.ticket;
+      // Encontrar o lote usado (pode ser o batchId do dto ou o lote ativo)
+      const batch = dto.tickets.find((t) => t.ticketId === ticket.id)?.batchId
+        ? ticket.batches.find((b: any) => b.id === dto.tickets.find((t) => t.ticketId === ticket.id)?.batchId)
+        : ticket.batches[0]; // Usar o primeiro lote se não especificado
+
+      return {
+        id: ticket.id,
+        name: ticket.name,
+        description: ticket.description,
+        price: batch?.price || ticket.basePrice || 0,
+        batch: batch ? {
+          id: batch.id,
+          name: batch.name,
+          price: batch.price,
+        } : null,
+        quantity: dto.tickets.find((t) => t.ticketId === ticket.id)?.quantity || 1,
+      };
+    });
+
+    // Buscar produtos inclusos nos tickets (TicketProduct) para cada ticket
+    const ticketProductsMap = new Map();
+    for (const ticketItem of dto.tickets) {
+      const ticketProducts = await prisma.ticketProduct.findMany({
+        where: { ticketId: ticketItem.ticketId },
+        include: {
+          product: {
+            include: {
+              variations: true,
+            },
+          },
+        },
+      });
+      ticketProductsMap.set(ticketItem.ticketId, ticketProducts);
+    }
+
+    // Formatar informações dos participantes usando dados do DTO e usuários encontrados
+    const participants = await Promise.all(
+      dto.participants.map(async (dtoParticipant, index) => {
+        const user = participantUsers.find((u) => u.email === dtoParticipant.email);
+
+        // Buscar respostas das perguntas deste participante
+        const participantQuestionAnswers = dtoParticipant.questionAnswers?.map((qa) => {
+          // Buscar a pergunta completa do banco se possível
+          const questionAnswer = questionAnswers.find((qaDb) => qaDb.questionId === qa.questionId);
+          return {
+            questionId: qa.questionId,
+            question: questionAnswer?.question?.question || null,
+            answer: qa.answer,
+            type: questionAnswer?.question?.type || null,
+          };
+        }) || [];
+
+        // Buscar produtos completos deste participante (produtos adicionais)
+        const participantProducts = [];
+        if (dtoParticipant.products) {
+          for (const productItem of dtoParticipant.products) {
+            const product = await prisma.product.findUnique({
+              where: { id: productItem.productId },
+              include: { variations: true },
+            });
+
+            if (product) {
+              let productPrice = product.basePrice;
+              let variationName = null;
+              if (productItem.variationId) {
+                const variation = product.variations.find(
+                  (v) => v.id === productItem.variationId,
+                );
+                if (variation) {
+                  productPrice = variation.price;
+                  variationName = variation.name;
+                }
+              }
+
+              participantProducts.push({
+                productId: product.id,
+                productName: product.name,
+                variationId: productItem.variationId || null,
+                variationName: variationName,
+                quantity: productItem.quantity,
+                unitPrice: productPrice,
+                totalPrice: productPrice * productItem.quantity,
+              });
+            }
+          }
+        }
+
+        // Buscar produtos inclusos nos ingressos deste participante
+        // Encontrar qual ticket foi comprado para este participante baseado na ordem
+        let ticketIndex = 0;
+        let participantCount = 0;
+        for (let i = 0; i < dto.tickets.length; i++) {
+          if (index < participantCount + dto.tickets[i].quantity) {
+            ticketIndex = i;
+            break;
+          }
+          participantCount += dto.tickets[i].quantity;
+        }
+        const participantTicket = dto.tickets[ticketIndex] || dto.tickets[0];
+
+        const includedProducts = ticketProductsMap.get(participantTicket?.ticketId) || [];
+        const formattedIncludedProducts = includedProducts.map((tp: any) => ({
+          productId: tp.product.id,
+          productName: tp.product.name,
+          basePrice: tp.product.basePrice,
+          isIncludedInTicket: true,
+        }));
+
+        return {
+          id: user?.id || `participant-${index}`,
+          name: user ? `${user.firstName} ${user.lastName}` : dtoParticipant.name,
+          email: dtoParticipant.email,
+          cpf: user?.documentNumber || dtoParticipant.cpf || null,  // documentNumber contém o CPF
+          phone: user?.phone || dtoParticipant.phone || null,
+          birthDate: user?.dateOfBirth ? user.dateOfBirth.toISOString().split('T')[0] : dtoParticipant.birthDate || null,  // dateOfBirth é DateTime
+          gender: user?.gender || dtoParticipant.gender || null,
+          questionAnswers: participantQuestionAnswers,
+          products: participantProducts, // Produtos adicionais
+          includedProducts: formattedIncludedProducts, // Produtos inclusos no ingresso
+        };
+      })
+    );
+
+    // Formatar informações dos produtos
+    let products: any[] = [];
+
+    if (registrationKitItems.length > 0) {
+      // Se houver RegistrationKitItem no banco, usar eles
+      products = registrationKitItems.map((rki: any) => {
+        const kitItem = rki.kitItem;
+        const product = kitItem.product;
+        return {
+          id: product.id,
+          name: product.name,
+          kitItemName: kitItem.name,
+          selectedSize: rki.selectedSize,
+          quantity: rki.quantity,
+          unitPrice: product.basePrice,
+          totalPrice: product.basePrice * rki.quantity,
+        };
+      });
+    } else {
+      // Se não houver no banco, buscar dos produtos do DTO
+      const allProducts: any[] = [];
+      for (const participant of dto.participants) {
+        if (participant.products) {
+          for (const productItem of participant.products) {
+            const product = await prisma.product.findUnique({
+              where: { id: productItem.productId },
+              include: { variations: true },
+            });
+
+            if (product) {
+              let productPrice = product.basePrice;
+              if (productItem.variationId) {
+                const variation = product.variations.find(
+                  (v) => v.id === productItem.variationId,
+                );
+                if (variation) {
+                  productPrice = variation.price;
+                }
+              }
+
+              allProducts.push({
+                id: product.id,
+                name: product.name,
+                variationId: productItem.variationId || null,
+                variationName: productItem.variationId
+                  ? product.variations.find((v) => v.id === productItem.variationId)?.name || null
+                  : null,
+                quantity: productItem.quantity,
+                unitPrice: productPrice,
+                totalPrice: productPrice * productItem.quantity,
+              });
+            }
+          }
+        }
+      }
+      products = allProducts;
+    }
+
+    // Formatar itens dos kits (separado dos produtos adicionais)
+    const kitItems = registrationKitItems.map((rki: any) => {
+      const kitItem = rki.kitItem;
+      return {
+        id: kitItem.id,
+        name: kitItem.name,
+        description: kitItem.description,
+        selectedSize: rki.selectedSize,
+        quantity: rki.quantity,
+        product: kitItem.product ? {
+          id: kitItem.product.id,
+          name: kitItem.product.name,
+          basePrice: kitItem.product.basePrice,
+        } : null,
+      };
+    });
+
+    // Formatar modalidades
+    const modalities = registrationModalities.map((rm: any) => ({
+      id: rm.modality.id,
+      name: rm.modality.name,
+      description: rm.modality.description,
+      price: rm.modality.price,
+    }));
+
+    // Formatar respostas das perguntas (agrupadas por pergunta)
+    const formattedQuestionAnswers = questionAnswers.map((qa: any) => ({
+      questionId: qa.questionId,
+      question: qa.question.question,
+      type: qa.question.type,
+      answer: qa.answer,
+    }));
+
+    return {
+      tickets,
+      participants,
+      products,
+      kitItems, // Itens dos kits
+      modalities, // Modalidades do evento
+      questionAnswers: formattedQuestionAnswers, // Respostas das perguntas
+    };
   }
 }

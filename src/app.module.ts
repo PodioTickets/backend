@@ -16,6 +16,7 @@ import { getCacheConfig } from './config/cache.config';
 import { CdnService } from './common/services/cdn.service';
 import { EventsModule } from './app/events/events.module';
 import { OrganizersModule } from './app/organizers/organizers.module';
+import { OrganizationsModule } from './app/organizations/organizations.module';
 import { RegistrationsModule } from './app/registrations/registrations.module';
 import { PaymentsModule } from './app/payments/payments.module';
 import { KitsModule } from './app/kits/kits.module';
@@ -62,6 +63,7 @@ import { CheckoutModule } from './app/checkout/checkout.module';
     // PodioGo Modules
     EventsModule,
     OrganizersModule,
+    OrganizationsModule,
     RegistrationsModule,
     PaymentsModule,
     KitsModule,

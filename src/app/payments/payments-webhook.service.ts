@@ -26,7 +26,11 @@ export class PaymentsWebhookService {
     const payment = await this.prisma.payment.findFirst({
       where: { transactionId: event.PaymentId },
       include: {
-        registration: true,
+        order: {
+          include: {
+            registrations: true,
+          },
+        },
       },
     });
 
@@ -59,10 +63,10 @@ export class PaymentsWebhookService {
         },
       });
 
-      // Atualizar status da inscrição se pago
-      if (paymentStatus === PaymentStatus.PAID) {
-        await prisma.registration.update({
-          where: { id: payment.registrationId },
+      // Atualizar status de todas as inscrições do pedido se pago
+      if (paymentStatus === PaymentStatus.PAID && payment.order) {
+        await prisma.registration.updateMany({
+          where: { orderId: payment.orderId },
           data: {
             status: 'CONFIRMED',
           },

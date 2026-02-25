@@ -15,12 +15,32 @@ import {
   UpdateEventTopicDto,
   CreateEventLocationDto,
 } from './dto/event-topic.dto';
-import { EventStatus } from '@prisma/client';
+import { DashboardQueryDto, DashboardPeriod } from './dto/dashboard.dto';
+import { FinancialQueryDto, FinancialPeriod } from './dto/financial.dto';
+import { RegistrationsQueryDto } from './dto/registrations.dto';
+import { EventStatus, RegistrationStatus, PaymentStatus, PaymentMethod } from '@prisma/client';
 import { generateSlug, generateUniqueSlug } from '../../helpers/SlugHelper';
 
 @Injectable()
 export class EventsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
+
+  /**
+   * Normaliza valor monetário para centavos
+   * Se o valor parece estar em reais (tem decimais e é menor que 1000), converte para centavos
+   */
+  private normalizeToCents(value: number | null | undefined): number {
+    if (!value || value === 0) return 0;
+
+    // Se o valor tem decimais significativos e é menor que 1000, provavelmente está em reais
+    // Converte para centavos multiplicando por 100
+    if (value < 1000 && value % 1 !== 0) {
+      return Math.round(value * 100);
+    }
+
+    // Caso contrário, assume que já está em centavos
+    return Math.round(value);
+  }
 
   /**
    * Valida se uma string é um UUID válido
@@ -51,14 +71,14 @@ export class EventsService {
       where: { slug },
       select: { id: true },
     });
-    
+
     if (!event) return false;
-    
+
     // Se estamos atualizando um evento, ignorar o próprio evento
     if (excludeEventId && event.id === excludeEventId) {
       return false;
     }
-    
+
     return true;
   }
 
@@ -82,10 +102,10 @@ export class EventsService {
     const baseSlug = customSlug || name;
     const uuidPart = this.extractUuidSecondPart(eventId);
     const slugWithUuid = uuidPart ? `${baseSlug}-${uuidPart}` : baseSlug;
-    
+
     // Gerar slug amigável
     const slug = generateSlug(slugWithUuid);
-    
+
     // Verificar se já existe e gerar único se necessário
     return generateUniqueSlug(slug, (s) =>
       this.slugExists(s, excludeEventId),
@@ -93,22 +113,28 @@ export class EventsService {
   }
 
   async create(userId: string, createEventDto: CreateEventDto) {
-    // Verificar se o usuário é organizador - usar write client
+    // Verificar se o usuário é membro de uma organização - usar write client
     const prismaWrite = this.prisma.getWriteClient();
 
-    const organizer = await prismaWrite.organizer.findUnique({
-      where: { userId },
+    const member = await prismaWrite.organizationMember.findFirst({
+      where: {
+        userId,
+        role: 'OWNER', // Apenas OWNER pode criar eventos
+      },
+      include: {
+        organization: true,
+      },
     });
 
-    if (!organizer) {
-      throw new BadRequestException('User is not an organizer');
+    if (!member) {
+      throw new BadRequestException('User is not an organizer (must be organization owner)');
     }
 
-    // Verificar se já existe um evento com o mesmo nome, data e organizador
+    // Verificar se já existe um evento com o mesmo nome, data e organização
     const eventDate = new Date(createEventDto.eventDate);
     const existingEvent = await prismaWrite.event.findFirst({
       where: {
-        organizerId: organizer.id,
+        organizationId: member.organizationId,
         name: createEventDto.name,
         eventDate: {
           gte: new Date(eventDate.getTime() - 24 * 60 * 60 * 1000), // 1 dia antes
@@ -119,7 +145,7 @@ export class EventsService {
 
     if (existingEvent) {
       throw new BadRequestException(
-        'An event with the same name and date already exists for this organizer',
+        'An event with the same name and date already exists for this organization',
       );
     }
 
@@ -128,21 +154,27 @@ export class EventsService {
       data: {
         ...createEventDto,
         slug: null, // Será gerado depois com o ID
-        organizerId: organizer.id,
+        organizationId: member.organizationId,
         eventDate: new Date(createEventDto.eventDate),
         registrationStartDate: new Date(createEventDto.registrationStartDate),
         registrationEndDate: new Date(createEventDto.registrationEndDate),
       },
       include: {
-        organizer: {
+        organization: {
           include: {
-            user: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                email: true,
+            members: {
+              where: { role: 'OWNER' },
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    email: true,
+                  },
+                },
               },
+              take: 1,
             },
           },
         },
@@ -161,15 +193,21 @@ export class EventsService {
       where: { id: event.id },
       data: { slug },
       include: {
-        organizer: {
+        organization: {
           include: {
-            user: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                email: true,
+            members: {
+              where: { role: 'OWNER' },
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    email: true,
+                  },
+                },
               },
+              take: 1,
             },
           },
         },
@@ -277,6 +315,7 @@ export class EventsService {
           description: true,
           bannerUrl: true,
           logoUrl: true,
+          slug: true,
           location: true,
           city: true,
           state: true,
@@ -286,7 +325,7 @@ export class EventsService {
           registrationEndDate: true,
           status: true,
           createdAt: true,
-          organizer: {
+          organization: {
             select: {
               id: true,
               name: true,
@@ -344,16 +383,19 @@ export class EventsService {
     // Se não especificar status e não for includeDraft, mostrar apenas PUBLISHED
     // Se for includeDraft e userId for fornecido, mostrar eventos do organizador também
     if (includeDraft && userId) {
-      // Buscar eventos do organizador ou eventos publicados
+      // Buscar eventos da organização do usuário ou eventos publicados
       const prismaRead = this.prisma.getReadClient();
-      const organizer = await prismaRead.organizer.findUnique({
-        where: { userId },
+      const member = await prismaRead.organizationMember.findFirst({
+        where: {
+          userId,
+          role: 'OWNER',
+        },
       });
 
-      if (organizer) {
+      if (member) {
         where.OR = [
           { status: EventStatus.PUBLISHED },
-          { organizerId: organizer.id },
+          { organizationId: member.organizationId },
         ];
       } else {
         where.status = status || EventStatus.PUBLISHED;
@@ -471,7 +513,7 @@ export class EventsService {
         skip: (page - 1) * limit,
         take: limit,
         include: {
-          organizer: {
+          organization: {
             select: {
               id: true,
               name: true,
@@ -502,7 +544,7 @@ export class EventsService {
 
   /**
    * Busca eventos de um organizador de forma performática
-   * Usa read replica e índice [organizerId, createdAt]
+   * Usa read replica e índice [organizationId, createdAt]
    */
   async findByOrganizer(
     userId: string,
@@ -528,19 +570,22 @@ export class EventsService {
 
     const prismaRead = this.prisma.getReadClient();
 
-    // Buscar organizerId do userId
-    const organizer = await prismaRead.organizer.findUnique({
-      where: { userId },
-      select: { id: true },
+    // Buscar organizationId do userId (membro OWNER)
+    const member = await prismaRead.organizationMember.findFirst({
+      where: {
+        userId,
+        role: 'OWNER',
+      },
+      select: { organizationId: true },
     });
 
-    if (!organizer) {
+    if (!member) {
       throw new BadRequestException('User is not an organizer');
     }
 
-    // Construir where clause otimizado para usar índice [organizerId, createdAt]
+    // Construir where clause otimizado para usar índice [organizationId, createdAt]
     const where: any = {
-      organizerId: organizer.id, // Usa o índice
+      organizationId: member.organizationId, // Usa o índice
     };
 
     // Filtro por status
@@ -582,6 +627,7 @@ export class EventsService {
           description: true,
           bannerUrl: true,
           logoUrl: true,
+          slug: true,
           location: true,
           city: true,
           state: true,
@@ -599,7 +645,7 @@ export class EventsService {
             },
           },
         },
-        // Ordenar por createdAt desc para usar índice [organizerId, createdAt]
+        // Ordenar por createdAt desc para usar índice [organizationId, createdAt]
         orderBy: {
           createdAt: 'desc',
         },
@@ -607,10 +653,33 @@ export class EventsService {
       prismaRead.event.count({ where }),
     ]);
 
+    // Calcular valor total em vendas para cada evento
+    const eventsWithSales = await Promise.all(
+      events.map(async (event) => {
+        // Buscar todos os pedidos pagos deste evento
+        const totalSales = await prismaRead.order.aggregate({
+          where: {
+            eventId: event.id,
+            payment: {
+              status: 'PAID',
+            },
+          },
+          _sum: {
+            finalAmount: true,
+          },
+        });
+
+        return {
+          ...event,
+          totalSales: this.normalizeToCents(totalSales._sum.finalAmount),
+        };
+      }),
+    );
+
     return {
       message: 'Organizer events fetched successfully',
       data: {
-        events,
+        events: eventsWithSales,
         pagination: {
           page,
           limit,
@@ -630,16 +699,22 @@ export class EventsService {
     const event = await prismaRead.event.findUnique({
       where: { id },
       include: {
-        organizer: {
+        organization: {
           include: {
-            user: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                email: true,
-                phone: true,
+            members: {
+              where: { role: 'OWNER' },
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    email: true,
+                    phone: true,
+                  },
+                },
               },
+              take: 1,
             },
           },
         },
@@ -703,15 +778,20 @@ export class EventsService {
     const event = await prismaRead.event.findUnique({
       where: { slug },
       include: {
-        organizer: {
+        organization: {
           include: {
-            user: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                email: true,
-                phone: true,
+            members: {
+              where: { role: 'OWNER' },
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    email: true,
+                    phone: true,
+                  },
+                },
               },
             },
           },
@@ -821,12 +901,6 @@ export class EventsService {
     this.validateUUID(id, 'event ID');
     const prismaWrite = this.prisma.getWriteClient();
 
-    const organizer = await prismaWrite.organizer.findUnique({
-      where: { userId },
-    });
-
-    if (!organizer) throw new BadRequestException('User is not an organizer');
-
     const event = await prismaWrite.event.findUnique({
       where: { id },
     });
@@ -835,12 +909,22 @@ export class EventsService {
       throw new NotFoundException('Event not found');
     }
 
-    if (event.organizerId !== organizer.id) {
-      throw new BadRequestException('User is not the organizer of this event');
+    // Verificar se o usuário é OWNER da organização do evento
+    const member = await prismaWrite.organizationMember.findUnique({
+      where: {
+        organizationId_userId: {
+          organizationId: event.organizationId,
+          userId,
+        },
+      },
+    });
+
+    if (!member || member.role !== 'OWNER') {
+      throw new BadRequestException('Only the organization owner can update events');
     }
 
     const updateData: any = { ...updateEventDto };
-    
+
     // Gerar slug se o nome ou slug foi alterado
     if (updateEventDto.name || updateEventDto.slug) {
       const nameForSlug = updateEventDto.name || event.name;
@@ -852,7 +936,7 @@ export class EventsService {
         id, // excludeEventId
       );
     }
-    
+
     if (updateEventDto.eventDate) {
       updateData.eventDate = new Date(updateEventDto.eventDate);
     }
@@ -870,7 +954,24 @@ export class EventsService {
       where: { id },
       data: updateData,
       include: {
-        organizer: true,
+        organization: {
+          include: {
+            members: {
+              where: { role: 'OWNER' },
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    email: true,
+                  },
+                },
+              },
+              take: 1,
+            },
+          },
+        },
       },
     });
     return {
@@ -884,14 +985,6 @@ export class EventsService {
 
     const prismaWrite = this.prisma.getWriteClient();
 
-    const organizer = await prismaWrite.organizer.findUnique({
-      where: { userId },
-    });
-
-    if (!organizer) {
-      throw new BadRequestException('User is not an organizer');
-    }
-
     const event = await prismaWrite.event.findUnique({
       where: { id },
     });
@@ -900,8 +993,18 @@ export class EventsService {
       throw new NotFoundException('Event not found');
     }
 
-    if (event.organizerId !== organizer.id) {
-      throw new BadRequestException('User is not the organizer of this event');
+    // Verificar se o usuário é OWNER da organização do evento
+    const member = await prismaWrite.organizationMember.findUnique({
+      where: {
+        organizationId_userId: {
+          organizationId: event.organizationId,
+          userId,
+        },
+      },
+    });
+
+    if (!member || member.role !== 'OWNER') {
+      throw new BadRequestException('Only the organization owner can delete events');
     }
 
     await prismaWrite.event.delete({
@@ -1077,14 +1180,6 @@ export class EventsService {
     // Verificações de acesso críticas devem usar write client para consistência
     const prismaWrite = this.prisma.getWriteClient();
 
-    const organizer = await prismaWrite.organizer.findUnique({
-      where: { userId },
-    });
-
-    if (!organizer) {
-      throw new BadRequestException('User is not an organizer');
-    }
-
     const event = await prismaWrite.event.findUnique({
       where: { id: eventId },
     });
@@ -1093,8 +1188,18 @@ export class EventsService {
       throw new NotFoundException('Event not found');
     }
 
-    if (event.organizerId !== organizer.id) {
-      throw new BadRequestException('User is not the organizer of this event');
+    // Verificar se o usuário é membro da organização do evento (OWNER ou EMPLOYEE)
+    const member = await prismaWrite.organizationMember.findUnique({
+      where: {
+        organizationId_userId: {
+          organizationId: event.organizationId,
+          userId,
+        },
+      },
+    });
+
+    if (!member || (member.role !== 'OWNER' && member.role !== 'EMPLOYEE')) {
+      throw new BadRequestException('Only organization members (OWNER or EMPLOYEE) can perform this action');
     }
   }
 
@@ -1153,7 +1258,11 @@ export class EventsService {
       prismaRead.registration.findMany({
         where: { eventId },
         include: {
-          payment: true,
+          order: {
+            include: {
+              payment: true,
+            },
+          },
           modalities: true,
         },
       }),
@@ -1165,8 +1274,8 @@ export class EventsService {
     const totalRegistrations = registrations.length;
     const confirmedRegistrations = registrations.filter((r) => r.status === 'CONFIRMED').length;
     const totalRevenue = registrations
-      .filter((r) => r.payment && r.payment.status === 'PAID')
-      .reduce((sum, r) => sum + r.finalAmount, 0);
+      .filter((r) => r.order?.payment && r.order.payment.status === 'PAID')
+      .reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
 
     const ticketsSold = registrations.reduce((sum, r) => {
       return sum + (r.modalities?.length || 0);
@@ -1196,21 +1305,27 @@ export class EventsService {
     const registrations = await prismaRead.registration.findMany({
       where: {
         eventId,
-        payment: {
-          status: 'PAID',
+        order: {
+          payment: {
+            status: 'PAID',
+          },
         },
       },
       include: {
+        order: {
+          include: {
+            payment: true,
+          },
+        },
         modalities: {
           include: {
             modality: true,
           },
         },
-        payment: true,
       },
     });
 
-    const total = registrations.reduce((sum, r) => sum + r.finalAmount, 0);
+    const total = registrations.reduce((sum, r) => sum + (r.order?.finalAmount || 0), 0);
 
     // Agrupar por modalidade
     const breakdownMap = new Map<string, { ticketId: string; ticketName: string; revenue: number; quantity: number }>();
@@ -1244,6 +1359,1918 @@ export class EventsService {
       data: {
         total,
         breakdown,
+      },
+    };
+  }
+
+  /**
+   * Obtém dados do dashboard do evento
+   */
+  async getDashboard(userId: string, eventId: string, queryDto: DashboardQueryDto) {
+    await this.verifyOrganizerAccess(userId, eventId);
+
+    const prismaRead = this.prisma.getReadClient();
+    const { period = DashboardPeriod.GERAL, ticketIds, page = 1, limit = 10 } = queryDto;
+
+    // Calcular range de datas baseado no período
+    const dateRange = this.calculateDateRange(period);
+    const now = new Date();
+
+    // Construir filtro de data para order
+    const orderDateFilter: any = {};
+    if (dateRange.start) {
+      orderDateFilter.gte = dateRange.start;
+    }
+    if (dateRange.end) {
+      orderDateFilter.lte = dateRange.end;
+    }
+
+    // Query base para registrations
+    const registrationWhere: any = {
+      eventId,
+    };
+
+    // Aplicar filtro de data no order se houver
+    if (Object.keys(orderDateFilter).length > 0) {
+      registrationWhere.order = {
+        createdAt: orderDateFilter,
+      };
+    }
+
+    // Filtrar por ticketIds se fornecido
+    if (ticketIds && ticketIds.length > 0) {
+      registrationWhere.tickets = {
+        some: {
+          ticketId: { in: ticketIds },
+        },
+      };
+    }
+
+    // Buscar todas as registrations do período
+    const registrations = await prismaRead.registration.findMany({
+      where: registrationWhere,
+      include: {
+        order: {
+          include: {
+            payment: true,
+          },
+        },
+        modalities: {
+          include: {
+            modality: true,
+          },
+        },
+        tickets: {
+          include: {
+            ticket: {
+              include: {
+                category: {
+                  select: {
+                    id: true,
+                    name: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+        user: {
+          select: {
+            id: true,
+            city: true,
+            state: true,
+          },
+        },
+      },
+    });
+
+    // Calcular métricas principais
+    const paidRegistrations = registrations.filter(
+      (r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && r.status === RegistrationStatus.CONFIRMED,
+    );
+    const cancelledRegistrations = registrations.filter((r) => r.status === RegistrationStatus.CANCELLED);
+    const refundedRegistrations = registrations.filter((r) => r.order?.payment?.status === PaymentStatus.REFUNDED);
+
+    const netRevenue = paidRegistrations.reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
+    const totalRegistrations = registrations.length;
+    const cancellations = cancelledRegistrations.length;
+    const refunds = refundedRegistrations.length;
+
+    // Calcular ticket médio (valores já estão em centavos)
+    const averageTicket = paidRegistrations.length > 0 ? netRevenue / paidRegistrations.length : 0;
+
+    // Comparar com semana passada (para mudanças percentuais)
+    const lastWeekStart = new Date(now);
+    lastWeekStart.setDate(now.getDate() - 14);
+    const lastWeekEnd = new Date(now);
+    lastWeekEnd.setDate(now.getDate() - 7);
+
+    const lastWeekRegistrations = await prismaRead.registration.findMany({
+      where: {
+        eventId,
+        order: {
+          createdAt: {
+            gte: lastWeekStart,
+            lte: lastWeekEnd,
+          },
+          payment: {
+            status: PaymentStatus.PAID,
+          },
+        },
+        status: RegistrationStatus.CONFIRMED,
+      },
+      include: {
+        order: {
+          include: {
+            payment: true,
+          },
+        },
+      },
+    });
+
+    const lastWeekRevenue = lastWeekRegistrations.reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
+    const lastWeekCount = lastWeekRegistrations.length;
+    const lastWeekAvgTicket = lastWeekCount > 0 ? lastWeekRevenue / lastWeekCount : 0; // Valores já estão em centavos
+
+    const netRevenueChange = lastWeekRevenue > 0 ? ((netRevenue - lastWeekRevenue) / lastWeekRevenue) * 100 : 0;
+    const totalRegistrationsChange = lastWeekCount > 0 ? ((totalRegistrations - lastWeekCount) / lastWeekCount) * 100 : 0;
+    const averageTicketChange = lastWeekAvgTicket > 0 ? ((averageTicket - lastWeekAvgTicket) / lastWeekAvgTicket) * 100 : 0;
+
+    // Status de cancelamentos e estornos (thresholds)
+    const cancellationRate = totalRegistrations > 0 ? (cancellations / totalRegistrations) * 100 : 0;
+    const cancellationsStatus = cancellationRate > 10 ? 'Crítico' : cancellationRate > 5 ? 'Atenção' : 'Normal';
+
+    const refundRate = totalRegistrations > 0 ? (refunds / totalRegistrations) * 100 : 0;
+    const refundsStatus = refundRate > 5 ? 'Crítico' : refundRate > 2 ? 'Atenção' : 'Normal';
+
+    // Tendência de inscrições (dados para gráfico)
+    const chartData = this.buildChartData(registrations, dateRange);
+
+    // Ranking de ingressos
+    const ticketRanking = this.buildTicketRanking(registrations, page, limit);
+
+    // Top cidades
+    const topCities = this.buildTopCities(registrations);
+
+    // Lotes próximos de esgotamento
+    const lotsNearDepletion = await this.buildLotsNearDepletion(prismaRead, eventId);
+
+    // Heatmap de vendas
+    const salesHeatmap = this.buildSalesHeatmap(registrations);
+
+    // Calcular total de tickets únicos no ranking para paginação
+    const ticketMapForPagination = new Map<string, boolean>();
+    paidRegistrations.forEach((reg) => {
+      if (reg.tickets && reg.tickets.length > 0) {
+        reg.tickets.forEach((rt: any) => {
+          ticketMapForPagination.set(rt.ticket.id, true);
+        });
+      } else if (reg.modalities && reg.modalities.length > 0) {
+        reg.modalities.forEach((rm: any) => {
+          ticketMapForPagination.set(rm.modality.id, true);
+        });
+      }
+    });
+    const totalTicketsInRanking = ticketMapForPagination.size;
+
+    return {
+      message: 'Dashboard data fetched successfully',
+      data: {
+        period: {
+          selected: period,
+          startDate: dateRange.start?.toISOString() || null,
+          endDate: dateRange.end?.toISOString() || null,
+        },
+        metrics: {
+          netRevenue,
+          netRevenueChange,
+          averageTicket,
+          averageTicketChange,
+          totalRegistrations,
+          totalRegistrationsChange,
+          cancellations,
+          cancellationsStatus,
+          refunds,
+          refundsStatus,
+        },
+        registrationsTrend: {
+          amount: netRevenue, // Valores já estão em centavos no banco
+          change: netRevenueChange,
+          confirmed: paidRegistrations.length,
+          canceled: cancellations,
+          refunded: refunds,
+          chartData,
+        },
+        ticketRanking: {
+          data: ticketRanking,
+          pagination: {
+            page,
+            limit,
+            total: totalTicketsInRanking,
+            totalPages: Math.ceil(totalTicketsInRanking / limit),
+          },
+        },
+        topCities,
+        lotsNearDepletion,
+        salesHeatmap,
+      },
+    };
+  }
+
+  /**
+   * Calcula o range de datas baseado no período
+   */
+  private calculateDateRange(period: DashboardPeriod): { start: Date | null; end: Date | null } {
+    const now = new Date();
+    const start = new Date();
+    const end = new Date();
+
+    switch (period) {
+      case DashboardPeriod.LAST_24H:
+        start.setHours(now.getHours() - 24);
+        return { start, end: now };
+      case DashboardPeriod.LAST_7D:
+        start.setDate(now.getDate() - 7);
+        return { start, end: now };
+      case DashboardPeriod.LAST_15D:
+        start.setDate(now.getDate() - 15);
+        return { start, end: now };
+      case DashboardPeriod.LAST_1M:
+        start.setMonth(now.getMonth() - 1);
+        return { start, end: now };
+      case DashboardPeriod.LAST_2M:
+        start.setMonth(now.getMonth() - 2);
+        return { start, end: now };
+      case DashboardPeriod.GERAL:
+      default:
+        return { start: null, end: null };
+    }
+  }
+
+  /**
+   * Constrói dados do gráfico de tendência
+   */
+  private buildChartData(registrations: any[], dateRange: { start: Date | null; end: Date | null }) {
+    // Agrupar por data
+    const dailyData = new Map<string, { revenue: number; confirmed: number; canceled: number; refunded: number }>();
+
+    registrations.forEach((reg) => {
+      const date = new Date(reg.order?.createdAt || reg.createdAt).toISOString().split('T')[0];
+      if (!dailyData.has(date)) {
+        dailyData.set(date, { revenue: 0, confirmed: 0, canceled: 0, refunded: 0 });
+      }
+
+      const dayData = dailyData.get(date)!;
+      if (reg.order?.payment?.status === PaymentStatus.PAID && reg.status === RegistrationStatus.CONFIRMED) {
+        dayData.revenue += this.normalizeToCents(reg.order?.finalAmount);
+        dayData.confirmed += 1;
+      } else if (reg.status === RegistrationStatus.CANCELLED) {
+        dayData.canceled += 1;
+      } else if (reg.order?.payment?.status === PaymentStatus.REFUNDED) {
+        dayData.refunded += 1;
+      }
+    });
+
+    const sortedDates = Array.from(dailyData.keys()).sort();
+    const labels = sortedDates.map((d) => {
+      const date = new Date(d);
+      return date.toLocaleDateString('pt-BR', { month: 'short', day: 'numeric' });
+    });
+    const revenue = sortedDates.map((d) => dailyData.get(d)!.revenue); // Valores já estão em centavos no banco
+
+    return {
+      labels,
+      revenue,
+      dailyData: sortedDates.map((date) => {
+        const data = dailyData.get(date)!;
+        return {
+          date,
+          revenue: data.revenue, // Valores já estão em centavos no banco
+          confirmed: data.confirmed,
+          canceled: data.canceled,
+          refunded: data.refunded,
+        };
+      }),
+    };
+  }
+
+  /**
+   * Constrói ranking de ingressos
+   */
+  private buildTicketRanking(registrations: any[], page: number, limit: number) {
+    const ticketMap = new Map<string, { ticketId: string; name: string; category: string; quantity: number; total: number }>();
+
+    registrations.forEach((reg) => {
+      if (reg.order?.payment?.status === PaymentStatus.PAID && reg.status === RegistrationStatus.CONFIRMED) {
+        // Obter o valor total do pedido em centavos
+        const orderTotal = this.normalizeToCents(reg.order?.finalAmount);
+
+        // Usar tickets se disponível, senão usar modalities
+        if (reg.tickets && reg.tickets.length > 0) {
+          // Dividir o valor do pedido pelo número de tickets no pedido
+          const ticketsInOrder = reg.tickets.length;
+          const valuePerTicket = ticketsInOrder > 0 ? orderTotal / ticketsInOrder : 0;
+
+          reg.tickets.forEach((rt: any) => {
+            const ticket = rt.ticket;
+            const ticketId = ticket.id;
+            const ticketName = ticket.name;
+            const categoryName = ticket.category?.name || 'Sem categoria';
+
+            if (!ticketMap.has(ticketId)) {
+              ticketMap.set(ticketId, {
+                ticketId,
+                name: ticketName,
+                category: categoryName,
+                quantity: 0,
+                total: 0,
+              });
+            }
+
+            const ticketEntry = ticketMap.get(ticketId)!;
+            ticketEntry.quantity += 1;
+            ticketEntry.total += valuePerTicket;
+          });
+        } else if (reg.modalities && reg.modalities.length > 0) {
+          // Fallback para modalities se não houver tickets
+          // Dividir o valor do pedido pelo número de modalities
+          const modalitiesInOrder = reg.modalities.length;
+          const valuePerModality = modalitiesInOrder > 0 ? orderTotal / modalitiesInOrder : 0;
+
+          reg.modalities.forEach((rm: any) => {
+            const modality = rm.modality;
+            const ticketId = modality.id;
+            const ticketName = modality.name;
+            const categoryName = 'Sem categoria';
+
+            if (!ticketMap.has(ticketId)) {
+              ticketMap.set(ticketId, {
+                ticketId,
+                name: ticketName,
+                category: categoryName,
+                quantity: 0,
+                total: 0,
+              });
+            }
+
+            const ticket = ticketMap.get(ticketId)!;
+            ticket.quantity += 1;
+            ticket.total += valuePerModality;
+          });
+        }
+      }
+    });
+
+    const ranking = Array.from(ticketMap.values())
+      .map(ticket => ({
+        ...ticket,
+        total: Math.round(ticket.total), // Garantir que seja inteiro (centavos)
+      }))
+      .sort((a, b) => b.total - a.total)
+      .slice((page - 1) * limit, page * limit);
+
+    return ranking;
+  }
+
+  /**
+   * Constrói top cidades
+   */
+  private buildTopCities(registrations: any[]) {
+    const cityMap = new Map<string, { city: string; state?: string; buyers: number }>();
+
+    // Filtrar apenas registrations pagas e confirmadas
+    const paidRegistrations = registrations.filter(
+      (r) => r.order?.payment?.status === PaymentStatus.PAID && r.status === RegistrationStatus.CONFIRMED,
+    );
+
+    paidRegistrations.forEach((reg) => {
+      // Verificar se user existe e tem cidade (city pode ser string vazia)
+      const city = reg.user?.city?.trim();
+      const state = reg.user?.state?.trim() || '';
+
+      if (city && city.length > 0) {
+        const key = `${city}-${state}`;
+        if (!cityMap.has(key)) {
+          cityMap.set(key, {
+            city: city,
+            state: state || undefined,
+            buyers: 0,
+          });
+        }
+        cityMap.get(key)!.buyers += 1;
+      }
+    });
+
+    // Ordenar por número de compradores (decrescente) e retornar apenas as 2 top cidades
+    const result = Array.from(cityMap.values())
+      .sort((a, b) => b.buyers - a.buyers)
+      .slice(0, 2) // Limitar a apenas 2 cidades
+      .map((item) => ({
+        city: item.city,
+        state: item.state,
+        buyers: item.buyers,
+      }));
+
+    return result;
+  }
+
+  /**
+   * Constrói lista de lotes próximos de esgotamento
+   */
+  private async buildLotsNearDepletion(prismaRead: any, eventId: string) {
+    const tickets = await prismaRead.ticket.findMany({
+      where: { eventId, isActive: true },
+      include: {
+        batches: {
+          orderBy: {
+            createdAt: 'asc', // Ordenar por data de criação para processar na ordem
+          },
+        },
+        category: true,
+        registrations: {
+          include: {
+            registration: {
+              include: {
+                order: {
+                  include: {
+                    payment: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    console.log('[DEBUG lotsNearDepletion] Tickets found:', tickets.length);
+
+    const lots: any[] = [];
+    const now = new Date();
+
+    for (const ticket of tickets) {
+      console.log(`[DEBUG lotsNearDepletion] Processing ticket: ${ticket.name} (${ticket.id})`);
+      console.log(`[DEBUG lotsNearDepletion] Ticket batches:`, ticket.batches.length);
+      console.log(`[DEBUG lotsNearDepletion] Ticket registrations:`, ticket.registrations.length);
+
+      // Contar vendas confirmadas e pagas do ticket
+      const soldCount = ticket.registrations.filter(
+        (rt: any) => rt.registration.order?.payment?.status === PaymentStatus.PAID && rt.registration.status === RegistrationStatus.CONFIRMED,
+      ).length;
+
+      console.log(`[DEBUG lotsNearDepletion] Sold count:`, soldCount);
+
+      if (soldCount === 0) {
+        console.log(`[DEBUG lotsNearDepletion] Skipping ticket ${ticket.name} - no sales`);
+        continue; // Pular tickets sem vendas
+      }
+
+      // Filtrar apenas lotes ativos (sem endDate ou endDate no futuro, e com startDate no passado ou null)
+      const activeBatches = ticket.batches.filter((batch: any) => {
+        // Verificar se o lote já começou
+        if (batch.startDate && new Date(batch.startDate) > now) {
+          console.log(`[DEBUG lotsNearDepletion] Batch ${batch.id} not started yet`);
+          return false; // Lote ainda não começou
+        }
+        // Verificar se o lote ainda não terminou
+        if (batch.endDate && new Date(batch.endDate) < now) {
+          console.log(`[DEBUG lotsNearDepletion] Batch ${batch.id} already ended`);
+          return false; // Lote já terminou
+        }
+        return true;
+      });
+
+      console.log(`[DEBUG lotsNearDepletion] Active batches:`, activeBatches.length);
+
+      if (activeBatches.length === 0) {
+        console.log(`[DEBUG lotsNearDepletion] Skipping ticket ${ticket.name} - no active batches`);
+        continue;
+      }
+
+      // Calcular quantidade total disponível nos lotes ativos
+      const totalAvailable = activeBatches.reduce((sum: number, batch: any) => sum + batch.quantity, 0);
+
+      console.log(`[DEBUG lotsNearDepletion] Total available:`, totalAvailable);
+
+      if (totalAvailable === 0) {
+        console.log(`[DEBUG lotsNearDepletion] Skipping ticket ${ticket.name} - no available quantity`);
+        continue; // Pular se não há quantidade disponível
+      }
+
+      // Distribuir vendas entre os lotes ativos proporcionalmente
+      // Começamos pelos lotes mais antigos primeiro
+      let remainingSold = soldCount;
+
+      for (const batch of activeBatches) {
+        if (remainingSold <= 0) break;
+
+        // Calcular quanto deste lote foi vendido (proporcional à quantidade total)
+        const batchProportion = totalAvailable > 0 ? batch.quantity / totalAvailable : 0;
+        const estimatedSold = Math.min(
+          Math.round(soldCount * batchProportion),
+          batch.quantity,
+          remainingSold,
+        );
+
+        const remaining = Math.max(0, batch.quantity - estimatedSold);
+        const percentageSold = batch.quantity > 0 ? (estimatedSold / batch.quantity) * 100 : 0;
+
+        // Também considerar lotes com pouca quantidade restante (menos de 25 unidades)
+        const isLowStock = remaining > 0 && remaining <= 25;
+
+        let status: 'Normal' | 'Atenção' | 'Crítico';
+        if (percentageSold >= 90 || (isLowStock && percentageSold >= 50)) {
+          status = 'Crítico';
+        } else if (percentageSold >= 75 || (isLowStock && percentageSold >= 25)) {
+          status = 'Atenção';
+        } else {
+          status = 'Normal';
+        }
+
+        console.log(`[DEBUG lotsNearDepletion] Batch ${batch.id}:`, {
+          estimatedSold,
+          total: batch.quantity,
+          remaining,
+          percentageSold: Math.round(percentageSold),
+          status,
+        });
+
+        if (status !== 'Normal') {
+          lots.push({
+            lotId: batch.id,
+            ticketId: ticket.id,
+            ticketName: ticket.name,
+            name: `${ticket.name} - Lote ${batch.id.slice(0, 8)}`,
+            status,
+            sold: estimatedSold,
+            total: batch.quantity,
+            remaining,
+            percentageSold: Math.round(percentageSold),
+          });
+        }
+
+        remainingSold -= estimatedSold;
+      }
+    }
+
+    console.log('[DEBUG lotsNearDepletion] Final lots:', lots.length);
+    console.log('[DEBUG lotsNearDepletion] Final lots data:', lots);
+
+    return lots.sort((a, b) => b.percentageSold - a.percentageSold);
+  }
+
+  /**
+   * Constrói heatmap de vendas
+   */
+  private buildSalesHeatmap(registrations: any[]) {
+    const heatmap = new Map<string, number>();
+
+    registrations.forEach((reg) => {
+      if (reg.order?.payment?.status === PaymentStatus.PAID && reg.status === RegistrationStatus.CONFIRMED) {
+        const date = new Date(reg.order?.createdAt || reg.createdAt);
+        const day = date.getDay(); // 0 = Domingo, 6 = Sábado
+        const hour = date.getHours();
+
+        const dayNames = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sab'];
+        const key = `${dayNames[day]}-${hour}`;
+
+        heatmap.set(key, (heatmap.get(key) || 0) + 1);
+      }
+    });
+
+    return Array.from(heatmap.entries()).map(([key, sales]) => {
+      const [day, hour] = key.split('-');
+      return {
+        day,
+        hour: parseInt(hour, 10),
+        sales,
+      };
+    });
+  }
+
+  /**
+   * 
+   * Obtém dados financeiros do evento
+   */
+  async getFinancial(userId: string, eventId: string, queryDto: FinancialQueryDto) {
+    await this.verifyOrganizerAccess(userId, eventId);
+
+    const prismaRead = this.prisma.getReadClient();
+    const { period = FinancialPeriod.HOJE, page = 1, limit = 20 } = queryDto;
+
+    // Calcular range de datas
+    const dateRange = this.calculateFinancialDateRange(period);
+
+    // Construir filtro de data
+    const orderDateFilter: any = {};
+    if (dateRange.start) {
+      orderDateFilter.gte = dateRange.start;
+    }
+    if (dateRange.end) {
+      orderDateFilter.lte = dateRange.end;
+    }
+
+    // Buscar todas as registrations pagas
+    const registrations = await prismaRead.registration.findMany({
+      where: {
+        eventId,
+        order: {
+          payment: {
+            status: PaymentStatus.PAID,
+          },
+          ...(Object.keys(orderDateFilter).length > 0 && { createdAt: orderDateFilter }),
+        },
+      },
+      include: {
+        order: {
+          include: {
+            payment: true,
+          },
+        },
+        modalities: {
+          include: {
+            modality: true,
+          },
+        },
+      },
+    });
+
+    // Calcular resumo financeiro
+    const grossRevenue = registrations.reduce((sum, r) => sum + this.normalizeToCents(r.order?.totalAmount), 0);
+
+    // Calcular valores aguardando liberação (prazo de retenção: 30 dias)
+    const retentionDays = 30;
+    const now = new Date();
+    const pendingReleaseRegistrations = registrations.filter((r) => {
+      if (!r.order?.payment?.paymentDate) return false;
+      const releaseDate = new Date(r.order.payment.paymentDate);
+      releaseDate.setDate(releaseDate.getDate() + retentionDays);
+      return releaseDate > now;
+    });
+    const awaitingRelease = pendingReleaseRegistrations.reduce((sum, r) => sum + (r.order?.finalAmount || 0), 0);
+
+    // Calcular parcelas a receber (apenas para cartão de crédito parcelado)
+    const installmentPayments = registrations.filter((r) => {
+      const metadata = r.order?.payment?.metadata as any;
+      return metadata?.creditCard?.installments && metadata.creditCard.installments > 1;
+    });
+    const installmentsToReceive = await this.calculateInstallmentsToReceive(installmentPayments);
+
+    // Calcular total já repassado (pagamentos antigos que já passaram do prazo de retenção)
+    const transferredRegistrations = registrations.filter((r) => {
+      if (!r.order?.payment?.paymentDate) return false;
+      const releaseDate = new Date(r.order.payment.paymentDate);
+      releaseDate.setDate(releaseDate.getDate() + retentionDays);
+      return releaseDate <= now;
+    });
+    const totalTransferred = transferredRegistrations.reduce((sum, r) => sum + (r.order?.finalAmount || 0), 0);
+
+    const refunded = registrations
+      .filter((r) => r.order?.payment?.status === PaymentStatus.REFUNDED)
+      .reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
+    const chargebacks = 0; // TODO: Implementar quando houver chargebacks
+    const availableBalance = grossRevenue - totalTransferred - awaitingRelease - refunded;
+
+    // Comparar com semana passada
+    const lastWeekStart = new Date();
+    lastWeekStart.setDate(lastWeekStart.getDate() - 14);
+    const lastWeekEnd = new Date();
+    lastWeekEnd.setDate(lastWeekEnd.getDate() - 7);
+
+    const lastWeekRegistrations = await prismaRead.registration.findMany({
+      where: {
+        eventId,
+        order: {
+          createdAt: {
+            gte: lastWeekStart,
+            lte: lastWeekEnd,
+          },
+          payment: {
+            status: PaymentStatus.PAID,
+          },
+        },
+      },
+      include: {
+        order: {
+          include: {
+            payment: true,
+          },
+        },
+      },
+    });
+
+    const lastWeekRevenue = lastWeekRegistrations.reduce((sum, r) => sum + this.normalizeToCents(r.order?.totalAmount), 0);
+    const revenueChange = lastWeekRevenue > 0 ? ((grossRevenue - lastWeekRevenue) / lastWeekRevenue) * 100 : 0;
+
+    // Dados para gráfico de faturamento
+    const revenueChart = this.buildRevenueChart(registrations, dateRange);
+
+    // Tabela de ingressos/lotes
+    const tickets = await this.buildTicketsTable(prismaRead, eventId, page, limit);
+
+    return {
+      message: 'Financial data fetched successfully',
+      data: {
+        summary: {
+          availableBalance: availableBalance, // Já está normalizado em centavos
+          installmentsToReceive: installmentsToReceive, // Já está normalizado em centavos
+          awaitingRelease: awaitingRelease, // Já está normalizado em centavos
+          totalTransferred: totalTransferred, // Já está normalizado em centavos
+          refunded: refunded, // Já está normalizado em centavos
+          chargebacks: chargebacks, // Já está normalizado em centavos
+          grossRevenue: grossRevenue, // Já está normalizado em centavos
+          revenueChange,
+        },
+        revenueChart,
+        tickets,
+      },
+    };
+  }
+
+  /**
+   * Calcula range de datas para financial
+   */
+  private calculateFinancialDateRange(period: FinancialPeriod): { start: Date | null; end: Date | null } {
+    const now = new Date();
+    const start = new Date();
+    const end = new Date();
+
+    switch (period) {
+      case FinancialPeriod.HOJE:
+        start.setHours(0, 0, 0, 0);
+        end.setHours(23, 59, 59, 999);
+        return { start, end };
+      case FinancialPeriod.LAST_7D:
+        start.setDate(now.getDate() - 7);
+        return { start, end: now };
+      case FinancialPeriod.LAST_15D:
+        start.setDate(now.getDate() - 15);
+        return { start, end: now };
+      case FinancialPeriod.LAST_1M:
+        start.setMonth(now.getMonth() - 1);
+        start.setHours(0, 0, 0, 0);
+        end.setHours(23, 59, 59, 999);
+        return { start, end: now };
+      case FinancialPeriod.LAST_2M:
+        start.setMonth(now.getMonth() - 2);
+        start.setHours(0, 0, 0, 0);
+        end.setHours(23, 59, 59, 999);
+        return { start, end: now };
+      default:
+        return { start: null, end: null };
+    }
+  }
+
+  /**
+   * Constrói gráfico de faturamento
+   */
+  private buildRevenueChart(registrations: any[], dateRange: { start: Date | null; end: Date | null }) {
+    const dailyData = new Map<string, number>();
+
+    registrations.forEach((reg) => {
+      const date = new Date(reg.order?.createdAt || reg.createdAt).toISOString().split('T')[0];
+      dailyData.set(date, (dailyData.get(date) || 0) + (reg.order?.totalAmount || 0));
+    });
+
+    const sortedDates = Array.from(dailyData.keys()).sort();
+    const labels = sortedDates.map((d) => {
+      const date = new Date(d);
+      return date.toLocaleDateString('pt-BR', { month: 'short', day: 'numeric' });
+    });
+    const revenue = sortedDates.map((d) => dailyData.get(d)!);
+
+    return {
+      labels,
+      revenue,
+      dailyData: sortedDates.map((date) => ({
+        date,
+        revenue: dailyData.get(date)!,
+      })),
+    };
+  }
+
+  /**
+   * Constrói tabela de ingressos/lotes
+   */
+  private async buildTicketsTable(prismaRead: any, eventId: string, page: number, limit: number) {
+    const skip = (page - 1) * limit;
+
+    // Buscar todas as registrations pagas para calcular vendas
+    const paidRegistrations = await prismaRead.registration.findMany({
+      where: {
+        eventId,
+        order: {
+          payment: {
+            status: PaymentStatus.PAID,
+          },
+        },
+      },
+      include: {
+        order: {
+          include: {
+            payment: true,
+          },
+        },
+        tickets: {
+          include: {
+            ticket: {
+              include: {
+                category: true,
+                batches: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    // Buscar categorias e tickets
+    const categories = await prismaRead.ticketCategory.findMany({
+      where: { eventId },
+      include: {
+        tickets: {
+          include: {
+            batches: true,
+          },
+        },
+      },
+      orderBy: { order: 'asc' },
+    });
+
+    const items: any[] = [];
+
+    for (const category of categories) {
+      // Calcular vendas da categoria
+      const categoryRegistrations = paidRegistrations.filter((reg: any) =>
+        reg.tickets.some((rt: any) => rt.ticket.categoryId === category.id),
+      );
+
+      const categorySold = categoryRegistrations.length;
+      const categoryRevenue = categoryRegistrations.reduce((sum: number, reg: any) => sum + this.normalizeToCents(reg.order?.finalAmount), 0);
+
+      items.push({
+        id: category.id,
+        type: 'category' as const,
+        name: category.name,
+        sold: `${categorySold}`,
+        revenue: categoryRevenue,
+        createdAt: category.createdAt.toISOString(),
+        lots: category.tickets.flatMap((ticket: any) => {
+          const ticketRegistrations = paidRegistrations.filter((reg: any) =>
+            reg.tickets.some((rt: any) => rt.ticketId === ticket.id),
+          );
+          const ticketSold = ticketRegistrations.length;
+          const ticketRevenue = ticketRegistrations.reduce((sum: number, reg: any) => sum + this.normalizeToCents(reg.order?.finalAmount || reg.finalAmount), 0);
+
+          return ticket.batches.map((batch: any) => ({
+            id: batch.id,
+            name: `${ticket.name} - Lote ${batch.id.slice(0, 8)}`,
+            sold: `${ticketSold}-${batch.quantity}`,
+            revenue: ticketRevenue,
+            createdAt: batch.createdAt.toISOString(),
+          }));
+        }),
+      });
+    }
+
+    // Buscar tickets sem categoria
+    const ticketsWithoutCategory = await prismaRead.ticket.findMany({
+      where: {
+        eventId,
+        categoryId: null,
+      },
+      include: {
+        batches: true,
+      },
+    });
+
+    for (const ticket of ticketsWithoutCategory) {
+      const ticketRegistrations = paidRegistrations.filter((reg: any) =>
+        reg.tickets.some((rt: any) => rt.ticketId === ticket.id),
+      );
+      const ticketSold = ticketRegistrations.length;
+      const ticketRevenue = ticketRegistrations.reduce((sum: number, reg: any) => sum + this.normalizeToCents(reg.order?.finalAmount), 0);
+
+      items.push({
+        id: ticket.id,
+        type: 'lot' as const,
+        name: ticket.name,
+        sold: `${ticketSold}`,
+        revenue: ticketRevenue,
+        createdAt: ticket.createdAt.toISOString(),
+      });
+    }
+
+    const total = items.length;
+    const paginatedItems = items.slice(skip, skip + limit);
+
+    return {
+      items: paginatedItems,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
+  }
+
+  /**
+   * Obtém inscrições com filtros avançados
+   */
+  async getRegistrations(userId: string, eventId: string, queryDto: RegistrationsQueryDto) {
+    await this.verifyOrganizerAccess(userId, eventId);
+
+    const prismaRead = this.prisma.getReadClient();
+    const {
+      page = 1,
+      limit = 20,
+      status,
+      search,
+      ticketIds,
+      startDate,
+      endDate,
+      sortBy = 'purchaseDate',
+      sortOrder = 'desc',
+    } = queryDto;
+
+    const skip = (page - 1) * limit;
+
+    // Construir where clause
+    const where: any = {
+      eventId,
+    };
+
+    if (status) {
+      where.status = status;
+    }
+
+    if (startDate || endDate) {
+      where.order = {
+        createdAt: {},
+      };
+      if (startDate) where.order.createdAt.gte = new Date(startDate);
+      if (endDate) where.order.createdAt.lte = new Date(endDate);
+    }
+
+    // Filtro por ticketIds
+    if (ticketIds && ticketIds.length > 0) {
+      where.tickets = {
+        some: {
+          ticketId: { in: ticketIds },
+        },
+      };
+    }
+
+    // Busca por texto (nome, CPF, email, ID)
+    if (search) {
+      where.OR = [
+        { id: { contains: search, mode: 'insensitive' } },
+        {
+          user: {
+            OR: [
+              { firstName: { contains: search, mode: 'insensitive' } },
+              { lastName: { contains: search, mode: 'insensitive' } },
+              { email: { contains: search, mode: 'insensitive' } },
+              { documentNumber: { contains: search, mode: 'insensitive' } },
+            ],
+          },
+        },
+      ];
+    }
+
+    // Ordenação
+    // Sempre adicionar ordenação secundária por id da registration para garantir ordem consistente
+    const orderBy: any[] = [];
+    if (sortBy === 'purchaseDate') {
+      orderBy.push({
+        order: {
+          createdAt: sortOrder,
+        },
+      });
+    } else if (sortBy === 'amount') {
+      orderBy.push({
+        order: {
+          finalAmount: sortOrder,
+        },
+      });
+    } else if (sortBy === 'status') {
+      orderBy.push({
+        status: sortOrder,
+      });
+    }
+    // Sempre adicionar ordenação secundária por id para garantir ordem consistente entre registrations do mesmo pedido
+    orderBy.push({ id: sortOrder });
+
+    // Buscar registrations e total
+    const [registrations, total] = await Promise.all([
+      prismaRead.registration.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy,
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+              documentNumber: true,
+              avatarUrl: true,
+            },
+          },
+          modalities: {
+            include: {
+              modality: true,
+            },
+          },
+          tickets: {
+            include: {
+              ticket: {
+                include: {
+                  category: {
+                    select: {
+                      id: true,
+                      name: true,
+                    },
+                  },
+                  batches: {
+                    orderBy: {
+                      createdAt: 'desc', // Pegar o batch mais recente primeiro
+                    },
+                  },
+                },
+              },
+            },
+          },
+          kitItems: {
+            include: {
+              kitItem: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+            },
+          },
+          questionAnswers: {
+            include: {
+              question: {
+                select: {
+                  id: true,
+                  question: true,
+                  type: true,
+                },
+              },
+            },
+          },
+          order: {
+            include: {
+              payment: {
+                select: {
+                  id: true,
+                  status: true,
+                  method: true,
+                  amount: true,
+                  paymentDate: true,
+                  createdAt: true,
+                },
+              },
+              user: {
+                select: {
+                  id: true,
+                  firstName: true,
+                  lastName: true,
+                  email: true,
+                  avatarUrl: true,
+                },
+              },
+            },
+          },
+        },
+      }),
+      prismaRead.registration.count({ where }),
+    ]);
+
+    // Calcular estatísticas
+    const allRegistrations = await prismaRead.registration.findMany({
+      where: { eventId },
+      include: {
+        order: {
+          include: {
+            payment: true,
+          },
+        },
+      },
+    });
+
+    const paid = allRegistrations.filter(
+      (r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED),
+    ).length;
+    const cancelled = allRegistrations.filter((r) => r.status === RegistrationStatus.CANCELLED).length;
+    const totalCollected = allRegistrations
+      .filter((r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED))
+      .reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
+
+    // Comparar com semana passada
+    const lastWeekStart = new Date();
+    lastWeekStart.setDate(lastWeekStart.getDate() - 14);
+    const lastWeekEnd = new Date();
+    lastWeekEnd.setDate(lastWeekEnd.getDate() - 7);
+
+    const lastWeekRegistrations = await prismaRead.registration.findMany({
+      where: {
+        eventId,
+        order: {
+          createdAt: {
+            gte: lastWeekStart,
+            lte: lastWeekEnd,
+          },
+        },
+      },
+      include: {
+        order: {
+          include: {
+            payment: true,
+          },
+        },
+      },
+    });
+
+    const lastWeekTotal = lastWeekRegistrations.length;
+    const lastWeekPaid = lastWeekRegistrations.filter(
+      (r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED),
+    ).length;
+    const lastWeekCancelled = lastWeekRegistrations.filter((r) => r.status === RegistrationStatus.CANCELLED).length;
+    const lastWeekCollected = lastWeekRegistrations
+      .filter((r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED))
+      .reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
+
+    const totalChange = lastWeekTotal > 0 ? ((allRegistrations.length - lastWeekTotal) / lastWeekTotal) * 100 : 0;
+    const paidChange = lastWeekPaid > 0 ? ((paid - lastWeekPaid) / lastWeekPaid) * 100 : 0;
+    const cancelledChange = lastWeekCancelled > 0 ? ((cancelled - lastWeekCancelled) / lastWeekCancelled) * 100 : 0;
+    const totalCollectedChange = lastWeekCollected > 0 ? ((totalCollected - lastWeekCollected) / lastWeekCollected) * 100 : 0;
+
+    // Formatar registrations
+    // Cada registration representa um participante do pedido
+    // O pedido (order) agrupa múltiplas inscrições e tem o pagamento
+    const formattedRegistrations = registrations.map((reg) => ({
+      id: reg.id,
+      userId: reg.userId,
+      eventId: reg.eventId,
+      orderId: reg.orderId,
+      status: reg.status,
+      qrCode: reg.qrCode,
+      createdAt: reg.createdAt.toISOString(),
+      updatedAt: reg.updatedAt.toISOString(),
+      // Dados do participante (usuário da inscrição)
+      user: reg.user,
+      // Dados do pedido (compartilhado entre participantes)
+      order: reg.order ? {
+        id: reg.order.id,
+        totalAmount: Math.round(reg.order.totalAmount), // Garantir que seja inteiro (centavos)
+        serviceFee: Math.round(reg.order.serviceFee), // Garantir que seja inteiro (centavos)
+        discount: Math.round(reg.order.discount), // Garantir que seja inteiro (centavos)
+        finalAmount: Math.round(reg.order.finalAmount), // Garantir que seja inteiro (centavos)
+        purchaseDate: reg.order.createdAt.toISOString(), // Data do pedido
+        // Informações do comprador (quem fez o pedido/pagamento)
+        buyer: reg.order.user ? {
+          id: reg.order.user.id,
+          firstName: reg.order.user.firstName,
+          lastName: reg.order.user.lastName,
+          email: reg.order.user.email,
+          avatarUrl: reg.order.user.avatarUrl,
+        } : null,
+        // Informações do pagamento
+        payment: reg.order.payment ? {
+          id: reg.order.payment.id,
+          status: reg.order.payment.status,
+          method: reg.order.payment.method,
+          amount: Math.round(reg.order.payment.amount), // Garantir que seja inteiro (centavos)
+          paymentDate: reg.order.payment.paymentDate?.toISOString() || null,
+          createdAt: reg.order.payment.createdAt.toISOString(),
+        } : null,
+      } : null,
+      // Modalidades/Ingressos do participante
+      modalities: reg.modalities.map((rm: any) => ({
+        id: rm.id,
+        modality: {
+          id: rm.modality.id,
+          name: rm.modality.name,
+          price: Math.round(rm.modality.price * 100), // Converter para centavos (price está em reais)
+          ticketId: reg.tickets?.[0]?.ticket?.id,
+        },
+      })),
+      // Ticket do participante (cada registration tem apenas um ticket)
+      ticket: reg.tickets && reg.tickets.length > 0 ? (() => {
+        const registrationTicket = reg.tickets[0];
+        const ticket = registrationTicket.ticket;
+
+        // Calcular o valor pago pelo ticket
+        // Prioridade: 1) Preço da modality (se houver), 2) Preço do batch mais recente, 3) 0
+        let ticketPrice = 0;
+        if (reg.modalities && reg.modalities.length > 0) {
+          // Se houver modality, usar o preço da modality
+          ticketPrice = reg.modalities.reduce((sum: number, rm: any) => sum + rm.modality.price, 0) / reg.modalities.length;
+        } else if (ticket.batches && ticket.batches.length > 0) {
+          // Se não houver modality, usar o preço do batch mais recente
+          ticketPrice = ticket.batches[0].price;
+        }
+
+        return {
+          id: ticket.id,
+          name: ticket.name,
+          category: ticket.category ? {
+            id: ticket.category.id,
+            name: ticket.category.name,
+          } : null,
+          price: ticketPrice,
+        };
+      })() : null,
+      // Itens de kit do participante
+      kitItems: reg.kitItems.map((ki: any) => ({
+        id: ki.id,
+        kitItem: {
+          id: ki.kitItem.id,
+          name: ki.kitItem.name,
+        },
+        selectedSize: ki.selectedSize,
+        quantity: ki.quantity,
+      })),
+      // Respostas do questionário do participante
+      questionAnswers: reg.questionAnswers.map((qa: any) => ({
+        id: qa.id,
+        question: {
+          id: qa.question.id,
+          question: qa.question.question,
+          type: qa.question.type,
+        },
+        answer: qa.answer,
+      })),
+    }));
+
+    return {
+      message: 'Registrations fetched successfully',
+      data: {
+        registrations: formattedRegistrations,
+        stats: {
+          total: allRegistrations.length,
+          paid,
+          cancelled,
+          totalCollected,
+          totalChange,
+          paidChange,
+          cancelledChange,
+          totalCollectedChange,
+        },
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        },
+      },
+    };
+  }
+
+  /**
+   * Obtém estatísticas de inscrições (endpoint separado)
+   */
+  async getRegistrationStats(userId: string, eventId: string) {
+    await this.verifyOrganizerAccess(userId, eventId);
+
+    const prismaRead = this.prisma.getReadClient();
+
+    const allRegistrations = await prismaRead.registration.findMany({
+      where: { eventId },
+      include: {
+        order: {
+          include: {
+            payment: true,
+          },
+        },
+      },
+    });
+
+    const paid = allRegistrations.filter(
+      (r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED),
+    ).length;
+    const cancelled = allRegistrations.filter((r) => r.status === RegistrationStatus.CANCELLED).length;
+    const totalCollected = allRegistrations
+      .filter((r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED))
+      .reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
+
+    // Comparar com semana passada
+    const now = new Date();
+    const lastWeekStart = new Date(now);
+    lastWeekStart.setDate(now.getDate() - 14);
+    const lastWeekEnd = new Date(now);
+    lastWeekEnd.setDate(now.getDate() - 7);
+
+    const lastWeekRegistrations = await prismaRead.registration.findMany({
+      where: {
+        eventId,
+        order: {
+          createdAt: {
+            gte: lastWeekStart,
+            lte: lastWeekEnd,
+          },
+        },
+      },
+      include: {
+        order: {
+          include: {
+            payment: true,
+          },
+        },
+      },
+    });
+
+    const lastWeekTotal = lastWeekRegistrations.length;
+    const lastWeekPaid = lastWeekRegistrations.filter(
+      (r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED),
+    ).length;
+    const lastWeekCancelled = lastWeekRegistrations.filter((r) => r.status === RegistrationStatus.CANCELLED).length;
+    const lastWeekCollected = lastWeekRegistrations
+      .filter((r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED))
+      .reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
+
+    const totalChange = lastWeekTotal > 0 ? ((allRegistrations.length - lastWeekTotal) / lastWeekTotal) * 100 : 0;
+    const paidChange = lastWeekPaid > 0 ? ((paid - lastWeekPaid) / lastWeekPaid) * 100 : 0;
+    const cancelledChange = lastWeekCancelled > 0 ? ((cancelled - lastWeekCancelled) / lastWeekCancelled) * 100 : 0;
+    const totalCollectedChange = lastWeekCollected > 0 ? ((totalCollected - lastWeekCollected) / lastWeekCollected) * 100 : 0;
+
+    return {
+      message: 'Registration stats fetched successfully',
+      data: {
+        total: allRegistrations.length,
+        paid,
+        cancelled,
+        totalCollected,
+        totalChange,
+        paidChange,
+        cancelledChange,
+        totalCollectedChange,
+      },
+    };
+  }
+
+  /**
+   * Calcula parcelas a receber baseado nos pagamentos parcelados
+   */
+  private async calculateInstallmentsToReceive(registrations: any[]): Promise<number> {
+    let totalPending = 0;
+
+    for (const reg of registrations) {
+      const metadata = reg.order?.payment?.metadata as any;
+      if (metadata?.creditCard?.installments && metadata.creditCard.installments > 1) {
+        const installments = metadata.creditCard.installments;
+        const finalAmountCents = this.normalizeToCents(reg.order?.finalAmount);
+        const installmentValue = metadata.creditCard.installmentValue ? this.normalizeToCents(metadata.creditCard.installmentValue) : finalAmountCents / installments;
+        const paymentDate = reg.order?.payment?.paymentDate ? new Date(reg.order.payment.paymentDate) : new Date(reg.order?.createdAt || reg.createdAt);
+        const now = new Date();
+
+        // Calcular quantas parcelas já foram recebidas (baseado em meses desde o pagamento)
+        const monthsSincePayment = Math.floor(
+          (now.getTime() - paymentDate.getTime()) / (1000 * 60 * 60 * 24 * 30),
+        );
+        const receivedInstallments = Math.min(monthsSincePayment + 1, installments);
+        const pendingInstallments = installments - receivedInstallments;
+
+        if (pendingInstallments > 0) {
+          totalPending += installmentValue * pendingInstallments;
+        }
+      }
+    }
+
+    return totalPending;
+  }
+
+  /**
+   * Obtém histórico de repasses (baseado em pagamentos antigos que já passaram do prazo de retenção)
+   */
+  async getFinancialTransfers(userId: string, eventId: string) {
+    await this.verifyOrganizerAccess(userId, eventId);
+
+    const prismaRead = this.prisma.getReadClient();
+    const retentionDays = 30; // Prazo de retenção padrão
+
+    // Buscar todos os pagamentos pagos do evento
+    const paidRegistrations = await prismaRead.registration.findMany({
+      where: {
+        eventId,
+        order: {
+          payment: {
+            status: PaymentStatus.PAID,
+          },
+        },
+      },
+      include: {
+        order: {
+          include: {
+            payment: true,
+          },
+        },
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+    });
+
+    // Filtrar pagamentos que já passaram do prazo de retenção (considerados como "repassados")
+    const transfers: any[] = [];
+    let totalTransferred = 0;
+
+    for (const reg of paidRegistrations) {
+      if (!reg.order?.payment?.paymentDate) continue;
+
+      const paymentDate = new Date(reg.order.payment.paymentDate);
+      const releaseDate = new Date(paymentDate);
+      releaseDate.setDate(releaseDate.getDate() + retentionDays);
+
+      // Se já passou do prazo de retenção, considerar como repassado
+      if (releaseDate <= new Date()) {
+        const metadata = reg.order.payment.metadata as any;
+        transfers.push({
+          id: reg.order.payment.id,
+          amount: this.normalizeToCents(reg.order?.finalAmount),
+          status: 'COMPLETED' as const,
+          requestedAt: paymentDate.toISOString(),
+          completedAt: releaseDate.toISOString(),
+          paymentMethod: reg.order.payment.method,
+          bankAccount: undefined, // Não há informações de conta bancária no modelo atual
+        });
+        totalTransferred += this.normalizeToCents(reg.order?.finalAmount);
+      }
+    }
+
+    // Ordenar por data de conclusão (mais recente primeiro)
+    transfers.sort((a, b) => new Date(b.completedAt || '').getTime() - new Date(a.completedAt || '').getTime());
+
+    return {
+      message: 'Transfer history fetched successfully',
+      data: {
+        transfers,
+        totalTransferred: totalTransferred, // Já está normalizado em centavos
+      },
+    };
+  }
+
+  /**
+   * Obtém parcelas a receber (baseado em pagamentos parcelados com cartão de crédito)
+   */
+  async getFinancialInstallments(userId: string, eventId: string) {
+    await this.verifyOrganizerAccess(userId, eventId);
+
+    const prismaRead = this.prisma.getReadClient();
+
+    // Buscar todos os pagamentos pagos com cartão de crédito parcelado
+    const paidRegistrations = await prismaRead.registration.findMany({
+      where: {
+        eventId,
+        order: {
+          payment: {
+            status: PaymentStatus.PAID,
+            method: PaymentMethod.CREDIT_CARD,
+          },
+        },
+      },
+      include: {
+        order: {
+          include: {
+            payment: true,
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+                avatarUrl: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const installments: any[] = [];
+    let totalPending = 0;
+    let releaseToday = 0;
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    for (const reg of paidRegistrations) {
+      const metadata = reg.order?.payment?.metadata as any;
+      if (!metadata?.creditCard?.installments || metadata.creditCard.installments <= 1) continue;
+
+      const installmentsCount = metadata.creditCard.installments;
+      const finalAmountCents = this.normalizeToCents(reg.order?.finalAmount);
+      const installmentValue = metadata.creditCard.installmentValue ? this.normalizeToCents(metadata.creditCard.installmentValue) : finalAmountCents / installmentsCount;
+      const paymentDate = reg.order?.payment?.paymentDate ? new Date(reg.order.payment.paymentDate) : new Date(reg.order?.createdAt || reg.createdAt);
+
+      // Calcular todas as parcelas (a primeira já foi recebida no pagamento inicial)
+      // Parcelas futuras começam do mês seguinte
+      for (let i = 1; i < installmentsCount; i++) {
+        const dueDate = new Date(paymentDate);
+        dueDate.setMonth(dueDate.getMonth() + i);
+
+        // Verificar se a parcela já venceu (considerar como recebida) ou ainda está pendente
+        const isReceived = dueDate < today;
+        const isDueToday = dueDate.toDateString() === today.toDateString();
+
+        // Incluir apenas parcelas pendentes (futuras) ou que vencem hoje
+        // Parcelas já vencidas não devem aparecer na lista
+        if (!isReceived || isDueToday) {
+          // Gerar ID único para a parcela usando o payment ID e número da parcela
+          // Formato: paymentId-parcela (ex: uuid-2, uuid-3, etc.)
+          const installmentNumber = i + 1; // i começa em 1, então primeira parcela futura é 2
+          const paymentId = reg.order?.payment?.id || reg.id;
+
+          installments.push({
+            id: `${paymentId}-installment-${installmentNumber}`,
+            installmentNumber: installmentNumber, // Número da parcela (2, 3, 4, etc.)
+            paymentId: paymentId, // ID do pagamento original
+            amount: Math.round(installmentValue), // installmentValue já está normalizado em centavos
+            dueDate: dueDate.toISOString(),
+            status: isDueToday ? ('RECEIVED' as const) : ('PENDING' as const),
+            releaseToday: isDueToday ? installmentValue : undefined,
+            buyer: reg.order?.user ? {
+              id: reg.order.user.id,
+              firstName: reg.order.user.firstName,
+              lastName: reg.order.user.lastName,
+              email: reg.order.user.email,
+              avatarUrl: reg.order.user.avatarUrl,
+            } : null,
+          });
+
+          // Contar apenas parcelas realmente pendentes (não as que vencem hoje)
+          if (!isReceived && !isDueToday) {
+            totalPending += installmentValue;
+          }
+          if (isDueToday) {
+            releaseToday += installmentValue;
+          }
+        }
+      }
+    }
+
+    // Ordenar por data de vencimento
+    installments.sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
+
+    return {
+      message: 'Installments fetched successfully',
+      data: {
+        installments,
+        totalPending: Math.round(totalPending), // Pode ter decimais por divisão, arredondar
+        releaseToday: Math.round(releaseToday), // Pode ter decimais por divisão, arredondar
+        totalTransactions: paidRegistrations.length,
+      },
+    };
+  }
+
+  /**
+   * Obtém valores aguardando liberação (baseado em prazo de retenção de 30 dias)
+   */
+  async getFinancialPending(userId: string, eventId: string) {
+    await this.verifyOrganizerAccess(userId, eventId);
+
+    const prismaRead = this.prisma.getReadClient();
+    const retentionDays = 30; // Prazo de retenção padrão
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    // Buscar todos os pagamentos pagos do evento
+    const paidRegistrations = await prismaRead.registration.findMany({
+      where: {
+        eventId,
+        order: {
+          payment: {
+            status: PaymentStatus.PAID,
+          },
+        },
+      },
+      include: {
+        order: {
+          include: {
+            payment: true,
+          },
+        },
+      },
+    });
+
+    const pending: any[] = [];
+    let totalPending = 0;
+    let releaseToday = 0;
+
+    for (const reg of paidRegistrations) {
+      if (!reg.order?.payment?.paymentDate) continue;
+
+      const paymentDate = new Date(reg.order.payment.paymentDate);
+      const releaseDate = new Date(paymentDate);
+      releaseDate.setDate(releaseDate.getDate() + retentionDays);
+
+      // Se ainda não passou do prazo de retenção, está aguardando liberação
+      if (releaseDate > now) {
+        const daysUntilRelease = Math.ceil((releaseDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+        const isReleaseToday = releaseDate.toDateString() === today.toDateString();
+
+        pending.push({
+          id: reg.order.payment.id,
+          registrationId: reg.id,
+          amount: reg.order?.finalAmount || 0,
+          purchaseDate: reg.order?.createdAt.toISOString() || reg.createdAt.toISOString(),
+          releaseDate: releaseDate.toISOString(),
+          daysUntilRelease,
+        });
+
+        totalPending += (reg.order?.finalAmount || 0);
+        if (isReleaseToday) {
+          releaseToday += (reg.order?.finalAmount || 0);
+        }
+      }
+    }
+
+    // Ordenar por data de liberação (mais próxima primeiro)
+    pending.sort((a, b) => new Date(a.releaseDate).getTime() - new Date(b.releaseDate).getTime());
+
+    return {
+      message: 'Pending releases fetched successfully',
+      data: {
+        pending,
+        totalPending,
+        releaseToday,
+        totalTransactions: paidRegistrations.length,
+      },
+    };
+  }
+
+  /**
+   * Obtém lista de pagamentos estornados (refunded)
+   */
+  async getFinancialRefunded(userId: string, eventId: string, page: number = 1, limit: number = 20) {
+    await this.verifyOrganizerAccess(userId, eventId);
+
+    const prismaRead = this.prisma.getReadClient();
+    const skip = (page - 1) * limit;
+
+    // Buscar todos os pagamentos estornados do evento
+    const refundedRegistrations = await prismaRead.registration.findMany({
+      where: {
+        eventId,
+        order: {
+          payment: {
+            status: PaymentStatus.REFUNDED,
+          },
+        },
+      },
+      include: {
+        order: {
+          include: {
+            payment: {
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    email: true,
+                    avatarUrl: true,
+                  },
+                },
+              },
+            },
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+                avatarUrl: true,
+              },
+            },
+          },
+        },
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            avatarUrl: true,
+          },
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+      skip,
+      take: limit,
+    });
+
+    // Filtrar apenas os que têm refundType: 'REFUND' no metadata
+    const refunded = refundedRegistrations
+      .filter((reg) => {
+        const metadata = reg.order?.payment?.metadata as any;
+        return metadata?.refundType === 'REFUND' || (!metadata?.refundType && reg.order?.payment?.status === PaymentStatus.REFUNDED);
+      })
+      .map((reg) => {
+        const metadata = reg.order?.payment?.metadata as any;
+        return {
+          id: reg.order?.payment?.id,
+          orderId: reg.orderId,
+          registrationId: reg.id,
+          amount: this.normalizeToCents(reg.order?.finalAmount),
+          refundDate: reg.order?.payment?.updatedAt || reg.order?.payment?.paymentDate || reg.order?.createdAt,
+          purchaseDate: reg.order?.createdAt,
+          paymentMethod: reg.order?.payment?.method,
+          buyer: reg.order?.user ? {
+            id: reg.order.user.id,
+            firstName: reg.order.user.firstName,
+            lastName: reg.order.user.lastName,
+            email: reg.order.user.email,
+            avatarUrl: reg.order.user.avatarUrl,
+          } : null,
+          participant: reg.user ? {
+            id: reg.user.id,
+            firstName: reg.user.firstName,
+            lastName: reg.user.lastName,
+            email: reg.user.email,
+            avatarUrl: reg.user.avatarUrl,
+          } : null,
+          reason: metadata?.reason || 'Estorno solicitado pelo cliente',
+        };
+      });
+
+    // Contar total para paginação
+    const totalRefunded = await prismaRead.registration.count({
+      where: {
+        eventId,
+        order: {
+          payment: {
+            status: PaymentStatus.REFUNDED,
+          },
+        },
+      },
+    });
+
+    const totalAmount = refunded.reduce((sum, r) => sum + r.amount, 0);
+
+    return {
+      message: 'Refunded payments fetched successfully',
+      data: {
+        refunded,
+        pagination: {
+          page,
+          limit,
+          total: totalRefunded,
+          totalPages: Math.ceil(totalRefunded / limit),
+        },
+        totalAmount,
+      },
+    };
+  }
+
+  /**
+   * Obtém lista de chargebacks
+   */
+  async getFinancialChargebacks(userId: string, eventId: string, page: number = 1, limit: number = 20) {
+    await this.verifyOrganizerAccess(userId, eventId);
+
+    const prismaRead = this.prisma.getReadClient();
+    const skip = (page - 1) * limit;
+
+    // Buscar todos os pagamentos com chargeback do evento
+    const chargebackRegistrations = await prismaRead.registration.findMany({
+      where: {
+        eventId,
+        order: {
+          payment: {
+            status: PaymentStatus.REFUNDED,
+          },
+        },
+      },
+      include: {
+        order: {
+          include: {
+            payment: {
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    email: true,
+                    avatarUrl: true,
+                  },
+                },
+              },
+            },
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+                avatarUrl: true,
+              },
+            },
+          },
+        },
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            avatarUrl: true,
+          },
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+      skip,
+      take: limit,
+    });
+
+    // Filtrar apenas os que têm refundType: 'CHARGEBACK' no metadata
+    const chargebacks = chargebackRegistrations
+      .filter((reg) => {
+        const metadata = reg.order?.payment?.metadata as any;
+        return metadata?.refundType === 'CHARGEBACK';
+      })
+      .map((reg) => {
+        const metadata = reg.order?.payment?.metadata as any;
+        return {
+          id: reg.order?.payment?.id,
+          orderId: reg.orderId,
+          registrationId: reg.id,
+          amount: this.normalizeToCents(reg.order?.finalAmount),
+          chargebackDate: reg.order?.payment?.updatedAt || reg.order?.payment?.paymentDate || reg.order?.createdAt,
+          purchaseDate: reg.order?.createdAt,
+          paymentMethod: reg.order?.payment?.method,
+          buyer: reg.order?.user ? {
+            id: reg.order.user.id,
+            firstName: reg.order.user.firstName,
+            lastName: reg.order.user.lastName,
+            email: reg.order.user.email,
+            avatarUrl: reg.order.user.avatarUrl,
+          } : null,
+          participant: reg.user ? {
+            id: reg.user.id,
+            firstName: reg.user.firstName,
+            lastName: reg.user.lastName,
+            email: reg.user.email,
+            avatarUrl: reg.user.avatarUrl,
+          } : null,
+          reason: metadata?.reason || 'Chargeback solicitado pelo banco',
+        };
+      });
+
+    // Contar total para paginação
+    // Buscar todos os refunded e filtrar por metadata no código (Prisma não suporta filtro JSON complexo)
+    const allRefundedRegistrations = await prismaRead.registration.findMany({
+      where: {
+        eventId,
+        order: {
+          payment: {
+            status: PaymentStatus.REFUNDED,
+          },
+        },
+      },
+      include: {
+        order: {
+          include: {
+            payment: true,
+          },
+        },
+      },
+    });
+
+    const totalChargebacks = allRefundedRegistrations.filter((reg) => {
+      const metadata = reg.order?.payment?.metadata as any;
+      return metadata?.refundType === 'CHARGEBACK';
+    }).length;
+
+    const totalAmount = chargebacks.reduce((sum, c) => sum + c.amount, 0);
+
+    return {
+      message: 'Chargebacks fetched successfully',
+      data: {
+        chargebacks,
+        pagination: {
+          page,
+          limit,
+          total: totalChargebacks,
+          totalPages: Math.ceil(totalChargebacks / limit),
+        },
+        totalAmount,
       },
     };
   }
