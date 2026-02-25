@@ -64,6 +64,7 @@ export class UserController {
   }
 
   @Get('linked-users')
+  @NoCache()
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({
