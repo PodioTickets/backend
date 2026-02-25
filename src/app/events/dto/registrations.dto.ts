@@ -17,8 +17,8 @@ export class RegistrationsQueryDto {
   limit?: number;
 
   @IsOptional()
-  @IsEnum(RegistrationStatus)
-  status?: RegistrationStatus;
+  @IsString()
+  status?: RegistrationStatus | 'CHARGEBACK' | 'REFUNDED';
 
   @IsOptional()
   @IsString()

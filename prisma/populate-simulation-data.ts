@@ -58,7 +58,7 @@ async function main() {
 
   // 2. Permitir escolha do evento via argumento de linha de comando ou interativo
   let selectedEventId: string | null = null;
-  
+
   // Verificar se foi passado um ID de evento como argumento
   const eventIdArg = process.argv[2];
   if (eventIdArg) {
@@ -279,16 +279,20 @@ async function main() {
   const modalities = event.modalities;
 
   // Função auxiliar para calcular preço do ticket (usar batch mais recente)
-  const getTicketPrice = (ticket: any): number => {
+  // IMPORTANTE: Os preços no banco estão em REAIS (Float), sempre converter para centavos
+  const getTicketPriceInCents = (ticket: any): number => {
     if (ticket.batches && ticket.batches.length > 0) {
-      return ticket.batches[0].price; // Preço em reais
+      const price = ticket.batches[0].price; // Preço em reais (ex: 149.90)
+      return Math.round(price * 100); // Converter para centavos (14990)
     }
-    return 149.90; // Fallback
+    return 14990; // Fallback em centavos (R$ 149,90)
   };
 
   // Função auxiliar para calcular preço da modality
-  const getModalityPrice = (modality: any): number => {
-    return modality.price; // Preço em reais
+  // IMPORTANTE: Os preços no banco estão em REAIS (Float), sempre converter para centavos
+  const getModalityPriceInCents = (modality: any): number => {
+    const price = modality.price; // Preço em reais (ex: 50.00)
+    return Math.round(price * 100); // Converter para centavos (5000)
   };
 
   // 4. Criar os pedidos conforme especificação
@@ -312,14 +316,14 @@ async function main() {
 
     // Selecionar ticket aleatório
     const selectedTicket = tickets[Math.floor(Math.random() * tickets.length)];
-    const ticketPrice = getTicketPrice(selectedTicket);
+    const ticketPriceInCents = getTicketPriceInCents(selectedTicket);
     const selectedModality = modalities.length > 0
       ? modalities[Math.floor(Math.random() * modalities.length)]
       : null;
-    const modalityPrice = selectedModality ? getModalityPrice(selectedModality) : 0;
+    const modalityPriceInCents = selectedModality ? getModalityPriceInCents(selectedModality) : 0;
 
-    const baseAmount = Math.round((ticketPrice + modalityPrice) * 100);
-    const serviceFee = Math.round(baseAmount * 0.05);
+    const baseAmount = ticketPriceInCents + modalityPriceInCents; // Já está em centavos
+    const serviceFee = Math.round(baseAmount * 0.05); // 5% de taxa
     const totalAmount = baseAmount;
     const finalAmount = totalAmount + serviceFee;
 
@@ -340,10 +344,10 @@ async function main() {
         orderId: order.id,
         userId: buyer.id,
         method: PaymentMethod.CREDIT_CARD,
-        status: PaymentStatus.PAID, // Pagamento foi feito, mas depois cancelado
+        status: PaymentStatus.FAILED, // Pagamento falhou
         amount: finalAmount, // Já está em centavos
-        transactionId: `TXN-${Date.now()}-${20 + i}`,
-        paymentDate: order.createdAt,
+        transactionId: `TXN-FAILED-${Date.now()}-${20 + i}`,
+        paymentDate: order.createdAt, // Data do pagamento original
       },
     });
 
@@ -394,14 +398,14 @@ async function main() {
     userIndex++;
 
     const selectedTicket = tickets[Math.floor(Math.random() * tickets.length)];
-    const ticketPrice = getTicketPrice(selectedTicket);
+    const ticketPriceInCents = getTicketPriceInCents(selectedTicket);
     const selectedModality = modalities.length > 0
       ? modalities[Math.floor(Math.random() * modalities.length)]
       : null;
-    const modalityPrice = selectedModality ? getModalityPrice(selectedModality) : 0;
+    const modalityPriceInCents = selectedModality ? getModalityPriceInCents(selectedModality) : 0;
 
-    const baseAmount = Math.round((ticketPrice + modalityPrice) * 100);
-    const serviceFee = Math.round(baseAmount * 0.05);
+    const baseAmount = ticketPriceInCents + modalityPriceInCents; // Já está em centavos
+    const serviceFee = Math.round(baseAmount * 0.05); // 5% de taxa
     const totalAmount = baseAmount;
     const finalAmount = totalAmount + serviceFee;
 
@@ -481,14 +485,14 @@ async function main() {
     userIndex++;
 
     const selectedTicket = tickets[Math.floor(Math.random() * tickets.length)];
-    const ticketPrice = getTicketPrice(selectedTicket);
+    const ticketPriceInCents = getTicketPriceInCents(selectedTicket);
     const selectedModality = modalities.length > 0
       ? modalities[Math.floor(Math.random() * modalities.length)]
       : null;
-    const modalityPrice = selectedModality ? getModalityPrice(selectedModality) : 0;
+    const modalityPriceInCents = selectedModality ? getModalityPriceInCents(selectedModality) : 0;
 
-    const baseAmount = Math.round((ticketPrice + modalityPrice) * 100);
-    const serviceFee = Math.round(baseAmount * 0.05);
+    const baseAmount = ticketPriceInCents + modalityPriceInCents; // Já está em centavos
+    const serviceFee = Math.round(baseAmount * 0.05); // 5% de taxa
     const totalAmount = baseAmount;
     const finalAmount = totalAmount + serviceFee;
 

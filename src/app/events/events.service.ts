@@ -2302,14 +2302,64 @@ export class EventsService {
       eventId,
     };
 
+    // Filtro por status - suporta status de registro e status de pagamento (CHARGEBACK, REFUNDED)
+    // Para CHARGEBACK e REFUNDED, precisamos filtrar por payment.status REFUNDED e depois pelo metadata
+    let filterByPaymentMetadata = false;
+    let targetRefundType: 'CHARGEBACK' | 'REFUND' | null = null;
+
     if (status) {
-      where.status = status;
+      if (status === 'CHARGEBACK') {
+        // Filtrar por pagamentos REFUNDED com refundType CHARGEBACK no metadata
+        where.order = {
+          ...where.order,
+          payment: {
+            status: PaymentStatus.REFUNDED,
+          },
+        };
+        filterByPaymentMetadata = true;
+        targetRefundType = 'CHARGEBACK';
+      } else if (status === 'REFUNDED') {
+        // Filtrar por pagamentos REFUNDED com refundType REFUND no metadata (ou sem refundType)
+        where.order = {
+          ...where.order,
+          payment: {
+            status: PaymentStatus.REFUNDED,
+          },
+        };
+        filterByPaymentMetadata = true;
+        targetRefundType = 'REFUND';
+      } else {
+        // Status normal de registro (PENDING, CONFIRMED, CANCELLED, COMPLETED)
+        // Garantir que o status seja um valor válido do enum
+        const validStatuses = ['PENDING', 'CONFIRMED', 'CANCELLED', 'COMPLETED'];
+        if (validStatuses.includes(status)) {
+          where.status = status as RegistrationStatus;
+          
+          // Se o filtro for CANCELLED, excluir registrations com payment REFUNDED
+          // (chargeback e refund devem ser filtrados separadamente)
+          if (status === 'CANCELLED') {
+            // Mesclar com where.order existente (se houver de startDate/endDate)
+            if (!where.order) {
+              where.order = {};
+            }
+            where.order.payment = {
+              status: {
+                not: PaymentStatus.REFUNDED, // Excluir REFUNDED (chargeback/refund)
+              },
+            };
+          }
+        }
+      }
     }
 
     if (startDate || endDate) {
-      where.order = {
-        createdAt: {},
-      };
+      // Se já existe where.order (de filtro de status), mesclar
+      if (!where.order) {
+        where.order = {};
+      }
+      if (!where.order.createdAt) {
+        where.order.createdAt = {};
+      }
       if (startDate) where.order.createdAt.gte = new Date(startDate);
       if (endDate) where.order.createdAt.lte = new Date(endDate);
     }
@@ -2363,97 +2413,141 @@ export class EventsService {
     // Sempre adicionar ordenação secundária por id para garantir ordem consistente entre registrations do mesmo pedido
     orderBy.push({ id: sortOrder });
 
-    // Buscar registrations e total
-    const [registrations, total] = await Promise.all([
-      prismaRead.registration.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy,
+    // Se precisar filtrar por metadata do payment (CHARGEBACK ou REFUNDED), buscar todos e filtrar depois
+    let registrations: any[];
+    let total: number;
+
+    const includeClause = {
+      user: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          phone: true,
+          documentNumber: true,
+          avatarUrl: true,
+        },
+      },
+      modalities: {
         include: {
+          modality: true,
+        },
+      },
+      tickets: {
+        include: {
+          ticket: {
+            include: {
+              category: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+              batches: {
+                orderBy: {
+                  createdAt: 'desc' as const,
+                },
+              },
+            },
+          },
+        },
+      },
+      kitItems: {
+        include: {
+          kitItem: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+        },
+      },
+      questionAnswers: {
+        include: {
+          question: {
+            select: {
+              id: true,
+              question: true,
+              type: true,
+            },
+          },
+        },
+      },
+      order: {
+        include: {
+          payment: {
+            select: {
+              id: true,
+              status: true,
+              method: true,
+              amount: true,
+              paymentDate: true,
+              createdAt: true,
+              metadata: true,
+            },
+          },
           user: {
             select: {
               id: true,
               firstName: true,
               lastName: true,
               email: true,
-              phone: true,
-              documentNumber: true,
               avatarUrl: true,
             },
           },
-          modalities: {
-            include: {
-              modality: true,
-            },
-          },
-          tickets: {
-            include: {
-              ticket: {
-                include: {
-                  category: {
-                    select: {
-                      id: true,
-                      name: true,
-                    },
-                  },
-                  batches: {
-                    orderBy: {
-                      createdAt: 'desc', // Pegar o batch mais recente primeiro
-                    },
-                  },
-                },
-              },
-            },
-          },
-          kitItems: {
-            include: {
-              kitItem: {
-                select: {
-                  id: true,
-                  name: true,
-                },
-              },
-            },
-          },
-          questionAnswers: {
-            include: {
-              question: {
-                select: {
-                  id: true,
-                  question: true,
-                  type: true,
-                },
-              },
-            },
-          },
-          order: {
-            include: {
-              payment: {
-                select: {
-                  id: true,
-                  status: true,
-                  method: true,
-                  amount: true,
-                  paymentDate: true,
-                  createdAt: true,
-                },
-              },
-              user: {
-                select: {
-                  id: true,
-                  firstName: true,
-                  lastName: true,
-                  email: true,
-                  avatarUrl: true,
-                },
-              },
-            },
-          },
         },
-      }),
-      prismaRead.registration.count({ where }),
-    ]);
+      },
+    };
+
+    if (filterByPaymentMetadata) {
+      // Buscar todos os registrations com payment REFUNDED (sem paginação ainda)
+      const allRefundedRegistrations = await prismaRead.registration.findMany({
+        where,
+        orderBy,
+        include: includeClause,
+      });
+
+      // Filtrar pelo metadata do payment
+      const filteredRegistrations = allRefundedRegistrations.filter((reg: any) => {
+        if (!reg.order?.payment?.metadata) return false;
+
+        let metadata: any = reg.order.payment.metadata;
+        if (typeof metadata === 'string') {
+          try {
+            metadata = JSON.parse(metadata);
+          } catch (e) {
+            return false;
+          }
+        }
+
+        const refundType = metadata?.refundType;
+
+        if (targetRefundType === 'CHARGEBACK') {
+          return refundType === 'CHARGEBACK';
+        } else if (targetRefundType === 'REFUND') {
+          return refundType === 'REFUND' || !refundType; // REFUND ou sem refundType
+        }
+
+        return false;
+      });
+
+      total = filteredRegistrations.length;
+      // Aplicar paginação após filtrar
+      registrations = filteredRegistrations.slice(skip, skip + limit);
+    } else {
+      // Buscar registrations e total normalmente
+      [registrations, total] = await Promise.all([
+        prismaRead.registration.findMany({
+          where,
+          skip,
+          take: limit,
+          orderBy,
+          include: includeClause,
+        }),
+        prismaRead.registration.count({ where }),
+      ]);
+    }
 
     // Calcular estatísticas
     const allRegistrations = await prismaRead.registration.findMany({
@@ -2545,14 +2639,53 @@ export class EventsService {
           avatarUrl: reg.order.user.avatarUrl,
         } : null,
         // Informações do pagamento
-        payment: reg.order.payment ? {
-          id: reg.order.payment.id,
-          status: reg.order.payment.status,
-          method: reg.order.payment.method,
-          amount: this.normalizeToCents(reg.order.payment.amount), // Normalizar para centavos
-          paymentDate: reg.order.payment.paymentDate?.toISOString() || null,
-          createdAt: reg.order.payment.createdAt.toISOString(),
-        } : null,
+        payment: reg.order.payment ? (() => {
+          const payment = reg.order.payment;
+
+          // Parsear metadata - Prisma Json pode vir como objeto ou string
+          let metadata: any = null;
+          if (payment.metadata) {
+            if (typeof payment.metadata === 'string') {
+              try {
+                metadata = JSON.parse(payment.metadata);
+              } catch (e) {
+                // Se falhar ao parsear, tentar usar como objeto
+                metadata = payment.metadata;
+              }
+            } else {
+              // Já é um objeto
+              metadata = payment.metadata;
+            }
+          }
+
+          // Determinar o status detalhado baseado no status e metadata
+          let paymentStatus = payment.status;
+          let refundType: 'CHARGEBACK' | 'REFUND' | null = null;
+
+          // Se o status é REFUNDED, verificar o tipo no metadata
+          if (payment.status === PaymentStatus.REFUNDED) {
+            if (metadata && typeof metadata === 'object' && metadata.refundType) {
+              // Verificar se refundType é CHARGEBACK ou REFUND
+              const rt = String(metadata.refundType).toUpperCase();
+              refundType = rt === 'CHARGEBACK' ? 'CHARGEBACK' : 'REFUND';
+            } else {
+              // Se não tiver refundType no metadata, assumir REFUND (estorno padrão)
+              refundType = 'REFUND';
+            }
+          }
+
+          return {
+            id: payment.id,
+            status: paymentStatus,
+            refundType, // Sempre incluir refundType quando status for REFUNDED
+            method: payment.method,
+            amount: this.normalizeToCents(payment.amount), // Normalizar para centavos
+            paymentDate: payment.paymentDate?.toISOString() || null,
+            createdAt: payment.createdAt.toISOString(),
+            // Incluir metadata completo para facilitar renderização no frontend
+            metadata: metadata || null,
+          };
+        })() : null,
       } : null,
       // Modalidades/Ingressos do participante
       modalities: reg.modalities.map((rm: any) => ({
