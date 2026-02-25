@@ -9,11 +9,9 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        
       - name: Validate SSH Key Format
         run: |
           echo "🔍 Validando formato da chave SSH..."
@@ -31,41 +29,50 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           passphrase: ${{ secrets.SSH_KEY_PASSPHRASE }}
           port: ${{ secrets.SSH_PORT || 22 }}
-          timeout: 60s
+          timeout: 300s
           script_stop: true
-          debug: true
+          debug: false
           use_insecure_cipher: false
           script: |
             set -e
-
-            echo "Iniciando deploy..."
-            cd .. && cd /srv/backend
-
-            echo "Atualizando código"
+            
+            echo "🚀 Iniciando deploy..."
+            cd /srv/backend
+            
+            # Carrega variáveis do .env se existir
+            if [ -f .env ]; then
+              set -a
+              source .env
+              set +a
+            fi
+            
+            # Atualiza código
+            echo "📥 Atualizando código do repositório..."
             git fetch origin
-            git pull origin ${GITHUB_REF_NAME}
-
-            echo "Executando migrações..."
-            DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public"
-
-            docker run --rm \
-              -v "$(pwd):/app" \
-              -w /app \
-              --network podiogo_podiogo-network \
-              -e DATABASE_URL="$DATABASE_URL" \
-              node:20-alpine sh -c "
-                npm install -g pnpm &&
-                pnpm install --frozen-lockfile &&
-                pnpm prisma migrate deploy
-              " || echo "⚠️ Migrações falharam, continuando..."
-
-            echo "🔨 Build backend..."
-            docker compose build backend
-
-            echo "🔄 Subindo containers..."
-            docker compose up -d backend
-
-            sleep 5
-
-            echo "🏥 Verificando status..."
-            docker compose ps backend
+            git pull origin ${{ github.ref_name }} || {
+              echo "⚠️  Aviso: Falha no pull, tentando continuar..."
+            }
+            
+            # Habilita BuildKit para cache e builds mais rápidos
+            export DOCKER_BUILDKIT=1
+            export COMPOSE_DOCKER_CLI_BUILD=1
+            
+            # Garante que o script de deploy tenha permissão de execução
+            chmod +x deploy.sh 2>/dev/null || true
+            
+            # Usa o script de deploy otimizado
+            # O script faz: build, sobe serviços, aguarda DB, executa migrações, reinicia
+            echo "🔨 Executando deploy automatizado..."
+            SKIP_GIT_PULL=1 ./deploy.sh || {
+              echo "❌ Deploy falhou!"
+              echo ""
+              echo "📋 Logs do backend:"
+              docker compose logs --tail=50 backend || true
+              echo ""
+              echo "📋 Status dos containers:"
+              docker compose ps || true
+              exit 1
+            }
+            
+            echo ""
+            echo "✅ Deploy concluído com sucesso!"

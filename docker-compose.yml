@@ -55,7 +55,9 @@ services:
     restart: unless-stopped
 
   backend:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: podiogo-backend
     env_file:
       - .env
@@ -72,6 +74,7 @@ services:
       - "3333:3333"
     networks:
       - podiogo-network
+    restart: unless-stopped
 
 volumes:
   postgres_data:
