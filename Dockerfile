@@ -28,6 +28,8 @@ FROM dependencies AS build
 
 ENV NODE_OPTIONS=--max-old-space-size=4096
 
+
+
 COPY tsconfig.json tsconfig.build.json nest-cli.json ./
 COPY prisma ./prisma
 COPY src ./src
@@ -39,6 +41,8 @@ RUN pnpm prisma generate && \
 # Production
 # -----------------------------
 FROM base AS production
+
+RUN apk add --no-cache openssl3 libc6-compat
 
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nestjs -u 1001
