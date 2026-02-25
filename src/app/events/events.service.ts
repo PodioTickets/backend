@@ -26,21 +26,11 @@ export class EventsService {
   constructor(private readonly prisma: PrismaService) { }
 
   /**
-   * Normaliza valor monetário para centavos
-   * Se o valor parece estar em reais (tem decimais e é menor que 1000), converte para centavos
-   * Caso contrário, assume que já está em centavos
+   * Retorna o valor em centavos (valores já estão em centavos no banco)
    */
   private normalizeToCents(value: number | null | undefined): number {
     if (!value || value === 0) return 0;
-
-    // Se o valor tem decimais significativos e é menor que 1000, provavelmente está em reais
-    // Converte para centavos multiplicando por 100
-    if (value < 1000 && value % 1 !== 0) {
-      return Math.round(value * 100);
-    }
-
-    // Caso contrário, assume que já está em centavos
-    return Math.round(value);
+    return value; // Valor exato, sem arredondamento
   }
 
   /**
@@ -2364,6 +2354,19 @@ export class EventsService {
       if (endDate) where.order.createdAt.lte = new Date(endDate);
     }
 
+    // IMPORTANTE: Se where.order está definido mas vazio (sem filtros), remover para não excluir registrations
+    // Isso garante que todos os registrations sejam retornados quando não há filtros de order
+    // Verificar se where.order está vazio (sem createdAt, sem payment, etc.)
+    if (where.order) {
+      const hasCreatedAt = where.order.createdAt && Object.keys(where.order.createdAt).length > 0;
+      const hasPayment = where.order.payment && Object.keys(where.order.payment).length > 0;
+      
+      // Se não tem nenhum filtro real, remover where.order
+      if (!hasCreatedAt && !hasPayment) {
+        delete where.order;
+      }
+    }
+
     // Filtro por ticketIds
     if (ticketIds && ticketIds.length > 0) {
       where.tickets = {
@@ -2537,15 +2540,35 @@ export class EventsService {
       registrations = filteredRegistrations.slice(skip, skip + limit);
     } else {
       // Buscar registrations e total normalmente
+      // Garantir que where está limpo e correto
+      const finalWhere: any = {
+        eventId,
+      };
+      
+      // Aplicar filtros apenas se existirem
+      if (where.status) {
+        finalWhere.status = where.status;
+      }
+      if (where.tickets) {
+        finalWhere.tickets = where.tickets;
+      }
+      if (where.OR) {
+        finalWhere.OR = where.OR;
+      }
+      // where.order só deve ser incluído se tiver filtros reais (já foi verificado acima)
+      if (where.order && (where.order.createdAt || where.order.payment)) {
+        finalWhere.order = where.order;
+      }
+      
       [registrations, total] = await Promise.all([
         prismaRead.registration.findMany({
-          where,
+          where: finalWhere,
           skip,
           take: limit,
           orderBy,
           include: includeClause,
         }),
-        prismaRead.registration.count({ where }),
+        prismaRead.registration.count({ where: finalWhere }),
       ]);
     }
 
@@ -2693,7 +2716,7 @@ export class EventsService {
         modality: {
           id: rm.modality.id,
           name: rm.modality.name,
-          price: Math.round(rm.modality.price * 100), // Converter para centavos (price está em reais)
+          price: rm.modality.price, // Já está em centavos
           ticketId: reg.tickets?.[0]?.ticket?.id,
         },
       })),
@@ -2704,12 +2727,13 @@ export class EventsService {
 
         // Calcular o valor pago pelo ticket
         // Prioridade: 1) Preço da modality (se houver), 2) Preço do batch mais recente, 3) 0
+        // Todos os preços já estão em centavos
         let ticketPrice = 0;
         if (reg.modalities && reg.modalities.length > 0) {
-          // Se houver modality, usar o preço da modality
-          ticketPrice = reg.modalities.reduce((sum: number, rm: any) => sum + rm.modality.price, 0) / reg.modalities.length;
+          // Se houver modality, usar o preço médio das modalities (já está em centavos)
+          ticketPrice = Math.round(reg.modalities.reduce((sum: number, rm: any) => sum + rm.modality.price, 0) / reg.modalities.length);
         } else if (ticket.batches && ticket.batches.length > 0) {
-          // Se não houver modality, usar o preço do batch mais recente
+          // Se não houver modality, usar o preço do batch mais recente (já está em centavos)
           ticketPrice = ticket.batches[0].price;
         }
 

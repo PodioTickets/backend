@@ -235,7 +235,7 @@ export class CheckoutService {
         // Informações dos produtos adicionais inclusos
         products: {
           items: registrationDetails.products,
-          subtotal: Math.round(finalPrices.productsSubtotal), // Produtos adicionais em centavos
+          subtotal: finalPrices.productsSubtotal, // Produtos adicionais em centavos
         },
         // Itens dos kits selecionados
         kitItems: registrationDetails.kitItems || [],
@@ -244,11 +244,11 @@ export class CheckoutService {
         // Respostas das perguntas do evento
         questionAnswers: registrationDetails.questionAnswers || [],
         pricing: {
-          subtotal: Math.round(finalPrices.ticketsSubtotal + finalPrices.productsSubtotal), // Subtotal em centavos (ambos já estão em centavos)
-          serviceFee: Math.round(finalPrices.serviceFee), // Taxa de serviço em centavos
-          couponDiscount: Math.round((couponResult.discount || 0) * 100), // Desconto cupom em centavos
-          voucherDiscount: Math.round((voucherResult.discount || 0) * 100), // Desconto voucher em centavos
-          total: Math.round(finalPrices.finalTotal), // Total pago em centavos
+          subtotal: finalPrices.ticketsSubtotal + finalPrices.productsSubtotal, // Subtotal em centavos (ambos já estão em centavos)
+          serviceFee: finalPrices.serviceFee, // Taxa de serviço em centavos
+          couponDiscount: couponResult.discount || 0, // Desconto cupom em centavos
+          voucherDiscount: voucherResult.discount || 0, // Desconto voucher em centavos
+          total: finalPrices.finalTotal, // Total pago em centavos
         },
         orderId: order.id, // ID do pedido
         registrations: registrations.map((r, index) => ({
@@ -443,6 +443,7 @@ export class CheckoutService {
         );
       }
 
+      // batch.price já está em centavos
       ticketsSubtotal += batch.price * ticketItem.quantity;
     }
 
@@ -472,44 +473,41 @@ export class CheckoutService {
             }
           }
 
+          // productPrice já está em centavos
           productsSubtotal += productPrice * productItem.quantity;
         }
       }
     }
 
     // 3. Calcular taxa de serviço
-    // Se serviceFee for fornecido, converter de centavos para reais
-    // Caso contrário, usar 0 (sem taxa de serviço)
-    let calculatedServiceFee = 0;
-    if (serviceFee !== undefined && serviceFee !== null) {
-      calculatedServiceFee = serviceFee / 100; // Converter de centavos para reais
-    }
+    // serviceFee já está em centavos
+    const calculatedServiceFee = serviceFee !== undefined && serviceFee !== null ? serviceFee : 0;
 
-    // 4. Calcular subtotal (todos em reais)
+    // 4. Calcular subtotal (todos em centavos)
     const subtotal = ticketsSubtotal + productsSubtotal + calculatedServiceFee;
 
-    // 5. Aplicar descontos (converter de centavos para reais)
-    const total = Math.max(0, subtotal - (couponDiscount / 100) - (voucherDiscount / 100));
+    // 5. Aplicar descontos (já estão em centavos)
+    const total = Math.max(0, subtotal - couponDiscount - voucherDiscount);
 
     // 6. Aplicar desconto PIX (5%)
     let pixDiscount = 0;
     let finalTotal = total;
     if (paymentMethod === PaymentMethod.PIX) {
-      pixDiscount = total * 0.05;
+      pixDiscount = total * 0.05; // 5% em centavos (valor exato)
       finalTotal = total - pixDiscount;
     }
 
-    // Converter todos os valores para centavos (multiplicar por 100) mantendo precisão
+    // Todos os valores já estão em centavos
     return {
-      ticketsSubtotal: ticketsSubtotal * 100,
-      productsSubtotal: productsSubtotal * 100,
-      serviceFee: calculatedServiceFee * 100,
+      ticketsSubtotal: ticketsSubtotal,
+      productsSubtotal: productsSubtotal,
+      serviceFee: calculatedServiceFee,
       couponDiscount: couponDiscount, // Já está em centavos
       voucherDiscount: voucherDiscount, // Já está em centavos
-      subtotal: subtotal * 100,
-      total: total * 100,
-      pixDiscount: pixDiscount * 100,
-      finalTotal: finalTotal * 100,
+      subtotal: subtotal,
+      total: total,
+      pixDiscount: pixDiscount,
+      finalTotal: finalTotal,
     };
   }
 
@@ -648,18 +646,19 @@ export class CheckoutService {
       }
     }
 
-    // Calcular desconto (subtotal está em reais, converter para centavos)
+    // Calcular desconto (subtotal e coupon.value já estão em centavos)
     let discount = 0;
     if (coupon.type === 'PERCENTAGE') {
-      discount = subtotal * (coupon.value / 100);
+      // coupon.value é porcentagem (ex: 10 = 10%)
+      discount = subtotal * (coupon.value / 100); // Valor exato
     } else if (coupon.type === 'FIXED') {
+      // coupon.value já está em centavos
       discount = Math.min(coupon.value, subtotal);
     }
 
-    // Converter desconto para centavos
     return {
       isValid: true,
-      discount: discount * 100, // Converter para centavos
+      discount: discount, // Já está em centavos
       couponId: coupon.id,
     };
   }
@@ -928,10 +927,10 @@ export class CheckoutService {
       data: {
         userId,
         eventId: dto.eventId,
-        totalAmount: Math.round(prices.ticketsSubtotal + prices.productsSubtotal), // Já está em centavos
-        serviceFee: Math.round(prices.serviceFee), // Já está em centavos
-        discount: Math.round(prices.couponDiscount + prices.voucherDiscount), // Já está em centavos
-        finalAmount: Math.round(prices.finalTotal), // Já está em centavos
+        totalAmount: prices.ticketsSubtotal + prices.productsSubtotal, // Já está em centavos
+        serviceFee: prices.serviceFee, // Já está em centavos
+        discount: prices.couponDiscount + prices.voucherDiscount, // Já está em centavos
+        finalAmount: prices.finalTotal, // Já está em centavos
         ...(couponResult.couponId && { couponId: couponResult.couponId }),
         ...(voucherResult.voucherId && { voucherId: voucherResult.voucherId }),
       },

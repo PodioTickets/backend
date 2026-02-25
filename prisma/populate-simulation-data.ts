@@ -279,20 +279,18 @@ async function main() {
   const modalities = event.modalities;
 
   // Função auxiliar para calcular preço do ticket (usar batch mais recente)
-  // IMPORTANTE: Os preços no banco estão em REAIS (Float), sempre converter para centavos
+  // IMPORTANTE: Os preços no banco já estão em CENTAVOS (Int)
   const getTicketPriceInCents = (ticket: any): number => {
     if (ticket.batches && ticket.batches.length > 0) {
-      const price = ticket.batches[0].price; // Preço em reais (ex: 149.90)
-      return Math.round(price * 100); // Converter para centavos (14990)
+      return ticket.batches[0].price; // Já está em centavos
     }
     return 14990; // Fallback em centavos (R$ 149,90)
   };
 
   // Função auxiliar para calcular preço da modality
-  // IMPORTANTE: Os preços no banco estão em REAIS (Float), sempre converter para centavos
+  // IMPORTANTE: Os preços no banco já estão em CENTAVOS (Int)
   const getModalityPriceInCents = (modality: any): number => {
-    const price = modality.price; // Preço em reais (ex: 50.00)
-    return Math.round(price * 100); // Converter para centavos (5000)
+    return modality.price; // Já está em centavos
   };
 
   // 4. Criar os pedidos conforme especificação
@@ -323,7 +321,7 @@ async function main() {
     const modalityPriceInCents = selectedModality ? getModalityPriceInCents(selectedModality) : 0;
 
     const baseAmount = ticketPriceInCents + modalityPriceInCents; // Já está em centavos
-    const serviceFee = Math.round(baseAmount * 0.05); // 5% de taxa
+    const serviceFee = baseAmount * 0.05; // 5% de taxa (valor exato)
     const totalAmount = baseAmount;
     const finalAmount = totalAmount + serviceFee;
 
@@ -405,7 +403,7 @@ async function main() {
     const modalityPriceInCents = selectedModality ? getModalityPriceInCents(selectedModality) : 0;
 
     const baseAmount = ticketPriceInCents + modalityPriceInCents; // Já está em centavos
-    const serviceFee = Math.round(baseAmount * 0.05); // 5% de taxa
+    const serviceFee = baseAmount * 0.05; // 5% de taxa (valor exato)
     const totalAmount = baseAmount;
     const finalAmount = totalAmount + serviceFee;
 
@@ -492,7 +490,7 @@ async function main() {
     const modalityPriceInCents = selectedModality ? getModalityPriceInCents(selectedModality) : 0;
 
     const baseAmount = ticketPriceInCents + modalityPriceInCents; // Já está em centavos
-    const serviceFee = Math.round(baseAmount * 0.05); // 5% de taxa
+    const serviceFee = baseAmount * 0.05; // 5% de taxa (valor exato)
     const totalAmount = baseAmount;
     const finalAmount = totalAmount + serviceFee;
 
@@ -564,6 +562,91 @@ async function main() {
     orders.push({ order, payment, registrationsCount: 1 });
   }
   console.log(`✅ 2 pedidos estornados criados\n`);
+
+  // 20 pedidos pagos
+  console.log('📦 Criando 20 pedidos PAGOS...');
+  for (let i = 0; i < 20; i++) {
+    const buyer = users[userIndex % users.length];
+    userIndex++;
+
+    const selectedTicket = tickets[Math.floor(Math.random() * tickets.length)];
+    const ticketPriceInCents = getTicketPriceInCents(selectedTicket);
+    const selectedModality = modalities.length > 0
+      ? modalities[Math.floor(Math.random() * modalities.length)]
+      : null;
+    const modalityPriceInCents = selectedModality ? getModalityPriceInCents(selectedModality) : 0;
+
+    const baseAmount = ticketPriceInCents + modalityPriceInCents; // Já está em centavos
+    const serviceFee = baseAmount * 0.05; // 5% de taxa (valor exato)
+    const totalAmount = baseAmount;
+    const finalAmount = totalAmount + serviceFee;
+
+    const order = await prisma.order.create({
+      data: {
+        userId: buyer.id,
+        eventId: event.id,
+        totalAmount: totalAmount, // Já está em centavos
+        serviceFee: serviceFee, // Já está em centavos
+        discount: 0,
+        finalAmount: finalAmount, // Já está em centavos
+        createdAt: new Date(now.getTime() - (20 - i) * 24 * 60 * 60 * 1000),
+      },
+    });
+
+    const payment = await prisma.payment.create({
+      data: {
+        orderId: order.id,
+        userId: buyer.id,
+        method: PaymentMethod.CREDIT_CARD,
+        status: PaymentStatus.PAID, // Pagamento aprovado
+        amount: finalAmount, // Já está em centavos
+        transactionId: `TXN-PAID-${Date.now()}-${30 + i}`,
+        paymentDate: order.createdAt, // Data do pagamento
+      },
+    });
+
+    // Criar 1 inscrição confirmada (pagamento aprovado)
+    const participant = users[userIndex % users.length];
+    userIndex++;
+
+    // Alternar entre CONFIRMED e COMPLETED para variar
+    const registrationStatus = i % 2 === 0 ? RegistrationStatus.CONFIRMED : RegistrationStatus.COMPLETED;
+
+    const registration = await prisma.registration.create({
+      data: {
+        eventId: event.id,
+        orderId: order.id,
+        userId: participant.id,
+        status: registrationStatus,
+        qrCode: `QR-${order.id}-0`,
+        termsAccepted: true,
+        rulesAccepted: true,
+        createdAt: order.createdAt,
+      },
+    });
+
+    // Vincular ticket à inscrição
+    await prisma.registrationTicket.create({
+      data: {
+        registrationId: registration.id,
+        ticketId: selectedTicket.id,
+      },
+    });
+
+    // Vincular modality (se houver)
+    if (selectedModality) {
+      await prisma.registrationModality.create({
+        data: {
+          registrationId: registration.id,
+          modalityId: selectedModality.id,
+        },
+      });
+    }
+
+    registrationCount++;
+    orders.push({ order, payment, registrationsCount: 1 });
+  }
+  console.log(`✅ 20 pedidos pagos criados\n`);
 
   // Verificar os dados criados
   const paidCount = await prisma.payment.count({

@@ -125,9 +125,8 @@ export class CieloService {
       throw new Error('Cielo is not configured');
     }
 
-    // Normalizar para centavos: se o valor é menor que 1000, assume que está em reais e converte
-    // Caso contrário, assume que já está em centavos
-    const amountInCents = amount < 1000 ? Math.round(amount * 100) : Math.round(amount);
+    // amount já está em centavos (valor exato)
+    const amountInCents = amount;
 
     try {
       // Campos base do payment - alguns campos são específicos por método
@@ -659,7 +658,8 @@ export class CieloService {
 
     try {
       const url = `/1/sales/${paymentId}/capture`;
-      const requestBody = amount ? { Amount: Math.round(amount * 100) } : {};
+      // amount já está em centavos, mas Cielo espera em centavos também
+      const requestBody = amount ? { Amount: amount } : {};
 
       const response = await this.axiosInstance.put<any>(url, requestBody);
 
@@ -684,7 +684,8 @@ export class CieloService {
 
     try {
       const url = `/1/sales/${paymentId}/void`;
-      const requestBody = amount ? { Amount: Math.round(amount * 100) } : {};
+      // amount já está em centavos, mas Cielo espera em centavos também
+      const requestBody = amount ? { Amount: amount } : {};
 
       const response = await this.axiosInstance.put<any>(url, requestBody);
 

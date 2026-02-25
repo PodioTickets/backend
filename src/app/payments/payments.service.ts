@@ -12,18 +12,11 @@ export class PaymentsService {
   ) { }
 
   /**
-   * Normaliza valores monetários para centavos
-   * Se o valor parece estar em reais (pequeno), multiplica por 100
-   * Se parece estar em centavos (grande), usa diretamente
+   * Retorna o valor em centavos (valores já estão em centavos no banco)
    */
   private normalizeToCents(value: number | null | undefined): number {
     if (!value || value === 0) return 0;
-    // Se o valor é menor que 1000, provavelmente está em reais, converter para centavos
-    if (value < 1000) {
-      return Math.round(value * 100);
-    }
-    // Caso contrário, já está em centavos
-    return Math.round(value);
+    return value; // Valor exato, sem arredondamento
   }
 
   async create(userId: string, createPaymentDto: CreatePaymentDto) {

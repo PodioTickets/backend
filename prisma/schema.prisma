@@ -324,7 +324,7 @@ model Modality {
   groupId             String?  @db.Uuid // Referência ao grupo (opcional)
   name                String
   description         String?
-  price               Float
+  price               Int // Preço em centavos
   maxParticipants     Int?
   currentParticipants Int      @default(0)
   isActive            Boolean  @default(true)
@@ -476,10 +476,10 @@ model Order {
   id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId      String   @db.Uuid // Usuário que fez o pedido (comprador)
   eventId     String   @db.Uuid // Evento ao qual o pedido pertence
-  totalAmount Float // Valor total do pedido
-  serviceFee  Float // Taxa de serviço total
-  discount    Float    @default(0) // Desconto total (cupom/voucher)
-  finalAmount Float // Valor final a pagar
+  totalAmount Int // Valor total do pedido em centavos
+  serviceFee  Int // Taxa de serviço total em centavos
+  discount    Int      @default(0) // Desconto total (cupom/voucher) em centavos
+  finalAmount Int // Valor final a pagar em centavos
   couponId    String?  @db.Uuid // Cupom aplicado no pedido
   voucherId   String?  @db.Uuid // Voucher aplicado no pedido
   createdAt   DateTime @default(now())
@@ -503,7 +503,7 @@ model Payment {
   userId        String        @db.Uuid // Usuário que fez o pagamento
   method        PaymentMethod
   status        PaymentStatus @default(PENDING)
-  amount        Float
+  amount        Int // Valor em centavos
   transactionId String?
   paymentDate   DateTime?
   metadata      Json? // Dados adicionais do pagamento
@@ -564,11 +564,11 @@ model Coupon {
   code          String? // Obrigatório para DISCOUNT, opcional para QUANTITY e AGE
   couponType    CouponType
   type          CouponDiscountType
-  value         Float
+  value         Int // Valor em centavos (para FIXED) ou porcentagem (para PERCENTAGE)
   note          String?
   appliesTo     String? // 'all' ou ID de modalidade específica
   expiryDate    DateTime?
-  minCartValue  Float?
+  minCartValue  Int? // Valor mínimo do carrinho em centavos
   cpfListStatus CpfListStatus      @default(DISABLED)
   cpfList       Json? // Array de CPFs
   minQuantity   Int? // Para couponType QUANTITY
@@ -663,7 +663,7 @@ model TicketBatch {
   id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   ticketId  String    @db.Uuid
   quantity  Int
-  price     Float
+  price     Int // Preço em centavos
   startDate DateTime?
   endDate   DateTime?
   createdAt DateTime  @default(now())
@@ -681,7 +681,7 @@ model Product {
   name               String
   image              String?
   isIncludedInTicket Boolean  @default(false)
-  basePrice          Float    @default(0)
+  basePrice          Int      @default(0) // Preço base em centavos
   isRequired         Boolean  @default(false)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
@@ -698,7 +698,7 @@ model ProductVariation {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   productId String   @db.Uuid
   name      String
-  price     Float
+  price     Int // Preço em centavos
   stock     Int      @default(0) // 0 = ilimitado
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
