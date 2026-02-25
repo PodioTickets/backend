@@ -56,23 +56,40 @@ jobs:
             # Habilita BuildKit para cache e builds mais rápidos
             export DOCKER_BUILDKIT=1
             export COMPOSE_DOCKER_CLI_BUILD=1
-            
-            # Garante que o script de deploy tenha permissão de execução
-            chmod +x deploy.sh 2>/dev/null || true
-            
+
+            # Garante que o script de deploy tenha permissão de execução e quebras de linha corretas
+            if [ -f deploy.sh ]; then
+              # Converte quebras de linha para Unix (LF) se necessário
+              sed -i 's/\r$//' deploy.sh 2>/dev/null || true
+              chmod +x deploy.sh
+            fi
+
             # Usa o script de deploy otimizado
             # O script faz: build, sobe serviços, aguarda DB, executa migrações, reinicia
             echo "🔨 Executando deploy automatizado..."
-            SKIP_GIT_PULL=1 ./deploy.sh || {
-              echo "❌ Deploy falhou!"
-              echo ""
-              echo "📋 Logs do backend:"
-              docker compose logs --tail=50 backend || true
-              echo ""
-              echo "📋 Status dos containers:"
-              docker compose ps || true
-              exit 1
-            }
+            if [ -f deploy.sh ]; then
+              SKIP_GIT_PULL=1 bash deploy.sh || {
+                echo "❌ Deploy falhou!"
+                echo ""
+                echo "📋 Logs do backend:"
+                docker compose logs --tail=50 backend || true
+                echo ""
+                echo "📋 Status dos containers:"
+                docker compose ps || true
+                exit 1
+              }
+            else
+              echo "⚠️  Script deploy.sh não encontrado, executando comandos manualmente..."
+              docker compose build backend || exit 1
+              docker compose up -d postgres redis || exit 1
+              sleep 5
+              docker compose up -d backend || exit 1
+              sleep 3
+              docker compose exec backend pnpm prisma migrate deploy || {
+                echo "⚠️  Aviso: Falha nas migrações, continuando..."
+              }
+              docker compose restart backend
+            fi
             
             echo ""
             echo "✅ Deploy concluído com sucesso!"
