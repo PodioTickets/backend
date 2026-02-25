@@ -81,19 +81,21 @@ COPY --from=build /usr/src/app/node_modules/.pnpm/@prisma+client*/node_modules/@
 # O node_modules do prod-deps já inclui o Prisma, mas precisamos garantir que os binários estejam corretos
 USER root
 RUN chown -R nestjs:nodejs /usr/src/app/node_modules
-USER nestjs
 
 # Copia arquivos de configuração e script de entrada
 COPY package.json ./
 COPY docker-entrypoint.sh ./
 
 # Configura permissões e formatação do script de entrada
+# Precisa ser root para executar apk
 RUN apk add --no-cache dos2unix && \
     dos2unix docker-entrypoint.sh && \
     apk del dos2unix && \
     chmod +x docker-entrypoint.sh && \
     mkdir -p uploads logs && \
     chown -R nestjs:nodejs /usr/src/app
+
+# Muda para usuário não-root antes de expor a porta
 USER nestjs
 
 EXPOSE 3333
