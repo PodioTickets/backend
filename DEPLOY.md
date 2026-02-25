@@ -301,13 +301,14 @@ docker compose exec backend pnpm db:populate-simulation <eventId-ou-slug>
 docker compose exec backend pnpm db:populate-simulation
 
 # Exemplo:
-docker compose exec backend pnpm db:populate-simulation 999ef0df-a1a3-4e10-95eb-7b2b8df6f0c7
+docker compose exec backend pnpm db:populate-simulation 936b39f0-c774-4f01-95fe-4da4a962bd8f
+docker compose exec backend pnpm db:populate-simulation ee7fe954-1c21-470b-979c-5dbf82406edc
 
 # Se o comando acima não funcionar, tente:
-docker compose exec backend npx ts-node --project tsconfig.node.json prisma/populate-simulation-data.ts <eventId-ou-slug>
+docker compose exec backend npx ts-node --project tsconfig.node.json prisma/populate-simulation-data.ts 936b39f0-c774-4f01-95fe-4da4a962bd8f
 
 # Ou use node diretamente (compilando primeiro):
-docker compose exec backend sh -c "npx tsc prisma/populate-simulation-data.ts --outDir /tmp --module commonjs --target es2017 --esModuleInterop && node /tmp/populate-simulation-data.js <eventId-ou-slug>"
+docker compose exec backend sh -c "npx tsc prisma/populate-simulation-data.ts --outDir /tmp --module commonjs --target es2017 --esModuleInterop && node /tmp/populate-simulation-data.js 936b39f0-c774-4f01-95fe-4da4a962bd8f"
 
 # Ver uso de recursos
 docker stats

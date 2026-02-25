@@ -240,11 +240,6 @@ export class TicketsService {
       throw new NotFoundException('Ticket not found');
     }
 
-    // Não permitir atualizar ingressos que já foram vendidos
-    if (ticket.registrations.length > 0) {
-      throw new BadRequestException('Cannot update ticket that has been sold');
-    }
-
     // Validações similares ao create
     if (updateTicketDto.batches && updateTicketDto.batches.length === 0) {
       throw new BadRequestException('Ticket must have at least one batch');
