@@ -23,6 +23,7 @@ export class TicketCategoriesService {
     const category = await prismaWrite.ticketCategory.create({
       data: {
         name: createCategoryDto.name,
+        description: createCategoryDto.description,
         order: createCategoryDto.order,
         eventId,
       },

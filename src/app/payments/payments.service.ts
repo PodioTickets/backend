@@ -54,10 +54,6 @@ export class PaymentsService {
       throw new BadRequestException('Registration must have an order');
     }
 
-    if (registration.userId !== userId && registration.invitedById !== userId) {
-      throw new BadRequestException('Access denied');
-    }
-
     if (registration.status === 'CANCELLED') {
       throw new BadRequestException('Registration is cancelled');
     }
@@ -150,10 +146,6 @@ export class PaymentsService {
       throw new NotFoundException('Payment not found');
     }
 
-    if (payment.userId !== userId) {
-      throw new BadRequestException('Access denied');
-    }
-
     if (payment.status === PaymentStatus.PAID) {
       throw new BadRequestException('Payment already processed');
     }
@@ -220,10 +212,6 @@ export class PaymentsService {
 
     if (!payment) {
       throw new NotFoundException('Payment not found');
-    }
-
-    if (payment.userId !== userId) {
-      throw new BadRequestException('Access denied');
     }
 
     if (payment.status === PaymentStatus.PAID) {
@@ -307,10 +295,6 @@ export class PaymentsService {
 
     if (!payment) {
       throw new NotFoundException('Payment not found');
-    }
-
-    if (payment.userId !== userId) {
-      throw new BadRequestException('Access denied');
     }
 
     // Buscar informações atualizadas da Cielo se disponível
@@ -486,6 +470,15 @@ export class PaymentsService {
                       gender: true,
                     },
                   },
+                  tickets: {
+                    include: {
+                      ticket: {
+                        include: {
+                          category: true,
+                        },
+                      },
+                    },
+                  },
                 },
               },
             },
@@ -548,6 +541,15 @@ export class PaymentsService {
                       gender: true,
                     },
                   },
+                  tickets: {
+                    include: {
+                      ticket: {
+                        include: {
+                          category: true,
+                        },
+                      },
+                    },
+                  },
                 },
               },
             },
@@ -608,6 +610,15 @@ export class PaymentsService {
                       dateOfBirth: true,
                       reservePhone: true,
                       gender: true,
+                    },
+                  },
+                  tickets: {
+                    include: {
+                      ticket: {
+                        include: {
+                          category: true,
+                        },
+                      },
                     },
                   },
                 },
@@ -676,6 +687,15 @@ export class PaymentsService {
                               gender: true,
                             },
                           },
+                          tickets: {
+                            include: {
+                              ticket: {
+                                include: {
+                                  category: true,
+                                },
+                              },
+                            },
+                          },
                         },
                       },
                     },
@@ -709,6 +729,48 @@ export class PaymentsService {
       }
 
       payment = registration.order.payment;
+      // Garantir que payment.order tenha todas as registrations do pedido
+      // Como payment é do tipo Payment e não tem order tipado, precisamos fazer cast
+      // Preservar todas as propriedades do order, incluindo registrations
+      (payment as any).order = registration.order;
+      
+      // Se as registrations não estiverem carregadas, buscar diretamente do banco
+      if (!(payment as any).order.registrations || (payment as any).order.registrations.length === 0) {
+        const orderWithRegistrations = await prismaRead.order.findUnique({
+          where: { id: registration.orderId },
+          include: {
+            registrations: {
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    email: true,
+                    phone: true,
+                    documentNumber: true,
+                    dateOfBirth: true,
+                    reservePhone: true,
+                    gender: true,
+                  },
+                },
+                tickets: {
+                  include: {
+                    ticket: {
+                      include: {
+                        category: true,
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        });
+        if (orderWithRegistrations) {
+          (payment as any).order.registrations = orderWithRegistrations.registrations;
+        }
+      }
     }
 
     if (!payment) {
@@ -718,9 +780,34 @@ export class PaymentsService {
     // Verificar permissão se userId for fornecido
     if (userId && payment.userId !== userId) {
       // Verificar se o usuário é organizador do evento
-      const isOrganizer = payment.order?.event?.organization?.members?.some(
+      // Primeiro verifica nos membros já carregados (pode ter apenas OWNER)
+      let isOrganizer = payment.order?.event?.organization?.members?.some(
         (member: any) => member.userId === userId,
       );
+      
+      // Se não encontrou, busca todos os membros da organização
+      // Pode buscar organizationId de payment.order.event.organizationId ou payment.order.event.organization.id
+      let organizationId = payment.order?.event?.organizationId || payment.order?.event?.organization?.id;
+      
+      // Se ainda não encontrou o organizationId, busca o evento diretamente
+      if (!organizationId && payment.order?.eventId) {
+        const event = await prismaRead.event.findUnique({
+          where: { id: payment.order.eventId },
+          select: { organizationId: true },
+        });
+        organizationId = event?.organizationId;
+      }
+      
+      if (!isOrganizer && organizationId) {
+        const allMembers = await prismaRead.organizationMember.findMany({
+          where: {
+            organizationId: organizationId,
+            userId: userId,
+          },
+        });
+        isOrganizer = allMembers.length > 0;
+      }
+      
       if (!isOrganizer) {
         throw new BadRequestException('Access denied');
       }
@@ -838,6 +925,42 @@ export class PaymentsService {
         // IDs
         transactionId: payment.transactionId,
         orderId: payment.orderId,
+        // Todos os inscritos do pedido
+        registrations: (() => {
+          const orderRegistrations = (payment as any).order?.registrations || [];
+          
+          // Mapear as registrations existentes
+          const mappedRegistrations = orderRegistrations.map((reg: any) => ({
+            id: reg.id,
+            name: reg.user ? `${reg.user.firstName} ${reg.user.lastName}` : null,
+            email: reg.user?.email || null,
+            ticket: reg.tickets && reg.tickets.length > 0 ? {
+              id: reg.tickets[0].ticket.id,
+              name: reg.tickets[0].ticket.name,
+            } : null,
+            ticketCategory: reg.tickets && reg.tickets.length > 0 && reg.tickets[0].ticket.category ? {
+              id: reg.tickets[0].ticket.category.id,
+              name: reg.tickets[0].ticket.category.name,
+            } : null,
+          }));
+          
+          // Verificar se o comprador (buyer) já está na lista de registrations
+          const buyerId = buyer?.id;
+          const buyerAlreadyInList = buyerId && orderRegistrations.some((reg: any) => reg.userId === buyerId);
+          
+          // Se o comprador não estiver na lista, adicionar (mesmo sem registration, ele fez o pedido)
+          if (buyerId && !buyerAlreadyInList) {
+            mappedRegistrations.push({
+              id: null, // Comprador pode não ter registration própria
+              name: buyer ? `${buyer.firstName} ${buyer.lastName}` : null,
+              email: buyer?.email || null,
+              ticket: null, // Comprador pode não ter ticket se comprou apenas para outros
+              ticketCategory: null,
+            });
+          }
+          
+          return mappedRegistrations;
+        })(),
       },
     };
   }

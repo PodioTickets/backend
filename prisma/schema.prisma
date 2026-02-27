@@ -616,12 +616,13 @@ model Voucher {
 }
 
 model TicketCategory {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  eventId   String   @db.Uuid
-  name      String
-  order     Int      @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId     String   @db.Uuid
+  name        String
+  description String?
+  order       Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   event   Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
   tickets Ticket[]
@@ -635,6 +636,7 @@ model Ticket {
   eventId      String   @db.Uuid
   categoryId   String?  @db.Uuid
   name         String
+  description  String?
   modality     String // Valor do template selecionado (ex: 'Corrida de rua')
   distance     String?
   distanceUnit String?  @default("KM")

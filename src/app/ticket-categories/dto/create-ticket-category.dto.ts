@@ -11,6 +11,14 @@ export class CreateTicketCategoryDto {
   name: string;
 
   @IsOptional()
+  @IsString()
+  @ApiPropertyOptional({
+    description: 'Category description',
+    example: 'Categoria para corridas de rua',
+  })
+  description?: string;
+
+  @IsOptional()
   @IsInt()
   @Min(0)
   @ApiPropertyOptional({
@@ -25,6 +33,10 @@ export class UpdateTicketCategoryDto {
   @IsOptional()
   @IsString()
   name?: string;
+
+  @IsOptional()
+  @IsString()
+  description?: string;
 
   @IsOptional()
   @IsInt()

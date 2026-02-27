@@ -85,6 +85,7 @@ export class EventsController {
   }
 
   @Get('slug/:slug')
+  @NoCache()
   @ApiOperation({ summary: 'Get event by slug', description: 'Retrieves a single event by its slug (URL-friendly identifier)' })
   @ApiParam({ name: 'slug', description: 'Event slug' })
   @ApiResponse({ status: 200, description: 'Event retrieved successfully' })
@@ -449,7 +450,22 @@ export class EventsController {
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 403, description: 'Forbidden - Only organization owner can access' })
   @ApiResponse({ status: 404, description: 'Event not found' })
-  getRegistrations(@Request() req, @Param('eventId') eventId: string, @Query() queryDto: RegistrationsQueryDto) {
+  async getRegistrations(@Request() req, @Param('eventId') eventId: string, @Query() rawQuery: any) {
+    const normalizedQuery: any = { ...rawQuery };
+    if (rawQuery['ticketIds[]']) {
+      normalizedQuery.ticketIds = Array.isArray(rawQuery['ticketIds[]'])
+        ? rawQuery['ticketIds[]']
+        : [rawQuery['ticketIds[]']];
+      delete normalizedQuery['ticketIds[]'];
+    }
+    
+    // Transformar e validar manualmente para evitar erro de whitelist
+    const queryDto = plainToClass(RegistrationsQueryDto, normalizedQuery);
+    const errors = await validate(queryDto);
+    if (errors.length > 0) {
+      throw new BadRequestException('Validation failed');
+    }
+    
     return this.eventsService.getRegistrations(req.user.id, eventId, queryDto);
   }
 

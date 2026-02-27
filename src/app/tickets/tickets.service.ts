@@ -59,6 +59,7 @@ export class TicketsService {
     const ticket = await prismaWrite.ticket.create({
       data: {
         name: createTicketDto.name,
+        description: createTicketDto.description,
         categoryId: createTicketDto.categoryId,
         modality: createTicketDto.modality,
         distance: createTicketDto.distance,

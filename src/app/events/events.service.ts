@@ -1495,7 +1495,7 @@ export class EventsService {
     const refundsStatus = refundRate > 5 ? 'Crítico' : refundRate > 2 ? 'Atenção' : 'Normal';
 
     // Tendência de inscrições (dados para gráfico)
-    const chartData = this.buildChartData(registrations, dateRange);
+    const chartData = this.buildChartData(registrations, dateRange, period);
 
     // Ranking de ingressos
     const ticketRanking = this.buildTicketRanking(registrations, page, limit);
@@ -1601,8 +1601,13 @@ export class EventsService {
   /**
    * Constrói dados do gráfico de tendência
    */
-  private buildChartData(registrations: any[], dateRange: { start: Date | null; end: Date | null }) {
-    // Agrupar por data
+  private buildChartData(registrations: any[], dateRange: { start: Date | null; end: Date | null }, period?: DashboardPeriod) {
+    // Se o período for "geral", agrupar por mês (últimos 6 meses)
+    if (period === DashboardPeriod.GERAL || !dateRange.start) {
+      return this.buildMonthlyChartData(registrations);
+    }
+
+    // Caso contrário, agrupar por dia
     const dailyData = new Map<string, { revenue: number; confirmed: number; canceled: number; refunded: number }>();
 
     registrations.forEach((reg) => {
@@ -1637,6 +1642,85 @@ export class EventsService {
         return {
           date,
           revenue: data.revenue, // Valores já estão em centavos no banco
+          confirmed: data.confirmed,
+          canceled: data.canceled,
+          refunded: data.refunded,
+        };
+      }),
+    };
+  }
+
+  /**
+   * Constrói dados do gráfico agrupados por mês (últimos 6 meses)
+   */
+  private buildMonthlyChartData(registrations: any[]) {
+    // Calcular data de início (6 meses atrás)
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setMonth(startDate.getMonth() - 6);
+    startDate.setDate(1); // Primeiro dia do mês
+    startDate.setHours(0, 0, 0, 0);
+
+    // Agrupar por mês (YYYY-MM)
+    const monthlyData = new Map<string, { revenue: number; confirmed: number; canceled: number; refunded: number }>();
+
+    // Inicializar todos os últimos 6 meses com 0
+    for (let i = 5; i >= 0; i--) {
+      const date = new Date();
+      date.setMonth(date.getMonth() - i);
+      date.setDate(1);
+      const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+      monthlyData.set(monthKey, { revenue: 0, confirmed: 0, canceled: 0, refunded: 0 });
+    }
+
+    // Agregar valores por mês
+    registrations.forEach((reg) => {
+      const regDate = new Date(reg.order?.createdAt || reg.createdAt);
+      
+      // Só incluir se estiver dentro dos últimos 6 meses
+      if (regDate >= startDate && regDate <= endDate) {
+        const monthKey = `${regDate.getFullYear()}-${String(regDate.getMonth() + 1).padStart(2, '0')}`;
+        
+        if (monthlyData.has(monthKey)) {
+          const monthData = monthlyData.get(monthKey)!;
+          
+          if (reg.order?.payment?.status === PaymentStatus.PAID && reg.status === RegistrationStatus.CONFIRMED) {
+            monthData.revenue += this.normalizeToCents(reg.order?.finalAmount);
+            monthData.confirmed += 1;
+          } else if (reg.status === RegistrationStatus.CANCELLED) {
+            monthData.canceled += 1;
+          } else if (reg.order?.payment?.status === PaymentStatus.REFUNDED) {
+            monthData.refunded += 1;
+          }
+        }
+      }
+    });
+
+    // Ordenar meses
+    const sortedMonths = Array.from(monthlyData.keys()).sort();
+    
+    // Formatar labels (nomes dos meses em português)
+    const monthNames = [
+      'Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun',
+      'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'
+    ];
+    
+    const labels = sortedMonths.map((monthKey) => {
+      const [year, month] = monthKey.split('-');
+      const monthIndex = parseInt(month, 10) - 1;
+      return `${monthNames[monthIndex]}/${year.slice(-2)}`;
+    });
+
+    const revenue = sortedMonths.map((monthKey) => monthlyData.get(monthKey)!.revenue);
+
+    return {
+      labels,
+      revenue,
+      monthlyData: sortedMonths.map((monthKey) => {
+        const data = monthlyData.get(monthKey)!;
+        return {
+          month: monthKey,
+          revenue: data.revenue,
           confirmed: data.confirmed,
           canceled: data.canceled,
           refunded: data.refunded,

@@ -62,6 +62,11 @@ export class CreateTicketDto {
   name: string;
 
   @IsOptional()
+  @IsString()
+  @ApiPropertyOptional({ description: 'Ticket description', example: 'Ingresso para corrida de 5KM' })
+  description?: string;
+
+  @IsOptional()
   @IsUUID()
   @ApiPropertyOptional({ description: 'Category ID', example: 'uuid' })
   categoryId?: string;
@@ -130,6 +135,10 @@ export class UpdateTicketDto {
   @IsOptional()
   @IsString()
   name?: string;
+
+  @IsOptional()
+  @IsString()
+  description?: string;
 
   @IsOptional()
   @IsUUID()
