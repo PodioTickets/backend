@@ -1133,6 +1133,40 @@ export class CheckoutService {
           }
         }
 
+        // Criar produtos escolhidos pelo participante
+        if (participantData.products) {
+          for (const productItem of participantData.products) {
+            // Buscar produto e variação para obter preços
+            const product = await prisma.product.findUnique({
+              where: { id: productItem.productId },
+              include: { variations: true },
+            });
+
+            if (product) {
+              let unitPrice = product.basePrice;
+              if (productItem.variationId) {
+                const variation = product.variations.find(
+                  (v) => v.id === productItem.variationId,
+                );
+                if (variation) {
+                  unitPrice = variation.price;
+                }
+              }
+
+              await prisma.registrationProduct.create({
+                data: {
+                  registrationId: registration.id,
+                  productId: productItem.productId,
+                  variationId: productItem.variationId || null,
+                  quantity: productItem.quantity,
+                  unitPrice: unitPrice,
+                  totalPrice: unitPrice * productItem.quantity,
+                },
+              });
+            }
+          }
+        }
+
         registrations.push(updatedRegistration);
         participantIndex++;
       }

@@ -399,6 +399,7 @@ model Registration {
   kitItems        RegistrationKitItem[]
   questionAnswers QuestionAnswer[]
   tickets         RegistrationTicket[]
+  products        RegistrationProduct[]
 
   @@index([eventId])
   @@index([orderId])
@@ -688,10 +689,11 @@ model Product {
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
-  event      Event              @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  variations ProductVariation[]
-  tickets    TicketProduct[]
-  kitItems   KitItem[]
+  event         Event                 @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  variations    ProductVariation[]
+  tickets       TicketProduct[]
+  kitItems      KitItem[]
+  registrations RegistrationProduct[]
 
   @@index([eventId])
 }
@@ -705,7 +707,8 @@ model ProductVariation {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product       Product               @relation(fields: [productId], references: [id], onDelete: Cascade)
+  registrations RegistrationProduct[]
 
   @@index([productId])
 }
@@ -736,4 +739,23 @@ model RegistrationTicket {
   @@unique([registrationId, ticketId])
   @@index([registrationId])
   @@index([ticketId])
+}
+
+model RegistrationProduct {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  registrationId String   @db.Uuid
+  productId      String   @db.Uuid
+  variationId    String?  @db.Uuid // Variação escolhida (opcional, se o produto tiver variações)
+  quantity       Int      @default(1)
+  unitPrice      Int // Preço unitário em centavos no momento da compra
+  totalPrice     Int // Preço total em centavos (unitPrice * quantity)
+  createdAt      DateTime @default(now())
+
+  registration Registration      @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  product      Product           @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variation    ProductVariation? @relation(fields: [variationId], references: [id], onDelete: SetNull)
+
+  @@index([registrationId])
+  @@index([productId])
+  @@index([variationId])
 }

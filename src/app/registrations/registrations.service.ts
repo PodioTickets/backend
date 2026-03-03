@@ -1,7 +1,8 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateRegistrationDto, CreateRegistrationWithInvitedUserDto } from './dto/create-registration.dto';
-import { RegistrationStatus } from '@prisma/client';
+import { FilterRegistrationsDto, RegistrationFilterStatus } from './dto/filter-registrations.dto';
+import { RegistrationStatus, PaymentStatus } from '@prisma/client';
 // QR Code é gerado dinamicamente no frontend/backend usando o payload salvo em qrCode
 import { KitsService } from '../kits/kits.service';
 
@@ -10,7 +11,7 @@ export class RegistrationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly kitsService: KitsService,
-  ) {}
+  ) { }
 
   async create(userId: string, createRegistrationDto: CreateRegistrationWithInvitedUserDto) {
     const { eventId, modalities, kitItems = [], questionAnswers = [], termsAccepted, rulesAccepted, invitedUser, invitedUserId, couponCode, voucherCode } = createRegistrationDto;
@@ -287,10 +288,13 @@ export class RegistrationsService {
     };
   }
 
-  async findUserRegistrations(userId: string) {
+  async findUserRegistrations(userId: string, filterDto: FilterRegistrationsDto = {}) {
     const prismaRead = this.prisma.getReadClient();
-    
-    const registrations = await prismaRead.registration.findMany({
+    const { page = 1, limit = 20, status } = filterDto;
+    const skip = (page - 1) * limit;
+
+    // Buscar todas as registrations do usuário
+    const allRegistrations = await prismaRead.registration.findMany({
       where: {
         OR: [
           { userId },
@@ -340,15 +344,87 @@ export class RegistrationsService {
       },
     });
 
+    // Aplicar filtro de status se fornecido
+    let filteredRegistrations = allRegistrations;
+    if (status) {
+      const now = new Date();
+      filteredRegistrations = allRegistrations.filter((reg) => {
+        const eventDate = reg.event.eventDate ? new Date(reg.event.eventDate) : null;
+        const paymentStatus = reg.order?.payment?.status;
+        const registrationStatus = reg.status;
+        
+        // Parse payment metadata para verificar refundType
+        let paymentMetadata = null;
+        if (reg.order?.payment?.metadata) {
+          try {
+            paymentMetadata = typeof reg.order.payment.metadata === 'string'
+              ? JSON.parse(reg.order.payment.metadata)
+              : reg.order.payment.metadata;
+          } catch (e) {
+            paymentMetadata = reg.order.payment.metadata;
+          }
+        }
+        const refundType = paymentMetadata?.refundType;
+
+        switch (status) {
+          case RegistrationFilterStatus.COMPLETED:
+            // Evento já acabou
+            return eventDate && eventDate < now;
+
+          case RegistrationFilterStatus.CANCELLED:
+            // Pagamento cancelado, estorno ou chargeback
+            return (
+              registrationStatus === RegistrationStatus.CANCELLED ||
+              paymentStatus === PaymentStatus.REFUNDED ||
+              refundType === 'CHARGEBACK' ||
+              refundType === 'REFUND'
+            );
+
+          case RegistrationFilterStatus.PENDING:
+            // Esperando pagamento
+            return (
+              registrationStatus === RegistrationStatus.PENDING ||
+              paymentStatus === PaymentStatus.PENDING ||
+              paymentStatus === PaymentStatus.FAILED ||
+              !paymentStatus
+            );
+
+          case RegistrationFilterStatus.CONFIRMED:
+            // Pagamento confirmado ou pago
+            return (
+              (registrationStatus === RegistrationStatus.CONFIRMED ||
+                registrationStatus === RegistrationStatus.COMPLETED) &&
+              paymentStatus === PaymentStatus.PAID
+            );
+
+          default:
+            return true;
+        }
+      });
+    }
+
+    // Aplicar paginação
+    const paginatedRegistrations = filteredRegistrations.slice(skip, skip + limit);
+    const total = filteredRegistrations.length;
+    const totalPages = Math.ceil(total / limit);
+
     return {
       message: 'Registrations fetched successfully',
-      data: { registrations },
+      data: {
+        registrations: paginatedRegistrations,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages,
+        },
+      },
     };
   }
 
   async findOne(id: string, userId: string) {
     const prismaRead = this.prisma.getReadClient();
-    
+
     const registration = await prismaRead.registration.findUnique({
       where: { id },
       include: {
@@ -452,7 +528,7 @@ export class RegistrationsService {
     // Formatar a resposta conforme especificação
     // Usar type assertion para contornar problemas de tipagem do Prisma
     const reg = registration as any;
-    
+
     const formattedRegistration = {
       id: reg.id,
       qrCode: reg.qrCode,
@@ -481,10 +557,10 @@ export class RegistrationsService {
       ticket: reg.tickets && reg.tickets.length > 0 ? {
         id: reg.tickets[0].ticket.id,
         name: reg.tickets[0].ticket.name,
-        distance: reg.tickets[0].ticket.distance ? 
-          (reg.tickets[0].ticket.distanceUnit ? 
-            `${reg.tickets[0].ticket.distance} ${reg.tickets[0].ticket.distanceUnit}` : 
-            reg.tickets[0].ticket.distance) : 
+        distance: reg.tickets[0].ticket.distance ?
+          (reg.tickets[0].ticket.distanceUnit ?
+            `${reg.tickets[0].ticket.distance} ${reg.tickets[0].ticket.distanceUnit}` :
+            reg.tickets[0].ticket.distance) :
           null,
         category: reg.tickets[0].ticket.category ? {
           id: reg.tickets[0].ticket.category.id,
@@ -526,6 +602,412 @@ export class RegistrationsService {
 
     return {
       message: 'Registration fetched successfully',
+      data: { registration: formattedRegistration },
+    };
+  }
+
+  async findMyRegistration(id: string, userId: string) {
+    const prismaRead = this.prisma.getReadClient();
+
+    const registration = await prismaRead.registration.findUnique({
+      where: { id },
+      include: {
+        event: {
+          include: {
+            organization: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                phone: true,
+                logoUrl: true,
+              },
+            },
+            locations: true,
+            topics: {
+              where: {
+                title: 'REGULAMENTO',
+                isEnabled: true,
+              },
+            },
+          },
+        },
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            documentNumber: true,
+            avatarUrl: true,
+            dateOfBirth: true,
+            gender: true,
+            phone: true,
+            reservePhone: true,
+          },
+        },
+        invitedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+        modalities: {
+          include: {
+            modality: {
+              include: {
+                group: true,
+              },
+            },
+          },
+        },
+        tickets: {
+          include: {
+            ticket: {
+              include: {
+                category: true,
+                batches: {
+                  orderBy: {
+                    createdAt: 'desc' as const,
+                  },
+                },
+                products: {
+                  include: {
+                    product: {
+                      include: {
+                        variations: true,
+                      },
+                    },
+                  },
+                },
+                kit: true,
+              },
+            },
+          },
+        },
+        questionAnswers: {
+          include: {
+            question: {
+              select: {
+                id: true,
+                question: true,
+                type: true,
+                isRequired: true,
+              },
+            },
+          },
+        },
+        kitItems: {
+          include: {
+            kitItem: {
+              include: {
+                product: {
+                  select: {
+                    id: true,
+                    name: true,
+                    image: true,
+                    basePrice: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+        products: {
+          include: {
+            product: {
+              include: {
+                variations: true,
+              },
+            },
+            variation: true,
+          },
+        },
+        order: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+                phone: true,
+                documentNumber: true,
+                avatarUrl: true,
+              },
+            },
+            payment: {
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    email: true,
+                  },
+                },
+              },
+            },
+            registrations: {
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    email: true,
+                  },
+                },
+                tickets: {
+                  include: {
+                    ticket: {
+                      select: {
+                        id: true,
+                        name: true,
+                        category: {
+                          select: {
+                            id: true,
+                            name: true,
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            coupon: true,
+            voucher: true,
+          },
+        },
+      },
+    });
+
+    if (!registration) {
+      throw new NotFoundException('Registration not found');
+    }
+
+    // Verificar se o usuário tem acesso (é o dono da inscrição ou foi convidado por ele)
+    if (registration.userId !== userId && registration.invitedById !== userId) {
+      throw new BadRequestException('Access denied - You can only view your own registrations');
+    }
+
+    const reg = registration as any;
+
+    // Formatar payment metadata se existir
+    let paymentMetadata = null;
+    if (reg.order?.payment?.metadata) {
+      try {
+        paymentMetadata = typeof reg.order.payment.metadata === 'string'
+          ? JSON.parse(reg.order.payment.metadata)
+          : reg.order.payment.metadata;
+      } catch (e) {
+        paymentMetadata = reg.order.payment.metadata;
+      }
+    }
+
+    const formattedRegistration = {
+      id: reg.id,
+      status: reg.status,
+      qrCode: reg.qrCode,
+      createdAt: reg.createdAt,
+      updatedAt: reg.updatedAt,
+      user: {
+        id: reg.user.id,
+        firstName: reg.user.firstName,
+        lastName: reg.user.lastName,
+        email: reg.user.email,
+        documentNumber: reg.user.documentNumber,
+        avatarUrl: reg.user.avatarUrl,
+        dateOfBirth: reg.user.dateOfBirth?.toISOString() || null,
+        gender: reg.user.gender,
+        phone: reg.user.phone,
+        reservePhone: reg.user.reservePhone,
+        fullName: `${reg.user.firstName} ${reg.user.lastName}`,
+      },
+      invitedBy: reg.invitedBy ? {
+        id: reg.invitedBy.id,
+        firstName: reg.invitedBy.firstName,
+        lastName: reg.invitedBy.lastName,
+        email: reg.invitedBy.email,
+        fullName: `${reg.invitedBy.firstName} ${reg.invitedBy.lastName}`,
+      } : null,
+      event: {
+        id: reg.event.id,
+        name: reg.event.name,
+        slug: reg.event.slug,
+        description: reg.event.description,
+        startDate: reg.event.startDate,
+        endDate: reg.event.endDate,
+        registrationStartDate: reg.event.registrationStartDate,
+        registrationEndDate: reg.event.registrationEndDate,
+        imageUrl: reg.event.imageUrl,
+        bannerUrl: reg.event.bannerUrl,
+        status: reg.event.status,
+        location: reg.event.location,
+        organization: reg.event.organization,
+        regulationTopic: reg.event.topics && reg.event.topics.length > 0 ? reg.event.topics[0] : null,
+      },
+      modalities: (reg.modalities || []).map((rm: any) => ({
+        id: rm.id,
+        modality: {
+          id: rm.modality.id,
+          name: rm.modality.name,
+          price: rm.modality.price,
+          group: rm.modality.group ? {
+            id: rm.modality.group.id,
+            name: rm.modality.group.name,
+          } : null,
+        },
+      })),
+      tickets: (reg.tickets || []).map((rt: any) => ({
+        id: rt.id,
+        ticket: {
+          id: rt.ticket.id,
+          name: rt.ticket.name,
+          description: rt.ticket.description,
+          modality: rt.ticket.modality,
+          distance: rt.ticket.distance,
+          distanceUnit: rt.ticket.distanceUnit,
+          gender: rt.ticket.gender,
+          ageLimitMin: rt.ticket.ageLimitMin,
+          ageLimitMax: rt.ticket.ageLimitMax,
+          hasKit: rt.ticket.hasKit,
+          category: rt.ticket.category ? {
+            id: rt.ticket.category.id,
+            name: rt.ticket.category.name,
+            description: rt.ticket.category.description,
+          } : null,
+          batches: (rt.ticket.batches || []).map((batch: any) => ({
+            id: batch.id,
+            quantity: batch.quantity,
+            price: batch.price,
+            startDate: batch.startDate,
+            endDate: batch.endDate,
+          })),
+          products: (rt.ticket.products || []).map((tp: any) => ({
+            id: tp.product.id,
+            name: tp.product.name,
+            image: tp.product.image,
+            basePrice: tp.product.basePrice,
+            variations: (tp.product.variations || []).map((v: any) => ({
+              id: v.id,
+              name: v.name,
+              price: v.price,
+              stock: v.stock,
+            })),
+          })),
+          kit: rt.ticket.kit ? {
+            id: rt.ticket.kit.id,
+            name: rt.ticket.kit.name,
+          } : null,
+        },
+      })),
+      questionAnswers: (reg.questionAnswers || []).map((qa: any) => ({
+        id: qa.id,
+        question: {
+          id: qa.question.id,
+          question: qa.question.question,
+          type: qa.question.type,
+          isRequired: qa.question.isRequired,
+        },
+        answer: qa.answer as string,
+      })),
+      kitItems: (reg.kitItems || []).map((ki: any) => ({
+        id: ki.id,
+        kitItem: {
+          id: ki.kitItem.id,
+          name: ki.kitItem.name || ki.kitItem.product?.name || 'Item',
+          price: ki.kitItem.product?.basePrice || 0,
+          image: ki.kitItem.product?.image || null,
+        },
+        selectedSize: ki.selectedSize,
+        quantity: ki.quantity,
+      })),
+      products: (reg.products || []).map((rp: any) => ({
+        id: rp.id,
+        product: {
+          id: rp.product.id,
+          name: rp.product.name,
+          image: rp.product.image,
+          basePrice: rp.product.basePrice,
+        },
+        variation: rp.variation ? {
+          id: rp.variation.id,
+          name: rp.variation.name,
+          price: rp.variation.price,
+        } : null,
+        quantity: rp.quantity,
+        unitPrice: rp.unitPrice,
+        totalPrice: rp.totalPrice,
+      })),
+      order: reg.order ? {
+        id: reg.order.id,
+        totalAmount: reg.order.totalAmount,
+        serviceFee: reg.order.serviceFee,
+        discount: reg.order.discount,
+        finalAmount: reg.order.finalAmount,
+        purchaseDate: reg.order.createdAt,
+        buyer: reg.order.buyer ? {
+          id: reg.order.buyer.id,
+          firstName: reg.order.buyer.firstName,
+          lastName: reg.order.buyer.lastName,
+          email: reg.order.buyer.email,
+          phone: reg.order.buyer.phone,
+          documentNumber: reg.order.buyer.documentNumber,
+          avatarUrl: reg.order.buyer.avatarUrl,
+          fullName: `${reg.order.buyer.firstName} ${reg.order.buyer.lastName}`,
+        } : null,
+        payment: reg.order.payment ? {
+          id: reg.order.payment.id,
+          status: reg.order.payment.status,
+          method: reg.order.payment.method,
+          amount: reg.order.payment.amount,
+          transactionId: reg.order.payment.transactionId,
+          paymentDate: reg.order.payment.paymentDate,
+          createdAt: reg.order.payment.createdAt,
+          gateway: reg.order.payment.gateway,
+          metadata: paymentMetadata,
+          refundType: paymentMetadata?.refundType || null,
+        } : null,
+        coupon: reg.order.coupon ? {
+          id: reg.order.coupon.id,
+          code: reg.order.coupon.code,
+          type: reg.order.coupon.type,
+          value: reg.order.coupon.value,
+        } : null,
+        voucher: reg.order.voucher ? {
+          id: reg.order.voucher.id,
+          code: reg.order.voucher.code,
+          type: reg.order.voucher.type,
+          value: reg.order.voucher.value,
+        } : null,
+        registrations: (reg.order.registrations || []).map((orderReg: any) => ({
+          id: orderReg.id,
+          status: orderReg.status,
+          user: {
+            id: orderReg.user.id,
+            firstName: orderReg.user.firstName,
+            lastName: orderReg.user.lastName,
+            email: orderReg.user.email,
+            fullName: `${orderReg.user.firstName} ${orderReg.user.lastName}`,
+          },
+          tickets: (orderReg.tickets || []).map((orderTicket: any) => ({
+            id: orderTicket.ticket.id,
+            name: orderTicket.ticket.name,
+            category: orderTicket.ticket.category ? {
+              id: orderTicket.ticket.category.id,
+              name: orderTicket.ticket.category.name,
+            } : null,
+          })),
+        })),
+      } : null,
+    };
+
+    return {
+      message: 'Registration details fetched successfully',
       data: { registration: formattedRegistration },
     };
   }
