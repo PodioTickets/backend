@@ -282,9 +282,15 @@ export class RegistrationsService {
       });
     });
 
+    // Formatar registration para substituir qrCode pelo link
+    const formattedRegistration = {
+      ...registration,
+      qrCode: `https://www.podioticket.com.br/user/tickets/${registration.id}`,
+    };
+
     return {
       message: 'Registration created successfully',
-      data: { registration },
+      data: { registration: formattedRegistration },
     };
   }
 
@@ -331,6 +337,16 @@ export class RegistrationsService {
         kitItems: {
           include: {
             kitItem: true,
+          },
+        },
+        products: {
+          include: {
+            product: {
+              include: {
+                variations: true,
+              },
+            },
+            variation: true,
           },
         },
         order: {
@@ -403,9 +419,34 @@ export class RegistrationsService {
       });
     }
 
+    // Formatar registrations para substituir qrCode pelo link e formatar produtos
+    const formattedRegistrations = filteredRegistrations.map((reg: any) => ({
+      ...reg,
+      qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
+      products: (reg.products || []).map((rp: any) => ({
+        id: rp.id,
+        product: {
+          id: rp.product.id,
+          name: rp.product.name,
+          image: rp.product.image,
+          basePrice: rp.product.basePrice,
+          variationType: rp.product.variationType || null,
+        },
+        variation: rp.variation ? {
+          id: rp.variation.id,
+          name: rp.variation.name,
+          price: rp.variation.price,
+        } : null,
+        variationName: rp.variation?.name || null,
+        quantity: rp.quantity,
+        unitPrice: rp.unitPrice,
+        totalPrice: rp.totalPrice,
+      })),
+    }));
+
     // Aplicar paginação
-    const paginatedRegistrations = filteredRegistrations.slice(skip, skip + limit);
-    const total = filteredRegistrations.length;
+    const paginatedRegistrations = formattedRegistrations.slice(skip, skip + limit);
+    const total = formattedRegistrations.length;
     const totalPages = Math.ceil(total / limit);
 
     return {
@@ -514,6 +555,16 @@ export class RegistrationsService {
             },
           },
         },
+        products: {
+          include: {
+            product: {
+              include: {
+                variations: true,
+              },
+            },
+            variation: true,
+          },
+        },
         order: {
           include: {
             payment: true,
@@ -531,7 +582,7 @@ export class RegistrationsService {
 
     const formattedRegistration = {
       id: reg.id,
-      qrCode: reg.qrCode,
+      qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
       user: {
         id: reg.user.id,
         firstName: reg.user.firstName,
@@ -571,6 +622,7 @@ export class RegistrationsService {
           name: tp.product.name,
           image: tp.product.image,
           basePrice: tp.product.basePrice ? Math.round(tp.product.basePrice * 100) : 0, // Em centavos
+          variationType: tp.product.variationType || null,
           variations: (tp.product.variations || []).map((v: any) => ({
             id: v.id,
             name: v.name,
@@ -597,6 +649,25 @@ export class RegistrationsService {
         },
         selectedSize: ki.selectedSize,
         quantity: ki.quantity,
+      })),
+      products: (reg.products || []).map((rp: any) => ({
+        id: rp.id,
+        product: {
+          id: rp.product.id,
+          name: rp.product.name,
+          image: rp.product.image,
+          basePrice: rp.product.basePrice,
+          variationType: rp.product.variationType || null,
+        },
+        variation: rp.variation ? {
+          id: rp.variation.id,
+          name: rp.variation.name,
+          price: rp.variation.price,
+        } : null,
+        variationName: rp.variation?.name || null,
+        quantity: rp.quantity,
+        unitPrice: rp.unitPrice,
+        totalPrice: rp.totalPrice,
       })),
     };
 
@@ -811,7 +882,7 @@ export class RegistrationsService {
     const formattedRegistration = {
       id: reg.id,
       status: reg.status,
-      qrCode: reg.qrCode,
+      qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
       createdAt: reg.createdAt,
       updatedAt: reg.updatedAt,
       user: {
@@ -892,6 +963,7 @@ export class RegistrationsService {
             name: tp.product.name,
             image: tp.product.image,
             basePrice: tp.product.basePrice,
+            variationType: tp.product.variationType || null,
             variations: (tp.product.variations || []).map((v: any) => ({
               id: v.id,
               name: v.name,
@@ -933,12 +1005,14 @@ export class RegistrationsService {
           name: rp.product.name,
           image: rp.product.image,
           basePrice: rp.product.basePrice,
+          variationType: rp.product.variationType || null,
         },
         variation: rp.variation ? {
           id: rp.variation.id,
           name: rp.variation.name,
           price: rp.variation.price,
         } : null,
+        variationName: rp.variation?.name || null,
         quantity: rp.quantity,
         unitPrice: rp.unitPrice,
         totalPrice: rp.totalPrice,

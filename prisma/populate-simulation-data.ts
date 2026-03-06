@@ -227,9 +227,12 @@ async function main() {
       const emailBase = `${firstName.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')}.${lastName.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')}`;
       const email = `${emailBase}@gmail.com`;
 
-      // Verificar se email já existe (raro, mas possível)
-      const existingUserByEmail = await prisma.user.findUnique({
-        where: { email },
+      // Verificar se email já existe (raro, mas possível) - buscar conta USER
+      const existingUserByEmail = await prisma.user.findFirst({
+        where: { 
+          email,
+          accountType: 'USER',
+        },
       });
 
       if (existingUserByEmail) {
@@ -239,6 +242,7 @@ async function main() {
         const user = await prisma.user.create({
           data: {
             email: finalEmail,
+            accountType: 'USER',
             password: hashedPassword,
             firstName: firstName,
             lastName: lastName,
@@ -255,6 +259,7 @@ async function main() {
         const user = await prisma.user.create({
           data: {
             email: email,
+            accountType: 'USER',
             password: hashedPassword,
             firstName: firstName,
             lastName: lastName,

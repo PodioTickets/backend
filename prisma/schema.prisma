@@ -57,6 +57,11 @@ enum PaymentStatus {
   REFUNDED
 }
 
+enum AccountType {
+  USER
+  ORGANIZER
+}
+
 enum UserRole {
   USER
   ORGANIZER
@@ -100,7 +105,8 @@ enum VoucherStatus {
 
 model User {
   id                    String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  email                 String        @unique
+  email                 String
+  accountType           AccountType   @default(USER) // Tipo de conta: USER (participante) ou ORGANIZER (organizador)
   password              String
   firstName             String
   lastName              String
@@ -114,7 +120,7 @@ model User {
   city                  String?
   documentType          DocumentType?
   documentNumber        String? // CPF/CNPJ com formatação (ex: "123.456.789-00")
-  documentNumberClean   String?       @unique // CPF/CNPJ sem formatação (ex: "12345678900") - usado para validação de unicidade
+  documentNumberClean   String? // CPF/CNPJ sem formatação (ex: "12345678900") - usado para validação de unicidade
   acceptedTerms         Boolean       @default(false)
   acceptedPrivacyPolicy Boolean       @default(false)
   receiveCalendarEvents Boolean       @default(false)
@@ -123,7 +129,7 @@ model User {
   isActive              Boolean       @default(true)
   role                  UserRole      @default(USER)
   avatarUrl             String?
-  googleId              String?       @unique
+  googleId              String?
   googleEmail           String?
   totpSecret            String? // Secret TOTP para 2FA
   mfaEnabled            Boolean       @default(false) // Se 2FA está habilitado
@@ -139,6 +145,13 @@ model User {
   linkedUsersAsLinked  LinkedUser[]         @relation("LinkedUser")
   organizationMembers  OrganizationMember[]
   orders               Order[]
+
+  // Índices compostos para permitir mesmo email em contas diferentes
+  @@unique([email, accountType])
+  @@unique([documentNumberClean, accountType])
+  @@unique([googleId, accountType])
+  @@index([email, accountType])
+  @@index([accountType])
 }
 
 model Organization {
@@ -686,6 +699,7 @@ model Product {
   isIncludedInTicket Boolean  @default(false)
   basePrice          Int      @default(0) // Preço base em centavos
   isRequired         Boolean  @default(false)
+  variationType      String? // Tipo/nome da variação (ex: "Tamanhos", "Cores")
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 

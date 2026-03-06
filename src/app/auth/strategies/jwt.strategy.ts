@@ -19,6 +19,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: any) {
+    // Buscar usuário com accountType do payload ou buscar por ID
+    const accountType = payload.accountType || 'USER';
+    
     const user = await this.prisma.user.findUnique({
       where: { id: payload.sub },
       select: {
@@ -28,6 +31,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         lastName: true,
         documentNumber: true,
         role: true,
+        accountType: true,
         isActive: true,
         phone: true,
         reservePhone: true,
@@ -43,6 +47,11 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       throw new UnauthorizedException('User not found or inactive');
     }
 
+    // Verificar se o accountType do token corresponde ao do banco
+    if (user.accountType !== accountType) {
+      throw new UnauthorizedException('Invalid account type');
+    }
+
     return {
       id: user.id,
       email: user.email,
@@ -50,6 +59,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       lastName: user.lastName,
       documentNumber: user.documentNumber,
       role: user.role,
+      accountType: user.accountType,
       phone: user.phone,
       emergencyPhone: user.reservePhone, // Alias para compatibilidade
       reservePhone: user.reservePhone,

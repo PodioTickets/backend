@@ -36,9 +36,14 @@ export class OrganizationsService {
         throw new BadRequestException('Either userId or owner data (email, password, firstName, lastName) is required');
       }
 
-      // Verificar se email já existe
+      // Verificar se email já existe (conta ORGANIZER)
       const existingUserByEmail = await prismaRead.user.findUnique({
-        where: { email: createDto.ownerEmail },
+        where: { 
+          email_accountType: {
+            email: createDto.ownerEmail,
+            accountType: 'ORGANIZER',
+          }
+        },
       });
 
       if (existingUserByEmail) {
@@ -50,7 +55,12 @@ export class OrganizationsService {
         const documentNumberClean = this.cleanDocumentNumber(createDto.ownerDocumentNumber);
         if (documentNumberClean) {
           const existingUserByCpf = await prismaRead.user.findUnique({
-            where: { documentNumberClean },
+            where: { 
+              documentNumberClean_accountType: {
+                documentNumberClean,
+                accountType: 'ORGANIZER',
+              }
+            },
           });
 
           if (existingUserByCpf) {
@@ -95,6 +105,7 @@ export class OrganizationsService {
         const newUser = await tx.user.create({
           data: {
             email: createDto.ownerEmail!,
+            accountType: 'ORGANIZER', // Conta de organizador
             password: hashedPassword,
             firstName: createDto.ownerFirstName!,
             lastName: createDto.ownerLastName!,
@@ -423,6 +434,10 @@ export class OrganizationsService {
         throw new NotFoundException('User not found');
       }
 
+      if (userToAdd.accountType !== 'ORGANIZER') {
+        throw new BadRequestException('User must have accountType ORGANIZER to be added as organization member');
+      }
+
       userToAddId = addMemberDto.userId;
     } else {
       // Criar novo usuário
@@ -430,9 +445,14 @@ export class OrganizationsService {
         throw new BadRequestException('firstName, lastName, email and password are required when creating a new user');
       }
 
-      // Verificar se email já existe
+      // Verificar se email já existe (conta ORGANIZER)
       const existingUser = await prismaRead.user.findUnique({
-        where: { email: addMemberDto.email },
+        where: { 
+          email_accountType: {
+            email: addMemberDto.email,
+            accountType: 'ORGANIZER',
+          }
+        },
       });
 
       if (existingUser) {
@@ -451,12 +471,13 @@ export class OrganizationsService {
         mfaEnabled = true;
       }
 
-      // Criar usuário
+      // Criar usuário (conta ORGANIZER)
       const newUser = await prismaWrite.user.create({
         data: {
           firstName: addMemberDto.firstName,
           lastName: addMemberDto.lastName,
           email: addMemberDto.email,
+          accountType: 'ORGANIZER', // Conta de organizador
           password: hashedPassword,
           phone: addMemberDto.phone,
           totpSecret,
@@ -710,6 +731,11 @@ export class OrganizationsService {
         throw new NotFoundException('User not found');
       }
 
+      // Verificar se o usuário tem accountType ORGANIZER
+      if (userToAdd.accountType !== 'ORGANIZER') {
+        throw new BadRequestException('User must have accountType ORGANIZER to be added as organization member');
+      }
+
       userToAddId = addMemberDto.userId;
     } else {
       // Criar novo usuário
@@ -717,9 +743,14 @@ export class OrganizationsService {
         throw new BadRequestException('firstName, lastName, email and password are required when creating a new user');
       }
 
-      // Verificar se email já existe
+      // Verificar se email já existe (conta ORGANIZER)
       const existingUser = await prismaRead.user.findUnique({
-        where: { email: addMemberDto.email },
+        where: { 
+          email_accountType: {
+            email: addMemberDto.email,
+            accountType: 'ORGANIZER',
+          }
+        },
       });
 
       if (existingUser) {
@@ -738,12 +769,13 @@ export class OrganizationsService {
         mfaEnabled = true;
       }
 
-      // Criar usuário
+      // Criar usuário (conta ORGANIZER)
       const newUser = await prismaWrite.user.create({
         data: {
           firstName: addMemberDto.firstName,
           lastName: addMemberDto.lastName,
           email: addMemberDto.email,
+          accountType: 'ORGANIZER', // Conta de organizador
           password: hashedPassword,
           phone: addMemberDto.phone,
           totpSecret,

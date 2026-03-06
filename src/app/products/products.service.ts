@@ -4,7 +4,7 @@ import { CreateProductDto, UpdateProductDto, FilterProductsDto } from './dto/cre
 
 @Injectable()
 export class ProductsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
   async create(userId: string, eventId: string, createProductDto: CreateProductDto) {
     await this.verifyOrganizerAccess(userId, eventId);
@@ -27,6 +27,7 @@ export class ProductsService {
         isIncludedInTicket: createProductDto.isIncludedInTicket ?? false,
         basePrice: createProductDto.basePrice ?? 0,
         isRequired: createProductDto.isRequired ?? false,
+        variationType: createProductDto.variationType,
         eventId,
         variations: {
           create: createProductDto.variations.map((v) => ({
@@ -134,6 +135,11 @@ export class ProductsService {
     const updateData: any = { ...updateProductDto };
     delete updateData.variations;
 
+    // Converter basePrice de reais para centavos se fornecido
+    if (updateData.basePrice !== undefined) {
+      updateData.basePrice = Math.round(updateData.basePrice * 100);
+    }
+
     if (updateProductDto.variations) {
       // Validar variações
       if (updateProductDto.variations.length === 0) {
@@ -152,7 +158,7 @@ export class ProductsService {
       updateData.variations = {
         create: updateProductDto.variations.map((v) => ({
           name: v.name,
-          price: v.price,
+          price: Math.round(v.price * 100), // Converter reais para centavos
           stock: v.stock ?? 0,
         })),
       };

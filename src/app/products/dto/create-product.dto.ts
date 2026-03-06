@@ -84,6 +84,14 @@ export class CreateProductDto {
   })
   isRequired?: boolean;
 
+  @IsOptional()
+  @IsString()
+  @ApiPropertyOptional({
+    description: 'Variation type/name (e.g., "Tamanhos", "Cores")',
+    example: 'Tamanhos',
+  })
+  variationType?: string;
+
   @IsArray()
   @ArrayMinSize(1)
   @ValidateNested({ each: true })
@@ -118,6 +126,10 @@ export class UpdateProductDto {
   @IsOptional()
   @IsBoolean()
   isRequired?: boolean;
+
+  @IsOptional()
+  @IsString()
+  variationType?: string;
 
   @IsOptional()
   @IsArray()

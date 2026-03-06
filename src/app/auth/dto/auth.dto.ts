@@ -1,6 +1,6 @@
 import { IsEmail, IsString, IsOptional, MinLength, IsNotEmpty, IsBoolean, IsDateString, IsEnum } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Gender, DocumentType, Language } from '@prisma/client';
+import { Gender, DocumentType, Language, AccountType } from '@prisma/client';
 
 export class EmailLoginDto {
   @ApiProperty({ 
@@ -16,6 +16,15 @@ export class EmailLoginDto {
   @IsNotEmpty()
   @MinLength(8)
   password: string;
+
+  @ApiPropertyOptional({ 
+    description: 'Account type: USER (participant) or ORGANIZER',
+    enum: AccountType,
+    default: AccountType.USER
+  })
+  @IsOptional()
+  @IsEnum(AccountType)
+  accountType?: AccountType;
 }
 
 export class EmailRegisterDto {
@@ -118,6 +127,15 @@ export class ForgotPasswordDto {
   @ApiProperty({ description: 'User email' })
   @IsEmail()
   email: string;
+
+  @ApiPropertyOptional({ 
+    description: 'Account type: USER (participant) or ORGANIZER',
+    enum: AccountType,
+    default: AccountType.USER
+  })
+  @IsOptional()
+  @IsEnum(AccountType)
+  accountType?: AccountType;
 }
 
 export class ResetPasswordDto {
@@ -130,6 +148,41 @@ export class ResetPasswordDto {
   @IsString()
   @MinLength(8)
   password: string;
+}
+
+export class VerifyResetCodeDto {
+  @ApiProperty({ description: 'User email' })
+  @IsEmail()
+  email: string;
+
+  @ApiProperty({ description: 'Reset code (6 digits)' })
+  @IsString()
+  @IsNotEmpty()
+  code: string;
+
+  @ApiPropertyOptional({ 
+    description: 'Account type: USER (participant) or ORGANIZER',
+    enum: AccountType,
+    default: AccountType.USER
+  })
+  @IsOptional()
+  @IsEnum(AccountType)
+  accountType?: AccountType;
+}
+
+export class ResendResetCodeDto {
+  @ApiProperty({ description: 'User email' })
+  @IsEmail()
+  email: string;
+
+  @ApiPropertyOptional({ 
+    description: 'Account type: USER (participant) or ORGANIZER',
+    enum: AccountType,
+    default: AccountType.USER
+  })
+  @IsOptional()
+  @IsEnum(AccountType)
+  accountType?: AccountType;
 }
 
 export class VerifyEmailDto {

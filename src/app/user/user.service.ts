@@ -85,9 +85,14 @@ export class UserService {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
-    // Verificar se email já existe
+    // Verificar se email já existe (conta USER)
     const existingUserByEmail = await prismaRead.user.findUnique({
-      where: { email: createUserDto.email },
+      where: { 
+        email_accountType: {
+          email: createUserDto.email,
+          accountType: 'USER',
+        }
+      },
     });
 
     if (existingUserByEmail) {
@@ -98,7 +103,12 @@ export class UserService {
     if (createUserDto.documentNumber) {
       const documentNumberClean = this.cleanDocumentNumber(createUserDto.documentNumber);
       const existingUserByCpf = await prismaRead.user.findUnique({
-        where: { documentNumberClean },
+        where: { 
+          documentNumberClean_accountType: {
+            documentNumberClean,
+            accountType: 'USER',
+          }
+        },
       });
 
       if (existingUserByCpf) {
@@ -114,6 +124,7 @@ export class UserService {
       const user = await prismaWrite.user.create({
         data: {
           ...createUserDto,
+          accountType: 'USER', // Conta de usuário normal
           password: hashedPassword || '',
           dateOfBirth: createUserDto.dateOfBirth
             ? new Date(createUserDto.dateOfBirth)
@@ -395,16 +406,26 @@ export class UserService {
 
     const documentNumberClean = this.cleanDocumentNumber(createLinkedUserDto.documentNumber);
     let existingUser = await prismaRead.user.findUnique({
-      where: { documentNumberClean: documentNumberClean },
+      where: { 
+        documentNumberClean_accountType: {
+          documentNumberClean: documentNumberClean,
+          accountType: 'USER',
+        }
+      },
     });
 
     let wasCreated = false;
     let wasLinked = false;
 
     if (!existingUser) {
-      // Verificar se email já está em uso
+      // Verificar se email já está em uso (conta USER)
       const userWithEmail = await prismaRead.user.findUnique({
-        where: { email: createLinkedUserDto.email },
+        where: { 
+          email_accountType: {
+            email: createLinkedUserDto.email,
+            accountType: 'USER',
+          }
+        },
       });
 
       if (userWithEmail) {
@@ -423,6 +444,7 @@ export class UserService {
           firstName: createLinkedUserDto.firstName,
           lastName: createLinkedUserDto.lastName,
           email: createLinkedUserDto.email,
+          accountType: 'USER', // Conta de usuário normal
           documentNumber: createLinkedUserDto.documentNumber,
           documentNumberClean: documentNumberClean,
           phone: createLinkedUserDto.phone,

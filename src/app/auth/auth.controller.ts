@@ -27,6 +27,8 @@ import {
   RefreshTokenDto,
   ForgotPasswordDto,
   ResetPasswordDto,
+  VerifyResetCodeDto,
+  ResendResetCodeDto,
 } from './dto/auth.dto';
 import { Response } from 'express';
 import { LocalAuthGuard } from './guards/local-auth.guard';
@@ -58,7 +60,7 @@ export class AuthController {
   @Post('login')
   @UseGuards(LocalAuthGuard)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Login with email/CPF and password' })
+  @ApiOperation({ summary: 'Login with email/CPF and password (User account)' })
   @ApiResponse({ status: 200, description: 'Login successful' })
   @ApiResponse({ status: 401, description: 'Invalid credentials' })
   @ApiBody({
@@ -75,12 +77,50 @@ export class AuthController {
           description: 'User password',
           example: 'password123',
         },
+        accountType: {
+          type: 'string',
+          enum: ['USER', 'ORGANIZER'],
+          description: 'Account type: USER (participant) or ORGANIZER. Defaults to USER if not provided.',
+          example: 'USER',
+        },
       },
       required: ['emailOrCpf', 'password'],
     },
   })
   async loginEmail(@Request() req) {
     return this.authService.login(req.user);
+  }
+
+  @Post('login/organizer')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Login as organizer with email/CPF and password' })
+  @ApiResponse({ status: 200, description: 'Login successful' })
+  @ApiResponse({ status: 401, description: 'Invalid credentials' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        emailOrCpf: {
+          type: 'string',
+          description: 'Organizer email or CPF',
+          example: 'organizer@example.com',
+        },
+        password: {
+          type: 'string',
+          description: 'Organizer password',
+          example: 'password123',
+        },
+      },
+      required: ['emailOrCpf', 'password'],
+    },
+  })
+  async loginOrganizer(@Body() body: { emailOrCpf: string; password: string }) {
+    // Validar como organizador
+    const user = await this.authService.validateUser(body.emailOrCpf, body.password, 'ORGANIZER');
+    if (!user) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+    return this.authService.login(user);
   }
 
   @Get('google')
@@ -159,18 +199,46 @@ export class AuthController {
 
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Request password reset' })
+  @ApiOperation({ summary: 'Request password reset code (for USER or ORGANIZER)' })
   @ApiResponse({
     status: 200,
-    description: 'Reset email sent if account exists',
+    description: 'Reset code sent if account exists',
   })
   async forgotPassword(@Body() forgotPasswordDto: ForgotPasswordDto) {
-    return this.authService.forgotPassword(forgotPasswordDto);
+    console.log('[CONTROLLER] forgot-password endpoint called');
+    console.log('[CONTROLLER] Request body:', JSON.stringify(forgotPasswordDto, null, 2));
+    const accountType = forgotPasswordDto.accountType || 'USER';
+    console.log('[CONTROLLER] Account type:', accountType);
+    return this.authService.forgotPassword(forgotPasswordDto, accountType);
+  }
+
+  @Post('verify-reset-code')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Verify reset code and get token (for USER or ORGANIZER)' })
+  @ApiResponse({ status: 200, description: 'Code verified, token returned' })
+  @ApiResponse({ status: 400, description: 'Invalid or expired code' })
+  async verifyResetCode(@Body() verifyResetCodeDto: VerifyResetCodeDto) {
+    const accountType = verifyResetCodeDto.accountType || 'USER';
+    return this.authService.verifyResetCode(
+      verifyResetCodeDto.email,
+      verifyResetCodeDto.code,
+      accountType
+    );
+  }
+
+  @Post('resend-reset-code')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Resend reset code (for USER or ORGANIZER)' })
+  @ApiResponse({ status: 200, description: 'Reset code resent' })
+  @ApiResponse({ status: 429, description: 'Rate limit exceeded' })
+  async resendResetCode(@Body() resendResetCodeDto: ResendResetCodeDto) {
+    const accountType = resendResetCodeDto.accountType || 'USER';
+    return this.authService.resendResetCode(resendResetCodeDto.email, accountType);
   }
 
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Reset password with token' })
+  @ApiOperation({ summary: 'Reset password with token (for USER or ORGANIZER)' })
   @ApiResponse({ status: 200, description: 'Password reset successfully' })
   @ApiResponse({ status: 400, description: 'Invalid or expired token' })
   async resetPassword(@Body() resetPasswordDto: ResetPasswordDto) {
