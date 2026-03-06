@@ -377,11 +377,18 @@ export class EventsController {
     description: 'Retrieves amounts awaiting release. Only organization owner can access.',
   })
   @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20, max: 100)' })
   @ApiResponse({ status: 200, description: 'Pending releases fetched successfully' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 403, description: 'Forbidden - Only organization owner can access' })
-  getFinancialPending(@Request() req, @Param('eventId') eventId: string) {
-    return this.eventsService.getFinancialPending(req.user.id, eventId);
+  getFinancialPending(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ) {
+    return this.eventsService.getFinancialPending(req.user.id, eventId, page || 1, limit || 20);
   }
 
   @Get(':eventId/financial/refunded')

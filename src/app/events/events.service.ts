@@ -3179,7 +3179,7 @@ export class EventsService {
   /**
    * Obtém valores aguardando liberação (baseado em prazo de retenção de 30 dias)
    */
-  async getFinancialPending(userId: string, eventId: string) {
+  async getFinancialPending(userId: string, eventId: string, page: number = 1, limit: number = 20) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaRead = this.prisma.getReadClient();
@@ -3187,33 +3187,50 @@ export class EventsService {
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-    // Buscar todos os pagamentos pagos do evento
-    const paidRegistrations = await prismaRead.registration.findMany({
+    // Limitar o limit a 100
+    const safeLimit = Math.min(limit, 100);
+    const skip = (page - 1) * safeLimit;
+
+    // Buscar todos os pagamentos pagos do evento (agrupados por order para evitar duplicatas)
+    const paidOrders = await prismaRead.order.findMany({
       where: {
         eventId,
-        order: {
-          payment: {
-            status: PaymentStatus.PAID,
-          },
+        payment: {
+          status: PaymentStatus.PAID,
         },
       },
       include: {
-        order: {
-          include: {
-            payment: true,
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            avatarUrl: true,
+            documentNumber: true,
+          },
+        },
+        payment: true,
+        registrations: {
+          select: {
+            id: true,
           },
         },
       },
+      orderBy: {
+        createdAt: 'desc',
+      },
     });
 
-    const pending: any[] = [];
+    const allPending: any[] = [];
     let totalPending = 0;
     let releaseToday = 0;
 
-    for (const reg of paidRegistrations) {
-      if (!reg.order?.payment?.paymentDate) continue;
+    for (const order of paidOrders) {
+      if (!order.payment?.paymentDate) continue;
 
-      const paymentDate = new Date(reg.order.payment.paymentDate);
+      const paymentDate = new Date(order.payment.paymentDate);
       const releaseDate = new Date(paymentDate);
       releaseDate.setDate(releaseDate.getDate() + retentionDays);
 
@@ -3222,32 +3239,58 @@ export class EventsService {
         const daysUntilRelease = Math.ceil((releaseDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
         const isReleaseToday = releaseDate.toDateString() === today.toDateString();
 
-        pending.push({
-          id: reg.order.payment.id,
-          registrationId: reg.id,
-          amount: reg.order?.finalAmount || 0,
-          purchaseDate: reg.order?.createdAt.toISOString() || reg.createdAt.toISOString(),
+        allPending.push({
+          orderId: order.id,
+          paymentId: order.payment.id,
+          transactionId: order.payment.transactionId,
+          amount: order.finalAmount || 0,
+          paymentMethod: order.payment.method,
+          purchaseDate: order.createdAt.toISOString(),
+          paymentDate: order.payment.paymentDate.toISOString(),
           releaseDate: releaseDate.toISOString(),
           daysUntilRelease,
+          buyer: order.user ? {
+            id: order.user.id,
+            firstName: order.user.firstName,
+            lastName: order.user.lastName,
+            fullName: `${order.user.firstName} ${order.user.lastName}`,
+            email: order.user.email,
+            phone: order.user.phone,
+            documentNumber: order.user.documentNumber,
+            avatarUrl: order.user.avatarUrl,
+          } : null,
+          registrationsCount: order.registrations.length,
         });
 
-        totalPending += (reg.order?.finalAmount || 0);
+        totalPending += (order.finalAmount || 0);
         if (isReleaseToday) {
-          releaseToday += (reg.order?.finalAmount || 0);
+          releaseToday += (order.finalAmount || 0);
         }
       }
     }
 
-    // Ordenar por data de liberação (mais próxima primeiro)
-    pending.sort((a, b) => new Date(a.releaseDate).getTime() - new Date(b.releaseDate).getTime());
+    // Ordenar por data de compra (mais recentes primeiro)
+    allPending.sort((a, b) => new Date(b.purchaseDate).getTime() - new Date(a.purchaseDate).getTime());
+
+    // Aplicar paginação
+    const totalOrders = allPending.length;
+    const totalPages = Math.ceil(totalOrders / safeLimit);
+    const paginatedPending = allPending.slice(skip, skip + safeLimit);
 
     return {
       message: 'Pending releases fetched successfully',
       data: {
-        pending,
+        pending: paginatedPending,
         totalPending,
         releaseToday,
-        totalTransactions: paidRegistrations.length,
+        pagination: {
+          page,
+          limit: safeLimit,
+          totalOrders,
+          totalPages,
+          hasNextPage: page < totalPages,
+          hasPreviousPage: page > 1,
+        },
       },
     };
   }
