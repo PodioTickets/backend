@@ -324,6 +324,25 @@ docker compose exec postgres pg_dump -U podiogo podiogo > backup_$(date +%Y%m%d_
 docker compose exec -T postgres psql -U podiogo podiogo < backup.sql
 ```
 
+### Correção: accountType ORGANIZER (login organizador)
+
+Se organizadores existentes não conseguem fazer login em `POST /api/v1/auth/login/organizer` (o check `GET /api/v1/organizations/me/check` funciona porque usa só JWT), é porque o usuário está com `accountType = 'USER'`. Execute **uma vez** na VPS, no diretório do backend:
+
+```bash
+cd /opt/podiogo/backend   # ou o caminho onde está o projeto
+
+# Usando o script (substitua podiogo pelo seu POSTGRES_USER se for diferente)
+docker compose exec -T postgres psql -U podiogo -d podiogo < scripts/fix-organizer-account-type.sql
+```
+
+Ou em uma linha, sem script:
+
+```bash
+docker compose exec postgres psql -U podiogo -d podiogo -c "UPDATE \"User\" SET \"accountType\" = 'ORGANIZER' WHERE id IN (SELECT \"userId\" FROM \"OrganizationMember\" WHERE role = 'OWNER') AND \"accountType\" = 'USER';"
+```
+
+Troque `podiogo` por `$POSTGRES_USER` (ou o valor do seu `.env`) se for diferente.
+
 ## Deploy Automático via GitHub Actions
 
 O projeto está configurado para fazer deploy automático sempre que você fizer push para a branch `master` ou `main` no GitHub.

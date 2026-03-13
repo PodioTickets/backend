@@ -1,22 +1,47 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { CreateProductDto, UpdateProductDto, FilterProductsDto } from './dto/create-product.dto';
+import { CreateProductDto, UpdateProductDto, FilterProductsDto, ProductVariationDto } from './dto/create-product.dto';
+
+const DEFAULT_NO_INTEREST_VARIATION_NAME = 'Sem interesse';
 
 @Injectable()
 export class ProductsService {
   constructor(private readonly prisma: PrismaService) { }
 
+  /**
+   * Para produtos não incluídos no ticket, garante que exista a variação padrão "Sem interesse".
+   */
+  private ensureDefaultNoInterestVariation(
+    isIncludedInTicket: boolean,
+    variations: ProductVariationDto[],
+  ): ProductVariationDto[] {
+    if (isIncludedInTicket) return variations;
+    const hasNoInterest = variations.some(
+      (v) => v.name.trim().toLowerCase() === DEFAULT_NO_INTEREST_VARIATION_NAME.toLowerCase(),
+    );
+    if (hasNoInterest) return variations;
+    return [
+      { name: DEFAULT_NO_INTEREST_VARIATION_NAME, price: 0, stock: 0 },
+      ...variations,
+    ];
+  }
+
   async create(userId: string, eventId: string, createProductDto: CreateProductDto) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
+    const isIncluded = createProductDto.isIncludedInTicket ?? false;
+    const variations = this.ensureDefaultNoInterestVariation(
+      isIncluded,
+      createProductDto.variations,
+    );
 
     // Validações
-    if (createProductDto.variations.length === 0) {
+    if (variations.length === 0) {
       throw new BadRequestException('Product must have at least one variation');
     }
 
-    if (createProductDto.isRequired && createProductDto.variations.length < 2) {
+    if (createProductDto.isRequired && variations.length < 2) {
       throw new BadRequestException('Required products must have at least 2 variations');
     }
 
@@ -24,15 +49,15 @@ export class ProductsService {
       data: {
         name: createProductDto.name,
         image: createProductDto.image,
-        isIncludedInTicket: createProductDto.isIncludedInTicket ?? false,
-        basePrice: createProductDto.basePrice ?? 0,
+        isIncludedInTicket: isIncluded,
+        basePrice: Math.round(createProductDto.basePrice ?? 0), // entrada já em centavos (INT)
         isRequired: createProductDto.isRequired ?? false,
         variationType: createProductDto.variationType,
         eventId,
         variations: {
-          create: createProductDto.variations.map((v) => ({
+          create: variations.map((v) => ({
             name: v.name,
-            price: v.price,
+            price: Math.round(v.price ?? 0), // entrada já em centavos (INT)
             stock: v.stock ?? 0,
           })),
         },
@@ -135,18 +160,24 @@ export class ProductsService {
     const updateData: any = { ...updateProductDto };
     delete updateData.variations;
 
-    // Converter basePrice de reais para centavos se fornecido
+    // basePrice já vem em centavos (INT)
     if (updateData.basePrice !== undefined) {
-      updateData.basePrice = Math.round(updateData.basePrice * 100);
+      updateData.basePrice = Math.round(updateData.basePrice);
     }
 
     if (updateProductDto.variations) {
+      const isIncluded = updateProductDto.isIncludedInTicket ?? product.isIncludedInTicket;
+      const variations = this.ensureDefaultNoInterestVariation(
+        isIncluded,
+        updateProductDto.variations,
+      );
+
       // Validar variações
-      if (updateProductDto.variations.length === 0) {
+      if (variations.length === 0) {
         throw new BadRequestException('Product must have at least one variation');
       }
 
-      if (updateProductDto.isRequired && updateProductDto.variations.length < 2) {
+      if (updateProductDto.isRequired && variations.length < 2) {
         throw new BadRequestException('Required products must have at least 2 variations');
       }
 
@@ -156,9 +187,9 @@ export class ProductsService {
       });
 
       updateData.variations = {
-        create: updateProductDto.variations.map((v) => ({
+        create: variations.map((v) => ({
           name: v.name,
-          price: Math.round(v.price * 100), // Converter reais para centavos
+          price: Math.round(v.price ?? 0), // entrada já em centavos (INT)
           stock: v.stock ?? 0,
         })),
       };
