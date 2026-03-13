@@ -417,52 +417,100 @@ export class UserService {
     let wasCreated = false;
     let wasLinked = false;
 
+    const EMAIL_JA_CADASTRADO = 'Já existe um usuário com esse email';
+
     if (!existingUser) {
-      // Verificar se email já está em uso (conta USER)
-      const userWithEmail = await prismaRead.user.findUnique({
-        where: { 
-          email_accountType: {
-            email: createLinkedUserDto.email,
-            accountType: 'USER',
-          }
+      // Verificar no write para evitar atraso de réplica; se email já existe, tratar aqui
+      const userWithEmail = await prismaWrite.user.findFirst({
+        where: {
+          email: createLinkedUserDto.email,
+          accountType: 'USER',
         },
       });
 
       if (userWithEmail) {
-        throw new ConflictException(
-          'Este email já está cadastrado para outro CPF',
+        const onlyNameDiffers = this.onlyNameDiffersFromLinkedDto(
+          userWithEmail,
+          createLinkedUserDto,
+          documentNumberClean,
+          dateOfBirth,
         );
+        if (onlyNameDiffers) {
+          existingUser = await prismaWrite.user.update({
+            where: { id: userWithEmail.id },
+            data: {
+              firstName: createLinkedUserDto.firstName,
+              lastName: createLinkedUserDto.lastName,
+            },
+          });
+        } else {
+          throw new ConflictException(EMAIL_JA_CADASTRADO);
+        }
+      } else {
+        // Criar novo usuário
+        const randomPassword = crypto.randomBytes(32).toString('hex');
+        const hashedPassword = await bcrypt.hash(randomPassword, 10);
+
+        try {
+          existingUser = await prismaWrite.user.create({
+            data: {
+              firstName: createLinkedUserDto.firstName,
+              lastName: createLinkedUserDto.lastName,
+              email: createLinkedUserDto.email,
+              accountType: 'USER',
+              documentNumber: createLinkedUserDto.documentNumber,
+              documentNumberClean: documentNumberClean,
+              phone: createLinkedUserDto.phone,
+              dateOfBirth: dateOfBirth,
+              gender: this.mapGenderToEnum(createLinkedUserDto.gender),
+              password: hashedPassword,
+              acceptedTerms: false,
+              acceptedPrivacyPolicy: false,
+            },
+          });
+          wasCreated = true;
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          const isUniqueConstraint =
+            (err && typeof err === 'object' && (err as { code?: string }).code === 'P2002') ||
+            msg.includes('Unique constraint failed');
+          if (isUniqueConstraint) {
+            const byEmail = await prismaWrite.user.findFirst({
+              where: {
+                email: createLinkedUserDto.email,
+                accountType: 'USER',
+              },
+            });
+            if (byEmail) {
+              const onlyNameDiffers = this.onlyNameDiffersFromLinkedDto(
+                byEmail,
+                createLinkedUserDto,
+                documentNumberClean,
+                dateOfBirth,
+              );
+              if (onlyNameDiffers) {
+                existingUser = await prismaWrite.user.update({
+                  where: { id: byEmail.id },
+                  data: {
+                    firstName: createLinkedUserDto.firstName,
+                    lastName: createLinkedUserDto.lastName,
+                  },
+                });
+              } else {
+                throw new ConflictException(EMAIL_JA_CADASTRADO);
+              }
+            } else {
+              throw new ConflictException(EMAIL_JA_CADASTRADO);
+            }
+          } else {
+            throw err;
+          }
+        }
       }
-
-      // Criar novo usuário
-      const randomPassword = crypto.randomBytes(32).toString('hex');
-      const hashedPassword = await bcrypt.hash(randomPassword, 10);
-
-      const documentNumberClean = this.cleanDocumentNumber(createLinkedUserDto.documentNumber);
-      existingUser = await prismaWrite.user.create({
-        data: {
-          firstName: createLinkedUserDto.firstName,
-          lastName: createLinkedUserDto.lastName,
-          email: createLinkedUserDto.email,
-          accountType: 'USER', // Conta de usuário normal
-          documentNumber: createLinkedUserDto.documentNumber,
-          documentNumberClean: documentNumberClean,
-          phone: createLinkedUserDto.phone,
-          dateOfBirth: dateOfBirth,
-          gender: this.mapGenderToEnum(createLinkedUserDto.gender),
-          password: hashedPassword, // Senha aleatória (não pode fazer login)
-          acceptedTerms: false,
-          acceptedPrivacyPolicy: false,
-        },
-      });
-
-      wasCreated = true;
     } else {
-      // Verificar se email corresponde ao CPF
+      // Usuário encontrado por CPF: email deve ser o mesmo
       if (existingUser.email !== createLinkedUserDto.email) {
-        throw new ConflictException(
-          'Este email já está cadastrado para outro CPF',
-        );
+        throw new ConflictException(EMAIL_JA_CADASTRADO);
       }
     }
 
@@ -508,6 +556,41 @@ export class UserService {
         wasLinked,
       },
     };
+  }
+
+  /**
+   * Verifica se o usuário existente difere do DTO apenas no nome (firstName/lastName).
+   * Se documentNumber, phone, dateOfBirth ou gender forem diferentes, retorna false.
+   */
+  private onlyNameDiffersFromLinkedDto(
+    existingUser: {
+      documentNumberClean: string | null;
+      phone: string | null;
+      dateOfBirth: Date | null;
+      gender: 'MALE' | 'FEMALE' | 'OTHER' | 'PREFER_NOT_TO_SAY' | null;
+    },
+    dto: CreateLinkedUserDto,
+    documentNumberClean: string,
+    dateOfBirth: Date,
+  ): boolean {
+    if ((existingUser.documentNumberClean ?? '') !== documentNumberClean) {
+      return false;
+    }
+    if ((existingUser.phone ?? '') !== (dto.phone ?? '')) {
+      return false;
+    }
+    const existingTime = existingUser.dateOfBirth
+      ? existingUser.dateOfBirth.getTime()
+      : 0;
+    const dtoTime = dateOfBirth.getTime();
+    if (existingTime !== dtoTime) {
+      return false;
+    }
+    const dtoGender = this.mapGenderToEnum(dto.gender);
+    if ((existingUser.gender ?? null) !== (dtoGender ?? null)) {
+      return false;
+    }
+    return true;
   }
 
   /**

@@ -14,5 +14,9 @@ pnpm prisma migrate deploy || {
   echo "⚠️  Aviso: Falha ao executar migrações. Continuando..."
 }
 
+# Garantir que o volume de uploads exista e tenha permissão para o usuário da app
+mkdir -p /usr/src/app/uploads/images /usr/src/app/uploads/pdfs
+chown -R nestjs:nodejs /usr/src/app/uploads 2>/dev/null || true
+
 echo "🚀 Iniciando aplicação"
-exec node dist/src/main.js
+exec su-exec nestjs node dist/src/main.js

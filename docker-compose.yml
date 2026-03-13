@@ -72,6 +72,9 @@ services:
         condition: service_healthy
     ports:
       - "3333:3333"
+    volumes:
+      # Persistir uploads (banner/logo dos eventos, avatares, PDFs) entre deploys/restarts
+      - uploads_data:/usr/src/app/uploads
     networks:
       - podiogo-network
     restart: unless-stopped
@@ -80,6 +83,8 @@ volumes:
   postgres_data:
     driver: local
   redis_data:
+    driver: local
+  uploads_data:
     driver: local
 
 networks:

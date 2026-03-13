@@ -81,7 +81,7 @@ describe('OrganizersService', () => {
 
       mockPrismaService.organizer.findUnique.mockResolvedValue(null);
       mockPrismaService.organizer.create.mockResolvedValue(mockOrganizer);
-      mockPrismaService.user.update.mockResolvedValue({ id: userId, role: 'ORGANIZER' });
+      mockPrismaService.user.update.mockResolvedValue({ id: userId, role: 'ORGANIZER', accountType: 'ORGANIZER' });
 
       const result = await service.create(userId, createDto);
 
@@ -89,7 +89,7 @@ describe('OrganizersService', () => {
       expect(result.data.organizer).toEqual(mockOrganizer);
       expect(mockPrismaService.user.update).toHaveBeenCalledWith({
         where: { id: userId },
-        data: { role: 'ORGANIZER' },
+        data: { role: 'ORGANIZER', accountType: 'ORGANIZER' },
       });
     });
 

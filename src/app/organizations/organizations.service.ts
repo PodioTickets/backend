@@ -183,10 +183,10 @@ export class OrganizationsService {
         },
       });
 
-      // Atualizar role do usuário para ORGANIZER
+      // Atualizar role e accountType do usuário (accountType é usado no login/organizer)
       await tx.user.update({
         where: { id: userId },
-        data: { role: 'ORGANIZER' },
+        data: { role: 'ORGANIZER', accountType: 'ORGANIZER' },
       });
 
       return { organization, member };
@@ -841,11 +841,11 @@ export class OrganizationsService {
       },
     });
 
-    // Se for OWNER, atualizar role do usuário
+    // Se for OWNER, atualizar role e accountType do usuário (accountType é usado no login/organizer)
     if (addMemberDto.role === 'OWNER') {
       await prismaWrite.user.update({
         where: { id: userToAddId },
-        data: { role: 'ORGANIZER' },
+        data: { role: 'ORGANIZER', accountType: 'ORGANIZER' },
       });
     }
 
@@ -929,10 +929,10 @@ export class OrganizationsService {
     const willBeOwner = updateDto.role === 'OWNER';
 
     if (willBeOwner && !wasOwner) {
-      // Tornando-se OWNER - atualizar role do usuário
+      // Tornando-se OWNER - atualizar role e accountType (accountType é usado no login/organizer)
       await prismaWrite.user.update({
         where: { id: memberUserId },
-        data: { role: 'ORGANIZER' },
+        data: { role: 'ORGANIZER', accountType: 'ORGANIZER' },
       });
     }
     // Se estava removendo o OWNER (wasOwner && !willBeOwner), mantemos o role como ORGANIZER

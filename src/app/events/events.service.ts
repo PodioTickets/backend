@@ -74,6 +74,18 @@ export class EventsService {
   }
 
   /**
+   * Para listagens GET: eventos cuja data já passou são retornados com status COMPLETED (Finalized).
+   */
+  private withPastEventsAsCompleted<T extends { eventDate: Date; status: EventStatus }>(
+    events: T[],
+  ): T[] {
+    const now = new Date();
+    return events.map((e) =>
+      e.eventDate < now ? { ...e, status: EventStatus.COMPLETED } : e,
+    ) as T[];
+  }
+
+  /**
    * Extrai a segunda parte do UUID (ex: 2ba25f04-4b98-4e5e-9da6-ddb4e272ded4 -> 4b98)
    */
   private extractUuidSecondPart(uuid: string): string {
@@ -340,7 +352,7 @@ export class EventsService {
     return {
       message: 'Events search completed successfully',
       data: {
-        events,
+        events: this.withPastEventsAsCompleted(events),
         pagination: {
           page,
           limit,
@@ -395,17 +407,8 @@ export class EventsService {
       where.status = status || EventStatus.PUBLISHED;
     }
 
-    // Por padrão, mostrar apenas eventos futuros
-    // Se includeDraft=true e userId for fornecido, mostrar todos os eventos do organizador (incluindo passados)
-    // Se includePast=true, mostrar eventos passados também
-    if (!includeDraft || !userId) {
-      if (!includePast) {
-        where.eventDate = {
-          gte: new Date(), // Apenas eventos futuros
-        };
-      }
-      // Se includePast=true, não filtrar por data (mostrar todos)
-    }
+    // Retornar todos os eventos (futuros e passados). Eventos passados são exibidos com status COMPLETED.
+    // includePast é mantido por compatibilidade mas não filtra mais; includeDraft+userId ainda controla drafts do organizador.
 
     if (country) {
       where.country = country;
@@ -522,7 +525,7 @@ export class EventsService {
     return {
       message: 'Events fetched successfully',
       data: {
-        events,
+        events: this.withPastEventsAsCompleted(events),
         pagination: {
           page,
           limit,
@@ -670,7 +673,7 @@ export class EventsService {
     return {
       message: 'Organizer events fetched successfully',
       data: {
-        events: eventsWithSales,
+        events: this.withPastEventsAsCompleted(eventsWithSales),
         pagination: {
           page,
           limit,

@@ -7,7 +7,8 @@ RUN apk add --no-cache \
     postgresql-client \
     openssl \
     netcat-openbsd \
-    dos2unix
+    dos2unix \
+    su-exec
 
 RUN npm install -g pnpm
 
@@ -66,13 +67,13 @@ RUN find node_modules -name "*engine-linux-musl*" -type f -exec chmod +x {} \; 2
 # Copia arquivos de configuração
 COPY package.json docker-entrypoint.sh ./
 
-# Configura script de entrada
+# Configura script de entrada (entrypoint roda como root para chown do volume uploads)
 RUN dos2unix docker-entrypoint.sh && \
     chmod +x docker-entrypoint.sh && \
     mkdir -p uploads logs && \
     chown -R nestjs:nodejs /usr/src/app
 
-USER nestjs
+USER root
 
 EXPOSE 3333
 

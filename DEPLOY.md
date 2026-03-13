@@ -286,6 +286,10 @@ docker compose down
 # Parar e remover volumes (CUIDADO: apaga dados!)
 docker compose down -v
 
+# Persistência de imagens (uploads): o backend usa o volume uploads_data para
+# guardar banner/logo dos eventos, avatares e PDFs. Sem esse volume, a cada
+# deploy/restart as imagens somem. Com o volume, elas permanecem entre deploys.
+
 # Rebuild da imagem
 docker compose build --no-cache backend
 docker compose up -d backend

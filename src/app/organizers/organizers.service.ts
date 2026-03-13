@@ -60,10 +60,10 @@ export class OrganizersService {
         },
       });
 
-      // Atualizar role do usuário
+      // Atualizar role e accountType do usuário (accountType é usado no login/organizer)
       await tx.user.update({
         where: { id: userId },
-        data: { role: 'ORGANIZER' },
+        data: { role: 'ORGANIZER', accountType: 'ORGANIZER' },
       });
 
       return { organization, member };
