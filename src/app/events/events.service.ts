@@ -885,9 +885,13 @@ export class EventsService {
       throw new NotFoundException('Event not found');
     }
 
+    const now = new Date();
+    const eventDate = event.eventDate instanceof Date ? event.eventDate : new Date(event.eventDate);
+    const eventToReturn = eventDate < now ? { ...event, status: EventStatus.COMPLETED } : event;
+
     return {
       message: 'Event fetched successfully',
-      data: { event },
+      data: { event: eventToReturn },
     };
   }
 
@@ -1579,6 +1583,7 @@ export class EventsService {
         productId: true,
         variationId: true,
         quantity: true,
+        totalPrice: true,
         product: { select: { id: true, name: true, image: true } },
         variation: { select: { id: true, name: true, stock: true } },
       },
@@ -1588,6 +1593,7 @@ export class EventsService {
       productId: string;
       productName: string;
       productImage: string | null;
+      totalSoldAmount: number;
       byVariation: Map<string | null, { quantitySold: number; stock: number | null }>;
     }>();
 
@@ -1598,10 +1604,12 @@ export class EventsService {
           productId: r.product.id,
           productName: r.product.name,
           productImage: r.product.image ?? null,
+          totalSoldAmount: 0,
           byVariation: new Map(),
         });
       }
       const entry = salesByProduct.get(key)!;
+      entry.totalSoldAmount += r.totalPrice ?? 0;
       const variationId = r.variationId ?? null;
       const stock = r.variation?.stock ?? null;
       const stockVal = stock !== null && stock !== undefined ? stock : null;
@@ -1678,6 +1686,7 @@ export class EventsService {
         productId: product.id,
         productName: product.name,
         productImage: product.image ?? null,
+        totalSoldAmount: sales.totalSoldAmount,
         variations: variationRows,
       };
     });

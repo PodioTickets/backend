@@ -69,12 +69,13 @@ Lista, para cada produto do evento que teve venda, a **imagem do produto**, as v
 
 **Estrutura de cada item (produto)**:
 
-| Campo          | Tipo   | Descrição |
-|----------------|--------|-----------|
-| `productId`    | string | UUID do produto |
-| `productName`  | string | Nome do produto |
-| `productImage` | string \| null | URL ou caminho da imagem do produto; `null` se não houver |
-| `variations`   | array  | Variações ordenadas por quantidade vendida (maior primeiro) |
+| Campo             | Tipo   | Descrição |
+|-------------------|--------|-----------|
+| `productId`       | string | UUID do produto |
+| `productName`     | string | Nome do produto |
+| `productImage`    | string \| null | URL ou caminho da imagem do produto; `null` se não houver |
+| `totalSoldAmount` | number | Valor total vendido do produto em **centavos** (soma dos `totalPrice` das vendas) |
+| `variations`      | array  | Variações ordenadas por quantidade vendida (maior primeiro) |
 
 **Cada elemento de `variations`**:
 
@@ -96,6 +97,7 @@ Quando o estoque da variação é ilimitado (0 no cadastro), `remainingStock` e 
     "productId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     "productName": "Camiseta",
     "productImage": "/uploads/images/camiseta.jpg",
+    "totalSoldAmount": 12500,
     "variations": [
       {
         "variationId": "v-uuid-m",
