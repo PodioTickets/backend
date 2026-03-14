@@ -1484,35 +1484,23 @@ export class EventsService {
 
     const lastWeekRevenue = lastWeekRegistrations.reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
     const lastWeekCount = lastWeekRegistrations.length;
-    const lastWeekAvgTicket = lastWeekCount > 0 ? lastWeekRevenue / lastWeekCount : 0; // Valores já estão em centavos
-
+    const lastWeekAvgTicket = lastWeekCount > 0 ? lastWeekRevenue / lastWeekCount : 0;
     const netRevenueChange = lastWeekRevenue > 0 ? ((netRevenue - lastWeekRevenue) / lastWeekRevenue) * 100 : 0;
     const totalRegistrationsChange = lastWeekCount > 0 ? ((totalRegistrations - lastWeekCount) / lastWeekCount) * 100 : 0;
     const averageTicketChange = lastWeekAvgTicket > 0 ? ((averageTicket - lastWeekAvgTicket) / lastWeekAvgTicket) * 100 : 0;
-
-    // Status de cancelamentos e estornos (thresholds)
     const cancellationRate = totalRegistrations > 0 ? (cancellations / totalRegistrations) * 100 : 0;
     const cancellationsStatus = cancellationRate > 10 ? 'Crítico' : cancellationRate > 5 ? 'Atenção' : 'Normal';
-
     const refundRate = totalRegistrations > 0 ? (refunds / totalRegistrations) * 100 : 0;
     const refundsStatus = refundRate > 5 ? 'Crítico' : refundRate > 2 ? 'Atenção' : 'Normal';
-
-    // Tendência de inscrições (dados para gráfico)
     const chartData = this.buildChartData(registrations, dateRange, period);
-
-    // Ranking de ingressos
     const ticketRanking = this.buildTicketRanking(registrations, page, limit);
-
-    // Top cidades
     const topCities = this.buildTopCities(registrations);
-
-    // Lotes próximos de esgotamento
     const lotsNearDepletion = await this.buildLotsNearDepletion(prismaRead, eventId);
-
-    // Heatmap de vendas
     const salesHeatmap = this.buildSalesHeatmap(registrations);
+    const paidRegistrationIds = paidRegistrations.map((r) => r.id);
+    const topProductVariations = await this.buildTopProductVariations(prismaRead, eventId, paidRegistrationIds);
+    const mostAnsweredQuestions = await this.buildMostAnsweredQuestions(prismaRead, eventId);
 
-    // Calcular total de tickets únicos no ranking para paginação
     const ticketMapForPagination = new Map<string, boolean>();
     paidRegistrations.forEach((reg) => {
       if (reg.tickets && reg.tickets.length > 0) {
@@ -1567,8 +1555,212 @@ export class EventsService {
         topCities,
         lotsNearDepletion,
         salesHeatmap,
+        topProductVariations,
+        mostAnsweredQuestions,
       },
     };
+  }
+
+  /**
+   * Variações mais vendidas de cada produto do evento (inscrições confirmadas e pagas).
+   * Inclui todas as variações cadastradas do produto (com 0 vendas se não houver) e uma linha "Sem variação" quando existir venda sem variação escolhida.
+   */
+  private async buildTopProductVariations(
+    prismaRead: ReturnType<PrismaService['getReadClient']>,
+    eventId: string,
+    paidRegistrationIds: string[],
+  ) {
+    if (paidRegistrationIds.length === 0) {
+      return [];
+    }
+    const rows = await prismaRead.registrationProduct.findMany({
+      where: { registrationId: { in: paidRegistrationIds } },
+      select: {
+        productId: true,
+        variationId: true,
+        quantity: true,
+        product: { select: { id: true, name: true, image: true } },
+        variation: { select: { id: true, name: true, stock: true } },
+      },
+    });
+
+    const salesByProduct = new Map<string, {
+      productId: string;
+      productName: string;
+      productImage: string | null;
+      byVariation: Map<string | null, { quantitySold: number; stock: number | null }>;
+    }>();
+
+    for (const r of rows) {
+      const key = r.productId;
+      if (!salesByProduct.has(key)) {
+        salesByProduct.set(key, {
+          productId: r.product.id,
+          productName: r.product.name,
+          productImage: r.product.image ?? null,
+          byVariation: new Map(),
+        });
+      }
+      const entry = salesByProduct.get(key)!;
+      const variationId = r.variationId ?? null;
+      const stock = r.variation?.stock ?? null;
+      const stockVal = stock !== null && stock !== undefined ? stock : null;
+      const existing = entry.byVariation.get(variationId);
+      if (existing) {
+        existing.quantitySold += r.quantity;
+      } else {
+        entry.byVariation.set(variationId, {
+          quantitySold: r.quantity,
+          stock: stockVal,
+        });
+      }
+    }
+
+    const productIds = Array.from(salesByProduct.keys());
+    const productsWithVariations = await prismaRead.product.findMany({
+      where: { id: { in: productIds }, eventId },
+      select: {
+        id: true,
+        name: true,
+        image: true,
+        variations: { select: { id: true, name: true, stock: true }, orderBy: { name: 'asc' } },
+      },
+    });
+
+    const result = productsWithVariations.map((product) => {
+      const sales = salesByProduct.get(product.id);
+      if (!sales) return null;
+      const totalSold = Array.from(sales.byVariation.values()).reduce((sum, v) => sum + v.quantitySold, 0);
+
+      const variationRows: {
+        variationId: string | null;
+        variationName: string;
+        quantitySold: number;
+        percentage: number;
+        remainingStock: number | null;
+        totalStock: number | null;
+      }[] = [];
+
+      for (const v of product.variations) {
+        const sold = sales.byVariation.get(v.id);
+        const quantitySold = sold?.quantitySold ?? 0;
+        const percentage = totalSold > 0 ? Math.round((quantitySold / totalSold) * 10000) / 100 : 0;
+        const isUnlimited = v.stock === null || v.stock === 0;
+        const remainingStock = isUnlimited ? null : v.stock;
+        const totalStock = isUnlimited ? null : v.stock + quantitySold;
+        variationRows.push({
+          variationId: v.id,
+          variationName: v.name,
+          quantitySold,
+          percentage,
+          remainingStock,
+          totalStock,
+        });
+      }
+
+      const noVariationSales = sales.byVariation.get(null);
+      if (noVariationSales && noVariationSales.quantitySold > 0) {
+        const quantitySold = noVariationSales.quantitySold;
+        const percentage = totalSold > 0 ? Math.round((quantitySold / totalSold) * 10000) / 100 : 0;
+        variationRows.push({
+          variationId: null,
+          variationName: 'Sem variação',
+          quantitySold,
+          percentage,
+          remainingStock: null,
+          totalStock: null,
+        });
+      }
+
+      variationRows.sort((a, b) => b.quantitySold - a.quantitySold);
+
+      return {
+        productId: product.id,
+        productName: product.name,
+        productImage: product.image ?? null,
+        variations: variationRows,
+      };
+    });
+
+    return result.filter((r): r is NonNullable<typeof r> => r !== null);
+  }
+
+  /**
+   * Perguntas mais respondidas do evento, com ranking de respostas, % por opção e tipo.
+   */
+  private async buildMostAnsweredQuestions(
+    prismaRead: ReturnType<PrismaService['getReadClient']>,
+    eventId: string,
+  ) {
+    const answers = await prismaRead.questionAnswer.findMany({
+      where: { registration: { eventId } },
+      select: {
+        questionId: true,
+        answer: true,
+        registrationId: true,
+        question: {
+          select: { id: true, question: true, order: true, type: true, options: true, isRequired: true },
+        },
+      },
+    });
+    if (answers.length === 0) return [];
+
+    const byQuestion = new Map<string, {
+      questionId: string;
+      question: string;
+      order: number;
+      type: string;
+      options: unknown;
+      isRequired: boolean;
+      participantCount: number;
+      answersByValue: Map<string, number>;
+    }>();
+
+    for (const a of answers) {
+      const q = a.question;
+      if (!q) continue;
+      const key = q.id;
+      if (!byQuestion.has(key)) {
+        byQuestion.set(key, {
+          questionId: q.id,
+          question: q.question,
+          order: q.order,
+          type: q.type ?? 'text',
+          options: q.options ?? null,
+          isRequired: q.isRequired ?? false,
+          participantCount: 0,
+          answersByValue: new Map(),
+        });
+      }
+      const entry = byQuestion.get(key)!;
+      entry.participantCount += 1;
+      const ans = (a.answer ?? '').trim();
+      const val = ans === '' ? '(vazio)' : ans;
+      entry.answersByValue.set(val, (entry.answersByValue.get(val) ?? 0) + 1);
+    }
+
+    const result = Array.from(byQuestion.values()).map((entry) => {
+      const total = entry.participantCount;
+      const answersRanking = Array.from(entry.answersByValue.entries())
+        .map(([answer, count]) => ({
+          answer,
+          count,
+          percentage: total > 0 ? Math.round((count / total) * 10000) / 100 : 0,
+        }))
+        .sort((x, y) => y.count - x.count);
+      return {
+        questionId: entry.questionId,
+        question: entry.question,
+        order: entry.order,
+        type: entry.type,
+        options: entry.options,
+        isRequired: entry.isRequired,
+        participantCount: entry.participantCount,
+        answersRanking,
+      };
+    });
+
+    return result.sort((a, b) => b.participantCount - a.participantCount);
   }
 
   /**
@@ -1679,14 +1871,14 @@ export class EventsService {
     // Agregar valores por mês
     registrations.forEach((reg) => {
       const regDate = new Date(reg.order?.createdAt || reg.createdAt);
-      
+
       // Só incluir se estiver dentro dos últimos 6 meses
       if (regDate >= startDate && regDate <= endDate) {
         const monthKey = `${regDate.getFullYear()}-${String(regDate.getMonth() + 1).padStart(2, '0')}`;
-        
+
         if (monthlyData.has(monthKey)) {
           const monthData = monthlyData.get(monthKey)!;
-          
+
           if (reg.order?.payment?.status === PaymentStatus.PAID && reg.status === RegistrationStatus.CONFIRMED) {
             monthData.revenue += this.normalizeToCents(reg.order?.finalAmount);
             monthData.confirmed += 1;
@@ -1701,13 +1893,13 @@ export class EventsService {
 
     // Ordenar meses
     const sortedMonths = Array.from(monthlyData.keys()).sort();
-    
+
     // Formatar labels (nomes dos meses em português)
     const monthNames = [
       'Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun',
       'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'
     ];
-    
+
     const labels = sortedMonths.map((monthKey) => {
       const [year, month] = monthKey.split('-');
       const monthIndex = parseInt(month, 10) - 1;
@@ -2411,7 +2603,7 @@ export class EventsService {
         const validStatuses = ['PENDING', 'CONFIRMED', 'CANCELLED', 'COMPLETED'];
         if (validStatuses.includes(status)) {
           where.status = status as RegistrationStatus;
-          
+
           // Se o filtro for CANCELLED, excluir registrations com payment REFUNDED
           // (chargeback e refund devem ser filtrados separadamente)
           if (status === 'CANCELLED') {
@@ -2447,7 +2639,7 @@ export class EventsService {
     if (where.order) {
       const hasCreatedAt = where.order.createdAt && Object.keys(where.order.createdAt).length > 0;
       const hasPayment = where.order.payment && Object.keys(where.order.payment).length > 0;
-      
+
       // Se não tem nenhum filtro real, remover where.order
       if (!hasCreatedAt && !hasPayment) {
         delete where.order;
@@ -2631,7 +2823,7 @@ export class EventsService {
       const finalWhere: any = {
         eventId,
       };
-      
+
       // Aplicar filtros apenas se existirem
       if (where.status) {
         finalWhere.status = where.status;
@@ -2646,7 +2838,7 @@ export class EventsService {
       if (where.order && (where.order.createdAt || where.order.payment)) {
         finalWhere.order = where.order;
       }
-      
+
       [registrations, total] = await Promise.all([
         prismaRead.registration.findMany({
           where: finalWhere,
