@@ -32,6 +32,7 @@ enum Language {
 enum EventStatus {
   DRAFT
   PUBLISHED
+  SUSPENDED
   CANCELLED
   COMPLETED
 }
@@ -685,7 +686,8 @@ model TicketBatch {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
-  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  ticket         Ticket               @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  registrations  RegistrationTicket[]
 
   @@index([ticketId])
   @@index([ticketId, startDate, endDate])
@@ -745,14 +747,17 @@ model RegistrationTicket {
   id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   registrationId String   @db.Uuid
   ticketId       String   @db.Uuid
+  batchId        String?  @db.Uuid
   createdAt      DateTime @default(now())
 
   registration Registration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
   ticket       Ticket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  batch        TicketBatch? @relation(fields: [batchId], references: [id], onDelete: SetNull)
 
   @@unique([registrationId, ticketId])
   @@index([registrationId])
   @@index([ticketId])
+  @@index([batchId])
 }
 
 model RegistrationProduct {

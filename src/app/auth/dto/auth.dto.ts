@@ -150,6 +150,21 @@ export class ResetPasswordDto {
   password: string;
 }
 
+export class ChangePasswordDto {
+  @ApiPropertyOptional({
+    description: 'Current password. Obrigatório apenas se o usuário já tiver senha (ex.: conta email/senha). Omitir para usuários que só têm login social.',
+  })
+  @IsOptional()
+  @IsString()
+  currentPassword?: string;
+
+  @ApiProperty({ description: 'New password', minLength: 8 })
+  @IsString()
+  @IsNotEmpty()
+  @MinLength(8)
+  newPassword: string;
+}
+
 export class VerifyResetCodeDto {
   @ApiProperty({ description: 'User email' })
   @IsEmail()

@@ -178,6 +178,15 @@ export class FilterEventsDto {
   @Type(() => Boolean)
   includeDraft?: boolean; // Para organizadores verem seus próprios eventos DRAFT
 
+  /**
+   * Quando true (default), inclui `hasRegistrationSlotsAvailable` em cada evento (custo: 2 queries agregadas na página).
+   * Use false para listagens que não precisam do indicador de vaga.
+   */
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  includeHasSlots?: boolean;
+
   @IsOptional()
   @IsInt()
   @Min(1)

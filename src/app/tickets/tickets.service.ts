@@ -209,8 +209,30 @@ export class TicketsService {
       throw new NotFoundException('Ticket not found');
     }
 
+    const batchIds = ticket.batches.map((b) => b.id);
+    const soldByBatch =
+      batchIds.length > 0
+        ? await prismaRead.registrationTicket.groupBy({
+            by: ['batchId'],
+            where: {
+              ticketId: id,
+              batchId: { in: batchIds },
+            },
+            _count: { id: true },
+          })
+        : [];
+    const soldByBatchMap = new Map(
+      soldByBatch.map((s) => [s.batchId, s._count.id]),
+    );
+
+    const batchesWithSold = ticket.batches.map((batch) => ({
+      ...batch,
+      quantitySold: soldByBatchMap.get(batch.id) ?? 0,
+    }));
+
     const transformed = {
       ...ticket,
+      batches: batchesWithSold,
       ageLimit: {
         min: ticket.ageLimitMin,
         max: ticket.ageLimitMax,

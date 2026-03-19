@@ -1037,7 +1037,26 @@ export class CheckoutService {
       },
     });
 
-    // 3. Criar uma Registration por participante vinculada ao Order
+    // 3. Mapa ticketId -> batchId para persistir o lote vendido em cada RegistrationTicket
+    const ticketIdToBatchId = new Map<string, string>();
+    for (const ticketItem of dto.tickets) {
+      const ticket = await prisma.ticket.findUnique({
+        where: { id: ticketItem.ticketId },
+        include: { batches: true },
+      });
+      if (ticket) {
+        const batch = ticketItem.batchId
+          ? ticket.batches.find((b) => b.id === ticketItem.batchId)
+          : ticket.batches.find(
+            (b) =>
+              (!b.startDate || new Date(b.startDate) <= new Date()) &&
+              (!b.endDate || new Date(b.endDate) >= new Date()),
+          );
+        if (batch) ticketIdToBatchId.set(ticketItem.ticketId, batch.id);
+      }
+    }
+
+    // 4. Criar uma Registration por participante vinculada ao Order
     let participantIndex = 0;
     for (const ticketItem of dto.tickets) {
       // Criar participantes para este ticket
@@ -1112,11 +1131,12 @@ export class CheckoutService {
           },
         });
 
-        // Criar RegistrationTicket
+        // Criar RegistrationTicket (com batchId para contagem de vendas por lote)
         await prisma.registrationTicket.create({
           data: {
             registrationId: registration.id,
             ticketId: ticketItem.ticketId,
+            batchId: ticketIdToBatchId.get(ticketItem.ticketId) ?? null,
           },
         });
 

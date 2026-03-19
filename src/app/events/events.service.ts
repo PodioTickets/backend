@@ -379,14 +379,19 @@ export class EventsService {
       status,
       includeDraft,
       includePast,
+      includeHasSlots,
     } = filterDto;
 
     const where: any = {};
 
-    // Se não especificar status e não for includeDraft, mostrar apenas PUBLISHED
-    // Se for includeDraft e userId for fornecido, mostrar eventos do organizador também
+    // Sem status na query: retornar PUBLISHED e SUSPENDED (suspensos aparecem igual na listagem).
+    // Com status na query: filtrar pelo valor informado.
+    const statusFilter =
+      status != null
+        ? status
+        : { in: [EventStatus.PUBLISHED, EventStatus.SUSPENDED] };
+
     if (includeDraft && userId) {
-      // Buscar eventos da organização do usuário ou eventos publicados
       const prismaRead = this.prisma.getReadClient();
       const member = await prismaRead.organizationMember.findFirst({
         where: {
@@ -398,13 +403,14 @@ export class EventsService {
       if (member) {
         where.OR = [
           { status: EventStatus.PUBLISHED },
+          { status: EventStatus.SUSPENDED },
           { organizationId: member.organizationId },
         ];
       } else {
-        where.status = status || EventStatus.PUBLISHED;
+        where.status = statusFilter;
       }
     } else {
-      where.status = status || EventStatus.PUBLISHED;
+      where.status = statusFilter;
     }
 
     // Retornar todos os eventos (futuros e passados). Eventos passados são exibidos com status COMPLETED.
@@ -522,10 +528,32 @@ export class EventsService {
       prismaRead.event.count({ where }),
     ]);
 
+    const eventsCompleted = this.withPastEventsAsCompleted(events);
+    const shouldIncludeSlots = includeHasSlots !== false;
+
+    let eventsPayload = eventsCompleted;
+    if (shouldIncludeSlots && eventsCompleted.length > 0) {
+      const slotMaps = await this.loadRegistrationSlotCountMapsForTickets(
+        prismaRead,
+        eventsCompleted.map((e) => e.id),
+      );
+      eventsPayload = eventsCompleted.map((e) => ({
+        ...e,
+        hasRegistrationSlotsAvailable: this.computeSlotsFromCounts(
+          e.status,
+          e.eventDate instanceof Date ? e.eventDate : new Date(e.eventDate),
+          slotMaps.ticketsByEvent.get(e.id) ?? [],
+          slotMaps.totalByTicket,
+          slotMaps.soldWithBatchByTicket,
+          slotMaps.soldByBatch,
+        ),
+      }));
+    }
+
     return {
       message: 'Events fetched successfully',
       data: {
-        events: this.withPastEventsAsCompleted(events),
+        events: eventsPayload,
         pagination: {
           page,
           limit,
@@ -889,10 +917,244 @@ export class EventsService {
     const eventDate = event.eventDate instanceof Date ? event.eventDate : new Date(event.eventDate);
     const eventToReturn = eventDate < now ? { ...event, status: EventStatus.COMPLETED } : event;
 
+    const hasRegistrationSlotsAvailable =
+      await this.computeHasRegistrationSlotsAvailable(
+        prismaRead,
+        eventToReturn.status,
+        eventDate,
+        eventToReturn.tickets,
+      );
+
+
     return {
       message: 'Event fetched successfully',
-      data: { event: eventToReturn },
+      data: {
+        event: { ...eventToReturn, hasRegistrationSlotsAvailable },
+      },
     };
+  }
+
+  /**
+   * Contagens agregadas de RegistrationTicket confirmados (uma query groupBy por conjunto de ingressos).
+   */
+  private async buildConfirmedRegistrationCounts(
+    prismaRead: ReturnType<PrismaService['getReadClient']>,
+    ticketIds: string[],
+  ): Promise<{
+    totalByTicket: Map<string, number>;
+    soldWithBatchByTicket: Map<string, number>;
+    soldByBatch: Map<string, number>;
+  }> {
+    const totalByTicket = new Map<string, number>();
+    const soldWithBatchByTicket = new Map<string, number>();
+    const soldByBatch = new Map<string, number>();
+
+    if (ticketIds.length === 0) {
+      return { totalByTicket, soldWithBatchByTicket, soldByBatch };
+    }
+
+    const groupRows = await prismaRead.registrationTicket.groupBy({
+      by: ['ticketId', 'batchId'],
+      where: {
+        ticketId: { in: ticketIds },
+        registration: { status: RegistrationStatus.CONFIRMED },
+      },
+      _count: { id: true },
+    });
+
+    for (const row of groupRows) {
+      const c = row._count.id;
+      const tid = row.ticketId;
+      const bid = row.batchId;
+      totalByTicket.set(tid, (totalByTicket.get(tid) ?? 0) + c);
+      if (bid != null) {
+        soldWithBatchByTicket.set(
+          tid,
+          (soldWithBatchByTicket.get(tid) ?? 0) + c,
+        );
+        soldByBatch.set(bid, (soldByBatch.get(bid) ?? 0) + c);
+      }
+    }
+
+    return { totalByTicket, soldWithBatchByTicket, soldByBatch };
+  }
+
+  /**
+   * Ingressos ativos + lotes + mapas de venda para uma página de eventos (2 queries no total).
+   */
+  private async loadRegistrationSlotCountMapsForTickets(
+    prismaRead: ReturnType<PrismaService['getReadClient']>,
+    eventIds: string[],
+  ): Promise<{
+    ticketsByEvent: Map<
+      string,
+      Array<{
+        id: string;
+        batches: Array<{
+          id: string;
+          quantity: number;
+          startDate: Date | null;
+          endDate: Date | null;
+        }>;
+      }>
+    >;
+    totalByTicket: Map<string, number>;
+    soldWithBatchByTicket: Map<string, number>;
+    soldByBatch: Map<string, number>;
+  }> {
+    const tickets = await prismaRead.ticket.findMany({
+      where: { eventId: { in: eventIds }, isActive: true },
+      include: { batches: true },
+    });
+
+    const ticketsByEvent = new Map<
+      string,
+      Array<{
+        id: string;
+        batches: Array<{
+          id: string;
+          quantity: number;
+          startDate: Date | null;
+          endDate: Date | null;
+        }>;
+      }>
+    >();
+    for (const t of tickets) {
+      const arr = ticketsByEvent.get(t.eventId) ?? [];
+      arr.push(t);
+      ticketsByEvent.set(t.eventId, arr);
+    }
+
+    const ticketIds = tickets.map((t) => t.id);
+    const counts = await this.buildConfirmedRegistrationCounts(
+      prismaRead,
+      ticketIds,
+    );
+
+    return {
+      ticketsByEvent,
+      totalByTicket: counts.totalByTicket,
+      soldWithBatchByTicket: counts.soldWithBatchByTicket,
+      soldByBatch: counts.soldByBatch,
+    };
+  }
+
+  /**
+   * Mesma regra do endpoint por slug, sem I/O (usa mapas pré-carregados).
+   */
+  private computeSlotsFromCounts(
+    eventStatus: EventStatus,
+    eventDate: Date,
+    tickets: Array<{
+      id: string;
+      batches: Array<{
+        id: string;
+        quantity: number;
+        startDate: Date | null;
+        endDate: Date | null;
+      }>;
+    }>,
+    totalByTicket: Map<string, number>,
+    soldWithBatchByTicket: Map<string, number>,
+    soldByBatch: Map<string, number>,
+  ): boolean {
+    if (
+      eventStatus !== EventStatus.PUBLISHED &&
+      eventStatus !== EventStatus.SUSPENDED
+    ) {
+      return false;
+    }
+    if (eventDate < new Date()) {
+      return false;
+    }
+    if (!tickets?.length) {
+      return false;
+    }
+    const now = new Date();
+    for (const ticket of tickets) {
+      if (!ticket.batches?.length) continue;
+      const activeBatches = ticket.batches.filter(
+        (b) =>
+          (!b.startDate || new Date(b.startDate) <= now) &&
+          (!b.endDate || new Date(b.endDate) >= now),
+      );
+      if (activeBatches.length === 0) continue;
+
+      const capSum = activeBatches.reduce((sum, b) => sum + b.quantity, 0);
+
+      const totalConfirmed = totalByTicket.get(ticket.id) ?? 0;
+
+      if (totalConfirmed >= capSum) {
+        continue;
+      }
+
+      const soldWithBatchId = soldWithBatchByTicket.get(ticket.id) ?? 0;
+
+      if (soldWithBatchId === 0) {
+        if (totalConfirmed < capSum) {
+          return true;
+        }
+        continue;
+      }
+
+      for (const batch of activeBatches) {
+        const soldBatch = soldByBatch.get(batch.id) ?? 0;
+        if (batch.quantity > soldBatch) {
+          return true;
+        }
+      }
+
+      if (totalConfirmed < capSum) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Indica se ainda há capacidade (vaga) em algum ingresso ativo com lote no período vigente.
+   * Inclui eventos SUSPENDED: reflete estoque real; a UI pode bloquear inscrição pelo status.
+   * Usa uma única agregação groupBy em vez de N counts.
+   */
+  private async computeHasRegistrationSlotsAvailable(
+    prismaRead: ReturnType<PrismaService['getReadClient']>,
+    eventStatus: EventStatus,
+    eventDate: Date,
+    tickets: Array<{
+      id: string;
+      batches: Array<{
+        id: string;
+        quantity: number;
+        startDate: Date | null;
+        endDate: Date | null;
+      }>;
+    }>,
+  ): Promise<boolean> {
+    if (
+      eventStatus !== EventStatus.PUBLISHED &&
+      eventStatus !== EventStatus.SUSPENDED
+    ) {
+      return false;
+    }
+    if (eventDate < new Date()) {
+      return false;
+    }
+    if (!tickets?.length) {
+      return false;
+    }
+    const ticketIds = tickets.map((t) => t.id);
+    const counts = await this.buildConfirmedRegistrationCounts(
+      prismaRead,
+      ticketIds,
+    );
+    return this.computeSlotsFromCounts(
+      eventStatus,
+      eventDate,
+      tickets,
+      counts.totalByTicket,
+      counts.soldWithBatchByTicket,
+      counts.soldByBatch,
+    );
   }
 
   async update(userId: string, id: string, updateEventDto: UpdateEventDto) {
@@ -1243,6 +1505,71 @@ export class EventsService {
 
     return {
       message: 'Event published successfully',
+      data: { event: updatedEvent },
+    };
+  }
+
+  /**
+   * Suspende o evento (some da vitrine pública e bloqueia novas inscrições).
+   * Apenas eventos PUBLISHED podem ser suspensos.
+   */
+  async suspend(userId: string, eventId: string) {
+    await this.verifyOrganizerAccess(userId, eventId);
+
+    const prismaWrite = this.prisma.getWriteClient();
+    const event = await prismaWrite.event.findUnique({
+      where: { id: eventId },
+    });
+
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
+
+    if (event.status !== EventStatus.PUBLISHED) {
+      throw new BadRequestException(
+        'Somente eventos publicados podem ser suspensos',
+      );
+    }
+
+    const updatedEvent = await prismaWrite.event.update({
+      where: { id: eventId },
+      data: { status: EventStatus.SUSPENDED },
+    });
+
+    return {
+      message: 'Evento suspenso com sucesso',
+      data: { event: updatedEvent },
+    };
+  }
+
+  /**
+   * Volta o evento para publicado após suspensão (reaparece na vitrine).
+   */
+  async resumePublished(userId: string, eventId: string) {
+    await this.verifyOrganizerAccess(userId, eventId);
+
+    const prismaWrite = this.prisma.getWriteClient();
+    const event = await prismaWrite.event.findUnique({
+      where: { id: eventId },
+    });
+
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
+
+    if (event.status !== EventStatus.SUSPENDED) {
+      throw new BadRequestException(
+        'Somente eventos suspensos podem ser reativados desta forma',
+      );
+    }
+
+    const updatedEvent = await prismaWrite.event.update({
+      where: { id: eventId },
+      data: { status: EventStatus.PUBLISHED },
+    });
+
+    return {
+      message: 'Evento reativado com sucesso',
       data: { event: updatedEvent },
     };
   }

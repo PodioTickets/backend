@@ -4,6 +4,10 @@ API backend para o sistema de gestão de eventos e vendas de ingressos PodioTick
 
 ## Documentação
 
+### Suspender / reativar evento (organizador)
+
+[Documentação: suspender, reativar e fluxo de status](./docs/EVENT_SUSPEND_ORGANIZER_API.md)
+
 ### API de Pagamento
 
 Para informações detalhadas sobre como processar pagamentos, consulte a [Documentação da API de Pagamento](./docs/PAYMENT_API.md).

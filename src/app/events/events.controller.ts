@@ -59,7 +59,7 @@ export class EventsController {
   @ApiQuery({ name: 'city', required: false, description: 'Filter by city' })
   @ApiQuery({ name: 'startDate', required: false, description: 'Filter events from date (ISO string)' })
   @ApiQuery({ name: 'endDate', required: false, description: 'Filter events to date (ISO string)' })
-  @ApiQuery({ name: 'status', required: false, enum: ['DRAFT', 'PUBLISHED', 'CANCELLED', 'COMPLETED'], description: 'Filter by event status' })
+  @ApiQuery({ name: 'status', required: false, enum: ['DRAFT', 'PUBLISHED', 'SUSPENDED', 'CANCELLED', 'COMPLETED'], description: 'Filter by event status' })
   @ApiQuery({ name: 'includePast', required: false, type: Boolean, description: 'Include past events (default: false)' })
   @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20, max: 100)' })
@@ -69,6 +69,7 @@ export class EventsController {
   }
 
   @Get()
+  @NoCache()
   @ApiOperation({ summary: 'Get all events', description: 'Retrieves a list of events with optional filters' })
   @ApiQuery({ name: 'status', required: false, description: 'Filter by event status' })
   @ApiQuery({ name: 'country', required: false, description: 'Filter by country' })
@@ -78,6 +79,13 @@ export class EventsController {
   @ApiQuery({ name: 'dateTo', required: false, description: 'Filter events to date' })
   @ApiQuery({ name: 'includeDraft', required: false, description: 'Include draft events (only for organizers)' })
   @ApiQuery({ name: 'includePast', required: false, description: 'Include past events (default: false, only future events)' })
+  @ApiQuery({
+    name: 'includeHasSlots',
+    required: false,
+    type: Boolean,
+    description:
+      'Incluir hasRegistrationSlotsAvailable em cada evento (default: true). Use false para omitir o cálculo e reduzir carga no banco.',
+  })
   @ApiResponse({ status: 200, description: 'Events retrieved successfully' })
   findAll(@Request() req, @Query() filterDto: FilterEventsDto) {
     const userId = req.user?.id;
@@ -244,6 +252,48 @@ export class EventsController {
   @ApiResponse({ status: 404, description: 'Event not found' })
   publish(@Request() req, @Param('eventId') eventId: string) {
     return this.eventsService.publish(req.user.id, eventId);
+  }
+
+  @Post(':eventId/suspend')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Suspender evento',
+    description:
+      'Suspende um evento publicado: some das listagens públicas e bloqueia novas inscrições. Membros da organização (OWNER/EMPLOYEE) podem executar.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiResponse({ status: 200, description: 'Evento suspenso' })
+  @ApiResponse({ status: 400, description: 'Evento não está publicado' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({
+    status: 403,
+    description: 'Apenas membros da organização do evento',
+  })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  suspend(@Request() req, @Param('eventId') eventId: string) {
+    return this.eventsService.suspend(req.user.id, eventId);
+  }
+
+  @Post(':eventId/resume')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Reativar evento suspenso',
+    description:
+      'Volta o status para PUBLISHED após suspensão. Para publicar pela primeira vez, use POST .../publish.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiResponse({ status: 200, description: 'Evento reativado' })
+  @ApiResponse({ status: 400, description: 'Evento não está suspenso' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({
+    status: 403,
+    description: 'Apenas membros da organização do evento',
+  })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  resumePublished(@Request() req, @Param('eventId') eventId: string) {
+    return this.eventsService.resumePublished(req.user.id, eventId);
   }
 
   @Get(':eventId/stats')

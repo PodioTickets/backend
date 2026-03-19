@@ -21,6 +21,7 @@ import {
   RefreshTokenDto,
   ForgotPasswordDto,
   ResetPasswordDto,
+  ChangePasswordDto,
 } from './dto/auth.dto';
 
 @Injectable()
@@ -319,6 +320,18 @@ export class AuthService {
       console.error('Registration error:', error);
       throw new BadRequestException(error?.message || 'Failed to create user');
     }
+  }
+
+  /**
+   * Verifica se o usuário tem senha definida (login email/senha possível).
+   */
+  async hasPassword(userId: string): Promise<boolean> {
+    const prismaRead = this.prisma.getReadClient();
+    const user = await prismaRead.user.findUnique({
+      where: { id: userId },
+      select: { password: true },
+    });
+    return !!(user?.password && String(user.password).trim().length > 0);
   }
 
   async login(user: any) {
@@ -694,6 +707,63 @@ export class AuthService {
     return {
       success: true,
       message: 'Senha redefinida com sucesso',
+    };
+  }
+
+  /**
+   * Troca a senha do usuário logado. Se já tiver senha, exige currentPassword. Se não tiver (ex.: só Google), só newPassword.
+   */
+  async changePassword(userId: string, dto: ChangePasswordDto) {
+    const { currentPassword, newPassword } = dto;
+
+    if (newPassword.length < 8) {
+      throw new BadRequestException('A senha deve ter no mínimo 8 caracteres');
+    }
+
+    const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
+    if (!passwordRegex.test(newPassword)) {
+      throw new BadRequestException(
+        'A senha deve conter pelo menos uma letra maiúscula, uma minúscula e um número',
+      );
+    }
+
+    const prismaRead = this.prisma.getReadClient();
+    const prismaWrite = this.prisma.getWriteClient();
+
+    const user = await prismaRead.user.findUnique({
+      where: { id: userId },
+      select: { id: true, password: true },
+    });
+
+    if (!user) {
+      throw new BadRequestException('Usuário não encontrado');
+    }
+
+    const userHasPassword = !!(user.password && String(user.password).trim().length > 0);
+
+    if (userHasPassword) {
+      if (!currentPassword || typeof currentPassword !== 'string' || currentPassword.trim().length === 0) {
+        throw new BadRequestException('Senha atual é obrigatória para trocar a senha');
+      }
+      const isCurrentValid = await bcrypt.compare(currentPassword, user.password);
+      if (!isCurrentValid) {
+        throw new UnauthorizedException('Senha atual incorreta');
+      }
+      const isSamePassword = await bcrypt.compare(newPassword, user.password);
+      if (isSamePassword) {
+        throw new BadRequestException('A nova senha não pode ser igual à senha atual');
+      }
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 12);
+    await prismaWrite.user.update({
+      where: { id: userId },
+      data: { password: hashedPassword },
+    });
+
+    return {
+      success: true,
+      message: 'Senha alterada com sucesso',
     };
   }
 

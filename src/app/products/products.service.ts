@@ -9,13 +9,13 @@ export class ProductsService {
   constructor(private readonly prisma: PrismaService) { }
 
   /**
-   * Para produtos não incluídos no ticket, garante que exista a variação padrão "Sem interesse".
+   * Para produtos não obrigatórios, garante que exista a variação padrão "Sem interesse".
    */
   private ensureDefaultNoInterestVariation(
-    isIncludedInTicket: boolean,
+    isRequired: boolean,
     variations: ProductVariationDto[],
   ): ProductVariationDto[] {
-    if (isIncludedInTicket) return variations;
+    if (isRequired) return variations;
     const hasNoInterest = variations.some(
       (v) => v.name.trim().toLowerCase() === DEFAULT_NO_INTEREST_VARIATION_NAME.toLowerCase(),
     );
@@ -30,9 +30,9 @@ export class ProductsService {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
-    const isIncluded = createProductDto.isIncludedInTicket ?? false;
+    const isRequired = createProductDto.isRequired ?? false;
     const variations = this.ensureDefaultNoInterestVariation(
-      isIncluded,
+      isRequired,
       createProductDto.variations,
     );
 
@@ -49,7 +49,7 @@ export class ProductsService {
       data: {
         name: createProductDto.name,
         image: createProductDto.image,
-        isIncludedInTicket: isIncluded,
+        isIncludedInTicket: createProductDto.isIncludedInTicket ?? false,
         basePrice: Math.round(createProductDto.basePrice ?? 0), // entrada já em centavos (INT)
         isRequired: createProductDto.isRequired ?? false,
         variationType: createProductDto.variationType,
@@ -166,9 +166,9 @@ export class ProductsService {
     }
 
     if (updateProductDto.variations) {
-      const isIncluded = updateProductDto.isIncludedInTicket ?? product.isIncludedInTicket;
+      const isRequired = updateProductDto.isRequired ?? product.isRequired;
       const variations = this.ensureDefaultNoInterestVariation(
-        isIncluded,
+        isRequired,
         updateProductDto.variations,
       );
 

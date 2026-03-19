@@ -27,6 +27,7 @@ import {
   RefreshTokenDto,
   ForgotPasswordDto,
   ResetPasswordDto,
+  ChangePasswordDto,
   VerifyResetCodeDto,
   ResendResetCodeDto,
 } from './dto/auth.dto';
@@ -245,6 +246,22 @@ export class AuthController {
     return this.authService.resetPassword(resetPasswordDto);
   }
 
+  @Post('change-password')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Change password (logged-in user)',
+    description: 'Troca a senha do usuário. Se o usuário já tiver senha, envie currentPassword. Se não tiver (ex.: só login Google), envie apenas newPassword.',
+  })
+  @ApiBody({ type: ChangePasswordDto })
+  @ApiResponse({ status: 200, description: 'Senha alterada com sucesso' })
+  @ApiResponse({ status: 400, description: 'Dados inválidos ou nova senha igual à atual' })
+  @ApiResponse({ status: 401, description: 'Não autenticado ou senha atual incorreta' })
+  async changePassword(@Request() req, @Body() changePasswordDto: ChangePasswordDto) {
+    return this.authService.changePassword(req.user.id, changePasswordDto);
+  }
+
   @Get('profile')
   @NoCache()
   @UseGuards(JwtAuthGuard)
@@ -252,8 +269,9 @@ export class AuthController {
   @ApiResponse({ status: 200, description: 'User profile' })
   @ApiBearerAuth()
   async getProfile(@Request() req) {
+    const hasPassword = await this.authService.hasPassword(req.user.id);
     return {
-      data: req.user,
+      data: { ...req.user, hasPassword },
       message: 'User profile',
       success: true,
     };
