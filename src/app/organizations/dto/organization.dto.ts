@@ -1,4 +1,17 @@
-import { IsString, IsEmail, IsOptional, IsEnum, IsUrl } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  IsString,
+  IsEmail,
+  IsOptional,
+  IsEnum,
+  IsUrl,
+  IsObject,
+  IsArray,
+  IsUUID,
+  IsInt,
+  Min,
+  Max,
+} from 'class-validator';
 import { OrganizationMemberRole } from '@prisma/client';
 
 export class CreateOrganizationDto {
@@ -168,6 +181,73 @@ export class AddMemberDto {
 
   @IsEnum(OrganizationMemberRole)
   role: OrganizationMemberRole;
+
+  /** Canonical permission keys, e.g. `["dashboard", "edit_event"]`. Omit for server defaults. */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  permissions?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  eventIds?: string[];
+}
+
+export class PutMemberPermissionsDto {
+  /** Replaces stored permissions; values must be canonical keys (`dashboard`, `edit_event`, …). */
+  @IsArray()
+  @IsString({ each: true })
+  permissions: string[];
+}
+
+export class PutMemberEventsDto {
+  @IsArray()
+  @IsUUID('4', { each: true })
+  eventIds: string[];
+}
+
+export class PatchMemberSettingsDto {
+  @IsOptional()
+  @IsEnum(OrganizationMemberRole)
+  role?: OrganizationMemberRole;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  permissions?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  eventIds?: string[];
+}
+
+export class OrganizationAuditLogQueryDto {
+  @IsOptional()
+  @IsString()
+  q?: string;
+
+  @IsOptional()
+  @IsString()
+  from?: string;
+
+  @IsOptional()
+  @IsString()
+  to?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  limit?: number;
 }
 
 export class UpdateMemberRoleDto {

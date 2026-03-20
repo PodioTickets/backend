@@ -1,6 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { EventsService } from '../events.service';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { OrganizerMemberAccessService } from '../../organizations/organizer-member-access.service';
+import { OrganizationsService } from '../../organizations/organizations.service';
 import { NotFoundException, BadRequestException } from '@nestjs/common';
 import { EventStatus } from '@prisma/client';
 
@@ -38,6 +40,16 @@ describe('EventsService', () => {
     getWriteClient: jest.fn(),
   };
 
+  const mockOrganizerMemberAccess = {
+    getMemberForOrganizerUser: jest.fn(),
+    buildOrganizerEventsWhere: jest.fn(),
+    assertCanAccessEvent: jest.fn().mockResolvedValue(undefined),
+  };
+
+  const mockOrganizationsService = {
+    recordOrganizationAuditLog: jest.fn().mockResolvedValue(undefined),
+  };
+
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -45,6 +57,14 @@ describe('EventsService', () => {
         {
           provide: PrismaService,
           useValue: mockPrismaService,
+        },
+        {
+          provide: OrganizerMemberAccessService,
+          useValue: mockOrganizerMemberAccess,
+        },
+        {
+          provide: OrganizationsService,
+          useValue: mockOrganizationsService,
         },
       ],
     }).compile();
@@ -188,7 +208,9 @@ describe('EventsService', () => {
       const mockOrganizer = { id: 'org-123', userId };
       const mockEvent = {
         id: eventId,
+        organizationId: '00000000-0000-0000-0000-000000000001',
         organizerId: mockOrganizer.id,
+        name: 'Updated Event',
         ...updateDto,
       };
 

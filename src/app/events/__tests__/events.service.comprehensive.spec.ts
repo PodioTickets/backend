@@ -1,7 +1,9 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { EventsService } from '../events.service';
 import { PrismaService } from '../../../prisma/prisma.service';
-import { NotFoundException, BadRequestException } from '@nestjs/common';
+import { OrganizerMemberAccessService } from '../../organizations/organizer-member-access.service';
+import { OrganizationsService } from '../../organizations/organizations.service';
+import { NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { EventStatus } from '@prisma/client';
 
 describe('EventsService - Comprehensive Tests', () => {
@@ -37,6 +39,16 @@ describe('EventsService - Comprehensive Tests', () => {
     getWriteClient: jest.fn(),
   };
 
+  const mockOrganizerMemberAccess = {
+    getMemberForOrganizerUser: jest.fn(),
+    buildOrganizerEventsWhere: jest.fn(),
+    assertCanAccessEvent: jest.fn().mockResolvedValue(undefined),
+  };
+
+  const mockOrganizationsService = {
+    recordOrganizationAuditLog: jest.fn().mockResolvedValue(undefined),
+  };
+
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -44,6 +56,14 @@ describe('EventsService - Comprehensive Tests', () => {
         {
           provide: PrismaService,
           useValue: mockPrismaService,
+        },
+        {
+          provide: OrganizerMemberAccessService,
+          useValue: mockOrganizerMemberAccess,
+        },
+        {
+          provide: OrganizationsService,
+          useValue: mockOrganizationsService,
         },
       ],
     }).compile();
@@ -232,14 +252,15 @@ describe('EventsService - Comprehensive Tests', () => {
       it('should prevent organizer from updating other organizers events', async () => {
         const userId = 'user-123';
         const eventId = 'event-123';
-        const otherOrganizer = { id: 'org-999', userId: 'other-user' };
-        const event = { id: eventId, organizerId: 'org-999' };
+        const event = { id: eventId, organizationId: '00000000-0000-0000-0000-000000000099' };
 
-        mockPrismaService.organizer.findUnique.mockResolvedValue({ id: 'org-123', userId });
         mockPrismaService.event.findUnique.mockResolvedValue(event);
+        mockOrganizerMemberAccess.assertCanAccessEvent.mockRejectedValueOnce(
+          new ForbiddenException('No access to this event'),
+        );
 
         await expect(service.update(userId, eventId, { name: 'Hacked' })).rejects.toThrow(
-          BadRequestException,
+          ForbiddenException,
         );
       });
 
@@ -353,24 +374,20 @@ describe('EventsService - Comprehensive Tests', () => {
 
     describe('Access Control', () => {
       it('should allow only event owner to update event', async () => {
-        const ownerId = 'owner-123';
         const attackerId = 'attacker-123';
         const eventId = 'event-123';
 
-        const ownerOrganizer = { id: 'org-owner', userId: ownerId };
-        const attackerOrganizer = { id: 'org-attacker', userId: attackerId };
-        const event = { id: eventId, organizerId: 'org-owner' };
+        const event = { id: eventId, organizationId: '00000000-0000-0000-0000-000000000002' };
 
-        mockPrismaService.organizer.findUnique
-          .mockResolvedValueOnce(attackerOrganizer)
-          .mockResolvedValueOnce(ownerOrganizer);
         mockPrismaService.event.findUnique.mockResolvedValue(event);
+        mockOrganizerMemberAccess.assertCanAccessEvent.mockRejectedValueOnce(
+          new ForbiddenException('Missing permission: edit_event'),
+        );
 
         await expect(
           service.update(attackerId, eventId, { name: 'Hacked Event' }),
-        ).rejects.toThrow(BadRequestException);
+        ).rejects.toThrow(ForbiddenException);
 
-        // Verificar que o evento não foi atualizado
         expect(mockPrismaService.event.update).not.toHaveBeenCalled();
       });
     });

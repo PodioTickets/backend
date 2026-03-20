@@ -346,8 +346,14 @@ export class AuthService {
         throw new UnauthorizedException('JWT secret not configured');
       }
 
+      const prismaWrite = this.prisma.getWriteClient();
       const accessToken = this.jwtService.sign(payload);
       const refreshToken = await this.createRefreshToken(user.id);
+
+      await prismaWrite.user.update({
+        where: { id: user.id },
+        data: { lastLoginAt: new Date() },
+      });
 
       return {
         message: 'Login successful',

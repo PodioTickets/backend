@@ -104,6 +104,13 @@ enum VoucherStatus {
   INACTIVE
 }
 
+/** Central de comunicação — envios por evento (painel organizador) */
+enum EventNotificationStatus {
+  review
+  sent
+  denied
+}
+
 model User {
   id                    String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email                 String
@@ -134,6 +141,7 @@ model User {
   googleEmail           String?
   totpSecret            String? // Secret TOTP para 2FA
   mfaEnabled            Boolean       @default(false) // Se 2FA está habilitado
+  lastLoginAt           DateTime? // Último login (email/senha ou fluxo que chama login())
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
 
@@ -145,7 +153,9 @@ model User {
   linkedUsersAsMain    LinkedUser[]         @relation("MainUser")
   linkedUsersAsLinked  LinkedUser[]         @relation("LinkedUser")
   organizationMembers  OrganizationMember[]
+  organizationAuditLogs OrganizationAuditLog[]
   orders               Order[]
+  eventNotificationsCreated EventNotification[] @relation("EventNotificationCreator")
 
   // Índices compostos para permitir mesmo email em contas diferentes
   @@unique([email, accountType])
@@ -195,6 +205,7 @@ model Organization {
   members         OrganizationMember[]
   events          Event[]
   contactMessages ContactMessage[]
+  auditLogs       OrganizationAuditLog[]
 
   @@index([name])
   @@index([document])
@@ -206,16 +217,50 @@ model OrganizationMember {
   organizationId String                 @db.Uuid
   userId         String                 @db.Uuid
   role           OrganizationMemberRole @default(EMPLOYEE)
+  /// Permissões do painel (chaves canônicas do frontend). null = legado (tratar como acesso total).
+  permissions    Json?
   createdAt      DateTime               @default(now())
   updatedAt      DateTime               @updatedAt
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization                   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User                           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  eventAccesses OrganizationMemberEventAccess[]
 
   @@unique([organizationId, userId])
   @@index([organizationId])
   @@index([userId])
   @@index([organizationId, role])
+}
+
+/// Whitelist de eventos por membro. Sem registros = acesso a todos os eventos da organização (política permissiva para colaboradores).
+model OrganizationMemberEventAccess {
+  id                   String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationMemberId String @db.Uuid
+  eventId              String @db.Uuid
+  createdAt            DateTime @default(now())
+
+  member OrganizationMember @relation(fields: [organizationMemberId], references: [id], onDelete: Cascade)
+  event  Event              @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationMemberId, eventId])
+  @@index([organizationMemberId])
+  @@index([eventId])
+}
+
+model OrganizationAuditLog {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @db.Uuid
+  actorUserId    String?  @db.Uuid
+  ip             String?
+  action         String
+  metadata       Json?
+  occurredAt     DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actor        User?        @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, occurredAt])
+  @@index([organizationId, action])
 }
 
 model Event {
@@ -257,11 +302,33 @@ model Event {
   products         Product[]
   // slug já tem índice automático via @unique, não precisa de índice explícito
   vouchers         Voucher[]
+  memberAccessGrants OrganizationMemberEventAccess[]
+  eventNotifications EventNotification[]
 
   @@index([status, eventDate]) // Para buscar eventos publicados futuros
   @@index([status, country, state, city]) // Para filtros de localização (status primeiro para melhor seletividade)
   @@index([organizationId, createdAt]) // Para listar eventos da organização
   @@index([eventDate]) // Para ordenação e filtros por data
+}
+
+model EventNotification {
+  id          String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId     String                  @db.Uuid
+  title       String
+  messageHtml String                  @db.Text
+  channels    String[]
+  status      EventNotificationStatus @default(review)
+  /** Data/hora exibida na lista (v1 = criação do registro; futuro: pode atualizar ao enviar) */
+  occurredAt  DateTime                @default(now())
+  createdById String?                 @db.Uuid
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+
+  event     Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  createdBy User? @relation("EventNotificationCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([eventId, occurredAt])
+  @@index([eventId, status, occurredAt])
 }
 
 model EventTopic {

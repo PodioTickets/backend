@@ -4,6 +4,9 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { OrganizerMemberAccessService } from '../organizations/organizer-member-access.service';
+import { OrganizationsService } from '../organizations/organizations.service';
+import type { OrganizerPermissionKey } from '../organizations/constants/organizer-permissions';
 import {
   CreateEventDto,
   UpdateEventDto,
@@ -23,7 +26,11 @@ import { generateSlug, generateUniqueSlug } from '../../helpers/SlugHelper';
 
 @Injectable()
 export class EventsService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly organizerMemberAccess: OrganizerMemberAccessService,
+    private readonly organizationsService: OrganizationsService,
+  ) {}
 
   /**
    * Retorna o valor em centavos (valores já estão em centavos no banco)
@@ -592,22 +599,15 @@ export class EventsService {
 
     const prismaRead = this.prisma.getReadClient();
 
-    // Buscar organizationId do userId (membro OWNER)
-    const member = await prismaRead.organizationMember.findFirst({
-      where: {
-        userId,
-        role: 'OWNER',
-      },
-      select: { organizationId: true },
-    });
-
-    if (!member) {
-      throw new BadRequestException('User is not an organizer');
-    }
+    const orgMember =
+      await this.organizerMemberAccess.getMemberForOrganizerUser(userId);
+    const scopeWhere = this.organizerMemberAccess.buildOrganizerEventsWhere(
+      orgMember,
+    );
 
     // Construir where clause otimizado para usar índice [organizationId, createdAt]
     const where: any = {
-      organizationId: member.organizationId, // Usa o índice
+      ...scopeWhere,
     };
 
     // Filtro por status
@@ -1169,19 +1169,11 @@ export class EventsService {
       throw new NotFoundException('Event not found');
     }
 
-    // Verificar se o usuário é OWNER da organização do evento
-    const member = await prismaWrite.organizationMember.findUnique({
-      where: {
-        organizationId_userId: {
-          organizationId: event.organizationId,
-          userId,
-        },
-      },
-    });
-
-    if (!member || member.role !== 'OWNER') {
-      throw new BadRequestException('Only the organization owner can update events');
-    }
+    await this.organizerMemberAccess.assertCanAccessEvent(
+      userId,
+      id,
+      'edit_event',
+    );
 
     const updateData: any = { ...updateEventDto };
 
@@ -1234,6 +1226,19 @@ export class EventsService {
         },
       },
     });
+
+    await this.organizationsService.recordOrganizationAuditLog({
+      organizationId: event.organizationId,
+      actorUserId: userId,
+      ip: null,
+      action: `Editou evento "${updatedEvent.name}"`,
+      metadata: {
+        kind: 'EVENT_UPDATE',
+        eventId: id,
+        fields: Object.keys(updateEventDto),
+      },
+    });
+
     return {
       message: 'Event updated successfully',
       data: { event: updatedEvent },
@@ -1282,7 +1287,7 @@ export class EventsService {
     eventId: string,
     createTopicDto: CreateEventTopicDto,
   ) {
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
     const prismaWrite = this.prisma.getWriteClient();
 
@@ -1306,7 +1311,7 @@ export class EventsService {
     updateTopicDto: UpdateEventTopicDto,
   ) {
     this.validateUUID(topicId, 'topic ID');
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
     const prismaWrite = this.prisma.getWriteClient();
 
@@ -1331,7 +1336,7 @@ export class EventsService {
 
   async deleteTopic(userId: string, eventId: string, topicId: string) {
     this.validateUUID(topicId, 'topic ID');
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
     const prismaWrite = this.prisma.getWriteClient();
 
@@ -1364,7 +1369,7 @@ export class EventsService {
     eventId: string,
     createLocationDto: CreateEventLocationDto,
   ) {
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
     const prismaWrite = this.prisma.getWriteClient();
 
@@ -1388,7 +1393,7 @@ export class EventsService {
     updateLocationDto: CreateEventLocationDto,
   ) {
     this.validateUUID(locationId, 'location ID');
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
     const prismaWrite = this.prisma.getWriteClient();
 
@@ -1413,7 +1418,7 @@ export class EventsService {
 
   async deleteLocation(userId: string, eventId: string, locationId: string) {
     this.validateUUID(locationId, 'location ID');
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
     const prismaWrite = this.prisma.getWriteClient();
 
@@ -1434,37 +1439,21 @@ export class EventsService {
     };
   }
 
-  private async verifyOrganizerAccess(userId: string, eventId: string) {
+  private async verifyOrganizerAccess(
+    userId: string,
+    eventId: string,
+    requiredPermission: OrganizerPermissionKey,
+  ) {
     this.validateUUID(eventId, 'event ID');
-
-    // Verificações de acesso críticas devem usar write client para consistência
-    const prismaWrite = this.prisma.getWriteClient();
-
-    const event = await prismaWrite.event.findUnique({
-      where: { id: eventId },
-    });
-
-    if (!event) {
-      throw new NotFoundException('Event not found');
-    }
-
-    // Verificar se o usuário é membro da organização do evento (OWNER ou EMPLOYEE)
-    const member = await prismaWrite.organizationMember.findUnique({
-      where: {
-        organizationId_userId: {
-          organizationId: event.organizationId,
-          userId,
-        },
-      },
-    });
-
-    if (!member || (member.role !== 'OWNER' && member.role !== 'EMPLOYEE')) {
-      throw new BadRequestException('Only organization members (OWNER or EMPLOYEE) can perform this action');
-    }
+    await this.organizerMemberAccess.assertCanAccessEvent(
+      userId,
+      eventId,
+      requiredPermission,
+    );
   }
 
   async publish(userId: string, eventId: string) {
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
@@ -1514,7 +1503,7 @@ export class EventsService {
    * Apenas eventos PUBLISHED podem ser suspensos.
    */
   async suspend(userId: string, eventId: string) {
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
     const prismaWrite = this.prisma.getWriteClient();
     const event = await prismaWrite.event.findUnique({
@@ -1546,7 +1535,7 @@ export class EventsService {
    * Volta o evento para publicado após suspensão (reaparece na vitrine).
    */
   async resumePublished(userId: string, eventId: string) {
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
     const prismaWrite = this.prisma.getWriteClient();
     const event = await prismaWrite.event.findUnique({
@@ -1575,7 +1564,7 @@ export class EventsService {
   }
 
   async getStats(userId: string, eventId: string) {
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'dashboard');
 
     const prismaRead = this.prisma.getReadClient();
 
@@ -1623,7 +1612,7 @@ export class EventsService {
   }
 
   async getRevenue(userId: string, eventId: string) {
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'financial');
 
     const prismaRead = this.prisma.getReadClient();
 
@@ -1692,7 +1681,7 @@ export class EventsService {
    * Obtém dados do dashboard do evento
    */
   async getDashboard(userId: string, eventId: string, queryDto: DashboardQueryDto) {
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'dashboard');
 
     const prismaRead = this.prisma.getReadClient();
     const { period = DashboardPeriod.GERAL, ticketIds, page = 1, limit = 10 } = queryDto;
@@ -2559,7 +2548,7 @@ export class EventsService {
    * Obtém dados financeiros do evento
    */
   async getFinancial(userId: string, eventId: string, queryDto: FinancialQueryDto) {
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'financial');
 
     const prismaRead = this.prisma.getReadClient();
     const { period = FinancialPeriod.HOJE, page = 1, limit = 20 } = queryDto;
@@ -2885,7 +2874,7 @@ export class EventsService {
    * Obtém inscrições com filtros avançados
    */
   async getRegistrations(userId: string, eventId: string, queryDto: RegistrationsQueryDto) {
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'dashboard');
 
     const prismaRead = this.prisma.getReadClient();
     const {
@@ -3412,7 +3401,7 @@ export class EventsService {
    * Obtém estatísticas de inscrições (endpoint separado)
    */
   async getRegistrationStats(userId: string, eventId: string) {
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'dashboard');
 
     const prismaRead = this.prisma.getReadClient();
 
@@ -3525,7 +3514,7 @@ export class EventsService {
    * Obtém histórico de repasses (baseado em pagamentos antigos que já passaram do prazo de retenção)
    */
   async getFinancialTransfers(userId: string, eventId: string) {
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'financial');
 
     const prismaRead = this.prisma.getReadClient();
     const retentionDays = 30; // Prazo de retenção padrão
@@ -3599,7 +3588,7 @@ export class EventsService {
    * Obtém parcelas a receber (baseado em pagamentos parcelados com cartão de crédito)
    */
   async getFinancialInstallments(userId: string, eventId: string) {
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'financial');
 
     const prismaRead = this.prisma.getReadClient();
 
@@ -3711,7 +3700,7 @@ export class EventsService {
    * Obtém valores aguardando liberação (baseado em prazo de retenção de 30 dias)
    */
   async getFinancialPending(userId: string, eventId: string, page: number = 1, limit: number = 20) {
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'financial');
 
     const prismaRead = this.prisma.getReadClient();
     const retentionDays = 30; // Prazo de retenção padrão
@@ -3830,7 +3819,7 @@ export class EventsService {
    * Obtém lista de pagamentos estornados (refunded)
    */
   async getFinancialRefunded(userId: string, eventId: string, page: number = 1, limit: number = 20) {
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'financial');
 
     const prismaRead = this.prisma.getReadClient();
     const skip = (page - 1) * limit;
@@ -3956,7 +3945,7 @@ export class EventsService {
    * Obtém lista de chargebacks
    */
   async getFinancialChargebacks(userId: string, eventId: string, page: number = 1, limit: number = 20) {
-    await this.verifyOrganizerAccess(userId, eventId);
+    await this.verifyOrganizerAccess(userId, eventId, 'financial');
 
     const prismaRead = this.prisma.getReadClient();
     const skip = (page - 1) * limit;

@@ -8,6 +8,10 @@ API backend para o sistema de gestão de eventos e vendas de ingressos PodioTick
 
 [Documentação: suspender, reativar e fluxo de status](./docs/EVENT_SUSPEND_ORGANIZER_API.md)
 
+### Membros da organização (owner)
+
+[Documentação: adicionar, listar, papel e remoção de membros](./docs/ORGANIZATION_MEMBERS_API.md) · [Referência HTTP: payloads e `data`](./docs/ORGANIZATIONS_HTTP_REFERENCE.md) · [Notificações do evento (API) — Central de Comunicação](./EVENT_NOTIFICATIONS_API.md)
+
 ### API de Pagamento
 
 Para informações detalhadas sobre como processar pagamentos, consulte a [Documentação da API de Pagamento](./docs/PAYMENT_API.md).

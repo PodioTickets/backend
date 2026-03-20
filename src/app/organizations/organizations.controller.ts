@@ -2,10 +2,12 @@ import {
   Controller,
   Get,
   Post,
+  Put,
   Patch,
   Delete,
   Body,
   Param,
+  Query,
   UseGuards,
   Request,
 } from '@nestjs/common';
@@ -16,13 +18,36 @@ import {
   ApiBearerAuth,
   ApiParam,
   ApiBody,
+  ApiQuery,
 } from '@nestjs/swagger';
+import type { Request as ExpressRequest } from 'express';
 import { OrganizationsService } from './organizations.service';
-import { CreateOrganizationDto, AddMemberDto, UpdateMemberRoleDto, UpdateOrganizationDto, UpdateOrganizationLogoDto } from './dto/organization.dto';
+import {
+  CreateOrganizationDto,
+  AddMemberDto,
+  UpdateMemberRoleDto,
+  UpdateOrganizationDto,
+  UpdateOrganizationLogoDto,
+  PutMemberPermissionsDto,
+  PutMemberEventsDto,
+  PatchMemberSettingsDto,
+  OrganizationAuditLogQueryDto,
+} from './dto/organization.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { BypassKeyGuard } from '../../common/guards/bypass-key.guard';
 import { PrismaService } from '../../prisma/prisma.service';
 import { NoCache } from 'src/common/decorators/cache.decorator';
+
+function clientIp(req: ExpressRequest): string {
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.length > 0) {
+    return xff.split(',')[0].trim();
+  }
+  if (Array.isArray(xff) && xff[0]) {
+    return String(xff[0]).split(',')[0].trim();
+  }
+  return (req as ExpressRequest & { ip?: string }).ip || '';
+}
 
 @ApiTags('Organizations')
 @Controller('api/v1/organizations')
@@ -152,6 +177,7 @@ export class OrganizationsController {
   }
 
   @Get('me/members')
+  @NoCache()
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({
@@ -173,6 +199,43 @@ export class OrganizationsController {
     }
 
     return this.organizationsService.listMembers(req.user.id, member.organizationId);
+  }
+
+  @Get('me/audit-logs')
+  @NoCache()
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'List organization audit logs',
+    description: 'Paginated audit trail for the organization. Only the owner can access.',
+  })
+  @ApiQuery({ name: 'q', required: false })
+  @ApiQuery({ name: 'from', required: false })
+  @ApiQuery({ name: 'to', required: false })
+  @ApiQuery({ name: 'page', required: false })
+  @ApiQuery({ name: 'limit', required: false })
+  @ApiResponse({ status: 200, description: 'Audit logs retrieved successfully' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Only owner can view audit logs' })
+  async listMyAuditLogs(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Query() query: OrganizationAuditLogQueryDto,
+  ) {
+    const member = await this.prisma.organizationMember.findFirst({
+      where: {
+        userId: req.user.id,
+        role: 'OWNER',
+      },
+    });
+
+    if (!member) {
+      throw new Error('Organizer not found');
+    }
+
+    return this.organizationsService.listOrganizationAuditLogs(
+      req.user.id,
+      member.organizationId,
+      query,
+    );
   }
 
   @Post('me/members')
@@ -198,7 +261,198 @@ export class OrganizationsController {
       throw new Error('Organizer not found');
     }
 
-    return this.organizationsService.addMember(req.user.id, member.organizationId, addMemberDto);
+    return this.organizationsService.addMember(
+      req.user.id,
+      member.organizationId,
+      addMemberDto,
+      clientIp(req),
+    );
+  }
+
+  @Get('me/members/:memberUserId')
+  @NoCache()
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get organization member detail',
+    description: 'Returns member row, effective permissions, allowed event ids and lastLoginAt.',
+  })
+  @ApiParam({ name: 'memberUserId', description: 'User ID of the member' })
+  @ApiResponse({ status: 200, description: 'Member detail retrieved successfully' })
+  async getMyMemberDetail(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('memberUserId') memberUserId: string,
+  ) {
+    const member = await this.prisma.organizationMember.findFirst({
+      where: {
+        userId: req.user.id,
+        role: 'OWNER',
+      },
+    });
+
+    if (!member) {
+      throw new Error('Organizer not found');
+    }
+
+    return this.organizationsService.getMemberDetail(
+      req.user.id,
+      member.organizationId,
+      memberUserId,
+    );
+  }
+
+  @Get('me/members/:memberUserId/permissions')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get member permissions map' })
+  @ApiParam({ name: 'memberUserId', description: 'User ID of the member' })
+  @ApiResponse({ status: 200, description: 'Permissions retrieved successfully' })
+  async getMyMemberPermissions(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('memberUserId') memberUserId: string,
+  ) {
+    const member = await this.prisma.organizationMember.findFirst({
+      where: {
+        userId: req.user.id,
+        role: 'OWNER',
+      },
+    });
+
+    if (!member) {
+      throw new Error('Organizer not found');
+    }
+
+    return this.organizationsService.getMemberPermissions(
+      req.user.id,
+      member.organizationId,
+      memberUserId,
+    );
+  }
+
+  @Put('me/members/:memberUserId/permissions')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Replace member permissions (idempotent)' })
+  @ApiParam({ name: 'memberUserId', description: 'User ID of the member' })
+  @ApiBody({ type: PutMemberPermissionsDto })
+  @ApiResponse({ status: 200, description: 'Permissions updated successfully' })
+  async putMyMemberPermissions(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('memberUserId') memberUserId: string,
+    @Body() dto: PutMemberPermissionsDto,
+  ) {
+    const member = await this.prisma.organizationMember.findFirst({
+      where: {
+        userId: req.user.id,
+        role: 'OWNER',
+      },
+    });
+
+    if (!member) {
+      throw new Error('Organizer not found');
+    }
+
+    return this.organizationsService.putMemberPermissions(
+      req.user.id,
+      member.organizationId,
+      memberUserId,
+      dto,
+      clientIp(req),
+    );
+  }
+
+  @Get('me/members/:memberUserId/events')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get member event whitelist (expanded to full list for owner/unrestricted employees)' })
+  @ApiParam({ name: 'memberUserId', description: 'User ID of the member' })
+  @ApiResponse({ status: 200, description: 'Event access retrieved successfully' })
+  async getMyMemberEvents(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('memberUserId') memberUserId: string,
+  ) {
+    const member = await this.prisma.organizationMember.findFirst({
+      where: {
+        userId: req.user.id,
+        role: 'OWNER',
+      },
+    });
+
+    if (!member) {
+      throw new Error('Organizer not found');
+    }
+
+    return this.organizationsService.getMemberEvents(
+      req.user.id,
+      member.organizationId,
+      memberUserId,
+    );
+  }
+
+  @Put('me/members/:memberUserId/events')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Replace member event whitelist' })
+  @ApiParam({ name: 'memberUserId', description: 'User ID of the member' })
+  @ApiBody({ type: PutMemberEventsDto })
+  @ApiResponse({ status: 200, description: 'Event access updated successfully' })
+  async putMyMemberEvents(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('memberUserId') memberUserId: string,
+    @Body() dto: PutMemberEventsDto,
+  ) {
+    const member = await this.prisma.organizationMember.findFirst({
+      where: {
+        userId: req.user.id,
+        role: 'OWNER',
+      },
+    });
+
+    if (!member) {
+      throw new Error('Organizer not found');
+    }
+
+    return this.organizationsService.putMemberEvents(
+      req.user.id,
+      member.organizationId,
+      memberUserId,
+      dto,
+      clientIp(req),
+    );
+  }
+
+  @Patch('me/members/:memberUserId/settings')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Update member role, permissions and/or events in one request',
+  })
+  @ApiParam({ name: 'memberUserId', description: 'User ID of the member' })
+  @ApiBody({ type: PatchMemberSettingsDto })
+  @ApiResponse({ status: 200, description: 'Member settings updated successfully' })
+  async patchMyMemberSettings(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('memberUserId') memberUserId: string,
+    @Body() dto: PatchMemberSettingsDto,
+  ) {
+    const member = await this.prisma.organizationMember.findFirst({
+      where: {
+        userId: req.user.id,
+        role: 'OWNER',
+      },
+    });
+
+    if (!member) {
+      throw new Error('Organizer not found');
+    }
+
+    return this.organizationsService.patchMemberSettings(
+      req.user.id,
+      member.organizationId,
+      memberUserId,
+      dto,
+      clientIp(req),
+    );
   }
 
   @Patch('me/members/:memberUserId')
@@ -234,6 +488,7 @@ export class OrganizationsController {
       member.organizationId,
       memberUserId,
       updateDto,
+      clientIp(req),
     );
   }
 
@@ -260,7 +515,12 @@ export class OrganizationsController {
       throw new Error('Organizer not found');
     }
 
-    return this.organizationsService.removeMember(req.user.id, member.organizationId, memberUserId);
+    return this.organizationsService.removeMember(
+      req.user.id,
+      member.organizationId,
+      memberUserId,
+      clientIp(req),
+    );
   }
 
   // ========== BYPASS ENDPOINTS ==========

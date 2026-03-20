@@ -1,10 +1,28 @@
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException, ConflictException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { CreateOrganizationDto, AddMemberDto, UpdateMemberRoleDto, UpdateOrganizationDto } from './dto/organization.dto';
+import {
+  CreateOrganizationDto,
+  AddMemberDto,
+  UpdateMemberRoleDto,
+  UpdateOrganizationDto,
+  PutMemberPermissionsDto,
+  PutMemberEventsDto,
+  PatchMemberSettingsDto,
+  OrganizationAuditLogQueryDto,
+} from './dto/organization.dto';
 import { OrganizationMemberRole } from '@prisma/client';
 import { MFAService } from '../../common/services/mfa.service';
 import * as bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
+import {
+  DEFAULT_NEW_MEMBER_PERMISSIONS,
+  effectivePermissionsForMember,
+  FULL_ORGANIZER_PERMISSIONS,
+  grantedPermissionKeys,
+  mapFromPermissionKeys,
+  UnknownOrganizerPermissionKeyError,
+  type OrganizerPermissionsMap,
+} from './constants/organizer-permissions';
 
 @Injectable()
 export class OrganizationsService {
@@ -12,6 +30,156 @@ export class OrganizationsService {
     private readonly prisma: PrismaService,
     private readonly mfaService: MFAService,
   ) {}
+
+  private mapFromKeysOrThrow(keys: string[]): OrganizerPermissionsMap {
+    try {
+      return mapFromPermissionKeys(keys);
+    } catch (e) {
+      if (e instanceof UnknownOrganizerPermissionKeyError) {
+        throw new BadRequestException(`Unknown permission key: "${e.raw}"`);
+      }
+      throw e;
+    }
+  }
+
+  private normalizeNewMemberPermissions(
+    input?: string[] | null,
+  ): OrganizerPermissionsMap {
+    if (input == null) {
+      return { ...DEFAULT_NEW_MEMBER_PERMISSIONS };
+    }
+    return this.mapFromKeysOrThrow(input);
+  }
+
+  private normalizePutPermissions(keys: string[]): OrganizerPermissionsMap {
+    return this.mapFromKeysOrThrow(keys);
+  }
+
+  private async assertEventsBelongToOrganization(
+    organizationId: string,
+    eventIds: string[],
+  ) {
+    if (eventIds.length === 0) return;
+    const prismaRead = this.prisma.getReadClient();
+    const count = await prismaRead.event.count({
+      where: { organizationId, id: { in: eventIds } },
+    });
+    if (count !== eventIds.length) {
+      throw new BadRequestException(
+        'One or more events are invalid or belong to another organization',
+      );
+    }
+  }
+
+  async recordOrganizationAuditLog(params: {
+    organizationId: string;
+    actorUserId: string | null;
+    ip?: string | null;
+    action: string;
+    metadata?: Prisma.InputJsonValue;
+  }) {
+    const prismaWrite = this.prisma.getWriteClient();
+    await prismaWrite.organizationAuditLog.create({
+      data: {
+        organizationId: params.organizationId,
+        actorUserId: params.actorUserId,
+        ip: params.ip ?? null,
+        action: params.action,
+        metadata:
+          params.metadata === undefined ? Prisma.JsonNull : params.metadata,
+      },
+    });
+  }
+
+  private async replaceMemberEventAccess(
+    organizationMemberId: string,
+    organizationId: string,
+    eventIds: string[],
+  ) {
+    await this.assertEventsBelongToOrganization(organizationId, eventIds);
+    const prismaWrite = this.prisma.getWriteClient();
+    await prismaWrite.organizationMemberEventAccess.deleteMany({
+      where: { organizationMemberId },
+    });
+    if (eventIds.length > 0) {
+      await prismaWrite.organizationMemberEventAccess.createMany({
+        data: eventIds.map((eventId) => ({
+          organizationMemberId,
+          eventId,
+        })),
+      });
+    }
+  }
+
+  private async resolveMemberEventIdsForApi(params: {
+    role: OrganizationMemberRole;
+    organizationId: string;
+    eventAccesses: { eventId: string }[];
+  }): Promise<string[]> {
+    const prismaRead = this.prisma.getReadClient();
+    const allInOrg = async () => {
+      const rows = await prismaRead.event.findMany({
+        where: { organizationId: params.organizationId },
+        select: { id: true },
+      });
+      return rows.map((r) => r.id);
+    };
+    if (params.role === 'OWNER') {
+      return allInOrg();
+    }
+    if (params.eventAccesses.length === 0) {
+      return allInOrg();
+    }
+    return params.eventAccesses.map((e) => e.eventId);
+  }
+
+  private mapMemberForListResponse(
+    m: {
+      id: string;
+      organizationId: string;
+      userId: string;
+      role: OrganizationMemberRole;
+      permissions: Prisma.JsonValue | null;
+      createdAt: Date;
+      updatedAt: Date;
+      user: {
+        id: string;
+        firstName: string;
+        lastName: string;
+        email: string;
+        phone: string | null;
+        lastLoginAt: Date | null;
+      };
+      eventAccesses: { eventId: string }[];
+    },
+    eventIdsResolved: string[],
+  ) {
+    return {
+      id: m.id,
+      organizationId: m.organizationId,
+      userId: m.userId,
+      role: m.role,
+      permissions: grantedPermissionKeys(
+        effectivePermissionsForMember({
+          role: m.role,
+          permissionsJson: m.permissions,
+        }),
+      ),
+      eventIds: eventIdsResolved,
+      createdAt: m.createdAt,
+      updatedAt: m.updatedAt,
+      user: m.user,
+    };
+  }
+
+  private formatMemberNameForAudit(params: {
+    firstName?: string | null;
+    lastName?: string | null;
+    userId: string;
+  }): string {
+    const fullName = `${params.firstName ?? ''} ${params.lastName ?? ''}`.trim();
+    return fullName.length > 0 ? fullName : params.userId;
+  }
 
   /**
    * Limpa o documentNumber removendo formatação
@@ -412,7 +580,12 @@ export class OrganizationsService {
    * Adiciona um membro à organização (apenas dono)
    * Se userId não for fornecido, cria um novo usuário com os dados fornecidos
    */
-  async addMember(userId: string, organizationId: string, addMemberDto: AddMemberDto) {
+  async addMember(
+    userId: string,
+    organizationId: string,
+    addMemberDto: AddMemberDto,
+    clientIp?: string | null,
+  ) {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
@@ -507,31 +680,70 @@ export class OrganizationsService {
       throw new BadRequestException('Cannot add another owner. Only one owner per organization.');
     }
 
-    // Criar membro
-    const member = await prismaWrite.organizationMember.create({
-      data: {
+    const permissionsJson = this.normalizeNewMemberPermissions(
+      addMemberDto.permissions,
+    ) as Prisma.InputJsonValue;
+
+    if (addMemberDto.eventIds?.length) {
+      await this.assertEventsBelongToOrganization(
         organizationId,
-        userId: userToAddId,
-        role: addMemberDto.role,
-      },
-      include: {
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-            phone: true,
-            mfaEnabled: true,
-          },
+        addMemberDto.eventIds,
+      );
+    }
+
+    const member = await prismaWrite.$transaction(async (tx) => {
+      const created = await tx.organizationMember.create({
+        data: {
+          organizationId,
+          userId: userToAddId,
+          role: addMemberDto.role,
+          permissions: permissionsJson,
         },
-        organization: {
-          select: {
-            id: true,
-            name: true,
+      });
+
+      if (addMemberDto.eventIds?.length) {
+        await tx.organizationMemberEventAccess.createMany({
+          data: addMemberDto.eventIds.map((eventId) => ({
+            organizationMemberId: created.id,
+            eventId,
+          })),
+        });
+      }
+
+      return tx.organizationMember.findUniqueOrThrow({
+        where: { id: created.id },
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+              mfaEnabled: true,
+            },
           },
+          organization: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+          eventAccesses: { select: { eventId: true } },
         },
-      },
+      });
+    });
+
+    await this.recordOrganizationAuditLog({
+      organizationId,
+      actorUserId: userId,
+      ip: clientIp ?? null,
+      action: `Adicionou colaborador à equipe (${this.formatMemberNameForAudit({
+        firstName: member.user.firstName,
+        lastName: member.user.lastName,
+        userId: member.userId,
+      })})`,
+      metadata: { kind: 'MEMBER_ADD', memberUserId: userToAddId },
     });
 
     return {
@@ -543,7 +755,12 @@ export class OrganizationsService {
   /**
    * Remove um membro da organização (apenas dono)
    */
-  async removeMember(userId: string, organizationId: string, memberUserId: string) {
+  async removeMember(
+    userId: string,
+    organizationId: string,
+    memberUserId: string,
+    clientIp?: string | null,
+  ) {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
@@ -566,11 +783,31 @@ export class OrganizationsService {
           userId: memberUserId,
         },
       },
+      include: {
+        user: {
+          select: {
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
     });
 
     if (!member) {
       throw new NotFoundException('Member not found');
     }
+
+    await this.recordOrganizationAuditLog({
+      organizationId,
+      actorUserId: userId,
+      ip: clientIp ?? null,
+      action: `Removeu colaborador da equipe (${this.formatMemberNameForAudit({
+        firstName: member.user.firstName,
+        lastName: member.user.lastName,
+        userId: memberUserId,
+      })})`,
+      metadata: { kind: 'MEMBER_REMOVE', memberUserId },
+    });
 
     // Remover membro
     await prismaWrite.organizationMember.delete({
@@ -595,6 +832,7 @@ export class OrganizationsService {
     organizationId: string,
     memberUserId: string,
     updateDto: UpdateMemberRoleDto,
+    clientIp?: string | null,
   ) {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
@@ -659,6 +897,22 @@ export class OrganizationsService {
       },
     });
 
+    await this.recordOrganizationAuditLog({
+      organizationId,
+      actorUserId: userId,
+      ip: clientIp ?? null,
+      action: `Alterou papel do colaborador (${this.formatMemberNameForAudit({
+        firstName: updatedMember.user.firstName,
+        lastName: updatedMember.user.lastName,
+        userId: memberUserId,
+      })}) para ${updateDto.role}`,
+      metadata: {
+        kind: 'MEMBER_ROLE',
+        memberUserId,
+        role: updateDto.role,
+      },
+    });
+
     return {
       message: 'Member role updated successfully',
       data: { member: updatedMember },
@@ -687,8 +941,10 @@ export class OrganizationsService {
             lastName: true,
             email: true,
             phone: true,
+            lastLoginAt: true,
           },
         },
+        eventAccesses: { select: { eventId: true } },
       },
       orderBy: [
         { role: 'asc' }, // OWNER primeiro
@@ -696,9 +952,490 @@ export class OrganizationsService {
       ],
     });
 
+    const mapped = await Promise.all(
+      members.map(async (m) => {
+        const eventIds = await this.resolveMemberEventIdsForApi({
+          role: m.role,
+          organizationId: m.organizationId,
+          eventAccesses: m.eventAccesses,
+        });
+        return this.mapMemberForListResponse(m, eventIds);
+      }),
+    );
+
     return {
       message: 'Members fetched successfully',
-      data: { members },
+      data: { members: mapped },
+    };
+  }
+
+  async getMemberPermissions(
+    ownerUserId: string,
+    organizationId: string,
+    memberUserId: string,
+  ) {
+    const prismaRead = this.prisma.getReadClient();
+    if (!(await this.isOwner(ownerUserId, organizationId))) {
+      throw new ForbiddenException('Only organization owner can view member permissions');
+    }
+    const row = await prismaRead.organizationMember.findUnique({
+      where: {
+        organizationId_userId: { organizationId, userId: memberUserId },
+      },
+      include: {
+        user: {
+          select: {
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+    });
+    if (!row) {
+      throw new NotFoundException('Member not found');
+    }
+    const map =
+      row.role === 'OWNER'
+        ? { ...FULL_ORGANIZER_PERMISSIONS }
+        : effectivePermissionsForMember({
+            role: row.role,
+            permissionsJson: row.permissions,
+          });
+    return {
+      message: 'Member permissions retrieved successfully',
+      data: { memberUserId, permissions: grantedPermissionKeys(map) },
+    };
+  }
+
+  async putMemberPermissions(
+    ownerUserId: string,
+    organizationId: string,
+    memberUserId: string,
+    dto: PutMemberPermissionsDto,
+    clientIp?: string | null,
+  ) {
+    const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
+    if (!(await this.isOwner(ownerUserId, organizationId))) {
+      throw new ForbiddenException('Only organization owner can update member permissions');
+    }
+    const row = await prismaRead.organizationMember.findUnique({
+      where: {
+        organizationId_userId: { organizationId, userId: memberUserId },
+      },
+      include: {
+        user: {
+          select: {
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+    });
+    if (!row) {
+      throw new NotFoundException('Member not found');
+    }
+    if (row.role === 'OWNER') {
+      return {
+        message: 'Member permissions updated successfully',
+        data: {
+          memberUserId,
+          permissions: grantedPermissionKeys({ ...FULL_ORGANIZER_PERMISSIONS }),
+        },
+      };
+    }
+    const normalized = this.normalizePutPermissions(dto.permissions);
+    await prismaWrite.organizationMember.update({
+      where: {
+        organizationId_userId: { organizationId, userId: memberUserId },
+      },
+      data: { permissions: normalized as unknown as Prisma.InputJsonValue },
+    });
+    await this.recordOrganizationAuditLog({
+      organizationId,
+      actorUserId: ownerUserId,
+      ip: clientIp ?? null,
+      action: `Atualizou permissões do colaborador (${this.formatMemberNameForAudit({
+        firstName: row.user.firstName,
+        lastName: row.user.lastName,
+        userId: memberUserId,
+      })})`,
+      metadata: {
+        kind: 'MEMBER_PERMISSIONS',
+        memberUserId,
+        permissionKeys: grantedPermissionKeys(normalized),
+      },
+    });
+    return {
+      message: 'Member permissions updated successfully',
+      data: {
+        memberUserId,
+        permissions: grantedPermissionKeys(normalized),
+      },
+    };
+  }
+
+  async getMemberEvents(
+    ownerUserId: string,
+    organizationId: string,
+    memberUserId: string,
+  ) {
+    const prismaRead = this.prisma.getReadClient();
+    if (!(await this.isOwner(ownerUserId, organizationId))) {
+      throw new ForbiddenException('Only organization owner can view member event access');
+    }
+    const row = await prismaRead.organizationMember.findUnique({
+      where: {
+        organizationId_userId: { organizationId, userId: memberUserId },
+      },
+      include: { eventAccesses: { select: { eventId: true } } },
+    });
+    if (!row) {
+      throw new NotFoundException('Member not found');
+    }
+    const eventIds = await this.resolveMemberEventIdsForApi({
+      role: row.role,
+      organizationId,
+      eventAccesses: row.eventAccesses,
+    });
+    return {
+      message: 'Member event access retrieved successfully',
+      data: { memberUserId, eventIds },
+    };
+  }
+
+  async putMemberEvents(
+    ownerUserId: string,
+    organizationId: string,
+    memberUserId: string,
+    dto: PutMemberEventsDto,
+    clientIp?: string | null,
+  ) {
+    const prismaRead = this.prisma.getReadClient();
+    if (!(await this.isOwner(ownerUserId, organizationId))) {
+      throw new ForbiddenException('Only organization owner can update member event access');
+    }
+    const row = await prismaRead.organizationMember.findUnique({
+      where: {
+        organizationId_userId: { organizationId, userId: memberUserId },
+      },
+      include: {
+        user: {
+          select: {
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+    });
+    if (!row) {
+      throw new NotFoundException('Member not found');
+    }
+    if (row.role === 'OWNER') {
+      const eventIds = await this.resolveMemberEventIdsForApi({
+        role: row.role,
+        organizationId,
+        eventAccesses: [],
+      });
+      return {
+        message: 'Member event access updated successfully',
+        data: { memberUserId, eventIds },
+      };
+    }
+    await this.replaceMemberEventAccess(row.id, organizationId, dto.eventIds);
+    await this.recordOrganizationAuditLog({
+      organizationId,
+      actorUserId: ownerUserId,
+      ip: clientIp ?? null,
+      action: `Atualizou eventos do colaborador (${this.formatMemberNameForAudit({
+        firstName: row.user.firstName,
+        lastName: row.user.lastName,
+        userId: memberUserId,
+      })})`,
+      metadata: { kind: 'MEMBER_EVENTS', memberUserId, eventIds: dto.eventIds },
+    });
+    return {
+      message: 'Member event access updated successfully',
+      data: { memberUserId, eventIds: dto.eventIds },
+    };
+  }
+
+  async getMemberDetail(
+    ownerUserId: string,
+    organizationId: string,
+    memberUserId: string,
+  ) {
+    const prismaRead = this.prisma.getReadClient();
+    if (!(await this.isOwner(ownerUserId, organizationId))) {
+      throw new ForbiddenException('Only organization owner can view member details');
+    }
+    const row = await prismaRead.organizationMember.findUnique({
+      where: {
+        organizationId_userId: { organizationId, userId: memberUserId },
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            lastLoginAt: true,
+            mfaEnabled: true,
+          },
+        },
+        eventAccesses: { select: { eventId: true } },
+      },
+    });
+    if (!row) {
+      throw new NotFoundException('Member not found');
+    }
+    const permMap =
+      row.role === 'OWNER'
+        ? { ...FULL_ORGANIZER_PERMISSIONS }
+        : effectivePermissionsForMember({
+            role: row.role,
+            permissionsJson: row.permissions,
+          });
+    const eventIds = await this.resolveMemberEventIdsForApi({
+      role: row.role,
+      organizationId,
+      eventAccesses: row.eventAccesses,
+    });
+    const { eventAccesses: _ea, permissions: _perm, ...memberRest } = row;
+    return {
+      message: 'Member detail retrieved successfully',
+      data: {
+        member: memberRest,
+        permissions: grantedPermissionKeys(permMap),
+        eventIds,
+        lastLoginAt: row.user.lastLoginAt ?? null,
+      },
+    };
+  }
+
+  async patchMemberSettings(
+    ownerUserId: string,
+    organizationId: string,
+    memberUserId: string,
+    dto: PatchMemberSettingsDto,
+    clientIp?: string | null,
+  ) {
+    if (
+      dto.role === undefined &&
+      dto.permissions === undefined &&
+      dto.eventIds === undefined
+    ) {
+      throw new BadRequestException('At least one of role, permissions, eventIds is required');
+    }
+    const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
+    if (!(await this.isOwner(ownerUserId, organizationId))) {
+      throw new ForbiddenException('Only organization owner can update member settings');
+    }
+    const row = await prismaRead.organizationMember.findUnique({
+      where: {
+        organizationId_userId: { organizationId, userId: memberUserId },
+      },
+      include: {
+        user: {
+          select: {
+            firstName: true,
+            lastName: true,
+          },
+        },
+        eventAccesses: { select: { eventId: true } },
+      },
+    });
+    if (!row) {
+      throw new NotFoundException('Member not found');
+    }
+
+    const resultingRole =
+      dto.role !== undefined ? dto.role : row.role;
+
+    if (dto.role !== undefined) {
+      if (ownerUserId === memberUserId && dto.role !== 'OWNER') {
+        throw new BadRequestException('Cannot change your own role from OWNER');
+      }
+      if (dto.role === 'OWNER' && ownerUserId !== memberUserId) {
+        throw new BadRequestException(
+          'Cannot assign OWNER role. Only one owner per organization.',
+        );
+      }
+    }
+
+    await prismaWrite.$transaction(async (tx) => {
+      if (dto.role !== undefined) {
+        await tx.organizationMember.update({
+          where: {
+            organizationId_userId: { organizationId, userId: memberUserId },
+          },
+          data: { role: dto.role },
+        });
+      }
+      if (dto.permissions !== undefined && resultingRole !== 'OWNER') {
+        const normalized = this.normalizePutPermissions(dto.permissions);
+        await tx.organizationMember.update({
+          where: {
+            organizationId_userId: { organizationId, userId: memberUserId },
+          },
+          data: { permissions: normalized as unknown as Prisma.InputJsonValue },
+        });
+      }
+      if (dto.eventIds !== undefined && resultingRole !== 'OWNER') {
+        await this.assertEventsBelongToOrganization(organizationId, dto.eventIds);
+        await tx.organizationMemberEventAccess.deleteMany({
+          where: { organizationMemberId: row.id },
+        });
+        if (dto.eventIds.length > 0) {
+          await tx.organizationMemberEventAccess.createMany({
+            data: dto.eventIds.map((eventId) => ({
+              organizationMemberId: row.id,
+              eventId,
+            })),
+          });
+        }
+      }
+    });
+
+    await this.recordOrganizationAuditLog({
+      organizationId,
+      actorUserId: ownerUserId,
+      ip: clientIp ?? null,
+      action: `Atualizou configurações do colaborador (${this.formatMemberNameForAudit({
+        firstName: row.user.firstName,
+        lastName: row.user.lastName,
+        userId: memberUserId,
+      })})`,
+      metadata: {
+        kind: 'MEMBER_SETTINGS',
+        memberUserId,
+        role: dto.role,
+        hasPermissions: dto.permissions !== undefined,
+        hasEventIds: dto.eventIds !== undefined,
+      },
+    });
+
+    const fresh = await prismaRead.organizationMember.findUnique({
+      where: {
+        organizationId_userId: { organizationId, userId: memberUserId },
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            lastLoginAt: true,
+            mfaEnabled: true,
+          },
+        },
+        eventAccesses: { select: { eventId: true } },
+      },
+    });
+    if (!fresh) {
+      throw new NotFoundException('Member not found');
+    }
+    const permMap =
+      fresh.role === 'OWNER'
+        ? { ...FULL_ORGANIZER_PERMISSIONS }
+        : effectivePermissionsForMember({
+            role: fresh.role,
+            permissionsJson: fresh.permissions,
+          });
+    const eventIds = await this.resolveMemberEventIdsForApi({
+      role: fresh.role,
+      organizationId,
+      eventAccesses: fresh.eventAccesses,
+    });
+    const { eventAccesses: _e, permissions: _p, ...memberRest } = fresh;
+
+    return {
+      message: 'Member settings updated successfully',
+      data: {
+        member: memberRest,
+        permissions: grantedPermissionKeys(permMap),
+        eventIds,
+        lastLoginAt: fresh.user.lastLoginAt ?? null,
+      },
+    };
+  }
+
+  async listOrganizationAuditLogs(
+    requesterUserId: string,
+    organizationId: string,
+    query: OrganizationAuditLogQueryDto,
+  ) {
+    if (!(await this.isOwner(requesterUserId, organizationId))) {
+      throw new ForbiddenException('Only organization owner can view audit logs');
+    }
+    const prismaRead = this.prisma.getReadClient();
+    const page = query.page ?? 1;
+    const limit = Math.min(query.limit ?? 20, 100);
+    const where: Prisma.OrganizationAuditLogWhereInput = {
+      organizationId,
+    };
+    if (query.q?.trim()) {
+      where.action = {
+        contains: query.q.trim(),
+        mode: 'insensitive',
+      };
+    }
+    if (query.from || query.to) {
+      where.occurredAt = {};
+      if (query.from) {
+        (where.occurredAt as Prisma.DateTimeFilter).gte = new Date(query.from);
+      }
+      if (query.to) {
+        const t = new Date(query.to);
+        t.setUTCHours(23, 59, 59, 999);
+        (where.occurredAt as Prisma.DateTimeFilter).lte = t;
+      }
+    }
+    const [items, total] = await Promise.all([
+      prismaRead.organizationAuditLog.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { occurredAt: 'desc' },
+        include: {
+          actor: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+            },
+          },
+        },
+      }),
+      prismaRead.organizationAuditLog.count({ where }),
+    ]);
+    return {
+      message: 'Audit logs fetched successfully',
+      data: {
+        items: items.map((row) => ({
+          id: row.id,
+          ip: row.ip,
+          userId: row.actorUserId,
+          userName: row.actor
+            ? `${row.actor.firstName} ${row.actor.lastName}`.trim()
+            : null,
+          action: row.action,
+          occurredAt: row.occurredAt,
+          metadata: row.metadata,
+        })),
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit) || 0,
+        },
+      },
     };
   }
 
@@ -814,31 +1551,64 @@ export class OrganizationsService {
       }
     }
 
-    // Criar membro
-    const member = await prismaWrite.organizationMember.create({
-      data: {
+    const permissionsForMember =
+      addMemberDto.role === 'OWNER'
+        ? Prisma.JsonNull
+        : (this.normalizeNewMemberPermissions(
+            addMemberDto.permissions,
+          ) as Prisma.InputJsonValue);
+
+    if (addMemberDto.eventIds?.length) {
+      await this.assertEventsBelongToOrganization(
         organizationId,
-        userId: userToAddId,
-        role: addMemberDto.role,
-      },
-      include: {
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-            phone: true,
-            mfaEnabled: true,
-          },
+        addMemberDto.eventIds,
+      );
+    }
+
+    const member = await prismaWrite.$transaction(async (tx) => {
+      const created = await tx.organizationMember.create({
+        data: {
+          organizationId,
+          userId: userToAddId,
+          role: addMemberDto.role,
+          permissions: permissionsForMember,
         },
-        organization: {
-          select: {
-            id: true,
-            name: true,
+      });
+
+      if (
+        addMemberDto.eventIds?.length &&
+        addMemberDto.role !== 'OWNER'
+      ) {
+        await tx.organizationMemberEventAccess.createMany({
+          data: addMemberDto.eventIds.map((eventId) => ({
+            organizationMemberId: created.id,
+            eventId,
+          })),
+        });
+      }
+
+      return tx.organizationMember.findUniqueOrThrow({
+        where: { id: created.id },
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+              mfaEnabled: true,
+            },
           },
+          organization: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+          eventAccesses: { select: { eventId: true } },
         },
-      },
+      });
     });
 
     // Se for OWNER, atualizar role e accountType do usuário (accountType é usado no login/organizer)
