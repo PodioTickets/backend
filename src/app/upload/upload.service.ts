@@ -46,13 +46,9 @@ export class UploadService {
       );
 
       const compressedBuffer = await sharp(file.buffer)
-        .webp({ quality: 80, effort: 6, lossless: false })
-        .resize({
-          width: 500,
-          height: 500,
-          fit: 'inside',
-          withoutEnlargement: true,
-        })
+        // Em vez de reduzir qualidade com re-encode + resize,
+        // salva em WebP com perda zero (lossless) para preservar a imagem.
+        .webp({ quality: 100, effort: 6, lossless: true })
         .toBuffer();
 
       const filename = `${Date.now()}-${Math.round(Math.random() * 1e9)}.webp`;

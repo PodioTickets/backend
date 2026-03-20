@@ -115,16 +115,11 @@ describe('UploadService', () => {
       expect(fs.writeFile).toHaveBeenCalled();
     });
 
-    it('should resize image to max 500x500', async () => {
+    it('should not resize image', async () => {
       await service.compressImage(mockFile);
 
       const mockSharpInstance = (sharp as any).mock.results[0].value;
-      expect(mockSharpInstance.resize).toHaveBeenCalledWith({
-        width: 500,
-        height: 500,
-        fit: 'inside',
-        withoutEnlargement: true,
-      });
+      expect(mockSharpInstance.resize).not.toHaveBeenCalled();
     });
 
     it('should convert image to WebP format', async () => {
@@ -132,9 +127,9 @@ describe('UploadService', () => {
 
       const mockSharpInstance = (sharp as any).mock.results[0].value;
       expect(mockSharpInstance.webp).toHaveBeenCalledWith({
-        quality: 80,
+        quality: 100,
         effort: 6,
-        lossless: false,
+        lossless: true,
       });
     });
   });
