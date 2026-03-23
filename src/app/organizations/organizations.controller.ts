@@ -32,6 +32,7 @@ import {
   PutMemberEventsDto,
   PatchMemberSettingsDto,
   OrganizationAuditLogQueryDto,
+  RecordOrganizerPageViewDto,
 } from './dto/organization.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { BypassKeyGuard } from '../../common/guards/bypass-key.guard';
@@ -235,6 +236,29 @@ export class OrganizationsController {
       req.user.id,
       member.organizationId,
       query,
+    );
+  }
+
+  @Post('me/audit/page-view')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Record organizer panel page view',
+    description:
+      'Registers navigation to a panel route (e.g. `dashboard`). Repeated views of the same page within ~30 minutes are deduplicated (only the first is logged). Any organization member may call.',
+  })
+  @ApiBody({ type: RecordOrganizerPageViewDto })
+  @ApiResponse({ status: 200, description: 'Recorded or deduplicated' })
+  @ApiResponse({ status: 400, description: 'Invalid body' })
+  @ApiResponse({ status: 403, description: 'Not an organization member' })
+  async recordOrganizerPageView(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Body() body: RecordOrganizerPageViewDto,
+  ) {
+    return this.organizationsService.recordOrganizerPageView(
+      req.user.id,
+      body.pageKey,
+      clientIp(req),
     );
   }
 

@@ -71,7 +71,13 @@ export class OrganizersController {
   @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20, max: 100)' })
   @ApiQuery({ name: 'status', required: false, enum: EventStatus, description: 'Filter by event status' })
-  @ApiQuery({ name: 'includePast', required: false, type: Boolean, description: 'Include past events (default: false)' })
+  @ApiQuery({
+    name: 'includePast',
+    required: false,
+    type: Boolean,
+    description:
+      'Include past events (default: true — returns all organizer events). Pass false to only return events with eventDate >= now.',
+  })
   @ApiQuery({ name: 'startDate', required: false, type: String, description: 'Filter events from date (ISO string)' })
   @ApiQuery({ name: 'endDate', required: false, type: String, description: 'Filter events to date (ISO string)' })
   @ApiQuery({ name: 'name', required: false, type: String, description: 'Search events by name' })
@@ -95,7 +101,7 @@ export class OrganizersController {
       page: pageNum,
       limit: limitNum,
       status,
-      includePast: includePast === 'true',
+      includePast: includePast !== 'false',
       startDate,
       endDate,
       name,

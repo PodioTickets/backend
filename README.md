@@ -10,7 +10,7 @@ API backend para o sistema de gestão de eventos e vendas de ingressos PodioTick
 
 ### Membros da organização (owner)
 
-[Documentação: adicionar, listar, papel e remoção de membros](./docs/ORGANIZATION_MEMBERS_API.md) · [Referência HTTP: payloads e `data`](./docs/ORGANIZATIONS_HTTP_REFERENCE.md) · [Notificações do evento (API) — Central de Comunicação](./EVENT_NOTIFICATIONS_API.md)
+[Documentação: adicionar, listar, papel e remoção de membros](./docs/ORGANIZATION_MEMBERS_API.md) · [Referência HTTP: payloads e `data`](./docs/ORGANIZATIONS_HTTP_REFERENCE.md) · [Audit do organizador — integração frontend](./docs/ORGANIZER_AUDIT_FRONTEND.md) · [Notificações do evento (API) — Central de Comunicação](./EVENT_NOTIFICATIONS_API.md)
 
 ### API de Pagamento
 

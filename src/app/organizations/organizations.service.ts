@@ -91,6 +91,87 @@ export class OrganizationsService {
     });
   }
 
+  /** Janela em que F5 na mesma página não gera novo log (por org + usuário + pageKey). */
+  private static readonly ORGANIZER_PAGE_VIEW_DEDUPE_MS = 30 * 60 * 1000;
+
+  /**
+   * Registra acesso a uma rota do painel (com deduplicação).
+   * Qualquer membro da organização pode enviar; apenas quem pertence a uma org grava log.
+   */
+  async recordOrganizerPageView(
+    userId: string,
+    pageKey: string,
+    clientIp?: string | null,
+  ) {
+    const trimmed = pageKey?.trim();
+    if (!trimmed) {
+      throw new BadRequestException('pageKey is required');
+    }
+    const prismaRead = this.prisma.getReadClient();
+    const prismaWrite = this.prisma.getWriteClient();
+    const member = await prismaRead.organizationMember.findFirst({
+      where: { userId },
+      select: { organizationId: true },
+    });
+    if (!member) {
+      throw new ForbiddenException('Not an organization member');
+    }
+    const now = new Date();
+    const existing = await prismaRead.organizerAuditPageDedupe.findUnique({
+      where: {
+        organizationId_actorUserId_pageKey: {
+          organizationId: member.organizationId,
+          actorUserId: userId,
+          pageKey: trimmed,
+        },
+      },
+    });
+    if (
+      existing &&
+      now.getTime() - existing.lastRecordedAt.getTime() <
+        OrganizationsService.ORGANIZER_PAGE_VIEW_DEDUPE_MS
+    ) {
+      return {
+        message: 'Page view omitted (deduplicated)',
+        data: { recorded: false, pageKey: trimmed },
+      };
+    }
+    await prismaWrite.$transaction(async (tx) => {
+      await tx.organizationAuditLog.create({
+        data: {
+          organizationId: member.organizationId,
+          actorUserId: userId,
+          ip: clientIp ?? null,
+          action: `Acessou a página "${trimmed}"`,
+          metadata: {
+            kind: 'PAGE_VIEW',
+            page: trimmed,
+          },
+        },
+      });
+      await tx.organizerAuditPageDedupe.upsert({
+        where: {
+          organizationId_actorUserId_pageKey: {
+            organizationId: member.organizationId,
+            actorUserId: userId,
+            pageKey: trimmed,
+          },
+        },
+        create: {
+          organizationId: member.organizationId,
+          actorUserId: userId,
+          pageKey: trimmed,
+          lastRecordedAt: now,
+        },
+        update: { lastRecordedAt: now },
+      });
+    });
+    return {
+      message: 'Page view recorded',
+      data: { recorded: true, pageKey: trimmed },
+    };
+  }
+
   private async replaceMemberEventAccess(
     organizationMemberId: string,
     organizationId: string,
@@ -867,6 +948,38 @@ export class OrganizationsService {
       throw new NotFoundException('Member not found');
     }
 
+    if (member.role === updateDto.role) {
+      const updatedMember = await prismaRead.organizationMember.findUniqueOrThrow({
+        where: {
+          organizationId_userId: {
+            organizationId,
+            userId: memberUserId,
+          },
+        },
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+            },
+          },
+          organization: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+        },
+      });
+      return {
+        message: 'Member role updated successfully',
+        data: { member: updatedMember },
+      };
+    }
+
     // Atualizar role
     const updatedMember = await prismaWrite.organizationMember.update({
       where: {
@@ -908,8 +1021,12 @@ export class OrganizationsService {
       })}) para ${updateDto.role}`,
       metadata: {
         kind: 'MEMBER_ROLE',
+        page: updateDto.clientPage ?? 'member-role',
         memberUserId,
-        role: updateDto.role,
+        fieldsEdited: ['role'],
+        changes: [
+          { field: 'role', old: member.role, new: updateDto.role },
+        ],
       },
     });
 
@@ -1044,7 +1161,22 @@ export class OrganizationsService {
         },
       };
     }
+    const beforeMap = effectivePermissionsForMember({
+      role: row.role,
+      permissionsJson: row.permissions,
+    });
+    const beforeKeys = grantedPermissionKeys(beforeMap).slice().sort();
     const normalized = this.normalizePutPermissions(dto.permissions);
+    const afterKeys = grantedPermissionKeys(normalized).slice().sort();
+    if (JSON.stringify(beforeKeys) === JSON.stringify(afterKeys)) {
+      return {
+        message: 'Member permissions updated successfully',
+        data: {
+          memberUserId,
+          permissions: afterKeys,
+        },
+      };
+    }
     await prismaWrite.organizationMember.update({
       where: {
         organizationId_userId: { organizationId, userId: memberUserId },
@@ -1062,8 +1194,13 @@ export class OrganizationsService {
       })})`,
       metadata: {
         kind: 'MEMBER_PERMISSIONS',
+        page: dto.clientPage ?? 'member-permissions',
         memberUserId,
-        permissionKeys: grantedPermissionKeys(normalized),
+        fieldsEdited: ['permissions'],
+        changes: [
+          { field: 'permissions', old: beforeKeys, new: afterKeys },
+        ],
+        permissionKeys: afterKeys,
       },
     });
     return {
@@ -1126,6 +1263,7 @@ export class OrganizationsService {
             lastName: true,
           },
         },
+        eventAccesses: { select: { eventId: true } },
       },
     });
     if (!row) {
@@ -1142,6 +1280,22 @@ export class OrganizationsService {
         data: { memberUserId, eventIds },
       };
     }
+    const beforeEventIds = (
+      await this.resolveMemberEventIdsForApi({
+        role: row.role,
+        organizationId,
+        eventAccesses: row.eventAccesses,
+      })
+    )
+      .slice()
+      .sort();
+    const afterEventIds = dto.eventIds.slice().sort();
+    if (JSON.stringify(beforeEventIds) === JSON.stringify(afterEventIds)) {
+      return {
+        message: 'Member event access updated successfully',
+        data: { memberUserId, eventIds: afterEventIds },
+      };
+    }
     await this.replaceMemberEventAccess(row.id, organizationId, dto.eventIds);
     await this.recordOrganizationAuditLog({
       organizationId,
@@ -1152,7 +1306,16 @@ export class OrganizationsService {
         lastName: row.user.lastName,
         userId: memberUserId,
       })})`,
-      metadata: { kind: 'MEMBER_EVENTS', memberUserId, eventIds: dto.eventIds },
+      metadata: {
+        kind: 'MEMBER_EVENTS',
+        page: dto.clientPage ?? 'member-events',
+        memberUserId,
+        fieldsEdited: ['eventIds'],
+        changes: [
+          { field: 'eventIds', old: beforeEventIds, new: afterEventIds },
+        ],
+        eventIds: afterEventIds,
+      },
     });
     return {
       message: 'Member event access updated successfully',
@@ -1254,6 +1417,10 @@ export class OrganizationsService {
 
     const resultingRole =
       dto.role !== undefined ? dto.role : row.role;
+    const appliedPermissionsUpdate =
+      dto.permissions !== undefined && resultingRole !== 'OWNER';
+    const appliedEventIdsUpdate =
+      dto.eventIds !== undefined && resultingRole !== 'OWNER';
 
     if (dto.role !== undefined) {
       if (ownerUserId === memberUserId && dto.role !== 'OWNER') {
@@ -1275,8 +1442,8 @@ export class OrganizationsService {
           data: { role: dto.role },
         });
       }
-      if (dto.permissions !== undefined && resultingRole !== 'OWNER') {
-        const normalized = this.normalizePutPermissions(dto.permissions);
+      if (appliedPermissionsUpdate) {
+        const normalized = this.normalizePutPermissions(dto.permissions!);
         await tx.organizationMember.update({
           where: {
             organizationId_userId: { organizationId, userId: memberUserId },
@@ -1284,38 +1451,20 @@ export class OrganizationsService {
           data: { permissions: normalized as unknown as Prisma.InputJsonValue },
         });
       }
-      if (dto.eventIds !== undefined && resultingRole !== 'OWNER') {
+      if (appliedEventIdsUpdate) {
         await this.assertEventsBelongToOrganization(organizationId, dto.eventIds);
         await tx.organizationMemberEventAccess.deleteMany({
           where: { organizationMemberId: row.id },
         });
-        if (dto.eventIds.length > 0) {
+        if (dto.eventIds!.length > 0) {
           await tx.organizationMemberEventAccess.createMany({
-            data: dto.eventIds.map((eventId) => ({
+            data: dto.eventIds!.map((eventId) => ({
               organizationMemberId: row.id,
               eventId,
             })),
           });
         }
       }
-    });
-
-    await this.recordOrganizationAuditLog({
-      organizationId,
-      actorUserId: ownerUserId,
-      ip: clientIp ?? null,
-      action: `Atualizou configurações do colaborador (${this.formatMemberNameForAudit({
-        firstName: row.user.firstName,
-        lastName: row.user.lastName,
-        userId: memberUserId,
-      })})`,
-      metadata: {
-        kind: 'MEMBER_SETTINGS',
-        memberUserId,
-        role: dto.role,
-        hasPermissions: dto.permissions !== undefined,
-        hasEventIds: dto.eventIds !== undefined,
-      },
     });
 
     const fresh = await prismaRead.organizationMember.findUnique({
@@ -1340,6 +1489,77 @@ export class OrganizationsService {
     if (!fresh) {
       throw new NotFoundException('Member not found');
     }
+
+    const auditChanges: Array<{ field: string; old: unknown; new: unknown }> = [];
+    if (dto.role !== undefined && fresh.role !== row.role) {
+      auditChanges.push({ field: 'role', old: row.role, new: fresh.role });
+    }
+    if (appliedPermissionsUpdate && fresh.role !== 'OWNER') {
+      const oldMap = effectivePermissionsForMember({
+        role: row.role,
+        permissionsJson: row.permissions,
+      });
+      const newMap = effectivePermissionsForMember({
+        role: fresh.role,
+        permissionsJson: fresh.permissions,
+      });
+      const oldK = grantedPermissionKeys(oldMap).slice().sort();
+      const newK = grantedPermissionKeys(newMap).slice().sort();
+      if (JSON.stringify(oldK) !== JSON.stringify(newK)) {
+        auditChanges.push({
+          field: 'permissions',
+          old: oldK,
+          new: newK,
+        });
+      }
+    }
+    if (appliedEventIdsUpdate && fresh.role !== 'OWNER') {
+      const oldIds = (
+        await this.resolveMemberEventIdsForApi({
+          role: row.role,
+          organizationId,
+          eventAccesses: row.eventAccesses,
+        })
+      )
+        .slice()
+        .sort();
+      const newIds = (
+        await this.resolveMemberEventIdsForApi({
+          role: fresh.role,
+          organizationId,
+          eventAccesses: fresh.eventAccesses,
+        })
+      )
+        .slice()
+        .sort();
+      if (JSON.stringify(oldIds) !== JSON.stringify(newIds)) {
+        auditChanges.push({
+          field: 'eventIds',
+          old: oldIds,
+          new: newIds,
+        });
+      }
+    }
+    if (auditChanges.length > 0) {
+      await this.recordOrganizationAuditLog({
+        organizationId,
+        actorUserId: ownerUserId,
+        ip: clientIp ?? null,
+        action: `Atualizou configurações do colaborador (${this.formatMemberNameForAudit({
+          firstName: row.user.firstName,
+          lastName: row.user.lastName,
+          userId: memberUserId,
+        })})`,
+        metadata: {
+          kind: 'MEMBER_SETTINGS',
+          page: dto.clientPage ?? 'member-settings',
+          memberUserId,
+          fieldsEdited: auditChanges.map((c) => c.field),
+          changes: auditChanges,
+        } as Prisma.InputJsonValue,
+      });
+    }
+
     const permMap =
       fresh.role === 'OWNER'
         ? { ...FULL_ORGANIZER_PERMISSIONS }

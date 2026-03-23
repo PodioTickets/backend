@@ -11,6 +11,7 @@ import {
   Request,
   BadRequestException,
 } from '@nestjs/common';
+import type { Request as ExpressRequest } from 'express';
 import {
   ApiTags,
   ApiOperation,
@@ -31,6 +32,17 @@ import { RegistrationsQueryDto } from './dto/registrations.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 
+function clientIp(req: ExpressRequest): string {
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.length > 0) {
+    return xff.split(',')[0].trim();
+  }
+  if (Array.isArray(xff) && xff[0]) {
+    return String(xff[0]).split(',')[0].trim();
+  }
+  return (req as ExpressRequest & { ip?: string }).ip || '';
+}
+
 @ApiTags('Events')
 @Controller('api/v1/events')
 export class EventsController {
@@ -44,8 +56,15 @@ export class EventsController {
   @ApiResponse({ status: 201, description: 'Event created successfully' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 403, description: 'Forbidden - User must be an organizer' })
-  create(@Request() req, @Body() createEventDto: CreateEventDto) {
-    return this.eventsService.create(req.user.id, createEventDto);
+  create(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Body() createEventDto: CreateEventDto,
+  ) {
+    return this.eventsService.create(
+      req.user.id,
+      createEventDto,
+      clientIp(req),
+    );
   }
 
   @Get('search')
@@ -70,8 +89,17 @@ export class EventsController {
 
   @Get()
   @NoCache()
-  @ApiOperation({ summary: 'Get all events', description: 'Retrieves a list of events with optional filters' })
-  @ApiQuery({ name: 'status', required: false, description: 'Filter by event status' })
+  @ApiOperation({
+    summary: 'Get all events',
+    description:
+      'Public listing with optional filters. Suspended events are never returned. Default status when omitted is PUBLISHED only.',
+  })
+  @ApiQuery({
+    name: 'status',
+    required: false,
+    description:
+      'Filter by event status. SUSPENDED is ignored (always excluded). Default when omitted: PUBLISHED.',
+  })
   @ApiQuery({ name: 'country', required: false, description: 'Filter by country' })
   @ApiQuery({ name: 'state', required: false, description: 'Filter by state' })
   @ApiQuery({ name: 'city', required: false, description: 'Filter by city' })
@@ -122,8 +150,17 @@ export class EventsController {
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can update' })
   @ApiResponse({ status: 404, description: 'Event not found' })
-  update(@Request() req, @Param('id') id: string, @Body() updateEventDto: UpdateEventDto) {
-    return this.eventsService.update(req.user.id, id, updateEventDto);
+  update(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('id') id: string,
+    @Body() updateEventDto: UpdateEventDto,
+  ) {
+    return this.eventsService.update(
+      req.user.id,
+      id,
+      updateEventDto,
+      clientIp(req),
+    );
   }
 
   @Delete(':id')

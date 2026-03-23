@@ -154,6 +154,7 @@ model User {
   linkedUsersAsLinked  LinkedUser[]         @relation("LinkedUser")
   organizationMembers  OrganizationMember[]
   organizationAuditLogs OrganizationAuditLog[]
+  organizerAuditPageDedupes OrganizerAuditPageDedupe[]
   orders               Order[]
   eventNotificationsCreated EventNotification[] @relation("EventNotificationCreator")
 
@@ -206,6 +207,7 @@ model Organization {
   events          Event[]
   contactMessages ContactMessage[]
   auditLogs       OrganizationAuditLog[]
+  auditPageDedupes OrganizerAuditPageDedupe[]
 
   @@index([name])
   @@index([document])
@@ -261,6 +263,21 @@ model OrganizationAuditLog {
 
   @@index([organizationId, occurredAt])
   @@index([organizationId, action])
+}
+
+/// Último registro de page-view por (org, usuário, chave de página) para deduplicar acessos (ex.: F5).
+model OrganizerAuditPageDedupe {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @db.Uuid
+  actorUserId    String   @db.Uuid
+  pageKey        String
+  lastRecordedAt DateTime
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [actorUserId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, actorUserId, pageKey])
+  @@index([organizationId, lastRecordedAt])
 }
 
 model Event {

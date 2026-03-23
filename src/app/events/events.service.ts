@@ -21,8 +21,18 @@ import {
 import { DashboardQueryDto, DashboardPeriod } from './dto/dashboard.dto';
 import { FinancialQueryDto, FinancialPeriod } from './dto/financial.dto';
 import { RegistrationsQueryDto } from './dto/registrations.dto';
-import { EventStatus, RegistrationStatus, PaymentStatus, PaymentMethod } from '@prisma/client';
+import {
+  EventStatus,
+  RegistrationStatus,
+  PaymentStatus,
+  PaymentMethod,
+  Prisma,
+} from '@prisma/client';
 import { generateSlug, generateUniqueSlug } from '../../helpers/SlugHelper';
+import {
+  diffEventUpdateForAudit,
+  summarizeEventFieldChanges,
+} from './event-audit.helpers';
 
 @Injectable()
 export class EventsService {
@@ -122,7 +132,11 @@ export class EventsService {
     );
   }
 
-  async create(userId: string, createEventDto: CreateEventDto) {
+  async create(
+    userId: string,
+    createEventDto: CreateEventDto,
+    clientIp?: string | null,
+  ) {
     // Verificar se o usuário é membro de uma organização - usar write client
     const prismaWrite = this.prisma.getWriteClient();
 
@@ -221,6 +235,17 @@ export class EventsService {
             },
           },
         },
+      },
+    });
+
+    await this.organizationsService.recordOrganizationAuditLog({
+      organizationId: member.organizationId,
+      actorUserId: userId,
+      ip: clientIp ?? null,
+      action: `Criou o evento "${updatedEvent.name}"`,
+      metadata: {
+        kind: 'EVENT_CREATE',
+        eventId: updatedEvent.id,
       },
     });
 
@@ -391,12 +416,10 @@ export class EventsService {
 
     const where: any = {};
 
-    // Sem status na query: retornar PUBLISHED e SUSPENDED (suspensos aparecem igual na listagem).
-    // Com status na query: filtrar pelo valor informado.
+    // Catálogo público: nunca listar SUSPENDED (nem por padrão nem via includeDraft).
+    // Sem status na query: apenas PUBLISHED. Com status na query: filtra pelo valor (exceto que SUSPENDED continua excluído pelo AND global abaixo).
     const statusFilter =
-      status != null
-        ? status
-        : { in: [EventStatus.PUBLISHED, EventStatus.SUSPENDED] };
+      status != null ? status : EventStatus.PUBLISHED;
 
     if (includeDraft && userId) {
       const prismaRead = this.prisma.getReadClient();
@@ -410,7 +433,6 @@ export class EventsService {
       if (member) {
         where.OR = [
           { status: EventStatus.PUBLISHED },
-          { status: EventStatus.SUSPENDED },
           { organizationId: member.organizationId },
         ];
       } else {
@@ -511,12 +533,16 @@ export class EventsService {
       }
     }
 
+    const whereFinal: Prisma.EventWhereInput = {
+      AND: [{ status: { not: EventStatus.SUSPENDED } }, where],
+    };
+
     // Usar read client para operações de leitura
     const prismaRead = this.prisma.getReadClient();
 
     const [events, total] = await Promise.all([
       prismaRead.event.findMany({
-        where,
+        where: whereFinal,
         skip: (page - 1) * limit,
         take: limit,
         include: {
@@ -532,7 +558,7 @@ export class EventsService {
           eventDate: 'asc',
         },
       }),
-      prismaRead.event.count({ where }),
+      prismaRead.event.count({ where: whereFinal }),
     ]);
 
     const eventsCompleted = this.withPastEventsAsCompleted(events);
@@ -591,7 +617,8 @@ export class EventsService {
       page = 1,
       limit = 20,
       status,
-      includePast = false,
+      /** Por padrão lista toda a linha do tempo (passados e futuros), com paginação. */
+      includePast = true,
       startDate,
       endDate,
       name,
@@ -1157,7 +1184,12 @@ export class EventsService {
     );
   }
 
-  async update(userId: string, id: string, updateEventDto: UpdateEventDto) {
+  async update(
+    userId: string,
+    id: string,
+    updateEventDto: UpdateEventDto,
+    clientIp?: string | null,
+  ) {
     this.validateUUID(id, 'event ID');
     const prismaWrite = this.prisma.getWriteClient();
 
@@ -1175,7 +1207,15 @@ export class EventsService {
       'edit_event',
     );
 
-    const updateData: any = { ...updateEventDto };
+    const { clientPage, ...patchFields } = updateEventDto;
+    const updateData: Record<string, unknown> = { ...patchFields };
+    for (const k of Object.keys(updateData)) {
+      if (updateData[k] === undefined) {
+        delete updateData[k];
+      }
+    }
+
+    const auditChanges = diffEventUpdateForAudit(event, updateEventDto);
 
     // Gerar slug se o nome ou slug foi alterado
     if (updateEventDto.name || updateEventDto.slug) {
@@ -1202,9 +1242,14 @@ export class EventsService {
         updateEventDto.registrationEndDate,
       );
     }
+
+    if (Object.keys(updateData).length === 0) {
+      throw new BadRequestException('No fields to update');
+    }
+
     const updatedEvent = await prismaWrite.event.update({
       where: { id },
-      data: updateData,
+      data: updateData as Prisma.EventUpdateInput,
       include: {
         organization: {
           include: {
@@ -1227,17 +1272,24 @@ export class EventsService {
       },
     });
 
-    await this.organizationsService.recordOrganizationAuditLog({
-      organizationId: event.organizationId,
-      actorUserId: userId,
-      ip: null,
-      action: `Editou evento "${updatedEvent.name}"`,
-      metadata: {
-        kind: 'EVENT_UPDATE',
-        eventId: id,
-        fields: Object.keys(updateEventDto),
-      },
-    });
+    if (auditChanges.length > 0) {
+      const summary = summarizeEventFieldChanges(auditChanges);
+      await this.organizationsService.recordOrganizationAuditLog({
+        organizationId: event.organizationId,
+        actorUserId: userId,
+        ip: clientIp ?? null,
+        action: summary
+          ? `Editou o evento "${updatedEvent.name}" (${summary})`
+          : `Editou o evento "${updatedEvent.name}"`,
+        metadata: {
+          kind: 'EVENT_UPDATE',
+          eventId: id,
+          page: clientPage ?? 'event-edit',
+          fieldsEdited: auditChanges.map((c) => c.field),
+          changes: auditChanges,
+        } as Prisma.InputJsonValue,
+      });
+    }
 
     return {
       message: 'Event updated successfully',

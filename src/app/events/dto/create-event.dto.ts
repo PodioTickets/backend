@@ -129,6 +129,11 @@ export class UpdateEventDto {
   @IsOptional()
   @IsEnum(EventStatus)
   status?: EventStatus;
+
+  /** Rota/página do painel (opcional) para o audit log, ex.: `event-edit`, `events/abc/general` */
+  @IsOptional()
+  @IsString()
+  clientPage?: string;
 }
 
 export class FilterEventsDto {

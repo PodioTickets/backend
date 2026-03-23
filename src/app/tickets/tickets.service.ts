@@ -146,10 +146,27 @@ export class TicketsService {
       prismaRead.ticket.count({ where }),
     ]);
 
+    const batchIds = tickets.flatMap((t) => t.batches.map((b) => b.id));
+    const soldByBatch =
+      batchIds.length > 0
+        ? await prismaRead.registrationTicket.groupBy({
+            by: ['batchId'],
+            where: { batchId: { in: batchIds } },
+            _count: { id: true },
+          })
+        : [];
+    const soldByBatchMap = new Map(
+      soldByBatch.map((s) => [s.batchId, s._count.id]),
+    );
+
     // Transformar para o formato esperado
     const transformedTickets = tickets.map((ticket) => ({
       ...ticket,
       price: ticket.batches[0]?.price || 0, // Preço do primeiro lote
+      batches: ticket.batches.map((batch) => ({
+        ...batch,
+        quantitySold: soldByBatchMap.get(batch.id) ?? 0,
+      })),
       ageLimit: {
         min: ticket.ageLimitMin,
         max: ticket.ageLimitMax,
@@ -281,19 +298,62 @@ export class TicketsService {
     delete updateData.productIds;
     delete updateData.ageLimit;
 
-    // Atualizar batches se fornecido
     if (updateTicketDto.batches) {
-      await prismaWrite.ticketBatch.deleteMany({
+      const existingBatches = await prismaRead.ticketBatch.findMany({
         where: { ticketId },
+        select: { id: true },
       });
-      updateData.batches = {
-        create: updateTicketDto.batches.map((b) => ({
-          quantity: b.quantity,
-          price: b.price,
-          startDate: b.startDate ? new Date(b.startDate) : null,
-          endDate: b.endDate ? new Date(b.endDate) : null,
-        })),
-      };
+      const existingIds = new Set(existingBatches.map((b) => b.id));
+
+      const soldAgg = await prismaRead.registrationTicket.groupBy({
+        by: ['batchId'],
+        where: { ticketId, batchId: { not: null } },
+        _count: { id: true },
+      });
+      const soldByBatch = new Map<string, number>(
+        soldAgg.map((r) => [r.batchId!, r._count.id]),
+      );
+
+      const seenDtoIds = new Set<string>();
+      for (const b of updateTicketDto.batches) {
+        if (b.id) {
+          if (seenDtoIds.has(b.id)) {
+            throw new BadRequestException(`Duplicate batch id: ${b.id}`);
+          }
+          seenDtoIds.add(b.id);
+          if (!existingIds.has(b.id)) {
+            throw new BadRequestException(
+              `Batch id does not belong to this ticket: ${b.id}`,
+            );
+          }
+        }
+      }
+
+      const dtoIdSet = new Set(
+        updateTicketDto.batches
+          .map((b) => b.id)
+          .filter((id): id is string => Boolean(id)),
+      );
+
+      for (const eid of existingIds) {
+        if (!dtoIdSet.has(eid)) {
+          const sold = soldByBatch.get(eid) ?? 0;
+          if (sold > 0) {
+            throw new BadRequestException(
+              `Cannot remove a batch that has sales (${sold} registration(s)). Include its id in batches to keep it.`,
+            );
+          }
+        }
+      }
+
+      for (const b of updateTicketDto.batches) {
+        const sold = b.id ? (soldByBatch.get(b.id) ?? 0) : 0;
+        if (b.quantity < sold) {
+          throw new BadRequestException(
+            `Batch quantity cannot be less than the number already sold (${sold})`,
+          );
+        }
+      }
     }
 
     // Atualizar products se fornecido
@@ -356,6 +416,42 @@ export class TicketsService {
         }
       }
 
+      if (updateTicketDto.batches) {
+        const stillExisting = await tx.ticketBatch.findMany({
+          where: { ticketId },
+          select: { id: true },
+        });
+        const stillIds = new Set(stillExisting.map((b) => b.id));
+        const keepIds = new Set(
+          updateTicketDto.batches
+            .map((b) => b.id)
+            .filter((id): id is string => Boolean(id)),
+        );
+        for (const eid of stillIds) {
+          if (!keepIds.has(eid)) {
+            await tx.ticketBatch.delete({ where: { id: eid } });
+          }
+        }
+        for (const b of updateTicketDto.batches) {
+          const data = {
+            quantity: b.quantity,
+            price: b.price,
+            startDate: b.startDate ? new Date(b.startDate) : null,
+            endDate: b.endDate ? new Date(b.endDate) : null,
+          };
+          if (b.id) {
+            await tx.ticketBatch.update({
+              where: { id: b.id },
+              data,
+            });
+          } else {
+            await tx.ticketBatch.create({
+              data: { ...data, ticketId },
+            });
+          }
+        }
+      }
+
       // Atualizar o ticket
       return await tx.ticket.update({
         where: { id: ticketId },
@@ -373,8 +469,25 @@ export class TicketsService {
       });
     });
 
+    const batchIdsAfter = updatedTicket.batches.map((b) => b.id);
+    const soldAfterUpdate =
+      batchIdsAfter.length > 0
+        ? await prismaRead.registrationTicket.groupBy({
+            by: ['batchId'],
+            where: { ticketId, batchId: { in: batchIdsAfter } },
+            _count: { id: true },
+          })
+        : [];
+    const soldAfterMap = new Map(
+      soldAfterUpdate.map((s) => [s.batchId!, s._count.id]),
+    );
+
     const transformed = {
       ...updatedTicket,
+      batches: updatedTicket.batches.map((batch) => ({
+        ...batch,
+        quantitySold: soldAfterMap.get(batch.id) ?? 0,
+      })),
       ageLimit: {
         min: updatedTicket.ageLimitMin,
         max: updatedTicket.ageLimitMax,

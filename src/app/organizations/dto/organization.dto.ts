@@ -199,12 +199,20 @@ export class PutMemberPermissionsDto {
   @IsArray()
   @IsString({ each: true })
   permissions: string[];
+
+  @IsOptional()
+  @IsString()
+  clientPage?: string;
 }
 
 export class PutMemberEventsDto {
   @IsArray()
   @IsUUID('4', { each: true })
   eventIds: string[];
+
+  @IsOptional()
+  @IsString()
+  clientPage?: string;
 }
 
 export class PatchMemberSettingsDto {
@@ -221,6 +229,10 @@ export class PatchMemberSettingsDto {
   @IsArray()
   @IsUUID('4', { each: true })
   eventIds?: string[];
+
+  @IsOptional()
+  @IsString()
+  clientPage?: string;
 }
 
 export class OrganizationAuditLogQueryDto {
@@ -253,6 +265,16 @@ export class OrganizationAuditLogQueryDto {
 export class UpdateMemberRoleDto {
   @IsEnum(OrganizationMemberRole)
   role: OrganizationMemberRole;
+
+  @IsOptional()
+  @IsString()
+  clientPage?: string;
+}
+
+/** Dedup de page views: o frontend envia ao montar uma rota (ex.: `dashboard`). */
+export class RecordOrganizerPageViewDto {
+  @IsString()
+  pageKey: string;
 }
 
 export class UpdateOrganizationDto {

@@ -33,6 +33,14 @@ export class AgeLimitDto {
 }
 
 export class TicketBatchDto {
+  /** Em updates, envie o id do lote existente para preservar vendas vinculadas. Omita para criar um lote novo. */
+  @IsOptional()
+  @IsUUID()
+  @ApiPropertyOptional({
+    description: 'Existing batch UUID (required on update to keep sales linked to this lot)',
+  })
+  id?: string;
+
   @IsNumber()
   @Min(1)
   @ApiProperty({ description: 'Quantity available in this batch', example: 100 })
