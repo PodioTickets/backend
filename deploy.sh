@@ -27,6 +27,7 @@ if [ ! -f .env ]; then
 fi
 
 echo -e "${BLUE}🔨 Construindo imagem Docker...${NC}"
+# BuildKit: cache de layers + RUN --mount no Dockerfile (exportado no workflow)
 docker compose build backend
 
 echo -e "${BLUE}🐘 Subindo PostgreSQL e Redis...${NC}"

@@ -9,7 +9,8 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Build remoto (Docker + pnpm + Prisma + Nest) costuma passar de 15 min em VPS pequenas
+    timeout-minutes: 60
 
     steps:
       - name: Validate SSH Key Format
@@ -29,7 +30,10 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           passphrase: ${{ secrets.SSH_KEY_PASSPHRASE }}
           port: ${{ secrets.SSH_PORT || 22 }}
-          timeout: 300s
+          # Conexão SSH (handshake); separado do tempo do script remoto
+          timeout: 120s
+          # Padrão da action é 10m — insuficiente para `docker compose build` na VPS
+          command_timeout: 45m
           script_stop: true
           debug: false
           use_insecure_cipher: false

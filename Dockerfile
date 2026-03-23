@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.4
 FROM node:20-alpine AS base
 
 ENV PRISMA_CLI_BINARY_TARGETS=linux-musl-openssl-3.0.x \
@@ -20,7 +21,9 @@ WORKDIR /usr/src/app
 FROM base AS dependencies
 
 COPY package.json pnpm-lock.yaml* ./
-RUN pnpm install --frozen-lockfile
+# Cache do store pnpm entre builds (BuildKit na VPS / CI)
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+    pnpm install --frozen-lockfile --store-dir /pnpm/store
 
 # -----------------------------
 # Build

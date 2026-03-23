@@ -402,6 +402,21 @@ Após fazer push, você pode:
    - Vá em `Actions` no seu repositório
    - Clique no workflow em execução para ver os logs
 
+#### Timeout no GitHub Actions (“job failed” / SSH cortando no meio do `docker build`)
+
+O `appleboy/ssh-action` tem dois limites importantes:
+
+- **`command_timeout`**: tempo máximo para o script remoto (antes o padrão da action era **10 minutos** — um `docker compose build` com `pnpm install` + Prisma + Nest na VPS costuma passar disso).
+- **`timeout-minutes` do job**: tempo máximo do workflow inteiro no GitHub.
+
+No repositório, `.github/workflows/deploy.yml` já aumenta esses valores e o `Dockerfile` usa **cache do store do pnpm** (BuildKit) para acelerar rebuilds na VPS.
+
+Se ainda estourar tempo, opções:
+
+- Aumentar `command_timeout` / `timeout-minutes` no workflow.
+- VPS com mais CPU/RAM ou disco mais rápido (build em disco lento demora muito).
+- **Deploy avançado**: build da imagem no GitHub Actions, push para um registry (GHCR) e na VPS só `docker compose pull && up` (elimina compilação pesada no servidor).
+
 2. **Verificar no servidor:**
    ```bash
    # Ver logs do último deploy
