@@ -8,7 +8,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
       PGDATA: /var/lib/postgresql/data/pgdata
-      REPLICA_PASSWORD: ${REPLICA_PASSWORD}
+      # Evita WARN quando a variável não existe no .env (réplica opcional)
+      REPLICA_PASSWORD: ${REPLICA_PASSWORD:-}
     ports:
       - "5432:5432"
     volumes:
@@ -58,6 +59,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Opcional no .env: NODE_MAX_OLD_SPACE_SIZE=2048 (máquinas com mais RAM)
+        NODE_MAX_OLD_SPACE_SIZE: ${NODE_MAX_OLD_SPACE_SIZE:-768}
     container_name: podiogo-backend
     env_file:
       - .env

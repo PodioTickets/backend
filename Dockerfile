@@ -30,9 +30,10 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
 # -----------------------------
 FROM dependencies AS build
 
-ENV NODE_OPTIONS=--max-old-space-size=4096
-
-
+# Em VPS pequena (ex.: 1 GB RAM) `4096` faz o Node/ts compiler disputar memória com o Docker e o kernel mata o processo ("signal: killed").
+# Ajuste no compose ou: docker compose build --build-arg NODE_MAX_OLD_SPACE_SIZE=2048 backend
+ARG NODE_MAX_OLD_SPACE_SIZE=768
+ENV NODE_OPTIONS=--max-old-space-size=${NODE_MAX_OLD_SPACE_SIZE}
 
 COPY tsconfig.json tsconfig.build.json nest-cli.json ./
 COPY prisma ./prisma

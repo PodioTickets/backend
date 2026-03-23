@@ -2,6 +2,17 @@
 
 ## Pré-requisitos na VPS
 
+### Droplet com 1 GB de RAM (build Docker na própria VPS)
+
+Se `docker compose build backend` termina com **`failed to execute bake: signal: killed`** no passo `nest build` / `prisma generate`, em geral é **falta de memória (OOM)** — o kernel mata o processo.
+
+Neste projeto o build do container usa por padrão heap menor (`NODE_MAX_OLD_SPACE_SIZE`, ver `docker-compose.yml`). Ainda assim, em **1 GB** recomenda-se:
+
+1. **Swap** de 1–2 GB (ex.: DigitalOcean: [How to add swap](https://www.digitalocean.com/community/tutorials/how-to-add-swap-space-on-ubuntu-22-04)).
+2. Opcional no `.env`: `NODE_MAX_OLD_SPACE_SIZE=1024` (só se tiver swap ou mais RAM; senão pode voltar a dar OOM).
+
+No `docker-compose.yml`, `REPLICA_PASSWORD` usa `${REPLICA_PASSWORD:-}` (vazio se não existir no `.env`), para não gerar aviso quando você não usa réplica.
+
 1. **Docker e Docker Compose instalados**
 ```bash
 # Ubuntu/Debian
