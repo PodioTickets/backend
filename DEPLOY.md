@@ -511,7 +511,7 @@ O proxy está no ar, mas **não consegue falar com o Node** (upstream fechado, r
    docker compose logs --tail=80 backend
    curl -sS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3333/health
    ```
-   Deve retornar **200**. Se `Connection refused`, o processo caiu ao iniciar (veja o stack trace nos logs: env, Prisma, `dist/main.js`, etc.).
+   Deve retornar **200**. Se `Connection refused`, o processo caiu ao iniciar (veja o stack trace nos logs: env, Prisma, etc.). Imagem Docker (build SWC) usa `dist/main.js`; build local `pnpm build` gera `dist/src/main.js`.
 
 2. **Nginx apontando para o lugar certo** (no host da VPS):
    - Se o compose publica `3333:3333`, use `proxy_pass http://127.0.0.1:3333;` (como no exemplo deste doc).
