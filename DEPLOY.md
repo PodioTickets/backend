@@ -501,6 +501,26 @@ docker compose logs backend
 docker compose ps
 ```
 
+### Erro 502 (Bad Gateway) no Nginx / Cloudflare
+
+O proxy está no ar, mas **não consegue falar com o Node** (upstream fechado, recusado ou timeout).
+
+1. **Confirmar que o backend está rodando e escutando**
+   ```bash
+   docker compose ps
+   docker compose logs --tail=80 backend
+   curl -sS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3333/health
+   ```
+   Deve retornar **200**. Se `Connection refused`, o processo caiu ao iniciar (veja o stack trace nos logs: env, Prisma, `dist/main.js`, etc.).
+
+2. **Nginx apontando para o lugar certo** (no host da VPS):
+   - Se o compose publica `3333:3333`, use `proxy_pass http://127.0.0.1:3333;` (como no exemplo deste doc).
+   - Se o backend só existir na **rede Docker** e o Nginx estiver **fora** do compose, o `localhost:3333` só funciona se a porta estiver mapeada no host — confira com `curl` acima.
+
+3. **Cloudflare / outro CDN**: 502 pode ser origem offline. Teste direto no IP da VPS (`curl http://IP:3333/health`) com firewall liberado.
+
+4. **Timeouts**: tráfego pesado ou cold start — pode subir `proxy_read_timeout` no Nginx se necessário.
+
 ### Banco de dados não conecta
 ```bash
 # Verificar se o PostgreSQL está rodando

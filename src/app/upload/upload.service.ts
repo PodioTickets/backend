@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import * as sharp from 'sharp';
+import sharp from 'sharp';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { stat } from 'fs/promises';

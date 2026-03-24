@@ -4,7 +4,7 @@ import { AppModule } from './app.module';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { ConfigService } from '@nestjs/config';
-import * as bodyParser from 'body-parser';
+import bodyParser from 'body-parser';
 import { join } from 'path';
 import { useContainer } from 'class-validator';
 import helmet from 'helmet';
@@ -13,11 +13,11 @@ import { ConcurrencyLimiterMiddleware } from './common/middleware/concurrency-li
 import { SSRFProtectionMiddleware } from './common/middleware/ssrf-protection.middleware';
 import { HttpAdapterHost } from '@nestjs/core';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
-import * as compression from 'compression';
-import * as passport from 'passport';
-import * as session from 'express-session';
-import * as express from 'express';
-import * as cookieParser from 'cookie-parser';
+import compression from 'compression';
+import passport from 'passport';
+import session from 'express-session';
+import express, { type Request, type Response } from 'express';
+import cookieParser from 'cookie-parser';
 import { initializeSentry } from './config/sentry.config';
 
 initializeSentry();
@@ -295,7 +295,7 @@ async function bootstrap() {
   app.useGlobalInterceptors(new SecurityHeadersInterceptor());
 
   const httpAdapter = app.getHttpAdapter();
-  httpAdapter.get('/health', (req: express.Request, res: express.Response) => {
+  httpAdapter.get('/health', (req: Request, res: Response) => {
     res.status(200).json({
       status: 'ok',
       timestamp: new Date().toISOString(),
@@ -304,7 +304,9 @@ async function bootstrap() {
     });
   });
 
-  await app.listen(process.env.PORT || 3333);
+  const port = Number(process.env.PORT) || 3333;
+  // 0.0.0.0: obrigatório no Docker para aceitar tráfego da bridge/rede do host (evita 502 no proxy).
+  await app.listen(port, '0.0.0.0');
 }
 
 bootstrap();

@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { UploadService } from '../upload.service';
 import * as fs from 'fs/promises';
-import * as sharp from 'sharp';
+import sharp from 'sharp';
 import * as ClamScan from 'clamscan';
 import * as path from 'path';
 
