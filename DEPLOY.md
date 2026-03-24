@@ -524,6 +524,36 @@ sudo netstat -tulpn | grep 3333
 docker compose exec backend ls -la /usr/src/app/uploads
 ```
 
+### `docker compose build backend` demora muito ou parece travar (VPS pequena)
+
+Em droplets **1 vCPU / 1 GB RAM**, o compilador TypeScript (`tsc`) dentro do build do Docker pode levar **vários minutos** ou ficar em **swap** (parece “não carregar nunca”). Este repositório usa **`pnpm run build:docker`** no Dockerfile (**Nest + SWC**), que é bem mais leve e rápido que o `nest build` padrão.
+
+Se ainda assim ficar lento ou o processo for morto (`signal: killed`):
+
+1. **Adicionar swap** (2 GB é um bom começo):
+   ```bash
+   sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+   sudo mkswap /swapfile && sudo swapon /swapfile
+   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+   free -h
+   ```
+
+2. **BuildKit** (cache de camadas):
+   ```bash
+   export DOCKER_BUILDKIT=1
+   docker compose build backend
+   ```
+
+3. **Limite de heap do Node no build** (no `.env` na pasta do compose, opcional):
+   ```env
+   NODE_MAX_OLD_SPACE_SIZE=768
+   ```
+   Valores muito altos em máquina com 1 GB de RAM podem piorar (disputa com o Docker).
+
+4. **Alternativa**: fazer o build da imagem em uma máquina com mais RAM (CI/GitHub Actions, notebook) e publicar no registry (`docker push`), e na VPS só `docker compose pull && up -d`.
+
+**Nota:** `pnpm build` local/CI continua usando **tsc** (checagem de tipos completa). O alvo `build:docker` é otimizado para imagem de produção.
+
 ## Segurança Adicional
 
 1. **Não exponha portas do banco e Redis publicamente**
