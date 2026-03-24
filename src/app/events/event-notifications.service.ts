@@ -188,7 +188,9 @@ export class EventNotificationsService {
     const title = dto.title?.trim() ?? '';
     if (!title.length || title.length > TITLE_MAX) {
       throw new BadRequestException(`title must be between 1 and ${TITLE_MAX} characters`);
-    }
+    }    
+
+    
     if (dto.messageHtml?.length > MESSAGE_MAX_BYTES) {
       throw new BadRequestException(`messageHtml exceeds maximum size (${MESSAGE_MAX_BYTES} bytes)`);
     }
