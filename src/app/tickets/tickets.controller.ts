@@ -1,4 +1,16 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete, Query, UseGuards, Request } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+  Query,
+  UseGuards,
+  Request,
+} from '@nestjs/common';
+import type { Request as ExpressRequest } from 'express';
 import {
   ApiTags,
   ApiOperation,
@@ -12,6 +24,17 @@ import { TicketsService } from './tickets.service';
 import { CreateTicketDto, UpdateTicketDto, FilterTicketsDto } from './dto/create-ticket.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
+
+function clientIp(req: ExpressRequest): string {
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.length > 0) {
+    return xff.split(',')[0].trim();
+  }
+  if (Array.isArray(xff) && xff[0]) {
+    return String(xff[0]).split(',')[0].trim();
+  }
+  return (req as ExpressRequest & { ip?: string }).ip || '';
+}
 
 @ApiTags('Tickets')
 @Controller('api/v1/tickets')
@@ -81,12 +104,18 @@ export class TicketsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can update tickets' })
   @ApiResponse({ status: 404, description: 'Ticket not found' })
   update(
-    @Request() req,
+    @Request() req: ExpressRequest & { user: { id: string } },
     @Param('eventId') eventId: string,
     @Param('ticketId') ticketId: string,
     @Body() updateTicketDto: UpdateTicketDto,
   ) {
-    return this.ticketsService.update(req.user.id, eventId, ticketId, updateTicketDto);
+    return this.ticketsService.update(
+      req.user.id,
+      eventId,
+      ticketId,
+      updateTicketDto,
+      clientIp(req),
+    );
   }
 
   @Delete('events/:eventId/:ticketId')

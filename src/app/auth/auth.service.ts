@@ -23,6 +23,13 @@ import {
   ResetPasswordDto,
   ChangePasswordDto,
 } from './dto/auth.dto';
+import { EmailService } from '../../common/services/email.service';
+
+type PasswordResetLinkPayload = {
+  userId: string;
+  email: string;
+  accountType: 'USER' | 'ORGANIZER';
+};
 
 @Injectable()
 export class AuthService {
@@ -32,6 +39,7 @@ export class AuthService {
     private readonly prisma: PrismaService,
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
     private readonly httpService: HttpService,
+    private readonly emailService: EmailService,
   ) {}
 
   /**
@@ -439,98 +447,60 @@ export class AuthService {
   }
 
   async forgotPassword(forgotPasswordDto: ForgotPasswordDto, accountType: 'USER' | 'ORGANIZER' = 'USER') {
-    const { email } = forgotPasswordDto;
-    
-    // Log inicial para debug
-    console.log('\n========================================');
-    console.log('📥 FORGOT PASSWORD REQUEST RECEIVED');
-    console.log('========================================');
-    console.log(`📧 Email recebido: ${email}`);
-    console.log(`👤 Account Type: ${accountType}`);
-    console.log('========================================\n');
-    
+    const emailNorm = forgotPasswordDto.email.trim();
     const prismaRead = this.prisma.getReadClient();
 
-    // Buscar usuário considerando accountType
+    const generic = {
+      success: true,
+      message:
+        'Se uma conta existir com este e-mail, enviaremos instruções para redefinir a senha.',
+    };
+
     const user = await prismaRead.user.findUnique({
-      where: { 
+      where: {
         email_accountType: {
-          email,
+          email: emailNorm,
           accountType,
-        }
+        },
       },
+      select: { id: true, email: true, firstName: true, isActive: true },
     });
 
-    if (!user) {
-      console.log(`❌ Usuário não encontrado para email: ${email} (${accountType})`);
-      // Por segurança, não revelar se o email existe
-      return {
-        success: true,
-        message: 'Se uma conta existir com este email, um código de recuperação foi enviado',
-      };
+    if (!user || !user.isActive) {
+      return generic;
     }
-    
-    console.log(`✅ Usuário encontrado: ${user.id} - ${user.firstName} ${user.lastName}`);
 
-    // Gerar código de 6 dígitos
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutos
+    const hour = Math.floor(Date.now() / (60 * 60 * 1000));
+    const rateKey = `forgot_pw:${emailNorm.toLowerCase()}:${accountType}:${hour}`;
+    const count = (await this.cacheManager.get<number>(rateKey)) || 0;
+    if (count >= 5) {
+      return generic;
+    }
+    await this.cacheManager.set(rateKey, count + 1, 2 * 60 * 60 * 1000);
 
-    // Armazenar código no cache com chave única por email e accountType
-    const cacheKey = `reset_code:${email}:${accountType}`;
-    await this.cacheManager.set(cacheKey, {
-      code,
-      email,
-      accountType,
-      userId: user.id,
-      expiresAt: expiresAt.toISOString(),
-      attempts: 0,
-      used: false,
-    }, 15 * 60 * 1000); // 15 minutos
+    try {
+      await this.issuePasswordResetLinkForUser(
+        { id: user.id, email: user.email, firstName: user.firstName },
+        accountType,
+      );
+    } catch (err) {
+      console.error('[AUTH] Falha ao enviar e-mail de redefinição de senha:', err);
+    }
 
-    // TODO: Enviar código por email
-    // Log do código para desenvolvimento (remover em produção)
-    const timestamp = new Date().toISOString();
-    console.log('\n========================================');
-    console.log('🔐 CÓDIGO DE RECUPERAÇÃO DE SENHA');
-    console.log('========================================');
-    console.log(`📧 Email: ${email}`);
-    console.log(`👤 Tipo de Conta: ${accountType}`);
-    console.log(`🔢 Código: ${code}`);
-    console.log(`⏰ Expira em: ${expiresAt.toLocaleString('pt-BR')}`);
-    console.log(`🕐 Gerado em: ${timestamp}`);
-    console.log(`🔑 Cache Key: ${cacheKey}`);
-    console.log('========================================\n');
-
-    return {
-      success: true,
-      message: 'Se uma conta existir com este email, um código de recuperação foi enviado',
-    };
+    return generic;
   }
 
+  /**
+   * Fluxo legado por código de 6 dígitos (se ainda existir entrada em cache).
+   * O fluxo principal de recuperação é o link enviado por e-mail.
+   */
   async verifyResetCode(email: string, code: string, accountType: 'USER' | 'ORGANIZER' = 'USER') {
     const cacheKey = `reset_code:${email}:${accountType}`;
-    
-    // Log da tentativa de verificação
-    console.log('\n========================================');
-    console.log('🔍 TENTATIVA DE VERIFICAÇÃO DE CÓDIGO');
-    console.log('========================================');
-    console.log(`📧 Email: ${email}`);
-    console.log(`👤 Tipo de Conta: ${accountType}`);
-    console.log(`🔢 Código Recebido: ${code}`);
-    console.log(`🔑 Cache Key: ${cacheKey}`);
-    console.log('========================================\n');
-    
     const cached = await this.cacheManager.get<any>(cacheKey);
 
     if (!cached) {
-      console.log('❌ Código não encontrado no cache ou expirado');
       throw new BadRequestException('Código inválido ou expirado');
     }
-    
-    console.log(`✅ Código encontrado no cache. Código armazenado: ${cached.code}`);
-    console.log(`📊 Tentativas anteriores: ${cached.attempts}`);
-    console.log(`⏰ Expira em: ${new Date(cached.expiresAt).toLocaleString('pt-BR')}`);
 
     if (cached.used) {
       throw new BadRequestException('Código já foi utilizado');
@@ -544,7 +514,6 @@ export class AuthService {
       throw new BadRequestException('Muitas tentativas. Solicite um novo código');
     }
 
-    // Incrementar tentativas
     cached.attempts += 1;
     await this.cacheManager.set(cacheKey, cached, 15 * 60 * 1000);
 
@@ -552,11 +521,9 @@ export class AuthService {
       throw new BadRequestException('Código inválido');
     }
 
-    // Marcar código como usado
     cached.used = true;
     await this.cacheManager.set(cacheKey, cached, 15 * 60 * 1000);
 
-    // Gerar token JWT para reset de senha
     const resetToken = this.jwtService.sign(
       {
         email,
@@ -565,8 +532,8 @@ export class AuthService {
         type: 'password_reset',
       },
       {
-        expiresIn: '30m', // 30 minutos
-      }
+        expiresIn: '30m',
+      },
     );
 
     return {
@@ -577,70 +544,47 @@ export class AuthService {
   }
 
   async resendResetCode(email: string, accountType: 'USER' | 'ORGANIZER' = 'USER') {
+    const emailNorm = email.trim();
     const prismaRead = this.prisma.getReadClient();
 
-    // Verificar se usuário existe
+    const generic = {
+      success: true,
+      message:
+        'Se uma conta existir com este e-mail, enviaremos instruções para redefinir a senha.',
+    };
+
     const user = await prismaRead.user.findUnique({
-      where: { 
+      where: {
         email_accountType: {
-          email,
+          email: emailNorm,
           accountType,
-        }
+        },
       },
+      select: { id: true, email: true, firstName: true, isActive: true },
     });
 
-    if (!user) {
-      // Por segurança, não revelar se o email existe
-      return {
-        success: true,
-        message: 'Se uma conta existir com este email, um código de recuperação foi enviado',
-      };
+    if (!user || !user.isActive) {
+      return generic;
     }
 
-    // Verificar rate limit (máximo 1 reenvio por minuto)
-    const rateLimitKey = `reset_code_rate_limit:${email}:${accountType}`;
-    const rateLimit = await this.cacheManager.get(rateLimitKey);
-    
-    if (rateLimit) {
-      throw new BadRequestException('Aguarde antes de solicitar um novo código');
+    const rateLimitKey = `reset_link_resend:${emailNorm.toLowerCase()}:${accountType}`;
+    if (await this.cacheManager.get(rateLimitKey)) {
+      return generic;
     }
-
-    // Definir rate limit de 1 minuto
     await this.cacheManager.set(rateLimitKey, true, 60 * 1000);
 
-    // Gerar novo código
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutos
-
-    // Armazenar novo código
-    const cacheKey = `reset_code:${email}:${accountType}`;
-    await this.cacheManager.set(cacheKey, {
-      code,
-      email,
-      accountType,
-      userId: user.id,
-      expiresAt: expiresAt.toISOString(),
-      attempts: 0,
-      used: false,
-    }, 15 * 60 * 1000);
-
-    // TODO: Enviar código por email
-    // Log do código para desenvolvimento (remover em produção)
-    const timestamp = new Date().toISOString();
-    console.log('\n========================================');
-    console.log('🔄 CÓDIGO DE RECUPERAÇÃO REENVIADO');
-    console.log('========================================');
-    console.log(`📧 Email: ${email}`);
-    console.log(`👤 Tipo de Conta: ${accountType}`);
-    console.log(`🔢 Novo Código: ${code}`);
-    console.log(`⏰ Expira em: ${expiresAt.toLocaleString('pt-BR')}`);
-    console.log(`🕐 Reenviado em: ${timestamp}`);
-    console.log(`🔑 Cache Key: ${cacheKey}`);
-    console.log('========================================\n');
+    try {
+      await this.issuePasswordResetLinkForUser(
+        { id: user.id, email: user.email, firstName: user.firstName },
+        accountType,
+      );
+    } catch (err) {
+      console.error('[AUTH] Falha ao reenviar e-mail de redefinição de senha:', err);
+    }
 
     return {
       success: true,
-      message: 'Código reenviado com sucesso',
+      message: 'Se o e-mail estiver cadastrado, você receberá um novo link em instantes.',
     };
   }
 
@@ -653,7 +597,6 @@ export class AuthService {
       );
     }
 
-    // Validar senha forte (pelo menos uma maiúscula, uma minúscula e um número)
     const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
     if (!passwordRegex.test(password)) {
       throw new BadRequestException(
@@ -661,10 +604,18 @@ export class AuthService {
       );
     }
 
-    let decoded: any;
+    const trimmedToken = token.trim();
+    const looksLikeJwt =
+      typeof trimmedToken === 'string' && trimmedToken.split('.').length === 3;
+
+    if (!looksLikeJwt) {
+      return this.resetPasswordWithOpaqueToken(trimmedToken, password);
+    }
+
+    let decoded: { type?: string; email?: string; accountType?: string; userId?: string };
     try {
-      decoded = this.jwtService.verify(token);
-    } catch (error) {
+      decoded = this.jwtService.verify(trimmedToken);
+    } catch {
       throw new BadRequestException('Token inválido ou expirado');
     }
 
@@ -672,18 +623,19 @@ export class AuthService {
       throw new BadRequestException('Token inválido');
     }
 
-    const { email, accountType, userId } = decoded;
+    const email = decoded.email as string;
+    const accountType = decoded.accountType as 'USER' | 'ORGANIZER';
+    const userId = decoded.userId as string;
 
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
-    // Verificar se usuário ainda existe
     const user = await prismaRead.user.findUnique({
-      where: { 
+      where: {
         email_accountType: {
           email,
           accountType,
-        }
+        },
       },
     });
 
@@ -691,29 +643,132 @@ export class AuthService {
       throw new BadRequestException('Usuário não encontrado');
     }
 
-    // Verificar se a nova senha não é igual à atual
     const isSamePassword = await bcrypt.compare(password, user.password);
     if (isSamePassword) {
       throw new BadRequestException('A nova senha não pode ser igual à senha atual');
     }
 
-    // Criptografar nova senha
     const hashedPassword = await bcrypt.hash(password, 12);
 
-    // Atualizar senha
     await prismaWrite.user.update({
       where: { id: user.id },
       data: { password: hashedPassword },
     });
 
-    // Invalidar todos os códigos de reset pendentes para este email/accountType
-    const cacheKey = `reset_code:${email}:${accountType}`;
-    await this.cacheManager.del(cacheKey);
+    await this.invalidatePasswordResetArtifactsForUser(user.id, email, accountType);
 
     return {
       success: true,
       message: 'Senha redefinida com sucesso',
     };
+  }
+
+  private async resetPasswordWithOpaqueToken(token: string, password: string) {
+    const cached = await this.cacheManager.get<PasswordResetLinkPayload>(
+      `password_reset_link:${token}`,
+    );
+
+    if (!cached) {
+      throw new BadRequestException('Token inválido ou expirado');
+    }
+
+    const { userId, email, accountType } = cached;
+    const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
+
+    const user = await prismaRead.user.findUnique({
+      where: {
+        email_accountType: {
+          email,
+          accountType,
+        },
+      },
+    });
+
+    if (!user || user.id !== userId) {
+      throw new BadRequestException('Usuário não encontrado');
+    }
+
+    const isSamePassword = await bcrypt.compare(password, user.password);
+    if (isSamePassword) {
+      throw new BadRequestException('A nova senha não pode ser igual à senha atual');
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 12);
+
+    await prismaWrite.user.update({
+      where: { id: user.id },
+      data: { password: hashedPassword },
+    });
+
+    await this.invalidatePasswordResetArtifactsForUser(user.id, email, accountType);
+
+    return {
+      success: true,
+      message: 'Senha redefinida com sucesso',
+    };
+  }
+
+  private getPasswordResetLinkTtlMs(): number {
+    const raw = this.configService.get<string>('PASSWORD_RESET_TOKEN_TTL_MS');
+    const n = raw ? parseInt(raw, 10) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : 60 * 60 * 1000;
+  }
+
+  private buildPasswordResetPageUrl(token: string): string {
+    const base = (
+      this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000'
+    ).replace(/\/$/, '');
+    const pathRaw = this.configService.get<string>('PASSWORD_RESET_PATH') || '/reset-password';
+    const path = pathRaw.startsWith('/') ? pathRaw : `/${pathRaw}`;
+    return `${base}${path}?token=${encodeURIComponent(token)}`;
+  }
+
+  private async invalidatePasswordResetArtifactsForUser(
+    userId: string,
+    email: string,
+    accountType: 'USER' | 'ORGANIZER',
+  ): Promise<void> {
+    await this.cacheManager.del(`reset_code:${email}:${accountType}`);
+    const activeToken = await this.cacheManager.get<string>(
+      `password_reset_active:${userId}`,
+    );
+    if (activeToken) {
+      await this.cacheManager.del(`password_reset_link:${activeToken}`);
+      await this.cacheManager.del(`password_reset_active:${userId}`);
+    }
+  }
+
+  private async issuePasswordResetLinkForUser(
+    user: { id: string; email: string; firstName: string },
+    accountType: 'USER' | 'ORGANIZER',
+  ): Promise<void> {
+    const ttl = this.getPasswordResetLinkTtlMs();
+    const token = crypto.randomBytes(32).toString('hex');
+    const payload: PasswordResetLinkPayload = {
+      userId: user.id,
+      email: user.email,
+      accountType,
+    };
+    const resetUrl = this.buildPasswordResetPageUrl(token);
+    const accountLabel =
+      accountType === 'ORGANIZER' ? 'conta de organizador' : 'sua conta PodioGo';
+
+    await this.emailService.sendPasswordResetLink({
+      email: user.email,
+      firstName: user.firstName,
+      resetUrl,
+      accountLabel,
+    });
+
+    const prevToken = await this.cacheManager.get<string>(
+      `password_reset_active:${user.id}`,
+    );
+    await this.cacheManager.set(`password_reset_link:${token}`, payload, ttl);
+    await this.cacheManager.set(`password_reset_active:${user.id}`, token, ttl);
+    if (prevToken && prevToken !== token) {
+      await this.cacheManager.del(`password_reset_link:${prevToken}`);
+    }
   }
 
   /**
@@ -738,7 +793,12 @@ export class AuthService {
 
     const user = await prismaRead.user.findUnique({
       where: { id: userId },
-      select: { id: true, password: true },
+      select: {
+        id: true,
+        password: true,
+        email: true,
+        accountType: true,
+      },
     });
 
     if (!user) {
@@ -766,6 +826,12 @@ export class AuthService {
       where: { id: userId },
       data: { password: hashedPassword },
     });
+
+    await this.invalidatePasswordResetArtifactsForUser(
+      user.id,
+      user.email,
+      user.accountType as 'USER' | 'ORGANIZER',
+    );
 
     return {
       success: true,

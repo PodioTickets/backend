@@ -23,6 +23,7 @@ import {
   UnknownOrganizerPermissionKeyError,
   type OrganizerPermissionsMap,
 } from './constants/organizer-permissions';
+import { resolveOrganizerPageViewActionLabel } from './organizer-audit-page-label.util';
 
 @Injectable()
 export class OrganizationsService {
@@ -71,6 +72,63 @@ export class OrganizationsService {
     }
   }
 
+  /** Garante JSON serializável (datas, etc.) e, em `changes`, old/new + valorAnterior/valorNovo. */
+  private serializeAuditValue(value: unknown): unknown {
+    if (value === undefined) return null;
+    if (value === null) return null;
+    if (value instanceof Date) return value.toISOString();
+    if (typeof value === 'bigint') return value.toString();
+    if (Array.isArray(value)) {
+      return value.map((v) => this.serializeAuditValue(v));
+    }
+    if (typeof value === 'object') {
+      const o = value as Record<string, unknown> & { toJSON?: () => unknown };
+      if (typeof o.toJSON === 'function') {
+        return this.serializeAuditValue(o.toJSON());
+      }
+      const out: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(o)) {
+        out[k] = this.serializeAuditValue(val);
+      }
+      return out;
+    }
+    return value;
+  }
+
+  private prepareAuditMetadata(meta: Prisma.InputJsonValue): Prisma.InputJsonValue {
+    if (meta === null || typeof meta !== 'object' || Array.isArray(meta)) {
+      return this.serializeAuditValue(meta) as Prisma.InputJsonValue;
+    }
+    const base = meta as Record<string, unknown>;
+    const out: Record<string, unknown> = { ...base };
+    if (Array.isArray(out.changes)) {
+      out.changes = out.changes.map((entry: unknown) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+          return this.serializeAuditValue(entry);
+        }
+        const e = entry as Record<string, unknown>;
+        const oldS = this.serializeAuditValue(e.old);
+        const newS = this.serializeAuditValue(e.new);
+        const row: Record<string, unknown> = {
+          field: e.field,
+          old: oldS,
+          new: newS,
+          valorAnterior: oldS,
+          valorNovo: newS,
+        };
+        if ('label' in e && e.label !== undefined) {
+          row.label = this.serializeAuditValue(e.label);
+        }
+        return row;
+      });
+    }
+    for (const key of Object.keys(out)) {
+      if (key === 'changes') continue;
+      out[key] = this.serializeAuditValue(out[key]);
+    }
+    return out as Prisma.InputJsonValue;
+  }
+
   async recordOrganizationAuditLog(params: {
     organizationId: string;
     actorUserId: string | null;
@@ -86,7 +144,9 @@ export class OrganizationsService {
         ip: params.ip ?? null,
         action: params.action,
         metadata:
-          params.metadata === undefined ? Prisma.JsonNull : params.metadata,
+          params.metadata === undefined
+            ? Prisma.JsonNull
+            : this.prepareAuditMetadata(params.metadata),
       },
     });
   }
@@ -136,13 +196,19 @@ export class OrganizationsService {
         data: { recorded: false, pageKey: trimmed },
       };
     }
+    const actionLabel = await resolveOrganizerPageViewActionLabel(
+      prismaRead,
+      member.organizationId,
+      trimmed,
+    );
+
     await prismaWrite.$transaction(async (tx) => {
       await tx.organizationAuditLog.create({
         data: {
           organizationId: member.organizationId,
           actorUserId: userId,
           ip: clientIp ?? null,
-          action: `Acessou a página "${trimmed}"`,
+          action: actionLabel,
           metadata: {
             kind: 'PAGE_VIEW',
             page: trimmed,
@@ -824,7 +890,24 @@ export class OrganizationsService {
         lastName: member.user.lastName,
         userId: member.userId,
       })})`,
-      metadata: { kind: 'MEMBER_ADD', memberUserId: userToAddId },
+      metadata: {
+        kind: 'MEMBER_ADD',
+        memberUserId: userToAddId,
+        changes: [
+          {
+            field: 'colaborador',
+            old: null,
+            new: {
+              userId: member.userId,
+              email: member.user.email,
+              nome: `${member.user.firstName ?? ''} ${member.user.lastName ?? ''}`.trim(),
+              role: member.role,
+              permissions: member.permissions,
+              eventIds: member.eventAccesses.map((a) => a.eventId),
+            },
+          },
+        ],
+      },
     });
 
     return {
@@ -867,10 +950,13 @@ export class OrganizationsService {
       include: {
         user: {
           select: {
+            id: true,
+            email: true,
             firstName: true,
             lastName: true,
           },
         },
+        eventAccesses: { select: { eventId: true } },
       },
     });
 
@@ -887,7 +973,24 @@ export class OrganizationsService {
         lastName: member.user.lastName,
         userId: memberUserId,
       })})`,
-      metadata: { kind: 'MEMBER_REMOVE', memberUserId },
+      metadata: {
+        kind: 'MEMBER_REMOVE',
+        memberUserId,
+        changes: [
+          {
+            field: 'colaborador',
+            old: {
+              userId: memberUserId,
+              email: member.user.email,
+              nome: `${member.user.firstName ?? ''} ${member.user.lastName ?? ''}`.trim(),
+              role: member.role,
+              permissions: member.permissions,
+              eventIds: member.eventAccesses.map((a) => a.eventId),
+            },
+            new: null,
+          },
+        ],
+      },
     });
 
     // Remover membro

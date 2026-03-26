@@ -1,10 +1,19 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateTicketDto, UpdateTicketDto, FilterTicketsDto } from './dto/create-ticket.dto';
+import { OrganizationsService } from '../organizations/organizations.service';
+import { Prisma } from '@prisma/client';
+import {
+  summarizeTicketUpdateForAudit,
+  type TicketBeforeAudit,
+} from './ticket-audit.helpers';
 
 @Injectable()
 export class TicketsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly organizationsService: OrganizationsService,
+  ) {}
 
   async create(userId: string, eventId: string, createTicketDto: CreateTicketDto) {
     await this.verifyOrganizerAccess(userId, eventId);
@@ -263,7 +272,13 @@ export class TicketsService {
     };
   }
 
-  async update(userId: string, eventId: string, ticketId: string, updateTicketDto: UpdateTicketDto) {
+  async update(
+    userId: string,
+    eventId: string,
+    ticketId: string,
+    updateTicketDto: UpdateTicketDto,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -273,6 +288,16 @@ export class TicketsService {
       where: { id: ticketId },
       include: {
         registrations: true,
+        products: { select: { productId: true } },
+        batches: {
+          select: {
+            id: true,
+            quantity: true,
+            price: true,
+            startDate: true,
+            endDate: true,
+          },
+        },
       },
     });
 
@@ -396,6 +421,13 @@ export class TicketsService {
       updateData.products = undefined;
     }
 
+    const { labels: auditLabels, changes: auditChanges } =
+      summarizeTicketUpdateForAudit(
+        ticket as unknown as TicketBeforeAudit,
+        updateData,
+        updateTicketDto,
+      );
+
     // Usa transação para garantir atomicidade
     const updatedTicket = await prismaWrite.$transaction(async (tx) => {
       // Atualizar produtos primeiro, se necessário
@@ -494,6 +526,29 @@ export class TicketsService {
       },
       productIds: updatedTicket.products.map((tp) => tp.productId),
     };
+
+    const eventRecord = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: { organizationId: true, name: true },
+    });
+    if (eventRecord) {
+      const summaryJoined = auditLabels.join(', ');
+      await this.organizationsService.recordOrganizationAuditLog({
+        organizationId: eventRecord.organizationId,
+        actorUserId: userId,
+        ip: clientIp ?? null,
+        action: summaryJoined
+          ? `Editou o ingresso "${updatedTicket.name}" do evento "${eventRecord.name}" (${summaryJoined})`
+          : `Editou o ingresso "${updatedTicket.name}" do evento "${eventRecord.name}"`,
+        metadata: {
+          kind: 'TICKET_UPDATE',
+          eventId,
+          ticketId,
+          fieldsEdited: auditLabels,
+          changes: auditChanges,
+        } as Prisma.InputJsonValue,
+      });
+    }
 
     return {
       message: 'Ticket updated successfully',

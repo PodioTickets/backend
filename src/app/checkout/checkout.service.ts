@@ -315,11 +315,71 @@ export class CheckoutService {
       );
     }
 
+    await this.validateParticipantQuestions(dto, prisma);
+
     // 1.4 Validar método de pagamento
     if (
       !['PIX', 'CREDIT_CARD', 'BOLETO', 'CRYPTO'].includes(dto.paymentMethod)
     ) {
       throw new BadRequestException('Método de pagamento inválido');
+    }
+  }
+
+  private async validateParticipantQuestions(
+    dto: ProcessCheckoutDto,
+    prisma: any,
+  ): Promise<void> {
+    const participantTicketIds = this.expandParticipantTicketIds(dto.tickets);
+    const questions = await prisma.question.findMany({
+      where: { eventId: dto.eventId, isRequired: true },
+      select: { id: true, question: true, isRequired: true, appliesTo: true },
+    });
+
+    if (questions.length === 0) return;
+
+    for (let participantIndex = 0; participantIndex < dto.participants.length; participantIndex++) {
+      const participant = dto.participants[participantIndex];
+      const ticketId = participantTicketIds[participantIndex];
+      const answeredQuestionIds = new Set(
+        (participant.questionAnswers || []).map((qa) => qa.questionId),
+      );
+
+      const missingQuestions = questions.filter((question) => {
+        if (!question.isRequired) return false;
+        if (!this.questionAppliesToTicket(question.appliesTo, ticketId)) return false;
+        return !answeredQuestionIds.has(question.id);
+      });
+
+      if (missingQuestions.length > 0) {
+        throw new BadRequestException(
+          `Participante ${participantIndex + 1} sem resposta para perguntas obrigatorias: ${missingQuestions.map((q) => q.question).join(', ')}`,
+        );
+      }
+    }
+  }
+
+  private expandParticipantTicketIds(
+    tickets: ProcessCheckoutDto['tickets'],
+  ): string[] {
+    return tickets.flatMap((ticketItem) =>
+      Array.from({ length: ticketItem.quantity }, () => ticketItem.ticketId),
+    );
+  }
+
+  private questionAppliesToTicket(
+    appliesTo: string | null,
+    ticketId: string,
+  ): boolean {
+    if (!appliesTo || appliesTo === 'all') return true;
+
+    try {
+      const parsed = JSON.parse(appliesTo);
+      if (Array.isArray(parsed)) {
+        return parsed.includes(ticketId);
+      }
+      return appliesTo === ticketId;
+    } catch {
+      return appliesTo === ticketId;
     }
   }
 

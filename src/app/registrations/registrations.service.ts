@@ -916,6 +916,7 @@ export class RegistrationsService {
         registrationEndDate: reg.event.registrationEndDate,
         imageUrl: reg.event.imageUrl,
         bannerUrl: reg.event.bannerUrl,
+        logoUrl: reg.event.logoUrl,
         status: reg.event.status,
         location: reg.event.location,
         organization: reg.event.organization,

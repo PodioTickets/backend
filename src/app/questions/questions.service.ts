@@ -10,6 +10,12 @@ export class QuestionsService {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
+    const appliesTo = await this.normalizeAndValidateAppliesTo(
+      eventId,
+      createQuestionDto.appliesTo,
+      prismaRead,
+    );
 
     const question = await prismaWrite.question.create({
       data: {
@@ -17,12 +23,18 @@ export class QuestionsService {
         eventId,
         type: createQuestionDto.type || 'text',
         options: createQuestionDto.options ? (createQuestionDto.options as any) : null,
+        appliesTo,
       },
     });
 
+    const transformedQuestion = {
+      ...question,
+      appliesTo: this.parseAppliesTo(question.appliesTo),
+    };
+
     return {
       message: 'Question created successfully',
-      data: { question },
+      data: { question: transformedQuestion },
     };
   }
 
@@ -32,10 +44,14 @@ export class QuestionsService {
       where: { eventId },
       orderBy: { order: 'asc' },
     });
+    const transformedQuestions = questions.map((question) => ({
+      ...question,
+      appliesTo: this.parseAppliesTo(question.appliesTo),
+    }));
 
     return {
       message: 'Questions fetched successfully',
-      data: { questions },
+      data: { questions: transformedQuestions },
     };
   }
 
@@ -56,10 +72,14 @@ export class QuestionsService {
     if (!question) {
       throw new NotFoundException('Question not found');
     }
+    const transformedQuestion = {
+      ...question,
+      appliesTo: this.parseAppliesTo(question.appliesTo),
+    };
 
     return {
       message: 'Question fetched successfully',
-      data: { question },
+      data: { question: transformedQuestion },
     };
   }
 
@@ -67,6 +87,7 @@ export class QuestionsService {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
 
     const question = await prismaWrite.question.findUnique({
       where: { id: questionId },
@@ -80,15 +101,26 @@ export class QuestionsService {
     if (updateQuestionDto.options) {
       updateData.options = updateQuestionDto.options as any;
     }
+    if (updateQuestionDto.appliesTo !== undefined) {
+      updateData.appliesTo = await this.normalizeAndValidateAppliesTo(
+        eventId,
+        updateQuestionDto.appliesTo,
+        prismaRead,
+      );
+    }
 
     const updatedQuestion = await prismaWrite.question.update({
       where: { id: questionId },
       data: updateData,
     });
+    const transformedQuestion = {
+      ...updatedQuestion,
+      appliesTo: this.parseAppliesTo(updatedQuestion.appliesTo),
+    };
 
     return {
       message: 'Question updated successfully',
-      data: { question: updatedQuestion },
+      data: { question: transformedQuestion },
     };
   }
 
@@ -147,6 +179,46 @@ export class QuestionsService {
     if (!member) {
       throw new BadRequestException('User is not a member of this event\'s organization');
     }
+  }
+
+  private parseAppliesTo(appliesTo: string | null): string | string[] | null {
+    if (!appliesTo) return null;
+    try {
+      const parsed = JSON.parse(appliesTo);
+      return Array.isArray(parsed) ? parsed : appliesTo;
+    } catch {
+      return appliesTo;
+    }
+  }
+
+  private async normalizeAndValidateAppliesTo(
+    eventId: string,
+    appliesTo: string | string[] | undefined,
+    prisma: any,
+  ): Promise<string | null> {
+    if (appliesTo === undefined) return null;
+
+    if (appliesTo === 'all') return 'all';
+
+    const ids = Array.isArray(appliesTo) ? appliesTo : [appliesTo];
+    const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
+    if (uniqueIds.length === 0) {
+      throw new BadRequestException('appliesTo must be "all" or a non-empty array of ticket IDs');
+    }
+
+    const tickets = await prisma.ticket.findMany({
+      where: {
+        id: { in: uniqueIds },
+        eventId,
+        isActive: true,
+      },
+      select: { id: true },
+    });
+    if (tickets.length !== uniqueIds.length) {
+      throw new BadRequestException('One or more ticket IDs in appliesTo are invalid for this event');
+    }
+
+    return JSON.stringify(uniqueIds);
   }
 }
 

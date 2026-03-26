@@ -1,12 +1,22 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateProductDto, UpdateProductDto, FilterProductsDto, ProductVariationDto } from './dto/create-product.dto';
+import { OrganizationsService } from '../organizations/organizations.service';
+import { Prisma } from '@prisma/client';
+import {
+  summarizeProductUpdateForAudit,
+  type ProductBeforeAudit,
+  type ProductVariationAuditSnapshot,
+} from './product-audit.helpers';
 
 const DEFAULT_NO_INTEREST_VARIATION_NAME = 'Sem interesse';
 
 @Injectable()
 export class ProductsService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly organizationsService: OrganizationsService,
+  ) {}
 
   /**
    * Para produtos não obrigatórios, garante que exista a variação padrão "Sem interesse".
@@ -26,10 +36,16 @@ export class ProductsService {
     ];
   }
 
-  async create(userId: string, eventId: string, createProductDto: CreateProductDto) {
+  async create(
+    userId: string,
+    eventId: string,
+    createProductDto: CreateProductDto,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
     const isRequired = createProductDto.isRequired ?? false;
     const variations = this.ensureDefaultNoInterestVariation(
       isRequired,
@@ -66,6 +82,44 @@ export class ProductsService {
         variations: true,
       },
     });
+
+    const eventRecord = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: { organizationId: true, name: true },
+    });
+    if (eventRecord) {
+      await this.organizationsService.recordOrganizationAuditLog({
+        organizationId: eventRecord.organizationId,
+        actorUserId: userId,
+        ip: clientIp ?? null,
+        action: `Criou o produto "${product.name}" do evento "${eventRecord.name}"`,
+        metadata: {
+          kind: 'PRODUCT_CREATE',
+          eventId,
+          productId: product.id,
+          changes: [
+            {
+              field: 'produto',
+              old: null,
+              new: {
+                id: product.id,
+                name: product.name,
+                image: product.image,
+                isIncludedInTicket: product.isIncludedInTicket,
+                basePrice: product.basePrice,
+                isRequired: product.isRequired,
+                variationType: product.variationType,
+                variations: product.variations.map((v) => ({
+                  name: v.name,
+                  price: v.price,
+                  stock: v.stock,
+                })),
+              },
+            },
+          ],
+        } as Prisma.InputJsonValue,
+      });
+    }
 
     return {
       message: 'Product created successfully',
@@ -138,15 +192,26 @@ export class ProductsService {
     };
   }
 
-  async update(userId: string, eventId: string, productId: string, updateProductDto: UpdateProductDto) {
+  async update(
+    userId: string,
+    eventId: string,
+    productId: string,
+    updateProductDto: UpdateProductDto,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
 
     const product = await prismaWrite.product.findUnique({
       where: { id: productId },
       include: {
         tickets: true,
+        variations: {
+          select: { id: true, name: true, price: true, stock: true },
+          orderBy: { name: 'asc' },
+        },
       },
     });
 
@@ -157,13 +222,20 @@ export class ProductsService {
     // Não permitir atualizar produtos vinculados a ingressos vendidos
     // TODO: Verificar se há registrations com esses tickets
 
-    const updateData: any = { ...updateProductDto };
+    const updateData: Record<string, unknown> = { ...updateProductDto };
     delete updateData.variations;
-
-    // basePrice já vem em centavos (INT)
-    if (updateData.basePrice !== undefined) {
-      updateData.basePrice = Math.round(updateData.basePrice);
+    for (const k of Object.keys(updateData)) {
+      if (updateData[k] === undefined) {
+        delete updateData[k];
+      }
     }
+
+    if (updateData.basePrice !== undefined) {
+      updateData.basePrice = Math.round(Number(updateData.basePrice));
+    }
+
+    const scalarOnlyForAudit = { ...updateData };
+    let newVariationsSnapshot: ProductVariationAuditSnapshot[] | null = null;
 
     if (updateProductDto.variations) {
       const isRequired = updateProductDto.isRequired ?? product.isRequired;
@@ -172,7 +244,6 @@ export class ProductsService {
         updateProductDto.variations,
       );
 
-      // Validar variações
       if (variations.length === 0) {
         throw new BadRequestException('Product must have at least one variation');
       }
@@ -181,7 +252,12 @@ export class ProductsService {
         throw new BadRequestException('Required products must have at least 2 variations');
       }
 
-      // Deletar variações antigas e criar novas
+      newVariationsSnapshot = variations.map((v) => ({
+        name: v.name,
+        price: Math.round(v.price ?? 0),
+        stock: v.stock ?? 0,
+      }));
+
       await prismaWrite.productVariation.deleteMany({
         where: { productId },
       });
@@ -189,19 +265,50 @@ export class ProductsService {
       updateData.variations = {
         create: variations.map((v) => ({
           name: v.name,
-          price: Math.round(v.price ?? 0), // entrada já em centavos (INT)
+          price: Math.round(v.price ?? 0),
           stock: v.stock ?? 0,
         })),
       };
     }
 
+    const { labels: auditLabels, changes: auditChanges } =
+      summarizeProductUpdateForAudit(
+        product as unknown as ProductBeforeAudit,
+        scalarOnlyForAudit,
+        updateProductDto,
+        newVariationsSnapshot,
+      );
+
     const updatedProduct = await prismaWrite.product.update({
       where: { id: productId },
-      data: updateData,
+      data: updateData as Prisma.ProductUpdateInput,
       include: {
         variations: true,
       },
     });
+
+    const eventRecord = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: { organizationId: true, name: true },
+    });
+    if (eventRecord) {
+      const summaryJoined = auditLabels.join(', ');
+      await this.organizationsService.recordOrganizationAuditLog({
+        organizationId: eventRecord.organizationId,
+        actorUserId: userId,
+        ip: clientIp ?? null,
+        action: summaryJoined
+          ? `Editou o produto "${updatedProduct.name}" do evento "${eventRecord.name}" (${summaryJoined})`
+          : `Editou o produto "${updatedProduct.name}" do evento "${eventRecord.name}"`,
+        metadata: {
+          kind: 'PRODUCT_UPDATE',
+          eventId,
+          productId,
+          fieldsEdited: auditLabels,
+          changes: auditChanges,
+        } as Prisma.InputJsonValue,
+      });
+    }
 
     return {
       message: 'Product updated successfully',
@@ -209,16 +316,23 @@ export class ProductsService {
     };
   }
 
-  async remove(userId: string, eventId: string, productId: string) {
+  async remove(
+    userId: string,
+    eventId: string,
+    productId: string,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
 
     const product = await prismaWrite.product.findUnique({
       where: { id: productId },
       include: {
         tickets: true,
         kitItems: true,
+        variations: { orderBy: { name: 'asc' } },
       },
     });
 
@@ -229,6 +343,44 @@ export class ProductsService {
     // Validar se o produto está vinculado a ingressos ou kits
     if (product.tickets.length > 0 || product.kitItems.length > 0) {
       throw new BadRequestException('Cannot delete product that is linked to tickets or kits');
+    }
+
+    const eventRecord = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: { organizationId: true, name: true },
+    });
+    if (eventRecord) {
+      await this.organizationsService.recordOrganizationAuditLog({
+        organizationId: eventRecord.organizationId,
+        actorUserId: userId,
+        ip: clientIp ?? null,
+        action: `Excluiu o produto "${product.name}" do evento "${eventRecord.name}"`,
+        metadata: {
+          kind: 'PRODUCT_DELETE',
+          eventId,
+          productId,
+          changes: [
+            {
+              field: 'produto',
+              old: {
+                id: product.id,
+                name: product.name,
+                image: product.image,
+                isIncludedInTicket: product.isIncludedInTicket,
+                basePrice: product.basePrice,
+                isRequired: product.isRequired,
+                variationType: product.variationType,
+                variations: product.variations.map((v) => ({
+                  name: v.name,
+                  price: v.price,
+                  stock: v.stock,
+                })),
+              },
+              new: null,
+            },
+          ],
+        } as Prisma.InputJsonValue,
+      });
     }
 
     await prismaWrite.product.delete({

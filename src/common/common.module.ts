@@ -10,9 +10,12 @@ import { SecurityLoggingInterceptor } from './interceptors/security-logging.inte
 import { SecurityMonitoringService } from './services/security-monitoring.service';
 import { SecurityAlertsService } from './services/security-alerts.service';
 import { SecretRotationService } from './services/secret-rotation.service';
+import { PerformanceMonitorService } from './services/performance-monitor.service';
+import { PerformanceMonitorController } from './controllers/performance-monitor.controller';
 
 @Module({
   imports: [ConfigModule],
+  controllers: [PerformanceMonitorController],
   providers: [
     CsrfGuard,
     RequestOriginGuard,
@@ -23,6 +26,7 @@ import { SecretRotationService } from './services/secret-rotation.service';
     SecurityMonitoringService,
     SecurityAlertsService,
     SecretRotationService,
+    PerformanceMonitorService,
   ],
   exports: [
     CsrfGuard,
@@ -33,6 +37,7 @@ import { SecretRotationService } from './services/secret-rotation.service';
     SecurityMonitoringService,
     SecurityAlertsService,
     SecretRotationService,
+    PerformanceMonitorService,
   ],
 })
 export class CommonModule {}

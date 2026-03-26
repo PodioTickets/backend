@@ -14,6 +14,9 @@ describe('EventsService', () => {
     organizer: {
       findUnique: jest.fn(),
     },
+    organizationMember: {
+      findFirst: jest.fn(),
+    },
     event: {
       create: jest.fn(),
       findUnique: jest.fn(),
@@ -26,6 +29,7 @@ describe('EventsService', () => {
     eventTopic: {
       create: jest.fn(),
       createMany: jest.fn(),
+      findMany: jest.fn(),
       findUnique: jest.fn(),
       update: jest.fn(),
       delete: jest.fn(),
@@ -92,32 +96,64 @@ describe('EventsService', () => {
         state: 'SP',
         country: 'Brasil',
         eventDate: '2024-12-31T00:00:00Z',
+        registrationStartDate: '2024-12-01T00:00:00Z',
         registrationEndDate: '2024-12-30T00:00:00Z',
       };
 
-      const mockOrganizer = { id: 'org-123', userId };
+      const mockMember = {
+        organizationId: 'org-123',
+        role: 'OWNER',
+        organization: { id: 'org-123' },
+      };
       const mockEvent = {
         id: 'event-123',
         ...createEventDto,
-        organizerId: mockOrganizer.id,
-        organizer: { user: { id: userId } },
+        organizationId: mockMember.organizationId,
+        slug: null,
       };
+      const mockUpdated = {
+        ...mockEvent,
+        slug: 'test-event-event-123',
+        organization: { members: [] },
+      };
+      const mockTopics = [
+        {
+          id: 'topic-1',
+          eventId: 'event-123',
+          title: 'Descrição do evento',
+          content: 'Test Description',
+          isDefault: true,
+          isRequired: true,
+          order: 0,
+        },
+      ];
 
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-      mockPrismaService.event.findFirst.mockResolvedValue(null); // Não existe evento duplicado
+      mockPrismaService.organizationMember.findFirst.mockResolvedValue(mockMember);
+      mockPrismaService.event.findFirst.mockResolvedValue(null);
       mockPrismaService.event.create.mockResolvedValue(mockEvent);
-      mockPrismaService.eventTopic.createMany.mockResolvedValue({ count: 4 });
+      mockPrismaService.event.update.mockResolvedValue(mockUpdated);
+      mockPrismaService.eventTopic.create.mockResolvedValue(mockTopics[0]);
+      mockPrismaService.eventTopic.findMany.mockResolvedValue(mockTopics);
 
       const result = await service.create(userId, createEventDto);
 
       expect(result.message).toBe('Event created successfully');
-      expect(result.data.event).toEqual(mockEvent);
-      expect(mockPrismaService.eventTopic.createMany).toHaveBeenCalled();
+      expect(result.data.event.topics).toEqual(mockTopics);
+      expect(mockPrismaService.eventTopic.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          eventId: 'event-123',
+          title: 'Descrição do evento',
+          content: 'Test Description',
+          isDefault: true,
+          isRequired: true,
+          order: 0,
+        }),
+      });
     });
 
-    it('should throw BadRequestException if user is not an organizer', async () => {
+    it('should throw BadRequestException if user is not an organization owner', async () => {
       const userId = 'user-123';
-      mockPrismaService.organizer.findUnique.mockResolvedValue(null);
+      mockPrismaService.organizationMember.findFirst.mockResolvedValue(null);
 
       await expect(
         service.create(userId, {
@@ -127,6 +163,7 @@ describe('EventsService', () => {
           state: 'Test',
           country: 'Test',
           eventDate: '2024-12-31T00:00:00Z',
+          registrationStartDate: '2024-12-01T00:00:00Z',
           registrationEndDate: '2024-12-30T00:00:00Z',
         }),
       ).rejects.toThrow(BadRequestException);

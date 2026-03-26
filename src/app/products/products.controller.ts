@@ -1,4 +1,16 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete, Query, UseGuards, Request } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+  Query,
+  UseGuards,
+  Request,
+} from '@nestjs/common';
+import type { Request as ExpressRequest } from 'express';
 import {
   ApiTags,
   ApiOperation,
@@ -12,6 +24,17 @@ import { ProductsService } from './products.service';
 import { CreateProductDto, UpdateProductDto, FilterProductsDto } from './dto/create-product.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
+
+function clientIp(req: ExpressRequest): string {
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.length > 0) {
+    return xff.split(',')[0].trim();
+  }
+  if (Array.isArray(xff) && xff[0]) {
+    return String(xff[0]).split(',')[0].trim();
+  }
+  return (req as ExpressRequest & { ip?: string }).ip || '';
+}
 
 @ApiTags('Products')
 @Controller('api/v1/products')
@@ -32,8 +55,17 @@ export class ProductsController {
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can create products' })
   @ApiResponse({ status: 404, description: 'Event not found' })
-  create(@Request() req, @Param('eventId') eventId: string, @Body() createProductDto: CreateProductDto) {
-    return this.productsService.create(req.user.id, eventId, createProductDto);
+  create(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('eventId') eventId: string,
+    @Body() createProductDto: CreateProductDto,
+  ) {
+    return this.productsService.create(
+      req.user.id,
+      eventId,
+      createProductDto,
+      clientIp(req),
+    );
   }
 
   @Get('events/:eventId')
@@ -80,12 +112,18 @@ export class ProductsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can update products' })
   @ApiResponse({ status: 404, description: 'Product not found' })
   update(
-    @Request() req,
+    @Request() req: ExpressRequest & { user: { id: string } },
     @Param('eventId') eventId: string,
     @Param('productId') productId: string,
     @Body() updateProductDto: UpdateProductDto,
   ) {
-    return this.productsService.update(req.user.id, eventId, productId, updateProductDto);
+    return this.productsService.update(
+      req.user.id,
+      eventId,
+      productId,
+      updateProductDto,
+      clientIp(req),
+    );
   }
 
   @Delete('events/:eventId/:productId')
@@ -102,7 +140,16 @@ export class ProductsController {
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can delete products' })
   @ApiResponse({ status: 404, description: 'Product not found' })
-  remove(@Request() req, @Param('eventId') eventId: string, @Param('productId') productId: string) {
-    return this.productsService.remove(req.user.id, eventId, productId);
+  remove(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('eventId') eventId: string,
+    @Param('productId') productId: string,
+  ) {
+    return this.productsService.remove(
+      req.user.id,
+      eventId,
+      productId,
+      clientIp(req),
+    );
   }
 }

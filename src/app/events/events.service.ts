@@ -12,10 +12,12 @@ import {
   UpdateEventDto,
   FilterEventsDto,
   type SearchEventsDto,
+  type SearchEventLocationsDto,
 } from './dto/create-event.dto';
 import {
   CreateEventTopicDto,
   UpdateEventTopicDto,
+  ReorderEventTopicsDto,
   CreateEventLocationDto,
 } from './dto/event-topic.dto';
 import { DashboardQueryDto, DashboardPeriod } from './dto/dashboard.dto';
@@ -30,7 +32,7 @@ import {
 } from '@prisma/client';
 import { generateSlug, generateUniqueSlug } from '../../helpers/SlugHelper';
 import {
-  diffEventUpdateForAudit,
+  diffEventUpdateAgainstData,
   summarizeEventFieldChanges,
 } from './event-audit.helpers';
 
@@ -173,10 +175,13 @@ export class EventsService {
       );
     }
 
+    const { cardImageUrl, ...createEventRest } = createEventDto;
+
     // Criar evento primeiro para ter o ID
     const event = await prismaWrite.event.create({
       data: {
-        ...createEventDto,
+        ...createEventRest,
+        logoUrl: createEventDto.logoUrl ?? cardImageUrl,
         slug: null, // Será gerado depois com o ID
         organizationId: member.organizationId,
         eventDate: new Date(createEventDto.eventDate),
@@ -238,6 +243,17 @@ export class EventsService {
       },
     });
 
+    await this.ensureDefaultDescriptionTopic(
+      prismaWrite,
+      updatedEvent.id,
+      createEventDto.description,
+    );
+
+    const topics = await prismaWrite.eventTopic.findMany({
+      where: { eventId: updatedEvent.id },
+      orderBy: { order: 'asc' },
+    });
+
     await this.organizationsService.recordOrganizationAuditLog({
       organizationId: member.organizationId,
       actorUserId: userId,
@@ -246,16 +262,70 @@ export class EventsService {
       metadata: {
         kind: 'EVENT_CREATE',
         eventId: updatedEvent.id,
+        changes: [
+          {
+            field: 'evento',
+            old: null,
+            new: {
+              id: updatedEvent.id,
+              name: updatedEvent.name,
+              slug: updatedEvent.slug,
+              status: updatedEvent.status,
+              location: updatedEvent.location,
+              city: updatedEvent.city,
+              state: updatedEvent.state,
+              country: updatedEvent.country,
+              eventDate: updatedEvent.eventDate,
+              registrationStartDate: updatedEvent.registrationStartDate,
+              registrationEndDate: updatedEvent.registrationEndDate,
+              bannerUrl: updatedEvent.bannerUrl,
+              logoUrl: updatedEvent.logoUrl,
+            },
+          },
+        ],
       },
     });
 
     return {
       message: 'Event created successfully',
-      data: { event: updatedEvent },
+      data: { event: { ...updatedEvent, topics } },
     };
   }
 
-  async search(searchDto: SearchEventsDto) {
+  /** Garante o tópico padrão de descrição (o front pode não criar tópicos no POST do evento). */
+  private async ensureDefaultDescriptionTopic(
+    prismaWrite: ReturnType<PrismaService['getWriteClient']>,
+    eventId: string,
+    description?: string | null,
+  ) {
+    const topicData = {
+      eventId,
+      title: 'Descrição do evento',
+      content: (description ?? '').trim(),
+      isEnabled: true,
+      isDefault: true,
+      isRequired: true,
+      order: 0,
+    };
+    await prismaWrite.eventTopic.create({
+      data: topicData as Prisma.EventTopicUncheckedCreateInput,
+    });
+  }
+
+  /**
+   * Where clause compartilhado entre GET /events/search e GET /events/search/locations
+   * (catálogo público: mesmo status padrão, datas e busca textual).
+   */
+  private buildPublicEventSearchWhere(params: {
+    q?: string;
+    country?: string;
+    state?: string;
+    city?: string;
+    startDate?: string;
+    endDate?: string;
+    status?: EventStatus;
+    includePast?: boolean;
+  }): Prisma.EventWhereInput {
     const {
       q,
       country,
@@ -265,11 +335,9 @@ export class EventsService {
       endDate,
       status,
       includePast = false,
-      page = 1,
-      limit = 20,
-    } = searchDto;
+    } = params;
 
-    const where: any = {
+    const where: Prisma.EventWhereInput = {
       status: status || EventStatus.PUBLISHED,
     };
 
@@ -309,7 +377,6 @@ export class EventsService {
       ];
     }
 
-    // Filtros de localização
     if (country) {
       where.country = country;
     }
@@ -322,18 +389,68 @@ export class EventsService {
       where.city = city;
     }
 
-    // Filtro de data
     if (startDate && endDate) {
       where.eventDate = {
         gte: new Date(startDate),
         lte: new Date(endDate),
       };
     } else if (!includePast) {
-      // Por padrão, apenas eventos futuros
       where.eventDate = {
         gte: new Date(),
       };
     }
+
+    return where;
+  }
+
+  async searchLocationFacets(dto: SearchEventLocationsDto) {
+    const where = this.buildPublicEventSearchWhere(dto);
+
+    const prismaRead = this.prisma.getReadClient();
+    const rows = await prismaRead.event.groupBy({
+      by: ['state', 'city'],
+      where,
+      _count: { _all: true },
+    });
+
+    const byState = new Map<string, Set<string>>();
+    for (const row of rows) {
+      const s = row.state.trim();
+      const c = row.city.trim();
+      if (!s || !c) {
+        continue;
+      }
+      if (!byState.has(s)) {
+        byState.set(s, new Set());
+      }
+      byState.get(s)!.add(c);
+    }
+
+    const collator = new Intl.Collator('pt-BR');
+    const states = Array.from(byState.entries())
+      .map(([state, cities]) => ({
+        state,
+        cities: Array.from(cities).sort((a, b) => collator.compare(a, b)),
+      }))
+      .sort((a, b) => collator.compare(a.state, b.state));
+
+    const pairCount = states.reduce((n, s) => n + s.cities.length, 0);
+
+    return {
+      message: 'Location facets retrieved successfully',
+      data: {
+        states,
+        meta: {
+          stateCount: states.length,
+          pairCount,
+        },
+      },
+    };
+  }
+
+  async search(searchDto: SearchEventsDto) {
+    const { page = 1, limit = 20, ...searchFilters } = searchDto;
+    const where = this.buildPublicEventSearchWhere(searchFilters);
 
     // Usar read replica para performance
     const prismaRead = this.prisma.getReadClient();
@@ -391,7 +508,7 @@ export class EventsService {
           total,
           totalPages: Math.ceil(total / limit),
         },
-        query: q || null,
+        query: searchDto.q || null,
       },
     };
   }
@@ -545,7 +662,28 @@ export class EventsService {
         where: whereFinal,
         skip: (page - 1) * limit,
         take: limit,
-        include: {
+        select: {
+          id: true,
+          organizationId: true,
+          name: true,
+          slug: true,
+          description: true,
+          bannerUrl: true,
+          logoUrl: true,
+          location: true,
+          city: true,
+          state: true,
+          country: true,
+          zipCode: true,
+          neighborhood: true,
+          googleMapsLink: true,
+          regulationUrl: true,
+          eventDate: true,
+          registrationStartDate: true,
+          registrationEndDate: true,
+          status: true,
+          createdAt: true,
+          updatedAt: true,
           organization: {
             select: {
               id: true,
@@ -1207,15 +1345,19 @@ export class EventsService {
       'edit_event',
     );
 
-    const { clientPage, ...patchFields } = updateEventDto;
+    const { clientPage, cardImageUrl, ...patchFields } = updateEventDto;
     const updateData: Record<string, unknown> = { ...patchFields };
     for (const k of Object.keys(updateData)) {
       if (updateData[k] === undefined) {
         delete updateData[k];
       }
     }
-
-    const auditChanges = diffEventUpdateForAudit(event, updateEventDto);
+    if (
+      cardImageUrl !== undefined &&
+      updateEventDto.logoUrl === undefined
+    ) {
+      updateData.logoUrl = cardImageUrl;
+    }
 
     // Gerar slug se o nome ou slug foi alterado
     if (updateEventDto.name || updateEventDto.slug) {
@@ -1247,6 +1389,8 @@ export class EventsService {
       throw new BadRequestException('No fields to update');
     }
 
+    const auditChanges = diffEventUpdateAgainstData(event, updateData);
+
     const updatedEvent = await prismaWrite.event.update({
       where: { id },
       data: updateData as Prisma.EventUpdateInput,
@@ -1272,24 +1416,22 @@ export class EventsService {
       },
     });
 
-    if (auditChanges.length > 0) {
-      const summary = summarizeEventFieldChanges(auditChanges);
-      await this.organizationsService.recordOrganizationAuditLog({
-        organizationId: event.organizationId,
-        actorUserId: userId,
-        ip: clientIp ?? null,
-        action: summary
-          ? `Editou o evento "${updatedEvent.name}" (${summary})`
-          : `Editou o evento "${updatedEvent.name}"`,
-        metadata: {
-          kind: 'EVENT_UPDATE',
-          eventId: id,
-          page: clientPage ?? 'event-edit',
-          fieldsEdited: auditChanges.map((c) => c.field),
-          changes: auditChanges,
-        } as Prisma.InputJsonValue,
-      });
-    }
+    const summary = summarizeEventFieldChanges(auditChanges);
+    await this.organizationsService.recordOrganizationAuditLog({
+      organizationId: event.organizationId,
+      actorUserId: userId,
+      ip: clientIp ?? null,
+      action: summary
+        ? `Editou o evento "${updatedEvent.name}" (${summary})`
+        : `Editou o evento "${updatedEvent.name}"`,
+      metadata: {
+        kind: 'EVENT_UPDATE',
+        eventId: id,
+        page: clientPage ?? 'event-edit',
+        fieldsEdited: auditChanges.map((c) => c.field),
+        changes: auditChanges,
+      } as Prisma.InputJsonValue,
+    });
 
     return {
       message: 'Event updated successfully',
@@ -1383,6 +1525,59 @@ export class EventsService {
     return {
       message: 'Topic updated successfully',
       data: { topic: updatedTopic },
+    };
+  }
+
+  async reorderTopics(
+    userId: string,
+    eventId: string,
+    dto: ReorderEventTopicsDto,
+  ) {
+    this.validateUUID(eventId, 'event ID');
+    await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
+
+    const prismaWrite = this.prisma.getWriteClient();
+
+    const existing = await prismaWrite.eventTopic.findMany({
+      where: { eventId },
+      select: { id: true },
+    });
+    const existingIds = new Set(existing.map((t) => t.id));
+    const incoming = dto.topicIds;
+
+    if (incoming.length !== existingIds.size) {
+      throw new BadRequestException(
+        'topicIds must list every event topic exactly once (same length as current topics)',
+      );
+    }
+    if (new Set(incoming).size !== incoming.length) {
+      throw new BadRequestException('topicIds must not contain duplicates');
+    }
+    for (const id of incoming) {
+      if (!existingIds.has(id)) {
+        throw new BadRequestException(
+          `Topic ${id} does not belong to this event`,
+        );
+      }
+    }
+
+    await prismaWrite.$transaction(
+      incoming.map((id, order) =>
+        prismaWrite.eventTopic.update({
+          where: { id },
+          data: { order },
+        }),
+      ),
+    );
+
+    const topics = await prismaWrite.eventTopic.findMany({
+      where: { eventId },
+      orderBy: { order: 'asc' },
+    });
+
+    return {
+      message: 'Topics reordered successfully',
+      data: { topics },
     };
   }
 

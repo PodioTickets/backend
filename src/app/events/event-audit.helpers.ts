@@ -80,6 +80,60 @@ export function diffEventUpdateForAudit(
   return out;
 }
 
+/**
+ * Diff do que de fato vai no `prisma.event.update` (inclui slug recalculado, datas como Date, etc.).
+ * Evita audit vazio quando o DTO não reflete o payload final.
+ */
+export function diffEventUpdateAgainstData(
+  before: Event,
+  updateData: Record<string, unknown>,
+): Array<{ field: string; old: unknown; new: unknown }> {
+  const out: Array<{ field: string; old: unknown; new: unknown }> = [];
+  for (const key of Object.keys(updateData)) {
+    const rawNew = updateData[key];
+    if (rawNew === undefined) continue;
+
+    const oldVal = before[key as keyof Event];
+
+    if ((DATE_FIELDS as readonly string[]).includes(key)) {
+      const newTime =
+        rawNew instanceof Date
+          ? rawNew.getTime()
+          : new Date(String(rawNew)).getTime();
+      const oldTime =
+        oldVal instanceof Date
+          ? oldVal.getTime()
+          : typeof oldVal === 'string'
+            ? new Date(oldVal).getTime()
+            : NaN;
+      if (
+        newTime === oldTime ||
+        (Number.isNaN(oldTime) && Number.isNaN(newTime))
+      ) {
+        continue;
+      }
+      const newAsDate =
+        rawNew instanceof Date ? rawNew : new Date(String(rawNew));
+      out.push({
+        field: key,
+        old: serializeAuditValue(oldVal),
+        new: serializeAuditValue(newAsDate),
+      });
+      continue;
+    }
+
+    if (oldVal === rawNew) continue;
+    if (String(oldVal ?? '') === String(rawNew ?? '')) continue;
+
+    out.push({
+      field: key,
+      old: serializeAuditValue(oldVal),
+      new: serializeAuditValue(rawNew),
+    });
+  }
+  return out;
+}
+
 export function summarizeEventFieldChanges(
   changes: Array<{ field: string }>,
 ): string {

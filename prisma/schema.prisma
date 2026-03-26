@@ -104,7 +104,9 @@ enum VoucherStatus {
   INACTIVE
 }
 
-/** Central de comunicação — envios por evento (painel organizador) */
+/**
+ * Central de comunicação — envios por evento (painel organizador)
+ */
 enum EventNotificationStatus {
   review
   sent
@@ -146,17 +148,17 @@ model User {
   updatedAt             DateTime      @updatedAt
 
   // Relations
-  registrations        Registration[]       @relation("Participant")
-  contactMessages      ContactMessage[]
-  payments             Payment[]
-  invitedRegistrations Registration[]       @relation("InvitedBy")
-  linkedUsersAsMain    LinkedUser[]         @relation("MainUser")
-  linkedUsersAsLinked  LinkedUser[]         @relation("LinkedUser")
-  organizationMembers  OrganizationMember[]
-  organizationAuditLogs OrganizationAuditLog[]
+  registrations             Registration[]             @relation("Participant")
+  contactMessages           ContactMessage[]
+  payments                  Payment[]
+  invitedRegistrations      Registration[]             @relation("InvitedBy")
+  linkedUsersAsMain         LinkedUser[]               @relation("MainUser")
+  linkedUsersAsLinked       LinkedUser[]               @relation("LinkedUser")
+  organizationMembers       OrganizationMember[]
+  organizationAuditLogs     OrganizationAuditLog[]
   organizerAuditPageDedupes OrganizerAuditPageDedupe[]
-  orders               Order[]
-  eventNotificationsCreated EventNotification[] @relation("EventNotificationCreator")
+  orders                    Order[]
+  eventNotificationsCreated EventNotification[]        @relation("EventNotificationCreator")
 
   // Índices compostos para permitir mesmo email em contas diferentes
   @@unique([email, accountType])
@@ -203,10 +205,10 @@ model Organization {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  members         OrganizationMember[]
-  events          Event[]
-  contactMessages ContactMessage[]
-  auditLogs       OrganizationAuditLog[]
+  members          OrganizationMember[]
+  events           Event[]
+  contactMessages  ContactMessage[]
+  auditLogs        OrganizationAuditLog[]
   auditPageDedupes OrganizerAuditPageDedupe[]
 
   @@index([name])
@@ -224,8 +226,8 @@ model OrganizationMember {
   createdAt      DateTime               @default(now())
   updatedAt      DateTime               @updatedAt
 
-  organization Organization                   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  user         User                           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization  Organization                    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user          User                            @relation(fields: [userId], references: [id], onDelete: Cascade)
   eventAccesses OrganizationMemberEventAccess[]
 
   @@unique([organizationId, userId])
@@ -236,9 +238,9 @@ model OrganizationMember {
 
 /// Whitelist de eventos por membro. Sem registros = acesso a todos os eventos da organização (política permissiva para colaboradores).
 model OrganizationMemberEventAccess {
-  id                   String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  organizationMemberId String @db.Uuid
-  eventId              String @db.Uuid
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationMemberId String   @db.Uuid
+  eventId              String   @db.Uuid
   createdAt            DateTime @default(now())
 
   member OrganizationMember @relation(fields: [organizationMemberId], references: [id], onDelete: Cascade)
@@ -303,22 +305,22 @@ model Event {
   createdAt             DateTime    @default(now())
   updatedAt             DateTime    @updatedAt
 
-  organization     Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  topics           EventTopic[]
-  modalities       Modality[]
-  kits             Kit[]
-  registrations    Registration[]
-  orders           Order[]
-  questions        Question[]
-  locations        EventLocation[]
-  ContactMessage   ContactMessage[]
-  modalityGroups   ModalityGroup[]
-  coupons          Coupon[]
-  ticketCategories TicketCategory[]
-  tickets          Ticket[]
-  products         Product[]
+  organization       Organization                    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  topics             EventTopic[]
+  modalities         Modality[]
+  kits               Kit[]
+  registrations      Registration[]
+  orders             Order[]
+  questions          Question[]
+  locations          EventLocation[]
+  ContactMessage     ContactMessage[]
+  modalityGroups     ModalityGroup[]
+  coupons            Coupon[]
+  ticketCategories   TicketCategory[]
+  tickets            Ticket[]
+  products           Product[]
   // slug já tem índice automático via @unique, não precisa de índice explícito
-  vouchers         Voucher[]
+  vouchers           Voucher[]
   memberAccessGrants OrganizationMemberEventAccess[]
   eventNotifications EventNotification[]
 
@@ -335,7 +337,9 @@ model EventNotification {
   messageHtml String                  @db.Text
   channels    String[]
   status      EventNotificationStatus @default(review)
-  /** Data/hora exibida na lista (v1 = criação do registro; futuro: pode atualizar ao enviar) */
+  /**
+   * Data/hora exibida na lista (v1 = criação do registro; futuro: pode atualizar ao enviar)
+   */
   occurredAt  DateTime                @default(now())
   createdById String?                 @db.Uuid
   createdAt   DateTime                @default(now())
@@ -349,15 +353,17 @@ model EventNotification {
 }
 
 model EventTopic {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  eventId   String   @db.Uuid
-  title     String
-  content   String
-  isEnabled Boolean  @default(true)
-  isDefault Boolean  @default(false) // Tópicos padrão: Descrição, Kit, Premiação, Regulamento
-  order     Int      @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId    String   @db.Uuid
+  title      String
+  content    String
+  isEnabled  Boolean  @default(true)
+  isDefault  Boolean  @default(false) // Tópicos padrão: Descrição, Kit, Premiação, Regulamento
+  /// Ex.: descrição principal obrigatória no painel (não confundir com validação de formulário).
+  isRequired Boolean  @default(false)
+  order      Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
 
@@ -545,6 +551,7 @@ model Question {
   question   String
   type       String   @default("text") // text, select, checkbox, radio
   options    Json? // Para tipos select, radio, checkbox
+  appliesTo  String? // 'all' ou JSON array de ticket IDs
   isRequired Boolean  @default(false)
   order      Int      @default(0)
   createdAt  DateTime @default(now())
@@ -770,8 +777,8 @@ model TicketBatch {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
-  ticket         Ticket               @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  registrations  RegistrationTicket[]
+  ticket        Ticket               @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  registrations RegistrationTicket[]
 
   @@index([ticketId])
   @@index([ticketId, startDate, endDate])

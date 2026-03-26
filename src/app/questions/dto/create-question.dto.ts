@@ -22,6 +22,9 @@ export class CreateQuestionDto {
   @Min(0)
   @Type(() => Number)
   order?: number;
+
+  @IsOptional()
+  appliesTo?: string | string[];
 }
 
 export class UpdateQuestionDto {
@@ -46,5 +49,8 @@ export class UpdateQuestionDto {
   @Min(0)
   @Type(() => Number)
   order?: number;
+
+  @IsOptional()
+  appliesTo?: string | string[];
 }
 

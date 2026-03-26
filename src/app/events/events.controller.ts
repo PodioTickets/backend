@@ -10,6 +10,7 @@ import {
   UseGuards,
   Request,
   BadRequestException,
+  Header,
 } from '@nestjs/common';
 import type { Request as ExpressRequest } from 'express';
 import {
@@ -24,8 +25,19 @@ import {
 import { plainToClass } from 'class-transformer';
 import { validate } from 'class-validator';
 import { EventsService } from './events.service';
-import { CreateEventDto, UpdateEventDto, FilterEventsDto, SearchEventsDto } from './dto/create-event.dto';
-import { CreateEventTopicDto, UpdateEventTopicDto, CreateEventLocationDto } from './dto/event-topic.dto';
+import {
+  CreateEventDto,
+  UpdateEventDto,
+  FilterEventsDto,
+  SearchEventsDto,
+  SearchEventLocationsDto,
+} from './dto/create-event.dto';
+import {
+  CreateEventTopicDto,
+  UpdateEventTopicDto,
+  ReorderEventTopicsDto,
+  CreateEventLocationDto,
+} from './dto/event-topic.dto';
 import { DashboardQueryDto } from './dto/dashboard.dto';
 import { FinancialQueryDto } from './dto/financial.dto';
 import { RegistrationsQueryDto } from './dto/registrations.dto';
@@ -65,6 +77,24 @@ export class EventsController {
       createEventDto,
       clientIp(req),
     );
+  }
+
+  @Get('search/locations')
+  @Header('Cache-Control', 'public, max-age=300, s-maxage=300, stale-while-revalidate=120')
+  @ApiOperation({
+    summary: 'Facetas de local (estado → cidades)',
+    description:
+      'Agregação DISTINCT no banco: estados e cidades com pelo menos um evento que passaria pelos mesmos filtros opcionais de GET /search (sem state/city). Payload mínimo para filtros em cascata na home/busca.',
+  })
+  @ApiQuery({ name: 'q', required: false, description: 'Igual ao search: restringe facetas a eventos que batem na busca textual' })
+  @ApiQuery({ name: 'country', required: false })
+  @ApiQuery({ name: 'startDate', required: false })
+  @ApiQuery({ name: 'endDate', required: false })
+  @ApiQuery({ name: 'status', required: false, enum: ['DRAFT', 'PUBLISHED', 'SUSPENDED', 'CANCELLED', 'COMPLETED'] })
+  @ApiQuery({ name: 'includePast', required: false, type: Boolean })
+  @ApiResponse({ status: 200, description: 'Árvore estado → cidades ordenada (pt-BR)' })
+  searchLocations(@Query() dto: SearchEventLocationsDto) {
+    return this.eventsService.searchLocationFacets(dto);
   }
 
   @Get('search')
@@ -189,6 +219,28 @@ export class EventsController {
   @ApiResponse({ status: 404, description: 'Event not found' })
   createTopic(@Request() req, @Param('eventId') eventId: string, @Body() createTopicDto: CreateEventTopicDto) {
     return this.eventsService.createTopic(req.user.id, eventId, createTopicDto);
+  }
+
+  @Patch(':eventId/topics/reorder')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Reorder event topics',
+    description:
+      'Define a ordem de todos os tópicos em uma única requisição. Envie `topicIds` na ordem desejada (cada id deve existir no evento, sem duplicar).',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiBody({ type: ReorderEventTopicsDto })
+  @ApiResponse({ status: 200, description: 'Topics reordered successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid topicIds payload' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  reorderTopics(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('eventId') eventId: string,
+    @Body() body: ReorderEventTopicsDto,
+  ) {
+    return this.eventsService.reorderTopics(req.user.id, eventId, body);
   }
 
   @Patch(':eventId/topics/:topicId')

@@ -5,8 +5,11 @@ import {
   IsInt,
   Min,
   IsUrl,
+  IsArray,
+  IsUUID,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 
 export class CreateEventTopicDto {
   @IsString()
@@ -25,11 +28,31 @@ export class CreateEventTopicDto {
 
   @IsOptional()
   @IsBoolean()
+  @Type(() => Boolean)
   @ApiPropertyOptional({
     description: 'Whether the event topic is enabled',
     example: true,
   })
   isEnabled?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  @ApiPropertyOptional({
+    description:
+      'Tópico do sistema (ex.: descrição, regulamento). Não pode ser excluído, apenas desativado.',
+    example: false,
+  })
+  isDefault?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  @ApiPropertyOptional({
+    description: 'Marca o tópico como obrigatório no fluxo do organizador',
+    example: false,
+  })
+  isRequired?: boolean;
 
   @IsOptional()
   @IsInt()
@@ -60,11 +83,30 @@ export class UpdateEventTopicDto {
 
   @IsOptional()
   @IsBoolean()
+  @Type(() => Boolean)
   @ApiPropertyOptional({
     description: 'Whether the event topic is enabled',
     example: true,
   })
   isEnabled?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  @ApiPropertyOptional({
+    description: 'Tópico padrão do sistema (não excluível)',
+    example: false,
+  })
+  isDefault?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  @ApiPropertyOptional({
+    description: 'Obrigatório no fluxo do organizador',
+    example: false,
+  })
+  isRequired?: boolean;
 
   @IsOptional()
   @IsInt()
@@ -74,6 +116,22 @@ export class UpdateEventTopicDto {
     example: 0,
   })
   order?: number;
+}
+
+/** Lista ordenada de IDs: posição no array = novo `order` (0, 1, 2, …). */
+export class ReorderEventTopicsDto {
+  @IsArray()
+  @IsUUID(undefined, { each: true })
+  @ApiProperty({
+    description:
+      'UUIDs de todos os tópicos do evento, na ordem desejada (primeiro item = order 0)',
+    type: [String],
+    example: [
+      'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+      'b2c3d4e5-f6a7-8901-bcde-f12345678901',
+    ],
+  })
+  topicIds: string[];
 }
 
 export class CreateEventLocationDto {
