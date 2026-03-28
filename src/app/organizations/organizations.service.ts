@@ -9,6 +9,7 @@ import {
   PutMemberEventsDto,
   PatchMemberSettingsDto,
   OrganizationAuditLogQueryDto,
+  AdminAuditLogQueryDto,
 } from './dto/organization.dto';
 import { OrganizationMemberRole } from '@prisma/client';
 import { MFAService } from '../../common/services/mfa.service';
@@ -24,6 +25,8 @@ import {
   type OrganizerPermissionsMap,
 } from './constants/organizer-permissions';
 import { resolveOrganizerPageViewActionLabel } from './organizer-audit-page-label.util';
+import { formatAuditLogItemForResponse } from './audit-log-item-format.util';
+import { buildAuditChangeDetails } from './audit-log-change-details.util';
 
 @Injectable()
 export class OrganizationsService {
@@ -1741,17 +1744,130 @@ export class OrganizationsService {
     return {
       message: 'Audit logs fetched successfully',
       data: {
-        items: items.map((row) => ({
-          id: row.id,
-          ip: row.ip,
-          userId: row.actorUserId,
-          userName: row.actor
-            ? `${row.actor.firstName} ${row.actor.lastName}`.trim()
-            : null,
-          action: row.action,
-          occurredAt: row.occurredAt,
-          metadata: row.metadata,
-        })),
+        items: items.map((row) => {
+          const { action, editedFields } = formatAuditLogItemForResponse(
+            row.action,
+            row.metadata,
+          );
+          return {
+            id: row.id,
+            ip: row.ip,
+            userId: row.actorUserId,
+            userName: row.actor
+              ? `${row.actor.firstName} ${row.actor.lastName}`.trim()
+              : null,
+            action,
+            editedFields,
+            occurredAt: row.occurredAt,
+            metadata: row.metadata,
+          };
+        }),
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit) || 0,
+        },
+      },
+    };
+  }
+
+  /**
+   * Lista todos os audit logs (todas as organizações), com metadata completa
+   * e `changeDetails` quando houver `metadata.changes`.
+   * Nota: a rota não exige papel admin até nova definição (só JWT).
+   */
+  async listAuditLogsAsAdmin(query: AdminAuditLogQueryDto) {
+    const prismaRead = this.prisma.getReadClient();
+    const page = query.page ?? 1;
+    const limit = Math.min(query.limit ?? 20, 100);
+    const where: Prisma.OrganizationAuditLogWhereInput = {};
+    if (query.organizationId) {
+      where.organizationId = query.organizationId;
+    }
+    if (query.q?.trim()) {
+      where.action = {
+        contains: query.q.trim(),
+        mode: 'insensitive',
+      };
+    }
+    if (query.from || query.to) {
+      where.occurredAt = {};
+      if (query.from) {
+        (where.occurredAt as Prisma.DateTimeFilter).gte = new Date(query.from);
+      }
+      if (query.to) {
+        const t = new Date(query.to);
+        t.setUTCHours(23, 59, 59, 999);
+        (where.occurredAt as Prisma.DateTimeFilter).lte = t;
+      }
+    }
+    if (query.kind?.trim()) {
+      where.metadata = {
+        path: ['kind'],
+        equals: query.kind.trim(),
+      };
+    }
+    const [items, total] = await Promise.all([
+      prismaRead.organizationAuditLog.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { occurredAt: 'desc' },
+        include: {
+          actor: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+            },
+          },
+          organization: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+        },
+      }),
+      prismaRead.organizationAuditLog.count({ where }),
+    ]);
+    return {
+      message: 'Audit logs fetched successfully (admin)',
+      data: {
+        items: items.map((row) => {
+          const { action, editedFields } = formatAuditLogItemForResponse(
+            row.action,
+            row.metadata,
+          );
+          const meta =
+            row.metadata &&
+            typeof row.metadata === 'object' &&
+            !Array.isArray(row.metadata)
+              ? (row.metadata as Record<string, unknown>)
+              : null;
+          const kind =
+            meta && typeof meta.kind === 'string' ? meta.kind : null;
+          return {
+            id: row.id,
+            organizationId: row.organizationId,
+            organization: row.organization,
+            ip: row.ip,
+            userId: row.actorUserId,
+            userName: row.actor
+              ? `${row.actor.firstName} ${row.actor.lastName}`.trim()
+              : null,
+            kind,
+            action,
+            editedFields,
+            changeDetails: buildAuditChangeDetails(row.metadata),
+            occurredAt: row.occurredAt,
+            metadata: row.metadata,
+            storedAction: row.action,
+          };
+        }),
         pagination: {
           page,
           limit,

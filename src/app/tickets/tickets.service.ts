@@ -532,14 +532,11 @@ export class TicketsService {
       select: { organizationId: true, name: true },
     });
     if (eventRecord) {
-      const summaryJoined = auditLabels.join(', ');
       await this.organizationsService.recordOrganizationAuditLog({
         organizationId: eventRecord.organizationId,
         actorUserId: userId,
         ip: clientIp ?? null,
-        action: summaryJoined
-          ? `Editou o ingresso "${updatedTicket.name}" do evento "${eventRecord.name}" (${summaryJoined})`
-          : `Editou o ingresso "${updatedTicket.name}" do evento "${eventRecord.name}"`,
+        action: `Editou o ingresso "${updatedTicket.name}" do evento "${eventRecord.name}"`,
         metadata: {
           kind: 'TICKET_UPDATE',
           eventId,

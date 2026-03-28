@@ -31,10 +31,7 @@ import {
   Prisma,
 } from '@prisma/client';
 import { generateSlug, generateUniqueSlug } from '../../helpers/SlugHelper';
-import {
-  diffEventUpdateAgainstData,
-  summarizeEventFieldChanges,
-} from './event-audit.helpers';
+import { diffEventUpdateAgainstData } from './event-audit.helpers';
 
 @Injectable()
 export class EventsService {
@@ -1416,14 +1413,11 @@ export class EventsService {
       },
     });
 
-    const summary = summarizeEventFieldChanges(auditChanges);
     await this.organizationsService.recordOrganizationAuditLog({
       organizationId: event.organizationId,
       actorUserId: userId,
       ip: clientIp ?? null,
-      action: summary
-        ? `Editou o evento "${updatedEvent.name}" (${summary})`
-        : `Editou o evento "${updatedEvent.name}"`,
+      action: `Editou o evento "${updatedEvent.name}"`,
       metadata: {
         kind: 'EVENT_UPDATE',
         eventId: id,

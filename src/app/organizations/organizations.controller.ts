@@ -32,6 +32,7 @@ import {
   PutMemberEventsDto,
   PatchMemberSettingsDto,
   OrganizationAuditLogQueryDto,
+  AdminAuditLogQueryDto,
   RecordOrganizerPageViewDto,
 } from './dto/organization.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -561,6 +562,28 @@ export class OrganizationsController {
   @ApiResponse({ status: 401, description: 'Unauthorized - Invalid or missing bypass key' })
   async createOrganizationAsAdmin(@Body() createDto: CreateOrganizationDto) {
     return this.organizationsService.createOrganization(createDto);
+  }
+
+  @Get('admin/audit-logs')
+  @NoCache()
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: '[ADMIN] List all organization audit logs',
+    description:
+      'Paginated audit trail across organizations. Includes full metadata and `changeDetails` (field, label, old/new values) when the log has `metadata.changes`. Filter by organizationId and/or metadata.kind. (Checagem de papel admin temporariamente desabilitada.)',
+  })
+  @ApiQuery({ name: 'organizationId', required: false })
+  @ApiQuery({ name: 'kind', required: false, description: 'e.g. EVENT_UPDATE, TICKET_UPDATE, PAGE_VIEW' })
+  @ApiQuery({ name: 'q', required: false })
+  @ApiQuery({ name: 'from', required: false })
+  @ApiQuery({ name: 'to', required: false })
+  @ApiQuery({ name: 'page', required: false })
+  @ApiQuery({ name: 'limit', required: false })
+  @ApiResponse({ status: 200, description: 'Audit logs retrieved successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  async listAuditLogsAsAdmin(@Query() query: AdminAuditLogQueryDto) {
+    return this.organizationsService.listAuditLogsAsAdmin(query);
   }
 
   @Get('admin/:organizationId')
