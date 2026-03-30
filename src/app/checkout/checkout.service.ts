@@ -1464,20 +1464,30 @@ export class CheckoutService {
       };
     });
 
-    // Buscar produtos inclusos nos tickets (TicketProduct) para cada ticket
-    const ticketProductsMap = new Map();
-    for (const ticketItem of dto.tickets) {
-      const ticketProducts = await prisma.ticketProduct.findMany({
-        where: { ticketId: ticketItem.ticketId },
-        include: {
-          product: {
+    // Produtos inclusos por ticket: uma consulta para todos os ticketIds do checkout
+    const ticketIdsUnique = [...new Set(dto.tickets.map((t) => t.ticketId))];
+    const allTicketProducts =
+      ticketIdsUnique.length > 0
+        ? await prisma.ticketProduct.findMany({
+            where: { ticketId: { in: ticketIdsUnique } },
+            orderBy: [{ ticketId: 'asc' }, { sortOrder: 'asc' }],
             include: {
-              variations: true,
+              product: {
+                include: {
+                  variations: true,
+                },
+              },
             },
-          },
-        },
-      });
-      ticketProductsMap.set(ticketItem.ticketId, ticketProducts);
+          })
+        : [];
+    const ticketProductsMap = new Map<string, typeof allTicketProducts>();
+    for (const row of allTicketProducts) {
+      const list = ticketProductsMap.get(row.ticketId);
+      if (list) {
+        list.push(row);
+      } else {
+        ticketProductsMap.set(row.ticketId, [row]);
+      }
     }
 
     // Formatar informações dos participantes usando dados do DTO e usuários encontrados

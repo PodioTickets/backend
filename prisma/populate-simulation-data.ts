@@ -113,6 +113,7 @@ async function main() {
             orderBy: { createdAt: 'desc' },
           },
           products: {
+            orderBy: { sortOrder: 'asc' },
             include: {
               product: {
                 include: {

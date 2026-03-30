@@ -144,7 +144,8 @@ export class ProductsService {
             orderBy: { name: 'asc' },
           },
         },
-        orderBy: { createdAt: 'desc' },
+        // Ordem estável para integração/UI: nome, depois id (desempate).
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
       }),
       prismaRead.product.count({ where: { eventId } }),
     ]);

@@ -1026,6 +1026,7 @@ export class EventsService {
               include: {
                 batches: true,
                 products: {
+                  orderBy: { sortOrder: 'asc' },
                   include: {
                     product: true,
                   },
@@ -1042,6 +1043,7 @@ export class EventsService {
               orderBy: { price: 'asc' },
             },
             products: {
+              orderBy: { sortOrder: 'asc' },
               include: {
                 product: {
                   include: {

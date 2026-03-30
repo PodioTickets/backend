@@ -1,6 +1,11 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { CreateTicketDto, UpdateTicketDto, FilterTicketsDto } from './dto/create-ticket.dto';
+import {
+  CreateTicketDto,
+  UpdateTicketDto,
+  FilterTicketsDto,
+  ReorderTicketProductsDto,
+} from './dto/create-ticket.dto';
 import { OrganizationsService } from '../organizations/organizations.service';
 import { Prisma } from '@prisma/client';
 import {
@@ -89,8 +94,9 @@ export class TicketsService {
         },
         products: createTicketDto.productIds
           ? {
-              create: createTicketDto.productIds.map((productId) => ({
+              create: createTicketDto.productIds.map((productId, index) => ({
                 productId,
+                sortOrder: index,
               })),
             }
           : undefined,
@@ -98,6 +104,7 @@ export class TicketsService {
       include: {
         batches: true,
         products: {
+          orderBy: { sortOrder: 'asc' },
           include: {
             product: true,
           },
@@ -135,6 +142,7 @@ export class TicketsService {
             orderBy: { price: 'asc' },
           },
           products: {
+            orderBy: { sortOrder: 'asc' },
             include: {
               product: {
                 include: {
@@ -208,6 +216,7 @@ export class TicketsService {
           orderBy: { price: 'asc' },
         },
         products: {
+          orderBy: { sortOrder: 'asc' },
           include: {
             product: {
               include: {
@@ -288,7 +297,7 @@ export class TicketsService {
       where: { id: ticketId },
       include: {
         registrations: true,
-        products: { select: { productId: true } },
+        products: { select: { productId: true }, orderBy: { sortOrder: 'asc' } },
         batches: {
           select: {
             id: true,
@@ -440,9 +449,10 @@ export class TicketsService {
         // Criar novos produtos se houver
         if (updateTicketDto.productIds.length > 0) {
           await tx.ticketProduct.createMany({
-            data: updateTicketDto.productIds.map((productId) => ({
+            data: updateTicketDto.productIds.map((productId, index) => ({
               ticketId,
               productId,
+              sortOrder: index,
             })),
           });
         }
@@ -491,6 +501,7 @@ export class TicketsService {
         include: {
           batches: true,
           products: {
+            orderBy: { sortOrder: 'asc' },
             include: {
               product: true,
             },
@@ -630,15 +641,19 @@ export class TicketsService {
         },
         products: originalTicket.products.length > 0
           ? {
-              create: originalTicket.products.map((tp) => ({
-                productId: tp.productId,
-              })),
+              create: [...originalTicket.products]
+                .sort((a, b) => a.sortOrder - b.sortOrder)
+                .map((tp, index) => ({
+                  productId: tp.productId,
+                  sortOrder: index,
+                })),
             }
           : undefined,
       },
       include: {
         batches: true,
         products: {
+          orderBy: { sortOrder: 'asc' },
           include: {
             product: true,
           },
@@ -660,6 +675,110 @@ export class TicketsService {
     return {
       message: 'Ticket duplicated successfully',
       data: { ticket: transformed },
+    };
+  }
+
+  /**
+   * Atualiza apenas sortOrder dos vínculos ticket–produto.
+   * Uma query UPDATE com VALUES (evita N round-trips) dentro de transação.
+   */
+  async reorderTicketProducts(
+    userId: string,
+    eventId: string,
+    ticketId: string,
+    dto: ReorderTicketProductsDto,
+    clientIp?: string | null,
+  ) {
+    await this.verifyOrganizerAccess(userId, eventId);
+
+    const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
+
+    const ticket = await prismaRead.ticket.findUnique({
+      where: { id: ticketId },
+      select: {
+        eventId: true,
+        name: true,
+        products: {
+          select: { productId: true },
+          orderBy: { sortOrder: 'asc' },
+        },
+      },
+    });
+
+    if (!ticket || ticket.eventId !== eventId) {
+      throw new NotFoundException('Ticket not found');
+    }
+
+    const currentIds = ticket.products.map((p) => p.productId);
+    const { productIds } = dto;
+
+    if (currentIds.length !== productIds.length) {
+      throw new BadRequestException(
+        'productIds must list every product linked to this ticket exactly once, in the new order',
+      );
+    }
+
+    const currentSet = new Set(currentIds);
+    for (const pid of productIds) {
+      if (!currentSet.has(pid)) {
+        throw new BadRequestException(
+          `Product ${pid} is not linked to this ticket`,
+        );
+      }
+    }
+
+    await prismaWrite.$transaction(async (tx) => {
+      if (productIds.length === 0) {
+        return;
+      }
+      const valueRows = Prisma.join(
+        productIds.map((id, i) => Prisma.sql`(${id}::uuid, ${i}::int)`),
+        ', ',
+      );
+      await tx.$executeRaw`
+        UPDATE "TicketProduct" AS tp
+        SET "sortOrder" = v.ord
+        FROM (VALUES ${valueRows}) AS v(pid, ord)
+        WHERE tp."ticketId" = ${ticketId}::uuid AND tp."productId" = v.pid
+      `;
+    });
+
+    const updated = await prismaRead.ticket.findUnique({
+      where: { id: ticketId },
+      include: {
+        products: {
+          orderBy: { sortOrder: 'asc' },
+          include: { product: true },
+        },
+      },
+    });
+
+    const eventRecord = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: { organizationId: true, name: true },
+    });
+    if (eventRecord) {
+      await this.organizationsService.recordOrganizationAuditLog({
+        organizationId: eventRecord.organizationId,
+        actorUserId: userId,
+        ip: clientIp ?? null,
+        action: `Reordenou os produtos do ingresso "${ticket.name}" do evento "${eventRecord.name}"`,
+        metadata: {
+          kind: 'TICKET_PRODUCTS_REORDER',
+          eventId,
+          ticketId,
+          productIds,
+        } as Prisma.InputJsonValue,
+      });
+    }
+
+    return {
+      message: 'Ticket products reordered successfully',
+      data: {
+        ticketId,
+        productIds: updated?.products.map((tp) => tp.productId) ?? [],
+      },
     };
   }
 

@@ -21,7 +21,12 @@ import {
   ApiQuery,
 } from '@nestjs/swagger';
 import { TicketsService } from './tickets.service';
-import { CreateTicketDto, UpdateTicketDto, FilterTicketsDto } from './dto/create-ticket.dto';
+import {
+  CreateTicketDto,
+  UpdateTicketDto,
+  FilterTicketsDto,
+  ReorderTicketProductsDto,
+} from './dto/create-ticket.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 
@@ -86,6 +91,37 @@ export class TicketsController {
   @ApiResponse({ status: 404, description: 'Ticket not found' })
   findOne(@Param('id') id: string) {
     return this.ticketsService.findOne(id);
+  }
+
+  @Patch('events/:eventId/:ticketId/products/reorder')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Reorder ticket products',
+    description:
+      'Updates display order only. Body must list every productId currently linked to the ticket, in the desired order (no additions or removals).',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiParam({ name: 'ticketId', description: 'Ticket UUID' })
+  @ApiBody({ type: ReorderTicketProductsDto })
+  @ApiResponse({ status: 200, description: 'Products reordered successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid productIds (wrong set or duplicates)' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  @ApiResponse({ status: 404, description: 'Ticket not found' })
+  reorderTicketProducts(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('eventId') eventId: string,
+    @Param('ticketId') ticketId: string,
+    @Body() body: ReorderTicketProductsDto,
+  ) {
+    return this.ticketsService.reorderTicketProducts(
+      req.user.id,
+      eventId,
+      ticketId,
+      body,
+      clientIp(req),
+    );
   }
 
   @Patch('events/:eventId/:ticketId')

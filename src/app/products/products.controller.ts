@@ -72,7 +72,8 @@ export class ProductsController {
   @NoCache()
   @ApiOperation({
     summary: 'List products',
-    description: 'Retrieves all products for a specific event with pagination',
+    description:
+      'Retrieves all products for a specific event with pagination. Results are ordered by name (A–Z), then by id for a stable sort across pages.',
   })
   @ApiParam({ name: 'eventId', description: 'Event UUID' })
   @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })

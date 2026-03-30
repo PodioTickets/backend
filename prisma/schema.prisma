@@ -821,16 +821,19 @@ model ProductVariation {
 }
 
 model TicketProduct {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  ticketId  String   @db.Uuid
-  productId String   @db.Uuid
-  createdAt DateTime @default(now())
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticketId   String   @db.Uuid
+  productId  String   @db.Uuid
+  /// Ordem de exibição por ingresso (0 = primeiro). Mesmo produto em tickets diferentes tem ordens independentes.
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
 
   ticket  Ticket  @relation(fields: [ticketId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@unique([ticketId, productId])
   @@index([ticketId])
+  @@index([ticketId, sortOrder])
   @@index([productId])
 }
 

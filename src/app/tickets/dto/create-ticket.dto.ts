@@ -10,7 +10,7 @@ import {
   Min,
   ArrayMinSize,
   ValidateIf,
-  IsNotEmpty,
+  ArrayUnique,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -191,6 +191,19 @@ export class UpdateTicketDto {
   @IsArray()
   @IsUUID(undefined, { each: true })
   productIds?: string[];
+}
+
+/** Lista ordenada com todos os productIds já vinculados ao ingresso (mesmo conjunto, nova ordem). */
+export class ReorderTicketProductsDto {
+  @IsArray()
+  @ArrayUnique()
+  @IsUUID(undefined, { each: true })
+  @ApiProperty({
+    description:
+      'All product UUIDs linked to this ticket, in the desired display order (same set as currently linked, no extras or omissions)',
+    type: [String],
+  })
+  productIds: string[];
 }
 
 export class FilterTicketsDto {

@@ -517,6 +517,7 @@ export class RegistrationsService {
                   },
                 },
                 products: {
+                  orderBy: { sortOrder: 'asc' },
                   include: {
                     product: {
                       include: {
@@ -745,6 +746,7 @@ export class RegistrationsService {
                   },
                 },
                 products: {
+                  orderBy: { sortOrder: 'asc' },
                   include: {
                     product: {
                       include: {
