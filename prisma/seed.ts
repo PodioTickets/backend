@@ -42,6 +42,14 @@ async function main() {
     });
   }
 
+  const allowedCodes = modalitiesTemplates.map((t) => t.code);
+  const removed = await prisma.modalityTemplate.deleteMany({
+    where: { code: { notIn: allowedCodes } },
+  });
+  if (removed.count > 0) {
+    console.log(`🗑️  Removed ${removed.count} modality template(s) not in seed list`);
+  }
+
   console.log(`✅ Seeded ${modalitiesTemplates.length} modality templates`);
 }
 
