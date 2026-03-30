@@ -959,7 +959,9 @@ export class EventsService {
     // Usar read replica para query de leitura
     const prismaRead = this.prisma.getReadClient();
 
-    const event = await prismaRead.event.findUnique({
+    // Duas queries: evita o mesmo ingresso ser carregado duas vezes (raiz + por categoria),
+    // o que gerava JOIN explosivo, resposta enorme e timeout ~10s no Nginx/proxy (502).
+    const eventBase = await prismaRead.event.findUnique({
       where: { slug },
       include: {
         organization: {
@@ -1017,50 +1019,7 @@ export class EventsService {
           orderBy: { createdAt: 'desc' },
         },
         ticketCategories: {
-          include: {
-            tickets: {
-              where: { isActive: true },
-              include: {
-                batches: true,
-                products: {
-                  orderBy: { sortOrder: 'asc' },
-                  include: {
-                    product: true,
-                  },
-                },
-              },
-            },
-          },
           orderBy: { order: 'asc' },
-        },
-        tickets: {
-          where: { isActive: true },
-          include: {
-            batches: {
-              orderBy: { price: 'asc' },
-            },
-            products: {
-              orderBy: { sortOrder: 'asc' },
-              include: {
-                product: {
-                  include: {
-                    variations: true,
-                  },
-                },
-              },
-            },
-            category: true,
-            kit: {
-              include: {
-                items: {
-                  include: {
-                    product: true,
-                  },
-                },
-              },
-            },
-          },
-          orderBy: { createdAt: 'desc' },
         },
         products: {
           include: {
@@ -1073,9 +1032,50 @@ export class EventsService {
       },
     });
 
-    if (!event) {
+    if (!eventBase) {
       throw new NotFoundException('Event not found');
     }
+
+    const tickets = await prismaRead.ticket.findMany({
+      where: { eventId: eventBase.id, isActive: true },
+      include: {
+        batches: {
+          orderBy: { price: 'asc' },
+        },
+        products: {
+          orderBy: { sortOrder: 'asc' },
+          include: {
+            product: {
+              include: {
+                variations: true,
+              },
+            },
+          },
+        },
+        category: true,
+        kit: {
+          include: {
+            items: {
+              include: {
+                product: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const ticketCategories = eventBase.ticketCategories.map((cat) => ({
+      ...cat,
+      tickets: tickets.filter((t) => t.categoryId === cat.id),
+    }));
+
+    const event = {
+      ...eventBase,
+      ticketCategories,
+      tickets,
+    };
 
     const now = new Date();
     const eventDate = event.eventDate instanceof Date ? event.eventDate : new Date(event.eventDate);
