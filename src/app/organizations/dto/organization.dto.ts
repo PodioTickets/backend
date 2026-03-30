@@ -262,6 +262,17 @@ export class OrganizationAuditLogQueryDto {
   limit?: number;
 }
 
+/** Filtros extras para listagem global de audit logs (admin). */
+export class AdminAuditLogQueryDto extends OrganizationAuditLogQueryDto {
+  @IsOptional()
+  @IsUUID('4')
+  organizationId?: string;
+
+  @IsOptional()
+  @IsString()
+  kind?: string;
+}
+
 export class UpdateMemberRoleDto {
   @IsEnum(OrganizationMemberRole)
   role: OrganizationMemberRole;

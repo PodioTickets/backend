@@ -1,7 +1,7 @@
 import type { Ticket, TicketBatch } from '@prisma/client';
 import type { UpdateTicketDto } from './dto/create-ticket.dto';
 
-const TICKET_FIELD_LABELS: Record<string, string> = {
+export const TICKET_FIELD_LABELS: Record<string, string> = {
   name: 'nome',
   description: 'descrição',
   categoryId: 'categoria',

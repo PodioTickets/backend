@@ -1,7 +1,7 @@
 import type { Product, ProductVariation } from '@prisma/client';
 import type { UpdateProductDto } from './dto/create-product.dto';
 
-const PRODUCT_FIELD_LABELS: Record<string, string> = {
+export const PRODUCT_FIELD_LABELS: Record<string, string> = {
   name: 'nome',
   image: 'imagem',
   isIncludedInTicket: 'incluso no ingresso',
