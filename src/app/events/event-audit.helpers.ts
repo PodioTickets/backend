@@ -26,6 +26,7 @@ export const EVENT_UPDATE_FIELD_LABELS: Record<string, string> = {
   registrationStartDate: 'início das inscrições',
   registrationEndDate: 'fim das inscrições',
   status: 'status',
+  kitSelectionDisplay: 'exibição de imagens do kit na escolha de ingressos',
 };
 
 export function serializeAuditValue(value: unknown): unknown {
@@ -118,6 +119,20 @@ export function diffEventUpdateAgainstData(
         field: key,
         old: serializeAuditValue(oldVal),
         new: serializeAuditValue(newAsDate),
+      });
+      continue;
+    }
+
+    if (key === 'kitSelectionDisplay') {
+      const norm = (v: unknown) =>
+        v === null || v === undefined ? 'null' : JSON.stringify(v);
+      if (norm(oldVal) === norm(rawNew)) {
+        continue;
+      }
+      out.push({
+        field: key,
+        old: serializeAuditValue(oldVal),
+        new: serializeAuditValue(rawNew),
       });
       continue;
     }

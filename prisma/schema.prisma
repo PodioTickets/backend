@@ -302,6 +302,8 @@ model Event {
   registrationStartDate DateTime
   registrationEndDate   DateTime
   status                EventStatus @default(DRAFT)
+  /// Opções avançadas de exibição de imagens do kit na escolha de ingressos (camelCase no JSON).
+  kitSelectionDisplay   Json?       @map("kit_selection_display")
   createdAt             DateTime    @default(now())
   updatedAt             DateTime    @updatedAt
 

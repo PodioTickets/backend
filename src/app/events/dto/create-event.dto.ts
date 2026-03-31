@@ -9,9 +9,12 @@ import {
   Max,
   IsUrl,
   ValidateNested,
+  ValidateIf,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import { EventStatus } from '@prisma/client';
+import { EventKitSelectionDisplayDto } from './kit-selection-display.dto';
 
 export class CreateEventDto {
   @IsString()
@@ -154,6 +157,14 @@ export class UpdateEventDto {
   @IsOptional()
   @IsString()
   clientPage?: string;
+
+  /** Exibição de imagens do kit na escolha de ingressos. `null` remove a configuração (cliente usa defaults). */
+  @ApiPropertyOptional({ type: EventKitSelectionDisplayDto, nullable: true })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null && v !== undefined)
+  @ValidateNested()
+  @Type(() => EventKitSelectionDisplayDto)
+  kitSelectionDisplay?: EventKitSelectionDisplayDto | null;
 }
 
 export class FilterEventsDto {

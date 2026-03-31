@@ -32,6 +32,10 @@ import {
 } from '@prisma/client';
 import { generateSlug, generateUniqueSlug } from '../../helpers/SlugHelper';
 import { diffEventUpdateAgainstData } from './event-audit.helpers';
+import {
+  UNCATEGORIZED_CATEGORY_KEY,
+  type EventKitSelectionDisplayDto,
+} from './dto/kit-selection-display.dto';
 
 @Injectable()
 export class EventsService {
@@ -66,6 +70,105 @@ export class EventsService {
       throw new BadRequestException(
         `Invalid ${fieldName} format. Expected UUID.`,
       );
+    }
+  }
+
+  /**
+   * Garante que kitSelectionDisplay referencia apenas tickets/categorias/produtos do evento.
+   * Duas leituras em paralelo (ingressos + categorias).
+   */
+  private async assertKitSelectionDisplayConsistent(
+    prismaRead: ReturnType<PrismaService['getReadClient']>,
+    eventId: string,
+    payload: EventKitSelectionDisplayDto,
+  ): Promise<void> {
+    const [tickets, categories] = await Promise.all([
+      prismaRead.ticket.findMany({
+        where: { eventId },
+        select: {
+          id: true,
+          categoryId: true,
+          products: { select: { productId: true } },
+        },
+      }),
+      prismaRead.ticketCategory.findMany({
+        where: { eventId },
+        select: { id: true },
+      }),
+    ]);
+
+    const ticketIds = new Set(tickets.map((t) => t.id));
+    const categoryIds = new Set(categories.map((c) => c.id));
+
+    const productIdsByTicket = new Map<string, Set<string>>();
+    for (const t of tickets) {
+      productIdsByTicket.set(
+        t.id,
+        new Set(t.products.map((p) => p.productId)),
+      );
+    }
+
+    const productIdsByCategoryKey = new Map<string, Set<string>>();
+    for (const t of tickets) {
+      const key = t.categoryId ?? UNCATEGORIZED_CATEGORY_KEY;
+      if (!productIdsByCategoryKey.has(key)) {
+        productIdsByCategoryKey.set(key, new Set());
+      }
+      const bucket = productIdsByCategoryKey.get(key)!;
+      for (const p of t.products) {
+        bucket.add(p.productId);
+      }
+    }
+
+    for (const [tid, pid] of Object.entries(
+      payload.primaryKitProductByTicketId,
+    )) {
+      this.validateUUID(tid, 'ticketId in primaryKitProductByTicketId');
+      this.validateUUID(pid, 'productId in primaryKitProductByTicketId');
+      if (!ticketIds.has(tid)) {
+        throw new BadRequestException(
+          `kitSelectionDisplay: ticket "${tid}" does not belong to this event`,
+        );
+      }
+      const allowed = productIdsByTicket.get(tid)!;
+      if (!allowed.has(pid)) {
+        throw new BadRequestException(
+          `kitSelectionDisplay: product "${pid}" is not linked to ticket "${tid}"`,
+        );
+      }
+    }
+
+    for (const [catKey, pid] of Object.entries(
+      payload.primaryKitProductByCategoryId,
+    )) {
+      this.validateUUID(pid, 'productId in primaryKitProductByCategoryId');
+
+      if (catKey !== UNCATEGORIZED_CATEGORY_KEY) {
+        this.validateUUID(catKey, 'categoryId in primaryKitProductByCategoryId');
+        if (!categoryIds.has(catKey)) {
+          throw new BadRequestException(
+            `kitSelectionDisplay: category "${catKey}" does not belong to this event`,
+          );
+        }
+      }
+
+      const allowed = productIdsByCategoryKey.get(catKey);
+      if (!allowed || allowed.size === 0) {
+        if (catKey === UNCATEGORIZED_CATEGORY_KEY) {
+          throw new BadRequestException(
+            `kitSelectionDisplay: no uncategorized tickets (or they have no kit products); fix "uncategorized" in primaryKitProductByCategoryId`,
+          );
+        }
+        throw new BadRequestException(
+          `kitSelectionDisplay: no tickets with kit products in category "${catKey}"`,
+        );
+      }
+
+      if (!allowed.has(pid)) {
+        throw new BadRequestException(
+          `kitSelectionDisplay: product "${pid}" is not among kit products for bucket "${catKey}"`,
+        );
+      }
     }
   }
 
@@ -821,6 +924,7 @@ export class EventsService {
           status: true,
           createdAt: true,
           updatedAt: true,
+          kitSelectionDisplay: true,
           // Contadores úteis sem carregar relações completas
           _count: {
             select: {
@@ -1334,6 +1438,7 @@ export class EventsService {
   ) {
     this.validateUUID(id, 'event ID');
     const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
 
     const event = await prismaWrite.event.findUnique({
       where: { id },
@@ -1349,7 +1454,12 @@ export class EventsService {
       'edit_event',
     );
 
-    const { clientPage, cardImageUrl, ...patchFields } = updateEventDto;
+    const {
+      clientPage,
+      cardImageUrl,
+      kitSelectionDisplay: kitSelDto,
+      ...patchFields
+    } = updateEventDto;
     const updateData: Record<string, unknown> = { ...patchFields };
     for (const k of Object.keys(updateData)) {
       if (updateData[k] === undefined) {
@@ -1387,6 +1497,19 @@ export class EventsService {
       updateData.registrationEndDate = new Date(
         updateEventDto.registrationEndDate,
       );
+    }
+
+    if (kitSelDto !== undefined) {
+      if (kitSelDto === null) {
+        updateData.kitSelectionDisplay = null;
+      } else {
+        await this.assertKitSelectionDisplayConsistent(
+          prismaRead,
+          id,
+          kitSelDto,
+        );
+        updateData.kitSelectionDisplay = kitSelDto;
+      }
     }
 
     if (Object.keys(updateData).length === 0) {
