@@ -837,28 +837,33 @@ export class EventsService {
       prismaRead.event.count({ where }),
     ]);
 
-    // Calcular valor total em vendas para cada evento
-    const eventsWithSales = await Promise.all(
-      events.map(async (event) => {
-        // Buscar todos os pedidos pagos deste evento
-        const totalSales = await prismaRead.order.aggregate({
-          where: {
-            eventId: event.id,
-            payment: {
-              status: 'PAID',
-            },
+    // Uma query agregada por eventId (evita N aggregates — um por evento da página)
+    const salesByEventId = new Map<string, number>();
+    if (events.length > 0) {
+      const salesRows = await prismaRead.order.groupBy({
+        by: ['eventId'],
+        where: {
+          eventId: { in: events.map((e) => e.id) },
+          payment: {
+            status: PaymentStatus.PAID,
           },
-          _sum: {
-            finalAmount: true,
-          },
-        });
+        },
+        _sum: {
+          finalAmount: true,
+        },
+      });
+      for (const row of salesRows) {
+        salesByEventId.set(
+          row.eventId,
+          this.normalizeToCents(row._sum.finalAmount),
+        );
+      }
+    }
 
-        return {
-          ...event,
-          totalSales: this.normalizeToCents(totalSales._sum.finalAmount),
-        };
-      }),
-    );
+    const eventsWithSales = events.map((event) => ({
+      ...event,
+      totalSales: salesByEventId.get(event.id) ?? 0,
+    }));
 
     return {
       message: 'Organizer events fetched successfully',
@@ -965,7 +970,7 @@ export class EventsService {
       where: { slug },
       include: {
         organization: {
-          include: {
+          include: {  
             members: {
               where: { role: 'OWNER' },
               include: {

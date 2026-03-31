@@ -1490,9 +1490,30 @@ export class CheckoutService {
       }
     }
 
+    const additionalProductIds = new Set<string>();
+    for (const p of dto.participants) {
+      if (p.products) {
+        for (const item of p.products) {
+          additionalProductIds.add(item.productId);
+        }
+      }
+    }
+    const additionalProductsById = new Map<
+      string,
+      { id: string; name: string; basePrice: number; variations: { id: string; name: string; price: number }[] }
+    >();
+    if (additionalProductIds.size > 0) {
+      const loaded = await prisma.product.findMany({
+        where: { id: { in: [...additionalProductIds] } },
+        include: { variations: true },
+      });
+      for (const prod of loaded) {
+        additionalProductsById.set(prod.id, prod);
+      }
+    }
+
     // Formatar informações dos participantes usando dados do DTO e usuários encontrados
-    const participants = await Promise.all(
-      dto.participants.map(async (dtoParticipant, index) => {
+    const participants = dto.participants.map((dtoParticipant, index) => {
         const user = participantUsers.find((u) => u.email === dtoParticipant.email);
 
         // Buscar respostas das perguntas deste participante
@@ -1507,14 +1528,10 @@ export class CheckoutService {
           };
         }) || [];
 
-        // Buscar produtos completos deste participante (produtos adicionais)
         const participantProducts = [];
         if (dtoParticipant.products) {
           for (const productItem of dtoParticipant.products) {
-            const product = await prisma.product.findUnique({
-              where: { id: productItem.productId },
-              include: { variations: true },
-            });
+            const product = additionalProductsById.get(productItem.productId);
 
             if (product) {
               let productPrice = product.basePrice;
@@ -1575,8 +1592,7 @@ export class CheckoutService {
           products: participantProducts, // Produtos adicionais
           includedProducts: formattedIncludedProducts, // Produtos inclusos no ingresso
         };
-      })
-    );
+    });
 
     // Formatar informações dos produtos
     let products: any[] = [];

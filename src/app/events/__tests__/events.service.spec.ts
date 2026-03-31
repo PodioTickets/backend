@@ -4,7 +4,7 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { OrganizerMemberAccessService } from '../../organizations/organizer-member-access.service';
 import { OrganizationsService } from '../../organizations/organizations.service';
 import { NotFoundException, BadRequestException } from '@nestjs/common';
-import { EventStatus } from '@prisma/client';
+import { EventStatus, PaymentStatus } from '@prisma/client';
 
 describe('EventsService', () => {
   let service: EventsService;
@@ -25,6 +25,9 @@ describe('EventsService', () => {
       update: jest.fn(),
       delete: jest.fn(),
       count: jest.fn(),
+    },
+    order: {
+      groupBy: jest.fn(),
     },
     eventTopic: {
       create: jest.fn(),
@@ -205,6 +208,87 @@ describe('EventsService', () => {
           }),
         }),
       );
+    });
+  });
+
+  describe('findByOrganizer', () => {
+    const futureDate = new Date('2099-06-15T12:00:00.000Z');
+
+    const baseEventRow = (id: string, name: string) => ({
+      id,
+      name,
+      description: null,
+      bannerUrl: null,
+      logoUrl: null,
+      slug: `${id}-slug`,
+      location: null,
+      city: 'SP',
+      state: 'SP',
+      country: 'BR',
+      eventDate: futureDate,
+      registrationEndDate: futureDate,
+      status: EventStatus.PUBLISHED,
+      createdAt: futureDate,
+      updatedAt: futureDate,
+      _count: { registrations: 0, modalities: 0 },
+    });
+
+    beforeEach(() => {
+      mockOrganizerMemberAccess.getMemberForOrganizerUser.mockResolvedValue({
+        organizationId: 'org-1',
+      });
+      mockOrganizerMemberAccess.buildOrganizerEventsWhere.mockReturnValue({
+        organizationId: 'org-1',
+      });
+    });
+
+    it('aggregates paid sales with a single order.groupBy for the current page', async () => {
+      const ev1 = baseEventRow('e1111111-1111-1111-1111-111111111111', 'Event A');
+      const ev2 = baseEventRow('e2222222-2222-2222-2222-222222222222', 'Event B');
+      mockPrismaService.event.findMany.mockResolvedValue([ev1, ev2]);
+      mockPrismaService.event.count.mockResolvedValue(2);
+      mockPrismaService.order.groupBy.mockResolvedValue([
+        { eventId: ev1.id, _sum: { finalAmount: 10_000 } },
+        { eventId: ev2.id, _sum: { finalAmount: 2_500 } },
+      ]);
+
+      const result = await service.findByOrganizer('user-1', { page: 1, limit: 20 });
+
+      expect(mockPrismaService.order.groupBy).toHaveBeenCalledTimes(1);
+      expect(mockPrismaService.order.groupBy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          by: ['eventId'],
+          where: expect.objectContaining({
+            eventId: { in: [ev1.id, ev2.id] },
+            payment: { status: PaymentStatus.PAID },
+          }),
+          _sum: { finalAmount: true },
+        }),
+      );
+      expect(result.data.events).toHaveLength(2);
+      expect(result.data.events[0].totalSales).toBe(10_000);
+      expect(result.data.events[1].totalSales).toBe(2_500);
+    });
+
+    it('does not call order.groupBy when the page has no events', async () => {
+      mockPrismaService.event.findMany.mockResolvedValue([]);
+      mockPrismaService.event.count.mockResolvedValue(0);
+
+      await service.findByOrganizer('user-1', { page: 1, limit: 20 });
+
+      expect(mockPrismaService.order.groupBy).not.toHaveBeenCalled();
+    });
+
+    it('returns totalSales 0 when there are no matching paid orders for listed events', async () => {
+      const ev1 = baseEventRow('e3333333-3333-3333-3333-333333333333', 'Lonely');
+      mockPrismaService.event.findMany.mockResolvedValue([ev1]);
+      mockPrismaService.event.count.mockResolvedValue(1);
+      mockPrismaService.order.groupBy.mockResolvedValue([]);
+
+      const result = await service.findByOrganizer('user-1', { page: 1, limit: 10 });
+
+      expect(mockPrismaService.order.groupBy).toHaveBeenCalledTimes(1);
+      expect(result.data.events[0].totalSales).toBe(0);
     });
   });
 
