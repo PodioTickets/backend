@@ -2,7 +2,7 @@ import { Injectable, NotFoundException, BadRequestException } from '@nestjs/comm
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateRegistrationDto, CreateRegistrationWithInvitedUserDto } from './dto/create-registration.dto';
 import { FilterRegistrationsDto, RegistrationFilterStatus } from './dto/filter-registrations.dto';
-import { RegistrationStatus, PaymentStatus } from '@prisma/client';
+import { Prisma, RegistrationStatus, PaymentStatus } from '@prisma/client';
 // QR Code é gerado dinamicamente no frontend/backend usando o payload salvo em qrCode
 import { KitsService } from '../kits/kits.service';
 
@@ -294,130 +294,179 @@ export class RegistrationsService {
     };
   }
 
+  /**
+   * Filtro equivalente ao comportamento anterior de findUserRegistrations (in-memory),
+   * empurrado para o Prisma para permitir paginação no banco.
+   */
+  private buildFindUserRegistrationsWhere(
+    userId: string,
+    status?: RegistrationFilterStatus,
+  ): Prisma.RegistrationWhereInput {
+    const participant: Prisma.RegistrationWhereInput = {
+      OR: [{ userId }, { invitedById: userId }],
+    };
+    if (!status) {
+      return participant;
+    }
+
+    const now = new Date();
+
+    switch (status) {
+      case RegistrationFilterStatus.CONFIRMED:
+        return {
+          AND: [
+            participant,
+            {
+              status: {
+                in: [RegistrationStatus.CONFIRMED, RegistrationStatus.COMPLETED],
+              },
+            },
+            {
+              order: {
+                payment: { status: PaymentStatus.PAID },
+              },
+            },
+          ],
+        };
+      case RegistrationFilterStatus.PENDING:
+        return {
+          AND: [
+            participant,
+            {
+              OR: [
+                { status: RegistrationStatus.PENDING },
+                {
+                  order: {
+                    payment: {
+                      status: {
+                        in: [PaymentStatus.PENDING, PaymentStatus.FAILED],
+                      },
+                    },
+                  },
+                },
+                { order: { is: { payment: null } } },
+              ],
+            },
+          ],
+        };
+      case RegistrationFilterStatus.COMPLETED:
+        return {
+          AND: [
+            participant,
+            {
+              event: {
+                eventDate: { lt: now },
+              },
+            },
+          ],
+        };
+      case RegistrationFilterStatus.CANCELLED:
+        return {
+          AND: [
+            participant,
+            {
+              OR: [
+                { status: RegistrationStatus.CANCELLED },
+                {
+                  order: {
+                    payment: { status: PaymentStatus.REFUNDED },
+                  },
+                },
+                {
+                  order: {
+                    payment: {
+                      metadata: {
+                        path: ['refundType'],
+                        equals: 'CHARGEBACK',
+                      },
+                    },
+                  },
+                },
+                {
+                  order: {
+                    payment: {
+                      metadata: {
+                        path: ['refundType'],
+                        equals: 'REFUND',
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          ],
+        };
+      default:
+        return participant;
+    }
+  }
+
+  private readonly findUserRegistrationsInclude = {
+    event: {
+      include: {
+        organization: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+          },
+        },
+      },
+    },
+    user: {
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        documentNumber: true,
+        dateOfBirth: true,
+      },
+    },
+    modalities: {
+      include: {
+        modality: true,
+      },
+    },
+    kitItems: {
+      include: {
+        kitItem: true,
+      },
+    },
+    products: {
+      include: {
+        product: {
+          include: {
+            variations: true,
+          },
+        },
+        variation: true,
+      },
+    },
+    order: {
+      include: {
+        payment: true,
+      },
+    },
+  } as const;
+
   async findUserRegistrations(userId: string, filterDto: FilterRegistrationsDto = {}) {
     const prismaRead = this.prisma.getReadClient();
     const { page = 1, limit = 20, status } = filterDto;
     const skip = (page - 1) * limit;
 
-    // Buscar todas as registrations do usuário
-    const allRegistrations = await prismaRead.registration.findMany({
-      where: {
-        OR: [
-          { userId },
-          { invitedById: userId },
-        ],
-      },
-      include: {
-        event: {
-          include: {
-            organization: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-                phone: true,
-              },
-            },
-          },
-        },
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            documentNumber: true,
-            dateOfBirth: true,
-          },
-        },
-        modalities: {
-          include: {
-            modality: true,
-          },
-        },
-        kitItems: {
-          include: {
-            kitItem: true,
-          },
-        },
-        products: {
-          include: {
-            product: {
-              include: {
-                variations: true,
-              },
-            },
-            variation: true,
-          },
-        },
-        order: {
-          include: {
-            payment: true,
-          },
-        },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
+    const where = this.buildFindUserRegistrationsWhere(userId, status);
 
-    // Aplicar filtro de status se fornecido
-    let filteredRegistrations = allRegistrations;
-    if (status) {
-      const now = new Date();
-      filteredRegistrations = allRegistrations.filter((reg) => {
-        const eventDate = reg.event.eventDate ? new Date(reg.event.eventDate) : null;
-        const paymentStatus = reg.order?.payment?.status;
-        const registrationStatus = reg.status;
-        
-        // Parse payment metadata para verificar refundType
-        let paymentMetadata = null;
-        if (reg.order?.payment?.metadata) {
-          try {
-            paymentMetadata = typeof reg.order.payment.metadata === 'string'
-              ? JSON.parse(reg.order.payment.metadata)
-              : reg.order.payment.metadata;
-          } catch (e) {
-            paymentMetadata = reg.order.payment.metadata;
-          }
-        }
-        const refundType = paymentMetadata?.refundType;
-
-        switch (status) {
-          case RegistrationFilterStatus.COMPLETED:
-            // Evento já acabou
-            return eventDate && eventDate < now;
-
-          case RegistrationFilterStatus.CANCELLED:
-            // Pagamento cancelado, estorno ou chargeback
-            return (
-              registrationStatus === RegistrationStatus.CANCELLED ||
-              paymentStatus === PaymentStatus.REFUNDED ||
-              refundType === 'CHARGEBACK' ||
-              refundType === 'REFUND'
-            );
-
-          case RegistrationFilterStatus.PENDING:
-            // Esperando pagamento
-            return (
-              registrationStatus === RegistrationStatus.PENDING ||
-              paymentStatus === PaymentStatus.PENDING ||
-              paymentStatus === PaymentStatus.FAILED ||
-              !paymentStatus
-            );
-
-          case RegistrationFilterStatus.CONFIRMED:
-            // Pagamento confirmado ou pago
-            return (
-              (registrationStatus === RegistrationStatus.CONFIRMED ||
-                registrationStatus === RegistrationStatus.COMPLETED) &&
-              paymentStatus === PaymentStatus.PAID
-            );
-
-          default:
-            return true;
-        }
-      });
-    }
+    const [filteredRegistrations, total] = await Promise.all([
+      prismaRead.registration.findMany({
+        where,
+        include: this.findUserRegistrationsInclude,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      prismaRead.registration.count({ where }),
+    ]);
 
     // Formatar registrations para substituir qrCode pelo link e formatar produtos
     const formattedRegistrations = filteredRegistrations.map((reg: any) => ({
@@ -444,15 +493,12 @@ export class RegistrationsService {
       })),
     }));
 
-    // Aplicar paginação
-    const paginatedRegistrations = formattedRegistrations.slice(skip, skip + limit);
-    const total = formattedRegistrations.length;
     const totalPages = Math.ceil(total / limit);
 
     return {
       message: 'Registrations fetched successfully',
       data: {
-        registrations: paginatedRegistrations,
+        registrations: formattedRegistrations,
         pagination: {
           page,
           limit,

@@ -230,8 +230,6 @@ async function bootstrap() {
 
     SwaggerModule.setup('api', app, document, swaggerOptions);
   }
-  app.use(bodyParser.json({ limit: '10mb' }));
-  app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
 
   app.use('/api/v1/upload', bodyParser.raw({ limit: '10mb' }));
   app.use(

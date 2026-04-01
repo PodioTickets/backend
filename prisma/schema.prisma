@@ -514,6 +514,7 @@ model Registration {
   // qrCode não pode ter índice devido ao tamanho (Data URL)
   @@index([eventId, status]) // Para filtrar inscrições por evento e status
   @@index([userId, createdAt]) // Para histórico ordenado do usuário
+  @@index([invitedById, createdAt]) // Lista de convidados ordenada (OR com userId)
   @@index([orderId, createdAt]) // Para ordenar inscrições por pedido
   @@index([status, createdAt]) // Para relatórios
 }
@@ -603,6 +604,7 @@ model Order {
   @@index([userId])
   @@index([eventId])
   @@index([createdAt])
+  @@index([eventId, createdAt]) // Janelas por data do pedido (métricas / relatórios)
 }
 
 model Payment {

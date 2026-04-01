@@ -3,6 +3,10 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { CreatePaymentDto, ProcessPaymentDto, ConfirmPaymentDto } from './dto/create-payment.dto';
 import { PaymentStatus, PaymentMethod } from '@prisma/client';
 import { CieloService } from './cielo.service';
+import {
+  PAYMENT_DETAILS_STANDARD_INCLUDE,
+  TICKET_CATEGORY_DETAIL_INCLUDE,
+} from './payment-details-standard.include';
 
 @Injectable()
 export class PaymentsService {
@@ -34,7 +38,6 @@ export class PaymentsService {
             payment: true,
           },
         },
-        event: true,
         user: {
           select: {
             id: true,
@@ -430,215 +433,17 @@ export class PaymentsService {
     if (identifierType === 'transaction') {
       payment = await prismaRead.payment.findFirst({
         where: { transactionId: identifier },
-        include: {
-          order: {
-            include: {
-              event: {
-                include: {
-                  organization: {
-                    include: {
-                      members: {
-                        where: { role: 'OWNER' },
-                        include: {
-                          user: {
-                            select: {
-                              id: true,
-                              firstName: true,
-                              lastName: true,
-                              email: true,
-                              avatarUrl: true,
-                            },
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-              registrations: {
-                include: {
-                  user: {
-                    select: {
-                      id: true,
-                      firstName: true,
-                      lastName: true,
-                      email: true,
-                      phone: true,
-                      documentNumber: true,
-                      dateOfBirth: true,
-                      reservePhone: true,
-                      gender: true,
-                    },
-                  },
-                  tickets: {
-                    include: {
-                      ticket: {
-                        include: {
-                          category: true,
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-          user: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              email: true,
-              phone: true,
-              documentNumber: true,
-              dateOfBirth: true,
-              reservePhone: true,
-              gender: true,
-            },
-          },
-        },
+        include: PAYMENT_DETAILS_STANDARD_INCLUDE,
       });
     } else if (identifierType === 'order') {
       payment = await prismaRead.payment.findUnique({
         where: { orderId: identifier },
-        include: {
-          order: {
-            include: {
-              event: {
-                include: {
-                  organization: {
-                    include: {
-                      members: {
-                        where: { role: 'OWNER' },
-                        include: {
-                          user: {
-                            select: {
-                              id: true,
-                              firstName: true,
-                              lastName: true,
-                              email: true,
-                              avatarUrl: true,
-                            },
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-              registrations: {
-                include: {
-                  user: {
-                    select: {
-                      id: true,
-                      firstName: true,
-                      lastName: true,
-                      email: true,
-                      phone: true,
-                      documentNumber: true,
-                      dateOfBirth: true,
-                      reservePhone: true,
-                      gender: true,
-                    },
-                  },
-                  tickets: {
-                    include: {
-                      ticket: {
-                        include: {
-                          category: true,
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-          user: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              email: true,
-              phone: true,
-              documentNumber: true,
-              dateOfBirth: true,
-              reservePhone: true,
-              gender: true,
-            },
-          },
-        },
+        include: PAYMENT_DETAILS_STANDARD_INCLUDE,
       });
     } else if (identifierType === 'payment') {
       payment = await prismaRead.payment.findUnique({
         where: { id: identifier },
-        include: {
-          order: {
-            include: {
-              event: {
-                include: {
-                  organization: {
-                    include: {
-                      members: {
-                        where: { role: 'OWNER' },
-                        include: {
-                          user: {
-                            select: {
-                              id: true,
-                              firstName: true,
-                              lastName: true,
-                              email: true,
-                              avatarUrl: true,
-                            },
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-              registrations: {
-                include: {
-                  user: {
-                    select: {
-                      id: true,
-                      firstName: true,
-                      lastName: true,
-                      email: true,
-                      phone: true,
-                      documentNumber: true,
-                      dateOfBirth: true,
-                      reservePhone: true,
-                      gender: true,
-                    },
-                  },
-                  tickets: {
-                    include: {
-                      ticket: {
-                        include: {
-                          category: true,
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-          user: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              email: true,
-              phone: true,
-              documentNumber: true,
-              dateOfBirth: true,
-              reservePhone: true,
-              gender: true,
-            },
-          },
-        },
+        include: PAYMENT_DETAILS_STANDARD_INCLUDE,
       });
     } else if (identifierType === 'registration') {
       const registration = await prismaRead.registration.findUnique({
@@ -691,7 +496,7 @@ export class PaymentsService {
                             include: {
                               ticket: {
                                 include: {
-                                  category: true,
+                                  category: TICKET_CATEGORY_DETAIL_INCLUDE,
                                 },
                               },
                             },
@@ -758,7 +563,7 @@ export class PaymentsService {
                   include: {
                     ticket: {
                       include: {
-                        category: true,
+                        category: TICKET_CATEGORY_DETAIL_INCLUDE,
                       },
                     },
                   },

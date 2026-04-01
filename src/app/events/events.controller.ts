@@ -42,7 +42,7 @@ import { DashboardQueryDto } from './dto/dashboard.dto';
 import { FinancialQueryDto } from './dto/financial.dto';
 import { RegistrationsQueryDto } from './dto/registrations.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { NoCache } from 'src/common/decorators/cache.decorator';
+import { CacheTTL, NoCache } from 'src/common/decorators/cache.decorator';
 
 function clientIp(req: ExpressRequest): string {
   const xff = req.headers['x-forwarded-for'];
@@ -80,6 +80,7 @@ export class EventsController {
   }
 
   @Get('search/locations')
+  @CacheTTL(300_000)
   @Header('Cache-Control', 'public, max-age=300, s-maxage=300, stale-while-revalidate=120')
   @ApiOperation({
     summary: 'Facetas de local (estado → cidades)',
@@ -98,6 +99,7 @@ export class EventsController {
   }
 
   @Get('search')
+  @CacheTTL(120_000)
   @ApiOperation({ 
     summary: 'Search events', 
     description: 'Advanced search for events with text search, location filters, and date ranges. Optimized for performance.' 

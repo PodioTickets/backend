@@ -9,7 +9,8 @@ import { PerformanceMonitoringMiddleware } from './common/middleware/performance
 import { AuthModule } from './app/auth/auth.module';
 import { ResponseCompressionInterceptor } from './common/interceptors/response-compression.interceptor';
 import { ScheduleModule } from '@nestjs/schedule';
-import { APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { ThrottlerGuard } from '@nestjs/throttler';
 import { ConfigModule } from '@nestjs/config';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { CommonModule } from './common/common.module';
@@ -67,8 +68,11 @@ import { CheckoutModule } from './app/checkout/checkout.module';
   controllers: [],
   providers: [
     UserService,
+    ConcurrencyLimiterMiddleware,
+    PerformanceMonitoringMiddleware,
     ResponseCompressionInterceptor,
     CdnService,
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_INTERCEPTOR, useClass: HttpCacheInterceptor },
     { provide: APP_INTERCEPTOR, useClass: ResponseCompressionInterceptor },
   ],

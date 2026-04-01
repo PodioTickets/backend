@@ -76,7 +76,6 @@ export class SSRFProtectionMiddleware implements NestMiddleware {
 
   private validateRequestBody(body: any): void {
     this.traverseObject(body, '', (value: string, path: string) => {
-      // Verificar se o valor parece ser uma URL
       if (this.isURLLike(value)) {
         this.validateURL(value, `request body: ${path}`);
       }
@@ -90,7 +89,12 @@ export class SSRFProtectionMiddleware implements NestMiddleware {
       const currentPath = path ? `${path}.${key}` : key;
 
       if (typeof value === 'string') {
-        callback(value, currentPath);
+        if (
+          value.length >= 8 &&
+          (value.includes('http://') || value.includes('https://'))
+        ) {
+          callback(value, currentPath);
+        }
       } else if (Array.isArray(value)) {
         value.forEach((item, index) => {
           if (typeof item === 'string') {
@@ -114,6 +118,16 @@ export class SSRFProtectionMiddleware implements NestMiddleware {
   }
 
   private isURLLike(value: string): boolean {
+    if (value.length > 4096) {
+      return false;
+    }
+    if (
+      !value.includes('://') &&
+      !value.startsWith('http://') &&
+      !value.startsWith('https://')
+    ) {
+      return false;
+    }
     try {
       const url = new URL(value);
       return url.protocol === 'http:' || url.protocol === 'https:';

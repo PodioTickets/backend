@@ -29,6 +29,7 @@ import {
   PaymentStatus,
   PaymentMethod,
   Prisma,
+  PrismaClient,
 } from '@prisma/client';
 import { generateSlug, generateUniqueSlug } from '../../helpers/SlugHelper';
 import { diffEventUpdateAgainstData } from './event-audit.helpers';
@@ -3241,6 +3242,187 @@ export class EventsService {
     };
   }
 
+  /** Escapa `%`, `_` e `\` para uso em ILIKE ... ESCAPE '\' */
+  private escapeIlikePattern(fragment: string): string {
+    return fragment.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+  }
+
+  /**
+   * Paginação no banco para filtro CHARGEBACK/REFUNDED por metadata (evita findMany completo + slice).
+   * Preserva a mesma ordenação e critérios do fluxo anterior em memória.
+   */
+  private async queryRegistrationIdsPageForRefundedMetadataFilter(
+    prismaRead: PrismaClient,
+    params: {
+      eventId: string;
+      targetRefundType: 'CHARGEBACK' | 'REFUND';
+      ticketIds?: string[];
+      startDate?: string;
+      endDate?: string;
+      search?: string;
+      sortBy: string;
+      sortOrder: 'asc' | 'desc';
+      skip: number;
+      limit: number;
+    },
+  ): Promise<{ ids: string[]; total: number }> {
+    const parts: Prisma.Sql[] = [
+      Prisma.sql`r."eventId" = ${params.eventId}::uuid`,
+      Prisma.sql`p.status = 'REFUNDED'`,
+    ];
+
+    if (params.targetRefundType === 'CHARGEBACK') {
+      parts.push(Prisma.sql`(p.metadata->>'refundType') = 'CHARGEBACK'`);
+    } else {
+      parts.push(
+        Prisma.sql`(NOT ((p.metadata->>'refundType') = 'CHARGEBACK') AND ((p.metadata->>'refundType') = 'REFUND' OR (p.metadata->>'refundType') IS NULL OR (p.metadata->>'refundType') = ''))`,
+      );
+    }
+
+    if (params.ticketIds && params.ticketIds.length > 0) {
+      const ticketConds = params.ticketIds.map(
+        (id) => Prisma.sql`${id}::uuid`,
+      );
+      parts.push(
+        Prisma.sql`EXISTS (SELECT 1 FROM "RegistrationTicket" rt WHERE rt."registrationId" = r.id AND rt."ticketId" IN (${Prisma.join(ticketConds)}))`,
+      );
+    }
+
+    if (params.startDate) {
+      parts.push(Prisma.sql`o."createdAt" >= ${new Date(params.startDate)}`);
+    }
+    if (params.endDate) {
+      parts.push(Prisma.sql`o."createdAt" <= ${new Date(params.endDate)}`);
+    }
+
+    const searchTrim = params.search?.trim();
+    if (searchTrim) {
+      const pat = `%${this.escapeIlikePattern(searchTrim)}%`;
+      parts.push(
+        Prisma.sql`(r.id::text ILIKE ${pat} ESCAPE '\\' OR EXISTS (SELECT 1 FROM "User" u WHERE u.id = r."userId" AND (u."firstName" ILIKE ${pat} ESCAPE '\\' OR u."lastName" ILIKE ${pat} ESCAPE '\\' OR u.email ILIKE ${pat} ESCAPE '\\' OR COALESCE(u."documentNumber", '') ILIKE ${pat} ESCAPE '\\')))`,
+      );
+    }
+
+    const whereSql = Prisma.join(parts, ' AND ');
+
+    let orderSql: Prisma.Sql;
+    const desc = params.sortOrder !== 'asc';
+    if (params.sortBy === 'amount') {
+      orderSql = desc
+        ? Prisma.sql`o."finalAmount" DESC, r.id DESC`
+        : Prisma.sql`o."finalAmount" ASC, r.id ASC`;
+    } else if (params.sortBy === 'status') {
+      orderSql = desc
+        ? Prisma.sql`r.status DESC, r.id DESC`
+        : Prisma.sql`r.status ASC, r.id ASC`;
+    } else {
+      orderSql = desc
+        ? Prisma.sql`o."createdAt" DESC NULLS LAST, r.id DESC`
+        : Prisma.sql`o."createdAt" ASC NULLS LAST, r.id ASC`;
+    }
+
+    const fromJoin = Prisma.sql`
+      FROM "Registration" r
+      INNER JOIN "Order" o ON o.id = r."orderId"
+      INNER JOIN "Payment" p ON p."orderId" = o.id
+      WHERE ${whereSql}
+    `;
+
+    const [countRows, idRows] = await Promise.all([
+      prismaRead.$queryRaw<{ c: bigint }[]>(
+        Prisma.sql`SELECT COUNT(*)::bigint AS c ${fromJoin}`,
+      ),
+      prismaRead.$queryRaw<{ id: string }[]>(
+        Prisma.sql`SELECT r.id ${fromJoin} ORDER BY ${orderSql} LIMIT ${params.limit} OFFSET ${params.skip}`,
+      ),
+    ]);
+
+    const total = Number(countRows[0]?.c ?? 0);
+    const ids = idRows.map((row) => row.id);
+    return { ids, total };
+  }
+
+  /**
+   * Métricas agregadas de inscrições do evento (sem carregar todas as linhas).
+   * collected replica a soma por inscrição (finalAmount repetido por registro no mesmo pedido).
+   */
+  private async aggregateEventRegistrationMetrics(
+    prismaRead: PrismaClient,
+    eventId: string,
+    orderCreatedBetween?: { gte: Date; lte: Date },
+  ): Promise<{
+    total: number;
+    paid: number;
+    cancelled: number;
+    collected: number;
+  }> {
+    const rows = orderCreatedBetween
+      ? await prismaRead.$queryRaw<
+          {
+            total: bigint;
+            paid: bigint;
+            cancelled: bigint;
+            collected: bigint;
+          }[]
+        >(Prisma.sql`
+          SELECT
+            COUNT(r.id)::bigint AS total,
+            COUNT(*) FILTER (
+              WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
+                AND p.status::text = 'PAID'
+            )::bigint AS paid,
+            COUNT(*) FILTER (WHERE r.status::text = 'CANCELLED')::bigint AS cancelled,
+            COALESCE(
+              SUM(o."finalAmount") FILTER (
+                WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
+                  AND p.status::text = 'PAID'
+              ),
+              0
+            )::bigint AS collected
+          FROM "Registration" r
+          INNER JOIN "Order" o ON o.id = r."orderId"
+          LEFT JOIN "Payment" p ON p."orderId" = o.id
+          WHERE r."eventId" = ${eventId}::uuid
+            AND o."createdAt" >= ${orderCreatedBetween.gte}
+            AND o."createdAt" <= ${orderCreatedBetween.lte}
+        `)
+      : await prismaRead.$queryRaw<
+          {
+            total: bigint;
+            paid: bigint;
+            cancelled: bigint;
+            collected: bigint;
+          }[]
+        >(Prisma.sql`
+          SELECT
+            COUNT(r.id)::bigint AS total,
+            COUNT(*) FILTER (
+              WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
+                AND p.status::text = 'PAID'
+            )::bigint AS paid,
+            COUNT(*) FILTER (WHERE r.status::text = 'CANCELLED')::bigint AS cancelled,
+            COALESCE(
+              SUM(o."finalAmount") FILTER (
+                WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
+                  AND p.status::text = 'PAID'
+              ),
+              0
+            )::bigint AS collected
+          FROM "Registration" r
+          INNER JOIN "Order" o ON o.id = r."orderId"
+          LEFT JOIN "Payment" p ON p."orderId" = o.id
+          WHERE r."eventId" = ${eventId}::uuid
+        `);
+
+    const row = rows[0];
+    return {
+      total: Number(row?.total ?? 0),
+      paid: Number(row?.paid ?? 0),
+      cancelled: Number(row?.cancelled ?? 0),
+      collected: Number(row?.collected ?? 0),
+    };
+  }
+
   /**
    * Obtém inscrições com filtros avançados
    */
@@ -3478,41 +3660,36 @@ export class EventsService {
       },
     };
 
-    if (filterByPaymentMetadata) {
-      // Buscar todos os registrations com payment REFUNDED (sem paginação ainda)
-      const allRefundedRegistrations = await prismaRead.registration.findMany({
-        where,
-        orderBy,
-        include: includeClause,
-      });
-
-      // Filtrar pelo metadata do payment
-      const filteredRegistrations = allRefundedRegistrations.filter((reg: any) => {
-        if (!reg.order?.payment?.metadata) return false;
-
-        let metadata: any = reg.order.payment.metadata;
-        if (typeof metadata === 'string') {
-          try {
-            metadata = JSON.parse(metadata);
-          } catch (e) {
-            return false;
-          }
-        }
-
-        const refundType = metadata?.refundType;
-
-        if (targetRefundType === 'CHARGEBACK') {
-          return refundType === 'CHARGEBACK';
-        } else if (targetRefundType === 'REFUND') {
-          return refundType === 'REFUND' || !refundType; // REFUND ou sem refundType
-        }
-
-        return false;
-      });
-
-      total = filteredRegistrations.length;
-      // Aplicar paginação após filtrar
-      registrations = filteredRegistrations.slice(skip, skip + limit);
+    if (filterByPaymentMetadata && targetRefundType) {
+      const { ids, total: metaTotal } =
+        await this.queryRegistrationIdsPageForRefundedMetadataFilter(
+          prismaRead,
+          {
+            eventId,
+            targetRefundType,
+            ticketIds: ticketIds && ticketIds.length > 0 ? ticketIds : undefined,
+            startDate,
+            endDate,
+            search,
+            sortBy,
+            sortOrder,
+            skip,
+            limit,
+          },
+        );
+      total = metaTotal;
+      if (ids.length === 0) {
+        registrations = [];
+      } else {
+        const unsorted = await prismaRead.registration.findMany({
+          where: { id: { in: ids } },
+          include: includeClause,
+        });
+        const orderMap = new Map(ids.map((id, i) => [id, i]));
+        registrations = [...unsorted].sort(
+          (a, b) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0),
+        );
+      }
     } else {
       // Buscar registrations e total normalmente
       // Garantir que where está limpo e correto
@@ -3547,61 +3724,32 @@ export class EventsService {
       ]);
     }
 
-    // Calcular estatísticas
-    const allRegistrations = await prismaRead.registration.findMany({
-      where: { eventId },
-      include: {
-        order: {
-          include: {
-            payment: true,
-          },
-        },
-      },
-    });
-
-    const paid = allRegistrations.filter(
-      (r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED),
-    ).length;
-    const cancelled = allRegistrations.filter((r) => r.status === RegistrationStatus.CANCELLED).length;
-    const totalCollected = allRegistrations
-      .filter((r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED))
-      .reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
-
-    // Comparar com semana passada
     const lastWeekStart = new Date();
     lastWeekStart.setDate(lastWeekStart.getDate() - 14);
     const lastWeekEnd = new Date();
     lastWeekEnd.setDate(lastWeekEnd.getDate() - 7);
 
-    const lastWeekRegistrations = await prismaRead.registration.findMany({
-      where: {
-        eventId,
-        order: {
-          createdAt: {
-            gte: lastWeekStart,
-            lte: lastWeekEnd,
-          },
-        },
-      },
-      include: {
-        order: {
-          include: {
-            payment: true,
-          },
-        },
-      },
-    });
+    const [stats, lastWeekStats] = await Promise.all([
+      this.aggregateEventRegistrationMetrics(prismaRead, eventId),
+      this.aggregateEventRegistrationMetrics(prismaRead, eventId, {
+        gte: lastWeekStart,
+        lte: lastWeekEnd,
+      }),
+    ]);
 
-    const lastWeekTotal = lastWeekRegistrations.length;
-    const lastWeekPaid = lastWeekRegistrations.filter(
-      (r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED),
-    ).length;
-    const lastWeekCancelled = lastWeekRegistrations.filter((r) => r.status === RegistrationStatus.CANCELLED).length;
-    const lastWeekCollected = lastWeekRegistrations
-      .filter((r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED))
-      .reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
+    const paid = stats.paid;
+    const cancelled = stats.cancelled;
+    const totalCollected = this.normalizeToCents(stats.collected);
 
-    const totalChange = lastWeekTotal > 0 ? ((allRegistrations.length - lastWeekTotal) / lastWeekTotal) * 100 : 0;
+    const lastWeekTotal = lastWeekStats.total;
+    const lastWeekPaid = lastWeekStats.paid;
+    const lastWeekCancelled = lastWeekStats.cancelled;
+    const lastWeekCollected = this.normalizeToCents(lastWeekStats.collected);
+
+    const totalChange =
+      lastWeekTotal > 0
+        ? ((stats.total - lastWeekTotal) / lastWeekTotal) * 100
+        : 0;
     const paidChange = lastWeekPaid > 0 ? ((paid - lastWeekPaid) / lastWeekPaid) * 100 : 0;
     const cancelledChange = lastWeekCancelled > 0 ? ((cancelled - lastWeekCancelled) / lastWeekCancelled) * 100 : 0;
     const totalCollectedChange = lastWeekCollected > 0 ? ((totalCollected - lastWeekCollected) / lastWeekCollected) * 100 : 0;
@@ -3749,7 +3897,7 @@ export class EventsService {
       data: {
         registrations: formattedRegistrations,
         stats: {
-          total: allRegistrations.length,
+          total: stats.total,
           paid,
           cancelled,
           totalCollected,
@@ -3776,61 +3924,33 @@ export class EventsService {
 
     const prismaRead = this.prisma.getReadClient();
 
-    const allRegistrations = await prismaRead.registration.findMany({
-      where: { eventId },
-      include: {
-        order: {
-          include: {
-            payment: true,
-          },
-        },
-      },
-    });
-
-    const paid = allRegistrations.filter(
-      (r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED),
-    ).length;
-    const cancelled = allRegistrations.filter((r) => r.status === RegistrationStatus.CANCELLED).length;
-    const totalCollected = allRegistrations
-      .filter((r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED))
-      .reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
-
-    // Comparar com semana passada
     const now = new Date();
     const lastWeekStart = new Date(now);
     lastWeekStart.setDate(now.getDate() - 14);
     const lastWeekEnd = new Date(now);
     lastWeekEnd.setDate(now.getDate() - 7);
 
-    const lastWeekRegistrations = await prismaRead.registration.findMany({
-      where: {
-        eventId,
-        order: {
-          createdAt: {
-            gte: lastWeekStart,
-            lte: lastWeekEnd,
-          },
-        },
-      },
-      include: {
-        order: {
-          include: {
-            payment: true,
-          },
-        },
-      },
-    });
+    const [stats, lastWeekStats] = await Promise.all([
+      this.aggregateEventRegistrationMetrics(prismaRead, eventId),
+      this.aggregateEventRegistrationMetrics(prismaRead, eventId, {
+        gte: lastWeekStart,
+        lte: lastWeekEnd,
+      }),
+    ]);
 
-    const lastWeekTotal = lastWeekRegistrations.length;
-    const lastWeekPaid = lastWeekRegistrations.filter(
-      (r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED),
-    ).length;
-    const lastWeekCancelled = lastWeekRegistrations.filter((r) => r.status === RegistrationStatus.CANCELLED).length;
-    const lastWeekCollected = lastWeekRegistrations
-      .filter((r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED))
-      .reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
+    const paid = stats.paid;
+    const cancelled = stats.cancelled;
+    const totalCollected = this.normalizeToCents(stats.collected);
 
-    const totalChange = lastWeekTotal > 0 ? ((allRegistrations.length - lastWeekTotal) / lastWeekTotal) * 100 : 0;
+    const lastWeekTotal = lastWeekStats.total;
+    const lastWeekPaid = lastWeekStats.paid;
+    const lastWeekCancelled = lastWeekStats.cancelled;
+    const lastWeekCollected = this.normalizeToCents(lastWeekStats.collected);
+
+    const totalChange =
+      lastWeekTotal > 0
+        ? ((stats.total - lastWeekTotal) / lastWeekTotal) * 100
+        : 0;
     const paidChange = lastWeekPaid > 0 ? ((paid - lastWeekPaid) / lastWeekPaid) * 100 : 0;
     const cancelledChange = lastWeekCancelled > 0 ? ((cancelled - lastWeekCancelled) / lastWeekCancelled) * 100 : 0;
     const totalCollectedChange = lastWeekCollected > 0 ? ((totalCollected - lastWeekCollected) / lastWeekCollected) * 100 : 0;
@@ -3838,7 +3958,7 @@ export class EventsService {
     return {
       message: 'Registration stats fetched successfully',
       data: {
-        total: allRegistrations.length,
+        total: stats.total,
         paid,
         cancelled,
         totalCollected,
