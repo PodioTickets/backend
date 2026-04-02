@@ -20,6 +20,9 @@ import express, { type Request, type Response } from 'express';
 import cookieParser from 'cookie-parser';
 import { initializeSentry } from './config/sentry.config';
 
+/** Body bruto para assinatura de webhook (ex.: POST /api/v1/payments/webhook). */
+type RequestWithRawBody = Request & { rawBody?: Buffer };
+
 initializeSentry();
 
 process.on('uncaughtException', (error) => {
@@ -31,8 +34,19 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
-  app.use(express.json({ limit: '10mb' }));
+  // bodyParser: false — o Nest registra json com limite padrão ~100kb antes do nosso middleware;
+  // esse limite é aplicado primeiro e causa PayloadTooLarge mesmo com app.use(json 10mb) abaixo.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bodyParser: false,
+  });
+  app.use(
+    express.json({
+      limit: '10mb',
+      verify: (req: RequestWithRawBody, _res, buf) => {
+        req.rawBody = buf;
+      },
+    }),
+  );
   app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
   const configService = app.get(ConfigService);

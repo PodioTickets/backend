@@ -8,7 +8,11 @@ import {
   ApiBody,
 } from '@nestjs/swagger';
 import { TicketCategoriesService } from './ticket-categories.service';
-import { CreateTicketCategoryDto, UpdateTicketCategoryDto } from './dto/create-ticket-category.dto';
+import {
+  CreateTicketCategoryDto,
+  UpdateTicketCategoryDto,
+  ReorderTicketCategoriesDto,
+} from './dto/create-ticket-category.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 
@@ -54,6 +58,29 @@ export class TicketCategoriesController {
   })
   findAllCategories(@Param('eventId') eventId: string) {
     return this.ticketCategoriesService.findAll(eventId);
+  }
+
+  @Patch('events/:eventId/categories/reorder')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Reorder ticket categories',
+    description:
+      'Sets sortOrder from the order of categoryIds (same pattern as event topics / ticket products).',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiBody({ type: ReorderTicketCategoriesDto })
+  @ApiResponse({ status: 200, description: 'Ticket categories reordered successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid categoryIds list' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  reorderCategories(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Body() body: ReorderTicketCategoriesDto,
+  ) {
+    return this.ticketCategoriesService.reorder(req.user.id, eventId, body);
   }
 
   @Patch('events/:eventId/categories/:categoryId')

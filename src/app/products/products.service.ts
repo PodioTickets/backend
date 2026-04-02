@@ -36,6 +36,80 @@ export class ProductsService {
     ];
   }
 
+  private normalizeBuyerVariationEditForCreate(dto: CreateProductDto): {
+    buyerVariationEditAllowed: boolean;
+    variationEditDeadlineDays: number;
+  } {
+    const allowed = dto.buyerVariationEditAllowed ?? false;
+    if (!allowed) {
+      return { buyerVariationEditAllowed: false, variationEditDeadlineDays: 0 };
+    }
+    const raw = dto.variationEditDeadlineDays;
+    let days: number;
+    if (raw === undefined || raw === null || Number.isNaN(Number(raw))) {
+      days = 30;
+    } else {
+      days = Math.round(Number(raw));
+      if (days < 0 || days > 9999) {
+        throw new BadRequestException(
+          'variationEditDeadlineDays must be an integer between 0 and 9999',
+        );
+      }
+    }
+    return { buyerVariationEditAllowed: true, variationEditDeadlineDays: days };
+  }
+
+  /**
+   * Mescla regras de edição de variação pelo comprador em PATCH (campos opcionais).
+   */
+  private mergeBuyerVariationEditForUpdate(
+    product: {
+      buyerVariationEditAllowed: boolean;
+      variationEditDeadlineDays: number;
+    },
+    dto: UpdateProductDto,
+  ): { buyerVariationEditAllowed: boolean; variationEditDeadlineDays: number } | null {
+    if (
+      dto.buyerVariationEditAllowed === undefined &&
+      dto.variationEditDeadlineDays === undefined
+    ) {
+      return null;
+    }
+
+    const dtoAllowed = dto.buyerVariationEditAllowed;
+    const dtoDays = dto.variationEditDeadlineDays;
+    const prevAllowed = product.buyerVariationEditAllowed;
+    const prevDays = product.variationEditDeadlineDays;
+
+    const nextAllowed = dtoAllowed !== undefined ? dtoAllowed : prevAllowed;
+
+    let nextDays: number;
+    if (!nextAllowed) {
+      nextDays = 0;
+    } else if (dtoDays !== undefined) {
+      if (Number.isNaN(Number(dtoDays))) {
+        throw new BadRequestException(
+          'variationEditDeadlineDays must be a valid integer between 0 and 9999',
+        );
+      }
+      nextDays = Math.round(Number(dtoDays));
+      if (nextDays < 0 || nextDays > 9999) {
+        throw new BadRequestException(
+          'variationEditDeadlineDays must be an integer between 0 and 9999',
+        );
+      }
+    } else if (!prevAllowed && dtoAllowed === true) {
+      nextDays = 30;
+    } else {
+      nextDays = prevDays;
+    }
+
+    return {
+      buyerVariationEditAllowed: nextAllowed,
+      variationEditDeadlineDays: nextDays,
+    };
+  }
+
   async create(
     userId: string,
     eventId: string,
@@ -61,6 +135,8 @@ export class ProductsService {
       throw new BadRequestException('Required products must have at least 2 variations');
     }
 
+    const buyerVariation = this.normalizeBuyerVariationEditForCreate(createProductDto);
+
     const product = await prismaWrite.product.create({
       data: {
         name: createProductDto.name,
@@ -69,6 +145,8 @@ export class ProductsService {
         basePrice: Math.round(createProductDto.basePrice ?? 0), // entrada já em centavos (INT)
         isRequired: createProductDto.isRequired ?? false,
         variationType: createProductDto.variationType,
+        buyerVariationEditAllowed: buyerVariation.buyerVariationEditAllowed,
+        variationEditDeadlineDays: buyerVariation.variationEditDeadlineDays,
         eventId,
         variations: {
           create: variations.map((v) => ({
@@ -109,6 +187,8 @@ export class ProductsService {
                 basePrice: product.basePrice,
                 isRequired: product.isRequired,
                 variationType: product.variationType,
+                buyerVariationEditAllowed: product.buyerVariationEditAllowed,
+                variationEditDeadlineDays: product.variationEditDeadlineDays,
                 variations: product.variations.map((v) => ({
                   name: v.name,
                   price: v.price,
@@ -225,6 +305,8 @@ export class ProductsService {
 
     const updateData: Record<string, unknown> = { ...updateProductDto };
     delete updateData.variations;
+    delete updateData.buyerVariationEditAllowed;
+    delete updateData.variationEditDeadlineDays;
     for (const k of Object.keys(updateData)) {
       if (updateData[k] === undefined) {
         delete updateData[k];
@@ -233,6 +315,17 @@ export class ProductsService {
 
     if (updateData.basePrice !== undefined) {
       updateData.basePrice = Math.round(Number(updateData.basePrice));
+    }
+
+    const mergedBuyerVariation = this.mergeBuyerVariationEditForUpdate(
+      product,
+      updateProductDto,
+    );
+    if (mergedBuyerVariation) {
+      updateData.buyerVariationEditAllowed =
+        mergedBuyerVariation.buyerVariationEditAllowed;
+      updateData.variationEditDeadlineDays =
+        mergedBuyerVariation.variationEditDeadlineDays;
     }
 
     const scalarOnlyForAudit = { ...updateData };
@@ -249,9 +342,8 @@ export class ProductsService {
         throw new BadRequestException('Product must have at least one variation');
       }
 
-      if (updateProductDto.isRequired && variations.length < 2) {
-        throw new BadRequestException('Required products must have at least 2 variations');
-      }
+      // No PATCH, uma única variação é permitida (ex.: produto obrigatório com um único SKU).
+      // A criação ainda exige ≥2 variações quando isRequired, para forçar escolha real + "Sem interesse" só em opcional.
 
       newVariationsSnapshot = variations.map((v) => ({
         name: v.name,
@@ -368,6 +460,8 @@ export class ProductsService {
                 basePrice: product.basePrice,
                 isRequired: product.isRequired,
                 variationType: product.variationType,
+                buyerVariationEditAllowed: product.buyerVariationEditAllowed,
+                variationEditDeadlineDays: product.variationEditDeadlineDays,
                 variations: product.variations.map((v) => ({
                   name: v.name,
                   price: v.price,

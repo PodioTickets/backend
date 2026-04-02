@@ -8,6 +8,8 @@ export const PRODUCT_FIELD_LABELS: Record<string, string> = {
   basePrice: 'preço base',
   isRequired: 'obrigatório',
   variationType: 'tipo de variação',
+  buyerVariationEditAllowed: 'edição da variação pelo comprador',
+  variationEditDeadlineDays: 'prazo (dias antes do evento) para alterar variação',
 };
 
 function valuesEqual(a: unknown, b: unknown): boolean {

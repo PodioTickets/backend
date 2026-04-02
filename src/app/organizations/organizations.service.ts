@@ -10,6 +10,7 @@ import {
   PatchMemberSettingsDto,
   OrganizationAuditLogQueryDto,
   AdminAuditLogQueryDto,
+  AdminOrganizationsListQueryDto,
 } from './dto/organization.dto';
 import { OrganizationMemberRole } from '@prisma/client';
 import { MFAService } from '../../common/services/mfa.service';
@@ -1773,6 +1774,67 @@ export class OrganizationsService {
   }
 
   /**
+   * Lista organizações com paginação (painel admin). Resposta enxuta + contagens.
+   * Rota: por enquanto só JWT; checagem de papel admin pode ser reativada no controller.
+   */
+  async listOrganizationsAsAdmin(query: AdminOrganizationsListQueryDto) {
+    const prismaRead = this.prisma.getReadClient();
+    const page = query.page ?? 1;
+    const limit = Math.min(query.limit ?? 20, 100);
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.OrganizationWhereInput = {};
+    const q = query.q?.trim();
+    if (q) {
+      where.OR = [
+        { name: { contains: q, mode: 'insensitive' } },
+        { tradeName: { contains: q, mode: 'insensitive' } },
+        { email: { contains: q, mode: 'insensitive' } },
+        { document: { contains: q, mode: 'insensitive' } },
+      ];
+    }
+
+    const [organizations, total] = await Promise.all([
+      prismaRead.organization.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+        select: {
+          id: true,
+          name: true,
+          tradeName: true,
+          document: true,
+          logoUrl: true,
+          email: true,
+          phone: true,
+          city: true,
+          state: true,
+          createdAt: true,
+          updatedAt: true,
+          _count: {
+            select: { members: true, events: true },
+          },
+        },
+      }),
+      prismaRead.organization.count({ where }),
+    ]);
+
+    return {
+      message: 'Organizations fetched successfully',
+      data: {
+        organizations,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit) || 0,
+        },
+      },
+    };
+  }
+
+  /**
    * Lista todos os audit logs (todas as organizações), com metadata completa
    * e `changeDetails` quando houver `metadata.changes`.
    * Nota: a rota não exige papel admin até nova definição (só JWT).
@@ -1806,6 +1868,16 @@ export class OrganizationsService {
       where.metadata = {
         path: ['kind'],
         equals: query.kind.trim(),
+      };
+    }
+    const userSearch = query.userSearch?.trim();
+    if (userSearch) {
+      where.actor = {
+        OR: [
+          { firstName: { contains: userSearch, mode: 'insensitive' } },
+          { lastName: { contains: userSearch, mode: 'insensitive' } },
+          { email: { contains: userSearch, mode: 'insensitive' } },
+        ],
       };
     }
     const [items, total] = await Promise.all([

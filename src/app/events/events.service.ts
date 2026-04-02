@@ -2742,148 +2742,145 @@ export class EventsService {
   }
 
   /**
-   * Constrói lista de lotes próximos de esgotamento
+   * Lotes do evento para o dashboard: todos com capacidade (>0) em ingressos ativos.
+   * Vendas por `RegistrationTicket.batchId`; vendas sem lote são alocadas FIFO nos lotes do ingresso.
+   * Ordem: menor `remaining` primeiro (mais próximo do esgotamento), depois maior % vendido.
    */
-  private async buildLotsNearDepletion(prismaRead: any, eventId: string) {
-    const tickets = await prismaRead.ticket.findMany({
-      where: { eventId, isActive: true },
-      include: {
-        batches: {
-          orderBy: {
-            createdAt: 'asc', // Ordenar por data de criação para processar na ordem
-          },
-        },
-        category: true,
-        registrations: {
-          include: {
-            registration: {
-              include: {
-                order: {
-                  include: {
-                    payment: true,
-                  },
-                },
-              },
-            },
-          },
-        },
+  private async buildLotsNearDepletion(
+    prismaRead: ReturnType<PrismaService['getReadClient']>,
+    eventId: string,
+  ) {
+    const paidRegistrationWhere = {
+      status: RegistrationStatus.CONFIRMED,
+      eventId,
+      order: { payment: { status: PaymentStatus.PAID } },
+    };
+
+    const batches = await prismaRead.ticketBatch.findMany({
+      where: {
+        ticket: { eventId, isActive: true },
+        quantity: { gt: 0 },
       },
+      include: {
+        ticket: { select: { id: true, name: true } },
+      },
+      orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }],
     });
 
-    console.log('[DEBUG lotsNearDepletion] Tickets found:', tickets.length);
+    if (batches.length === 0) {
+      return [];
+    }
 
-    const lots: any[] = [];
-    const now = new Date();
+    const batchIds = batches.map((b) => b.id);
 
-    for (const ticket of tickets) {
-      console.log(`[DEBUG lotsNearDepletion] Processing ticket: ${ticket.name} (${ticket.id})`);
-      console.log(`[DEBUG lotsNearDepletion] Ticket batches:`, ticket.batches.length);
-      console.log(`[DEBUG lotsNearDepletion] Ticket registrations:`, ticket.registrations.length);
+    const [soldByBatch, soldByTicket] = await Promise.all([
+      prismaRead.registrationTicket.groupBy({
+        by: ['batchId'],
+        where: {
+          batchId: { in: batchIds },
+          registration: paidRegistrationWhere,
+        },
+        _count: { _all: true },
+      }),
+      prismaRead.registrationTicket.groupBy({
+        by: ['ticketId'],
+        where: {
+          ticket: { eventId, isActive: true },
+          registration: paidRegistrationWhere,
+        },
+        _count: { _all: true },
+      }),
+    ]);
 
-      // Contar vendas confirmadas e pagas do ticket
-      const soldCount = ticket.registrations.filter(
-        (rt: any) => rt.registration.order?.payment?.status === PaymentStatus.PAID && rt.registration.status === RegistrationStatus.CONFIRMED,
-      ).length;
-
-      console.log(`[DEBUG lotsNearDepletion] Sold count:`, soldCount);
-
-      if (soldCount === 0) {
-        console.log(`[DEBUG lotsNearDepletion] Skipping ticket ${ticket.name} - no sales`);
-        continue; // Pular tickets sem vendas
-      }
-
-      // Filtrar apenas lotes ativos (sem endDate ou endDate no futuro, e com startDate no passado ou null)
-      const activeBatches = ticket.batches.filter((batch: any) => {
-        // Verificar se o lote já começou
-        if (batch.startDate && new Date(batch.startDate) > now) {
-          console.log(`[DEBUG lotsNearDepletion] Batch ${batch.id} not started yet`);
-          return false; // Lote ainda não começou
-        }
-        // Verificar se o lote ainda não terminou
-        if (batch.endDate && new Date(batch.endDate) < now) {
-          console.log(`[DEBUG lotsNearDepletion] Batch ${batch.id} already ended`);
-          return false; // Lote já terminou
-        }
-        return true;
-      });
-
-      console.log(`[DEBUG lotsNearDepletion] Active batches:`, activeBatches.length);
-
-      if (activeBatches.length === 0) {
-        console.log(`[DEBUG lotsNearDepletion] Skipping ticket ${ticket.name} - no active batches`);
-        continue;
-      }
-
-      // Calcular quantidade total disponível nos lotes ativos
-      const totalAvailable = activeBatches.reduce((sum: number, batch: any) => sum + batch.quantity, 0);
-
-      console.log(`[DEBUG lotsNearDepletion] Total available:`, totalAvailable);
-
-      if (totalAvailable === 0) {
-        console.log(`[DEBUG lotsNearDepletion] Skipping ticket ${ticket.name} - no available quantity`);
-        continue; // Pular se não há quantidade disponível
-      }
-
-      // Distribuir vendas entre os lotes ativos proporcionalmente
-      // Começamos pelos lotes mais antigos primeiro
-      let remainingSold = soldCount;
-
-      for (const batch of activeBatches) {
-        if (remainingSold <= 0) break;
-
-        // Calcular quanto deste lote foi vendido (proporcional à quantidade total)
-        const batchProportion = totalAvailable > 0 ? batch.quantity / totalAvailable : 0;
-        const estimatedSold = Math.min(
-          Math.round(soldCount * batchProportion),
-          batch.quantity,
-          remainingSold,
-        );
-
-        const remaining = Math.max(0, batch.quantity - estimatedSold);
-        const percentageSold = batch.quantity > 0 ? (estimatedSold / batch.quantity) * 100 : 0;
-
-        // Também considerar lotes com pouca quantidade restante (menos de 25 unidades)
-        const isLowStock = remaining > 0 && remaining <= 25;
-
-        let status: 'Normal' | 'Atenção' | 'Crítico';
-        if (percentageSold >= 90 || (isLowStock && percentageSold >= 50)) {
-          status = 'Crítico';
-        } else if (percentageSold >= 75 || (isLowStock && percentageSold >= 25)) {
-          status = 'Atenção';
-        } else {
-          status = 'Normal';
-        }
-
-        console.log(`[DEBUG lotsNearDepletion] Batch ${batch.id}:`, {
-          estimatedSold,
-          total: batch.quantity,
-          remaining,
-          percentageSold: Math.round(percentageSold),
-          status,
-        });
-
-        if (status !== 'Normal') {
-          lots.push({
-            lotId: batch.id,
-            ticketId: ticket.id,
-            ticketName: ticket.name,
-            name: `${ticket.name} - Lote ${batch.id.slice(0, 8)}`,
-            status,
-            sold: estimatedSold,
-            total: batch.quantity,
-            remaining,
-            percentageSold: Math.round(percentageSold),
-          });
-        }
-
-        remainingSold -= estimatedSold;
+    const soldCountByBatchId = new Map<string, number>();
+    for (const row of soldByBatch) {
+      if (row.batchId) {
+        soldCountByBatchId.set(row.batchId, row._count._all);
       }
     }
 
-    console.log('[DEBUG lotsNearDepletion] Final lots:', lots.length);
-    console.log('[DEBUG lotsNearDepletion] Final lots data:', lots);
+    const totalSoldByTicketId = new Map<string, number>();
+    for (const row of soldByTicket) {
+      totalSoldByTicketId.set(row.ticketId, row._count._all);
+    }
 
-    return lots.sort((a, b) => b.percentageSold - a.percentageSold);
+    const byTicket = new Map<string, typeof batches>();
+    for (const b of batches) {
+      const list = byTicket.get(b.ticketId) ?? [];
+      list.push(b);
+      byTicket.set(b.ticketId, list);
+    }
+
+    const effectiveSold = new Map<string, number>();
+    for (const b of batches) {
+      effectiveSold.set(b.id, soldCountByBatchId.get(b.id) ?? 0);
+    }
+
+    for (const [, ticketBatches] of byTicket) {
+      const ticketId = ticketBatches[0].ticketId;
+      const total = totalSoldByTicketId.get(ticketId) ?? 0;
+      const assigned = ticketBatches.reduce(
+        (s, bt) => s + (effectiveSold.get(bt.id) ?? 0),
+        0,
+      );
+      let orphan = total - assigned;
+      if (orphan <= 0) continue;
+
+      for (const bt of ticketBatches) {
+        if (orphan <= 0) break;
+        const cap = bt.quantity;
+        const current = effectiveSold.get(bt.id) ?? 0;
+        const room = Math.max(0, cap - current);
+        const add = Math.min(orphan, room);
+        effectiveSold.set(bt.id, current + add);
+        orphan -= add;
+      }
+    }
+
+    const lots = batches.map((batch) => {
+      const total = batch.quantity;
+      const soldRaw = effectiveSold.get(batch.id) ?? 0;
+      const sold = Math.min(soldRaw, total);
+      const remaining = Math.max(0, total - sold);
+      const percentageSold =
+        total > 0 ? Math.round((sold / total) * 10000) / 100 : 0;
+
+      const isLowStock = remaining > 0 && remaining <= 25;
+      let status: 'Normal' | 'Atenção' | 'Crítico';
+      if (
+        percentageSold >= 90 ||
+        remaining === 0 ||
+        (isLowStock && percentageSold >= 50)
+      ) {
+        status = 'Crítico';
+      } else if (percentageSold >= 75 || (isLowStock && percentageSold >= 25)) {
+        status = 'Atenção';
+      } else {
+        status = 'Normal';
+      }
+
+      return {
+        lotId: batch.id,
+        ticketId: batch.ticket.id,
+        ticketName: batch.ticket.name,
+        name: `${batch.ticket.name} - Lote ${batch.id.slice(0, 8)}`,
+        status,
+        sold,
+        total,
+        remaining,
+        percentageSold,
+      };
+    });
+
+    lots.sort((a, b) => {
+      if (a.remaining !== b.remaining) return a.remaining - b.remaining;
+      if (b.percentageSold !== a.percentageSold) {
+        return b.percentageSold - a.percentageSold;
+      }
+      return a.lotId.localeCompare(b.lotId);
+    });
+
+    return lots;
   }
 
   /**

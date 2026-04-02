@@ -6,8 +6,10 @@ import {
   IsArray,
   ValidateNested,
   Min,
+  Max,
   MaxLength,
   ArrayMinSize,
+  IsInt,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -101,6 +103,28 @@ export class CreateProductDto {
     type: [ProductVariationDto],
   })
   variations: ProductVariationDto[];
+
+  @IsOptional()
+  @IsBoolean()
+  @ApiPropertyOptional({
+    description:
+      'If true, the participant may change the chosen variation after purchase within variationEditDeadlineDays before the event.',
+    default: false,
+  })
+  buyerVariationEditAllowed?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(9999)
+  @ApiPropertyOptional({
+    description:
+      'Calendar days before the event until variation change is allowed. Ignored (stored as 0) when buyerVariationEditAllowed is false; default 30 when allowed and omitted.',
+    minimum: 0,
+    maximum: 9999,
+  })
+  @Type(() => Number)
+  variationEditDeadlineDays?: number;
 }
 
 export class UpdateProductDto {
@@ -136,6 +160,27 @@ export class UpdateProductDto {
   @ValidateNested({ each: true })
   @Type(() => ProductVariationDto)
   variations?: ProductVariationDto[];
+
+  @IsOptional()
+  @IsBoolean()
+  @ApiPropertyOptional({
+    description:
+      'If true, the participant may change the chosen variation after purchase within variationEditDeadlineDays before the event.',
+  })
+  buyerVariationEditAllowed?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(9999)
+  @ApiPropertyOptional({
+    description:
+      'Calendar days before the event until variation change is allowed. Use 0 when buyerVariationEditAllowed is false.',
+    minimum: 0,
+    maximum: 9999,
+  })
+  @Type(() => Number)
+  variationEditDeadlineDays?: number;
 }
 
 export class FilterProductsDto {

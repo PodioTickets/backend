@@ -730,7 +730,8 @@ model TicketCategory {
   eventId     String   @db.Uuid
   name        String
   description String?
-  order       Int      @default(0)
+  /// Ordem de exibição (0 = primeiro). Coluna no Postgres: "sortOrder" (ver migração rename).
+  order       Int      @default(0) @map("sortOrder")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -797,6 +798,10 @@ model Product {
   basePrice          Int      @default(0) // Preço base em centavos
   isRequired         Boolean  @default(false)
   variationType      String? // Tipo/nome da variação (ex: "Tamanhos", "Cores")
+  /// Comprador pode alterar a variação escolhida após a compra, dentro da janela em dias antes do evento.
+  buyerVariationEditAllowed Boolean @default(false)
+  /// Dias corridos antes da data do evento até quando a alteração de variação é permitida; 0 quando não permitido.
+  variationEditDeadlineDays Int     @default(0)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
