@@ -37,6 +37,7 @@ import {
   UNCATEGORIZED_CATEGORY_KEY,
   type EventKitSelectionDisplayDto,
 } from './dto/kit-selection-display.dto';
+import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
 
 @Injectable()
 export class EventsService {
@@ -155,14 +156,7 @@ export class EventsService {
 
       const allowed = productIdsByCategoryKey.get(catKey);
       if (!allowed || allowed.size === 0) {
-        if (catKey === UNCATEGORIZED_CATEGORY_KEY) {
-          throw new BadRequestException(
-            `kitSelectionDisplay: no uncategorized tickets (or they have no kit products); fix "uncategorized" in primaryKitProductByCategoryId`,
-          );
-        }
-        throw new BadRequestException(
-          `kitSelectionDisplay: no tickets with kit products in category "${catKey}"`,
-        );
+        continue;
       }
 
       if (!allowed.has(pid)) {
@@ -1057,7 +1051,11 @@ export class EventsService {
 
     return {
       message: 'Event fetched successfully',
-      data: { event },
+      data: {
+        event: this.stripPublicEventAdsTracking(
+          event as unknown as Record<string, unknown>,
+        ),
+      },
     };
   }
 
@@ -1173,18 +1171,36 @@ export class EventsService {
           },
         },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
     });
+
+    const ticketSortCmp = (
+      a: (typeof tickets)[0],
+      b: (typeof tickets)[0],
+    ): number =>
+      a.sortOrder - b.sortOrder ||
+      a.createdAt.getTime() - b.createdAt.getTime();
 
     const ticketCategories = eventBase.ticketCategories.map((cat) => ({
       ...cat,
-      tickets: tickets.filter((t) => t.categoryId === cat.id),
+      tickets: tickets
+        .filter((t) => t.categoryId === cat.id)
+        .sort(ticketSortCmp),
     }));
+
+    const ticketsOrdered = [
+      ...eventBase.ticketCategories.flatMap((cat) =>
+        tickets
+          .filter((t) => t.categoryId === cat.id)
+          .sort(ticketSortCmp),
+      ),
+      ...tickets.filter((t) => !t.categoryId).sort(ticketSortCmp),
+    ];
 
     const event = {
       ...eventBase,
       ticketCategories,
-      tickets,
+      tickets: ticketsOrdered,
     };
 
     const now = new Date();
@@ -1200,10 +1216,14 @@ export class EventsService {
       );
 
 
+    const eventPublic = this.stripPublicEventAdsTracking(
+      eventToReturn as unknown as Record<string, unknown>,
+    );
+
     return {
       message: 'Event fetched successfully',
       data: {
-        event: { ...eventToReturn, hasRegistrationSlotsAvailable },
+        event: { ...eventPublic, hasRegistrationSlotsAvailable },
       },
     };
   }
@@ -1597,6 +1617,118 @@ export class EventsService {
 
     return {
       message: 'Event deleted successfully',
+    };
+  }
+
+  private eventToAdsTrackingPayload(row: {
+    metaPixelId: string | null;
+    googleAnalyticsId: string | null;
+    googleAdsId: string | null;
+  }) {
+    return {
+      metaPixelId: row.metaPixelId ?? '',
+      googleAnalyticsId: row.googleAnalyticsId ?? '',
+      googleAdsId: row.googleAdsId ?? '',
+    };
+  }
+
+  /** Não expor IDs de ads/analytics em GET públicos do evento (slug / por id). */
+  private stripPublicEventAdsTracking<E extends Record<string, unknown>>(event: E): E {
+    const {
+      metaPixelId: _mp,
+      googleAnalyticsId: _ga,
+      googleAdsId: _gad,
+      ...rest
+    } = event;
+    return rest as E;
+  }
+
+  async getAdsTracking(userId: string, eventId: string) {
+    this.validateUUID(eventId, 'event ID');
+    await this.organizerMemberAccess.assertCanAccessEvent(
+      userId,
+      eventId,
+      'edit_event',
+    );
+
+    const prismaRead = this.prisma.getReadClient();
+    const event = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: {
+        id: true,
+        metaPixelId: true,
+        googleAnalyticsId: true,
+        googleAdsId: true,
+      },
+    });
+
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
+
+    return {
+      data: {
+        tracking: this.eventToAdsTrackingPayload(event),
+      },
+    };
+  }
+
+  async updateAdsTracking(
+    userId: string,
+    eventId: string,
+    dto: UpdateEventAdsTrackingDto,
+  ) {
+    this.validateUUID(eventId, 'event ID');
+    await this.organizerMemberAccess.assertCanAccessEvent(
+      userId,
+      eventId,
+      'edit_event',
+    );
+
+    const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
+
+    const existing = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: { id: true },
+    });
+    if (!existing) {
+      throw new NotFoundException('Event not found');
+    }
+
+    const data: Prisma.EventUpdateInput = {};
+    const toDb = (s: string | undefined) =>
+      s === undefined ? undefined : s === '' ? null : s;
+
+    if (dto.metaPixelId !== undefined) {
+      data.metaPixelId = toDb(dto.metaPixelId);
+    }
+    if (dto.googleAnalyticsId !== undefined) {
+      data.googleAnalyticsId = toDb(dto.googleAnalyticsId);
+    }
+    if (dto.googleAdsId !== undefined) {
+      data.googleAdsId = toDb(dto.googleAdsId);
+    }
+
+    if (Object.keys(data).length === 0) {
+      throw new BadRequestException('No fields to update');
+    }
+
+    const updated = await prismaWrite.event.update({
+      where: { id: eventId },
+      data,
+      select: {
+        metaPixelId: true,
+        googleAnalyticsId: true,
+        googleAdsId: true,
+      },
+    });
+
+    return {
+      message: 'Event tracking updated successfully',
+      data: {
+        tracking: this.eventToAdsTrackingPayload(updated),
+      },
     };
   }
 
@@ -2490,111 +2622,183 @@ export class EventsService {
     }
   }
 
-  /**
-   * Constrói dados do gráfico de tendência
-   */
-  private buildChartData(registrations: any[], dateRange: { start: Date | null; end: Date | null }, period?: DashboardPeriod) {
-    // Se o período for "geral", agrupar por mês (últimos 6 meses)
-    if (period === DashboardPeriod.GERAL || !dateRange.start) {
-      return this.buildMonthlyChartData(registrations);
+  /** Chaves UTC `YYYY-MM-DD` de cada dia no intervalo [from, to] (inclusive). */
+  private eachUtcDayKeys(from: Date, to: Date): string[] {
+    const keys: string[] = [];
+    let t = Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate());
+    const endT = Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate());
+    while (t <= endT) {
+      keys.push(new Date(t).toISOString().split('T')[0]);
+      t += 24 * 60 * 60 * 1000;
+      if (keys.length > 500) break;
     }
+    return keys;
+  }
 
-    // Caso contrário, agrupar por dia
-    const dailyData = new Map<string, { revenue: number; confirmed: number; canceled: number; refunded: number }>();
-
-    registrations.forEach((reg) => {
-      const date = new Date(reg.order?.createdAt || reg.createdAt).toISOString().split('T')[0];
-      if (!dailyData.has(date)) {
-        dailyData.set(date, { revenue: 0, confirmed: 0, canceled: 0, refunded: 0 });
-      }
-
-      const dayData = dailyData.get(date)!;
-      if (reg.order?.payment?.status === PaymentStatus.PAID && reg.status === RegistrationStatus.CONFIRMED) {
-        dayData.revenue += this.normalizeToCents(reg.order?.finalAmount);
-        dayData.confirmed += 1;
-      } else if (reg.status === RegistrationStatus.CANCELLED) {
-        dayData.canceled += 1;
-      } else if (reg.order?.payment?.status === PaymentStatus.REFUNDED) {
-        dayData.refunded += 1;
-      }
-    });
-
-    const sortedDates = Array.from(dailyData.keys()).sort();
-    const labels = sortedDates.map((d) => {
-      const date = new Date(d);
-      return date.toLocaleDateString('pt-BR', { month: 'short', day: 'numeric' });
-    });
-    const revenue = sortedDates.map((d) => dailyData.get(d)!.revenue); // Valores já estão em centavos no banco
-
+  private emptyTrendBucket(): {
+    revenue: number;
+    confirmed: number;
+    canceled: number;
+    refunded: number;
+    canceledRevenue: number;
+    refundedRevenue: number;
+  } {
     return {
-      labels,
-      revenue,
-      dailyData: sortedDates.map((date) => {
-        const data = dailyData.get(date)!;
-        return {
-          date,
-          revenue: data.revenue, // Valores já estão em centavos no banco
-          confirmed: data.confirmed,
-          canceled: data.canceled,
-          refunded: data.refunded,
-        };
-      }),
+      revenue: 0,
+      confirmed: 0,
+      canceled: 0,
+      refunded: 0,
+      canceledRevenue: 0,
+      refundedRevenue: 0,
     };
   }
 
   /**
-   * Constrói dados do gráfico agrupados por mês (últimos 6 meses)
+   * Acumula uma inscrição num bucket diário/mensal (centavos + contagens).
+   * Estorno antes de cancelado antes de confirmado, para não duplicar.
+   */
+  private accumulateRegistrationIntoTrendBucket(
+    bucket: {
+      revenue: number;
+      confirmed: number;
+      canceled: number;
+      refunded: number;
+      canceledRevenue: number;
+      refundedRevenue: number;
+    },
+    reg: any,
+  ) {
+    const cents = this.normalizeToCents(reg.order?.finalAmount);
+    const payStatus = reg.order?.payment?.status;
+    if (payStatus === PaymentStatus.REFUNDED) {
+      bucket.refunded += 1;
+      bucket.refundedRevenue += cents;
+      return;
+    }
+    if (reg.status === RegistrationStatus.CANCELLED) {
+      bucket.canceled += 1;
+      bucket.canceledRevenue += cents;
+      return;
+    }
+    if (payStatus === PaymentStatus.PAID && reg.status === RegistrationStatus.CONFIRMED) {
+      bucket.revenue += cents;
+      bucket.confirmed += 1;
+    }
+  }
+
+  /**
+   * Constrói dados do gráfico de tendência (`labels`, `revenue`, `dailyData` alinhados).
+   */
+  private buildChartData(
+    registrations: any[],
+    dateRange: { start: Date | null; end: Date | null },
+    period?: DashboardPeriod,
+  ) {
+    if (period === DashboardPeriod.GERAL || !dateRange.start) {
+      return this.buildMonthlyChartData(registrations);
+    }
+    return this.buildDailyChartData(registrations, dateRange);
+  }
+
+  /**
+   * Agrupa por dia (UTC); preenche todos os dias do período para manter labels/revenue/dailyData com o mesmo tamanho.
+   */
+  private buildDailyChartData(
+    registrations: any[],
+    dateRange: { start: Date; end: Date },
+  ) {
+    const sortedDates = this.eachUtcDayKeys(dateRange.start, dateRange.end);
+    const byDay = new Map<
+      string,
+      {
+        revenue: number;
+        confirmed: number;
+        canceled: number;
+        refunded: number;
+        canceledRevenue: number;
+        refundedRevenue: number;
+      }
+    >();
+    for (const d of sortedDates) {
+      byDay.set(d, this.emptyTrendBucket());
+    }
+
+    registrations.forEach((reg) => {
+      const date = new Date(reg.order?.createdAt || reg.createdAt)
+        .toISOString()
+        .split('T')[0];
+      if (!byDay.has(date)) return;
+      this.accumulateRegistrationIntoTrendBucket(byDay.get(date)!, reg);
+    });
+
+    const labels = sortedDates.map((d) => {
+      const [y, m, day] = d.split('-').map(Number);
+      const date = new Date(Date.UTC(y, m - 1, day));
+      return date.toLocaleDateString('pt-BR', {
+        month: 'short',
+        day: 'numeric',
+        timeZone: 'UTC',
+      });
+    });
+    const revenue = sortedDates.map((d) => byDay.get(d)!.revenue);
+    const dailyData = sortedDates.map((date) => {
+      const data = byDay.get(date)!;
+      return {
+        date,
+        revenue: data.revenue,
+        confirmed: data.confirmed,
+        canceled: data.canceled,
+        refunded: data.refunded,
+        canceledRevenue: data.canceledRevenue,
+        refundedRevenue: data.refundedRevenue,
+      };
+    });
+
+    return { labels, revenue, dailyData };
+  }
+
+  /**
+   * Gráfico período "geral": últimos 6 meses calendário; mesmo contrato que o diário (`dailyData`).
    */
   private buildMonthlyChartData(registrations: any[]) {
-    // Calcular data de início (6 meses atrás)
     const endDate = new Date();
     const startDate = new Date();
     startDate.setMonth(startDate.getMonth() - 6);
-    startDate.setDate(1); // Primeiro dia do mês
+    startDate.setDate(1);
     startDate.setHours(0, 0, 0, 0);
 
-    // Agrupar por mês (YYYY-MM)
-    const monthlyData = new Map<string, { revenue: number; confirmed: number; canceled: number; refunded: number }>();
+    const monthlyData = new Map<
+      string,
+      {
+        revenue: number;
+        confirmed: number;
+        canceled: number;
+        refunded: number;
+        canceledRevenue: number;
+        refundedRevenue: number;
+      }
+    >();
 
-    // Inicializar todos os últimos 6 meses com 0
     for (let i = 5; i >= 0; i--) {
       const date = new Date();
       date.setMonth(date.getMonth() - i);
       date.setDate(1);
       const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-      monthlyData.set(monthKey, { revenue: 0, confirmed: 0, canceled: 0, refunded: 0 });
+      monthlyData.set(monthKey, this.emptyTrendBucket());
     }
 
-    // Agregar valores por mês
     registrations.forEach((reg) => {
       const regDate = new Date(reg.order?.createdAt || reg.createdAt);
-
-      // Só incluir se estiver dentro dos últimos 6 meses
-      if (regDate >= startDate && regDate <= endDate) {
-        const monthKey = `${regDate.getFullYear()}-${String(regDate.getMonth() + 1).padStart(2, '0')}`;
-
-        if (monthlyData.has(monthKey)) {
-          const monthData = monthlyData.get(monthKey)!;
-
-          if (reg.order?.payment?.status === PaymentStatus.PAID && reg.status === RegistrationStatus.CONFIRMED) {
-            monthData.revenue += this.normalizeToCents(reg.order?.finalAmount);
-            monthData.confirmed += 1;
-          } else if (reg.status === RegistrationStatus.CANCELLED) {
-            monthData.canceled += 1;
-          } else if (reg.order?.payment?.status === PaymentStatus.REFUNDED) {
-            monthData.refunded += 1;
-          }
-        }
-      }
+      if (regDate < startDate || regDate > endDate) return;
+      const monthKey = `${regDate.getFullYear()}-${String(regDate.getMonth() + 1).padStart(2, '0')}`;
+      if (!monthlyData.has(monthKey)) return;
+      this.accumulateRegistrationIntoTrendBucket(monthlyData.get(monthKey)!, reg);
     });
 
-    // Ordenar meses
     const sortedMonths = Array.from(monthlyData.keys()).sort();
-
-    // Formatar labels (nomes dos meses em português)
     const monthNames = [
       'Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun',
-      'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'
+      'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez',
     ];
 
     const labels = sortedMonths.map((monthKey) => {
@@ -2604,21 +2808,21 @@ export class EventsService {
     });
 
     const revenue = sortedMonths.map((monthKey) => monthlyData.get(monthKey)!.revenue);
+    const dailyData = sortedMonths.map((monthKey) => {
+      const data = monthlyData.get(monthKey)!;
+      return {
+        date: monthKey,
+        revenue: data.revenue,
+        confirmed: data.confirmed,
+        canceled: data.canceled,
+        refunded: data.refunded,
+        canceledRevenue: data.canceledRevenue,
+        refundedRevenue: data.refundedRevenue,
+      };
+    });
 
-    return {
-      labels,
-      revenue,
-      monthlyData: sortedMonths.map((monthKey) => {
-        const data = monthlyData.get(monthKey)!;
-        return {
-          month: monthKey,
-          revenue: data.revenue,
-          confirmed: data.confirmed,
-          canceled: data.canceled,
-          refunded: data.refunded,
-        };
-      }),
-    };
+    // `monthlyData` espelha `dailyData` (legado); o contrato do dashboard é `dailyData`.
+    return { labels, revenue, dailyData, monthlyData: dailyData };
   }
 
   /**
@@ -2742,8 +2946,9 @@ export class EventsService {
   }
 
   /**
-   * Lotes do evento para o dashboard: todos com capacidade (>0) em ingressos ativos.
-   * Vendas por `RegistrationTicket.batchId`; vendas sem lote são alocadas FIFO nos lotes do ingresso.
+   * Lotes do evento para o dashboard: apenas lotes **ativos** (janela start/end em relação a agora),
+   * com capacidade (>0), em ingressos ativos.
+   * Vendas por `RegistrationTicket.batchId`; vendas sem lote são alocadas FIFO nos lotes ativos do ingresso.
    * Ordem: menor `remaining` primeiro (mais próximo do esgotamento), depois maior % vendido.
    */
   private async buildLotsNearDepletion(
@@ -2756,7 +2961,8 @@ export class EventsService {
       order: { payment: { status: PaymentStatus.PAID } },
     };
 
-    const batches = await prismaRead.ticketBatch.findMany({
+    const now = new Date();
+    const allBatches = await prismaRead.ticketBatch.findMany({
       where: {
         ticket: { eventId, isActive: true },
         quantity: { gt: 0 },
@@ -2765,6 +2971,12 @@ export class EventsService {
         ticket: { select: { id: true, name: true } },
       },
       orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }],
+    });
+
+    const batches = allBatches.filter((b) => {
+      if (b.startDate && new Date(b.startDate) > now) return false;
+      if (b.endDate && new Date(b.endDate) < now) return false;
+      return true;
     });
 
     if (batches.length === 0) {
@@ -3156,6 +3368,7 @@ export class EventsService {
           include: {
             batches: true,
           },
+          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
         },
       },
       orderBy: { order: 'asc' },
@@ -3206,6 +3419,7 @@ export class EventsService {
       include: {
         batches: true,
       },
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
     });
 
     for (const ticket of ticketsWithoutCategory) {

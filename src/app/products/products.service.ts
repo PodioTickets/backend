@@ -2,6 +2,7 @@ import { Injectable, NotFoundException, BadRequestException } from '@nestjs/comm
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateProductDto, UpdateProductDto, FilterProductsDto, ProductVariationDto } from './dto/create-product.dto';
 import { OrganizationsService } from '../organizations/organizations.service';
+import { stripDeletedProductFromKitSelectionDisplay } from '../events/kit-selection-display.prune';
 import { Prisma } from '@prisma/client';
 import {
   summarizeProductUpdateForAudit,
@@ -420,19 +421,12 @@ export class ProductsService {
     const product = await prismaWrite.product.findUnique({
       where: { id: productId },
       include: {
-        tickets: true,
-        kitItems: true,
         variations: { orderBy: { name: 'asc' } },
       },
     });
 
     if (!product || product.eventId !== eventId) {
       throw new NotFoundException('Product not found');
-    }
-
-    // Validar se o produto está vinculado a ingressos ou kits
-    if (product.tickets.length > 0 || product.kitItems.length > 0) {
-      throw new BadRequestException('Cannot delete product that is linked to tickets or kits');
     }
 
     const eventRecord = await prismaRead.event.findUnique({
@@ -475,8 +469,31 @@ export class ProductsService {
       });
     }
 
-    await prismaWrite.product.delete({
-      where: { id: productId },
+    await prismaWrite.$transaction(async (tx) => {
+      await tx.ticketProduct.deleteMany({ where: { productId } });
+      await tx.kitItem.updateMany({
+        where: { productId },
+        data: { productId: null },
+      });
+
+      const ev = await tx.event.findUnique({
+        where: { id: eventId },
+        select: { kitSelectionDisplay: true },
+      });
+      if (ev?.kitSelectionDisplay != null) {
+        const { next, changed } = stripDeletedProductFromKitSelectionDisplay(
+          ev.kitSelectionDisplay,
+          productId,
+        );
+        if (changed) {
+          await tx.event.update({
+            where: { id: eventId },
+            data: { kitSelectionDisplay: next },
+          });
+        }
+      }
+
+      await tx.product.delete({ where: { id: productId } });
     });
 
     return {

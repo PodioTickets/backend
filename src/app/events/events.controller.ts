@@ -41,6 +41,7 @@ import {
 import { DashboardQueryDto } from './dto/dashboard.dto';
 import { FinancialQueryDto } from './dto/financial.dto';
 import { RegistrationsQueryDto } from './dto/registrations.dto';
+import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CacheTTL, NoCache } from 'src/common/decorators/cache.decorator';
 
@@ -206,6 +207,51 @@ export class EventsController {
   @ApiResponse({ status: 404, description: 'Event not found' })
   remove(@Request() req, @Param('id') id: string) {
     return this.eventsService.remove(req.user.id, id);
+  }
+
+  @Get(':eventId/tracking')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @NoCache()
+  @ApiOperation({
+    summary: 'Get event ads / analytics tracking IDs',
+    description:
+      'Meta Pixel, GA4 e Google Ads (organizador). Não incluído em respostas públicas do evento.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiResponse({ status: 200, description: 'Tracking IDs retrieved' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  getAdsTracking(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('eventId') eventId: string,
+  ) {
+    return this.eventsService.getAdsTracking(req.user.id, eventId);
+  }
+
+  @Patch(':eventId/tracking')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @NoCache()
+  @ApiOperation({
+    summary: 'Update event ads / analytics tracking IDs',
+    description:
+      'PATCH parcial: apenas campos enviados são atualizados. String vazia remove o ID.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiBody({ type: UpdateEventAdsTrackingDto })
+  @ApiResponse({ status: 200, description: 'Tracking updated' })
+  @ApiResponse({ status: 400, description: 'Validation error or nothing to update' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  updateAdsTracking(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('eventId') eventId: string,
+    @Body() body: UpdateEventAdsTrackingDto,
+  ) {
+    return this.eventsService.updateAdsTracking(req.user.id, eventId, body);
   }
 
   // Event Topics

@@ -5,6 +5,7 @@ import {
   UpdateTicketDto,
   FilterTicketsDto,
   ReorderTicketProductsDto,
+  ReorderTicketsDto,
 } from './dto/create-ticket.dto';
 import { OrganizationsService } from '../organizations/organizations.service';
 import { Prisma } from '@prisma/client';
@@ -69,12 +70,24 @@ export class TicketsService {
       }
     }
 
+    const categoryKey = createTicketDto.categoryId ?? null;
+    let nextSortOrder = createTicketDto.sortOrder;
+    if (nextSortOrder === undefined) {
+      const last = await prismaWrite.ticket.findFirst({
+        where: { eventId, categoryId: categoryKey },
+        orderBy: { sortOrder: 'desc' },
+        select: { sortOrder: true },
+      });
+      nextSortOrder = last ? last.sortOrder + 1 : 0;
+    }
+
     // Criar ticket com batches
     const ticket = await prismaWrite.ticket.create({
       data: {
         name: createTicketDto.name,
         description: createTicketDto.description,
         categoryId: createTicketDto.categoryId,
+        sortOrder: nextSortOrder,
         modality: createTicketDto.modality,
         distance: createTicketDto.distance,
         distanceUnit: createTicketDto.distanceUnit || 'KM',
@@ -158,7 +171,7 @@ export class TicketsService {
             },
           },
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
       }),
       prismaRead.ticket.count({ where }),
     ]);
@@ -331,6 +344,31 @@ export class TicketsService {
     delete updateData.batches;
     delete updateData.productIds;
     delete updateData.ageLimit;
+
+    if (updateTicketDto.categoryId !== undefined) {
+      if (updateTicketDto.categoryId) {
+        const cat = await prismaRead.ticketCategory.findUnique({
+          where: { id: updateTicketDto.categoryId },
+        });
+        if (!cat || cat.eventId !== eventId) {
+          throw new NotFoundException('Ticket category not found');
+        }
+      }
+      const newCategoryId =
+        updateTicketDto.categoryId === null
+          ? null
+          : updateTicketDto.categoryId;
+      const categoryChanging =
+        (ticket.categoryId ?? null) !== (newCategoryId ?? null);
+      if (categoryChanging && updateTicketDto.sortOrder === undefined) {
+        const last = await prismaRead.ticket.findFirst({
+          where: { eventId, categoryId: newCategoryId },
+          orderBy: { sortOrder: 'desc' },
+          select: { sortOrder: true },
+        });
+        updateData.sortOrder = last ? last.sortOrder + 1 : 0;
+      }
+    }
 
     if (updateTicketDto.batches) {
       const existingBatches = await prismaRead.ticketBatch.findMany({
@@ -613,11 +651,22 @@ export class TicketsService {
       throw new NotFoundException('Ticket not found');
     }
 
+    const lastInGroup = await prismaRead.ticket.findFirst({
+      where: {
+        eventId,
+        categoryId: originalTicket.categoryId,
+      },
+      orderBy: { sortOrder: 'desc' },
+      select: { sortOrder: true },
+    });
+    const duplicateSortOrder = lastInGroup ? lastInGroup.sortOrder + 1 : 0;
+
     // Criar novo ticket com os mesmos dados, mas com novo nome (adicionando "Cópia")
     const duplicatedTicket = await prismaWrite.ticket.create({
       data: {
         name: `${originalTicket.name} (Cópia)`,
         categoryId: originalTicket.categoryId,
+        sortOrder: duplicateSortOrder,
         modality: originalTicket.modality,
         distance: originalTicket.distance,
         distanceUnit: originalTicket.distanceUnit,
@@ -776,6 +825,83 @@ export class TicketsService {
         ticketId,
         productIds: updated?.products.map((tp) => tp.productId) ?? [],
       },
+    };
+  }
+
+  /**
+   * Define sortOrder (0..n) para todos os ingressos do mesmo grupo: mesma categoryId ou sem categoria.
+   */
+  async reorderTickets(
+    userId: string,
+    eventId: string,
+    dto: ReorderTicketsDto,
+    clientIp?: string | null,
+  ) {
+    await this.verifyOrganizerAccess(userId, eventId);
+
+    const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
+
+    const categoryId = dto.categoryId ?? null;
+
+    const inGroup = await prismaRead.ticket.findMany({
+      where: {
+        eventId,
+        categoryId,
+        isActive: true,
+      },
+      select: { id: true },
+    });
+    const groupSet = new Set(inGroup.map((t) => t.id));
+    const incoming = dto.ticketIds;
+
+    if (incoming.length !== groupSet.size) {
+      throw new BadRequestException(
+        'ticketIds must list every active ticket in this category scope exactly once',
+      );
+    }
+    if (new Set(incoming).size !== incoming.length) {
+      throw new BadRequestException('ticketIds must not contain duplicates');
+    }
+    for (const id of incoming) {
+      if (!groupSet.has(id)) {
+        throw new BadRequestException(
+          `Ticket ${id} is not in this category scope or is inactive`,
+        );
+      }
+    }
+
+    await prismaWrite.$transaction(
+      incoming.map((id, index) =>
+        prismaWrite.ticket.update({
+          where: { id },
+          data: { sortOrder: index },
+        }),
+      ),
+    );
+
+    const eventRecord = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: { organizationId: true, name: true },
+    });
+    if (eventRecord) {
+      await this.organizationsService.recordOrganizationAuditLog({
+        organizationId: eventRecord.organizationId,
+        actorUserId: userId,
+        ip: clientIp ?? null,
+        action: `Reordenou ingressos do evento "${eventRecord.name}"`,
+        metadata: {
+          kind: 'TICKETS_REORDER',
+          eventId,
+          categoryId,
+          ticketIds: incoming,
+        } as Prisma.InputJsonValue,
+      });
+    }
+
+    return {
+      message: 'Tickets reordered successfully',
+      data: { categoryId, ticketIds: incoming },
     };
   }
 

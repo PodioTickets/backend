@@ -5,6 +5,7 @@ export const TICKET_FIELD_LABELS: Record<string, string> = {
   name: 'nome',
   description: 'descrição',
   categoryId: 'categoria',
+  sortOrder: 'ordem de exibição',
   modality: 'modalidade',
   distance: 'distância',
   distanceUnit: 'unidade da distância',

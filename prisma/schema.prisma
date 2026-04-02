@@ -304,6 +304,10 @@ model Event {
   status                EventStatus @default(DRAFT)
   /// Opções avançadas de exibição de imagens do kit na escolha de ingressos (camelCase no JSON).
   kitSelectionDisplay   Json?       @map("kit_selection_display")
+  /// Meta Pixel (Facebook/Instagram). Não expor em rotas públicas sem decisão explícita de produto.
+  metaPixelId           String?     @map("meta_pixel_id")
+  googleAnalyticsId     String?     @map("google_analytics_id")
+  googleAdsId           String?     @map("google_ads_id")
   createdAt             DateTime    @default(now())
   updatedAt             DateTime    @updatedAt
 
@@ -746,6 +750,8 @@ model Ticket {
   id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   eventId      String   @db.Uuid
   categoryId   String?  @db.Uuid
+  /// Ordem de exibição dentro do mesmo evento e mesma categoria (ou entre sem categoria: categoryId null).
+  sortOrder    Int      @default(0)
   name         String
   description  String?
   modality     String // Valor do template selecionado (ex: 'Corrida de rua')
@@ -770,6 +776,7 @@ model Ticket {
   @@index([eventId])
   @@index([categoryId])
   @@index([eventId, isActive])
+  @@index([eventId, categoryId, sortOrder])
 }
 
 model TicketBatch {

@@ -57,7 +57,7 @@ export class TicketCategoriesService {
       include: {
         tickets: {
           where: { isActive: true },
-          orderBy: { createdAt: 'asc' },
+          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
         },
       },
     });
@@ -156,7 +156,7 @@ export class TicketCategoriesService {
       include: {
         tickets: {
           where: { isActive: true },
-          orderBy: { createdAt: 'asc' },
+          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
         },
       },
     });

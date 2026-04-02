@@ -79,6 +79,16 @@ export class CreateTicketDto {
   @ApiPropertyOptional({ description: 'Category ID', example: 'uuid' })
   categoryId?: string;
 
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @ApiPropertyOptional({
+    description:
+      'Display order within the same category (or among uncategorized tickets). If omitted, appends after the last ticket in that group.',
+  })
+  @Type(() => Number)
+  sortOrder?: number;
+
   @IsString()
   @ApiProperty({
     description: 'Modality (value from template, e.g., "Corrida de rua")',
@@ -153,6 +163,12 @@ export class UpdateTicketDto {
   categoryId?: string;
 
   @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Type(() => Number)
+  sortOrder?: number;
+
+  @IsOptional()
   @IsString()
   modality?: string;
 
@@ -204,6 +220,29 @@ export class ReorderTicketProductsDto {
     type: [String],
   })
   productIds: string[];
+}
+
+/** Reordena ingressos dentro de uma categoria ou entre os sem categoria (categoryId omitido ou null). */
+export class ReorderTicketsDto {
+  @IsOptional()
+  @ValidateIf((_, v) => v != null && v !== '')
+  @IsUUID()
+  @ApiPropertyOptional({
+    description:
+      'UUID da categoria. Omita ou envie null para reordenar apenas ingressos sem categoria.',
+    nullable: true,
+  })
+  categoryId?: string | null;
+
+  @IsArray()
+  @ArrayUnique()
+  @IsUUID(undefined, { each: true })
+  @ApiProperty({
+    description:
+      'Todos os UUIDs de ingressos ativos desse grupo (mesma categoria ou sem categoria), na ordem desejada (índice 0 = primeiro).',
+    type: [String],
+  })
+  ticketIds: string[];
 }
 
 export class FilterTicketsDto {

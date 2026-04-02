@@ -26,6 +26,7 @@ import {
   UpdateTicketDto,
   FilterTicketsDto,
   ReorderTicketProductsDto,
+  ReorderTicketsDto,
 } from './dto/create-ticket.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
@@ -78,6 +79,33 @@ export class TicketsController {
   @ApiResponse({ status: 404, description: 'Event not found' })
   findAll(@Param('eventId') eventId: string, @Query() filterDto: FilterTicketsDto) {
     return this.ticketsService.findAll(eventId, filterDto);
+  }
+
+  @Patch('events/:eventId/reorder-tickets')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Reorder tickets within a category or uncategorized',
+    description:
+      'Body lists every active ticket in that scope (same categoryId, or omit categoryId for tickets without category). Index in the array is the new sortOrder.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiBody({ type: ReorderTicketsDto })
+  @ApiResponse({ status: 200, description: 'Tickets reordered successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid ticketIds (wrong set or duplicates)' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  reorderTickets(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('eventId') eventId: string,
+    @Body() body: ReorderTicketsDto,
+  ) {
+    return this.ticketsService.reorderTickets(
+      req.user.id,
+      eventId,
+      body,
+      clientIp(req),
+    );
   }
 
   @Get(':id')
