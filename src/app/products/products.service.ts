@@ -132,10 +132,6 @@ export class ProductsService {
       throw new BadRequestException('Product must have at least one variation');
     }
 
-    if (createProductDto.isRequired && variations.length < 2) {
-      throw new BadRequestException('Required products must have at least 2 variations');
-    }
-
     const buyerVariation = this.normalizeBuyerVariationEditForCreate(createProductDto);
 
     const product = await prismaWrite.product.create({
@@ -343,8 +339,7 @@ export class ProductsService {
         throw new BadRequestException('Product must have at least one variation');
       }
 
-      // No PATCH, uma única variação é permitida (ex.: produto obrigatório com um único SKU).
-      // A criação ainda exige ≥2 variações quando isRequired, para forçar escolha real + "Sem interesse" só em opcional.
+      // Produto obrigatório pode ter uma única variação (ex.: um SKU fixo).
 
       newVariationsSnapshot = variations.map((v) => ({
         name: v.name,
