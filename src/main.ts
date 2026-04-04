@@ -20,7 +20,6 @@ import express, { type Request, type Response } from 'express';
 import cookieParser from 'cookie-parser';
 import { initializeSentry } from './config/sentry.config';
 
-/** Body bruto para assinatura de webhook (ex.: POST /api/v1/payments/webhook). */
 type RequestWithRawBody = Request & { rawBody?: Buffer };
 
 initializeSentry();
@@ -34,8 +33,6 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 async function bootstrap() {
-  // bodyParser: false — o Nest registra json com limite padrão ~100kb antes do nosso middleware;
-  // esse limite é aplicado primeiro e causa PayloadTooLarge mesmo com app.use(json 10mb) abaixo.
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bodyParser: false,
   });
@@ -58,7 +55,9 @@ async function bootstrap() {
 
   const allowedOrigins = [
     'http://localhost:3000',
+    'http://app.localhost:3000',
     'https://www.podioticket.com.br',
+    'https://app.podioticket.com.br',
   ];
 
   app.use((req, res, next) => {
@@ -170,7 +169,7 @@ async function bootstrap() {
       req.path.startsWith('/uploads/') ||
       req.path.startsWith('/api/v1/auth') ||
       req.headers['x-api-bypass'] ===
-        configService.get<string>('API_BYPASS_SECRET')
+      configService.get<string>('API_BYPASS_SECRET')
     ) {
       if (origin && allowedOrigins.includes(origin)) {
         res.header('Access-Control-Allow-Origin', origin);
@@ -284,17 +283,12 @@ async function bootstrap() {
               messages[0] || `Validation failed for property ${error.property}`,
             constraints: constraints,
           };
-
-          // Incluir erros aninhados (children)
           if (error.children && error.children.length > 0) {
             formatted.children = error.children.map((child: any) => formatError(child));
           }
-
           return formatted;
         };
-
         const formattedErrors = errors.map(formatError);
-
         return new BadRequestException({
           message: 'Validation failed',
           errors: formattedErrors.map((e) => e.message),
@@ -317,7 +311,6 @@ async function bootstrap() {
   });
 
   const port = Number(process.env.PORT) || 3333;
-  // 0.0.0.0: obrigatório no Docker para aceitar tráfego da bridge/rede do host (evita 502 no proxy).
   await app.listen(port, '0.0.0.0');
 }
 
