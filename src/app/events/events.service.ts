@@ -3560,13 +3560,20 @@ export class EventsService {
   private async aggregateEventRegistrationMetrics(
     prismaRead: PrismaClient,
     eventId: string,
-    orderCreatedBetween?: { gte: Date; lte: Date },
+    orderCreatedBetween?: { gte: Date; lte?: Date; lt?: Date },
   ): Promise<{
     total: number;
     paid: number;
     cancelled: number;
     collected: number;
   }> {
+    const upperBoundSql =
+      orderCreatedBetween?.lt !== undefined
+        ? Prisma.sql`AND o."createdAt" < ${orderCreatedBetween.lt}`
+        : orderCreatedBetween?.lte !== undefined
+          ? Prisma.sql`AND o."createdAt" <= ${orderCreatedBetween.lte}`
+          : Prisma.empty;
+
     const rows = orderCreatedBetween
       ? await prismaRead.$queryRaw<
           {
@@ -3595,7 +3602,7 @@ export class EventsService {
           LEFT JOIN "Payment" p ON p."orderId" = o.id
           WHERE r."eventId" = ${eventId}::uuid
             AND o."createdAt" >= ${orderCreatedBetween.gte}
-            AND o."createdAt" <= ${orderCreatedBetween.lte}
+            ${upperBoundSql}
         `)
       : await prismaRead.$queryRaw<
           {
@@ -3631,6 +3638,51 @@ export class EventsService {
       paid: Number(row?.paid ?? 0),
       cancelled: Number(row?.cancelled ?? 0),
       collected: Number(row?.collected ?? 0),
+    };
+  }
+
+  /**
+   * Variação percentual: últimos 7 dias vs. 7 dias anteriores (filtro por data de criação do pedido).
+   * Retorna 0% quando a semana anterior não tem base (denominador zero).
+   */
+  private async computeRegistrationWowPercentChanges(
+    prismaRead: PrismaClient,
+    eventId: string,
+    reference: Date = new Date(),
+  ): Promise<{
+    totalChange: number;
+    paidChange: number;
+    cancelledChange: number;
+    totalCollectedChange: number;
+  }> {
+    const now = reference;
+    const currentWeekStart = new Date(now);
+    currentWeekStart.setDate(now.getDate() - 7);
+    const previousWeekStart = new Date(now);
+    previousWeekStart.setDate(now.getDate() - 14);
+
+    const [thisWeek, prevWeek] = await Promise.all([
+      this.aggregateEventRegistrationMetrics(prismaRead, eventId, {
+        gte: currentWeekStart,
+        lte: now,
+      }),
+      this.aggregateEventRegistrationMetrics(prismaRead, eventId, {
+        gte: previousWeekStart,
+        lt: currentWeekStart,
+      }),
+    ]);
+
+    const pct = (cur: number, prev: number): number =>
+      prev > 0 ? ((cur - prev) / prev) * 100 : 0;
+
+    return {
+      totalChange: pct(thisWeek.total, prevWeek.total),
+      paidChange: pct(thisWeek.paid, prevWeek.paid),
+      cancelledChange: pct(thisWeek.cancelled, prevWeek.cancelled),
+      totalCollectedChange: pct(
+        this.normalizeToCents(thisWeek.collected),
+        this.normalizeToCents(prevWeek.collected),
+      ),
     };
   }
 
@@ -3935,35 +3987,16 @@ export class EventsService {
       ]);
     }
 
-    const lastWeekStart = new Date();
-    lastWeekStart.setDate(lastWeekStart.getDate() - 14);
-    const lastWeekEnd = new Date();
-    lastWeekEnd.setDate(lastWeekEnd.getDate() - 7);
-
-    const [stats, lastWeekStats] = await Promise.all([
+    const [stats, wowChanges] = await Promise.all([
       this.aggregateEventRegistrationMetrics(prismaRead, eventId),
-      this.aggregateEventRegistrationMetrics(prismaRead, eventId, {
-        gte: lastWeekStart,
-        lte: lastWeekEnd,
-      }),
+      this.computeRegistrationWowPercentChanges(prismaRead, eventId),
     ]);
 
     const paid = stats.paid;
     const cancelled = stats.cancelled;
     const totalCollected = this.normalizeToCents(stats.collected);
 
-    const lastWeekTotal = lastWeekStats.total;
-    const lastWeekPaid = lastWeekStats.paid;
-    const lastWeekCancelled = lastWeekStats.cancelled;
-    const lastWeekCollected = this.normalizeToCents(lastWeekStats.collected);
-
-    const totalChange =
-      lastWeekTotal > 0
-        ? ((stats.total - lastWeekTotal) / lastWeekTotal) * 100
-        : 0;
-    const paidChange = lastWeekPaid > 0 ? ((paid - lastWeekPaid) / lastWeekPaid) * 100 : 0;
-    const cancelledChange = lastWeekCancelled > 0 ? ((cancelled - lastWeekCancelled) / lastWeekCancelled) * 100 : 0;
-    const totalCollectedChange = lastWeekCollected > 0 ? ((totalCollected - lastWeekCollected) / lastWeekCollected) * 100 : 0;
+    const { totalChange, paidChange, cancelledChange, totalCollectedChange } = wowChanges;
 
     // Formatar registrations
     // Cada registration representa um participante do pedido
@@ -4136,35 +4169,17 @@ export class EventsService {
     const prismaRead = this.prisma.getReadClient();
 
     const now = new Date();
-    const lastWeekStart = new Date(now);
-    lastWeekStart.setDate(now.getDate() - 14);
-    const lastWeekEnd = new Date(now);
-    lastWeekEnd.setDate(now.getDate() - 7);
 
-    const [stats, lastWeekStats] = await Promise.all([
+    const [stats, wowChanges] = await Promise.all([
       this.aggregateEventRegistrationMetrics(prismaRead, eventId),
-      this.aggregateEventRegistrationMetrics(prismaRead, eventId, {
-        gte: lastWeekStart,
-        lte: lastWeekEnd,
-      }),
+      this.computeRegistrationWowPercentChanges(prismaRead, eventId, now),
     ]);
 
     const paid = stats.paid;
     const cancelled = stats.cancelled;
     const totalCollected = this.normalizeToCents(stats.collected);
 
-    const lastWeekTotal = lastWeekStats.total;
-    const lastWeekPaid = lastWeekStats.paid;
-    const lastWeekCancelled = lastWeekStats.cancelled;
-    const lastWeekCollected = this.normalizeToCents(lastWeekStats.collected);
-
-    const totalChange =
-      lastWeekTotal > 0
-        ? ((stats.total - lastWeekTotal) / lastWeekTotal) * 100
-        : 0;
-    const paidChange = lastWeekPaid > 0 ? ((paid - lastWeekPaid) / lastWeekPaid) * 100 : 0;
-    const cancelledChange = lastWeekCancelled > 0 ? ((cancelled - lastWeekCancelled) / lastWeekCancelled) * 100 : 0;
-    const totalCollectedChange = lastWeekCollected > 0 ? ((totalCollected - lastWeekCollected) / lastWeekCollected) * 100 : 0;
+    const { totalChange, paidChange, cancelledChange, totalCollectedChange } = wowChanges;
 
     return {
       message: 'Registration stats fetched successfully',
