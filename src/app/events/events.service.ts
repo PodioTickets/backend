@@ -577,6 +577,7 @@ export class EventsService {
               id: true,
               name: true,
               email: true,
+              logoUrl: true,
             },
           },
           _count: {
@@ -784,6 +785,7 @@ export class EventsService {
               id: true,
               name: true,
               email: true,
+              logoUrl: true,
             },
           },
         },
