@@ -13,18 +13,15 @@ export function initializeSentry() {
   Sentry.init({
     dsn,
     environment,
-    tracesSampleRate: environment === 'production' ? 0.1 : 1.0, // 10% em produção, 100% em dev
+    tracesSampleRate: environment === 'production' ? 0.1 : 1.0,
     profilesSampleRate: environment === 'production' ? 0.1 : 1.0,
     beforeSend(event, hint) {
-      // Filtrar eventos sensíveis
       if (event.request) {
-        // Remover dados sensíveis do request
         if (event.request.headers) {
           delete event.request.headers['authorization'];
           delete event.request.headers['cookie'];
         }
         if (event.request.data) {
-          // Remover senhas e tokens
           const data = event.request.data as any;
           if (data.password) delete data.password;
           if (data.token) delete data.token;

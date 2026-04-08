@@ -1252,6 +1252,21 @@ export class CheckoutService {
       }
     }
 
+    const buyerAccount = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+    const buyerCheckoutParticipant = dto.participants.find(
+      (p) => p.email?.toLowerCase() === buyerAccount?.email?.toLowerCase(),
+    );
+    const emergency = buyerCheckoutParticipant?.emergencyPhone?.trim();
+    if (emergency) {
+      await prisma.user.update({
+        where: { id: userId },
+        data: { reservePhone: emergency },
+      });
+    }
+
     // 4. Atualizar uso de cupom
     if (couponResult.couponId) {
       await prisma.coupon.update({

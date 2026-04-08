@@ -657,6 +657,7 @@ export class PaymentsService {
           phone: buyer?.phone,
           dateOfBirth: buyer?.dateOfBirth,
           reservePhone: buyer?.reservePhone,
+          emergencyPhone: buyer?.reservePhone,
           gender: buyer?.gender,
         },
         // Informações do pagamento

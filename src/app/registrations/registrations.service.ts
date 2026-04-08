@@ -448,6 +448,17 @@ export class RegistrationsService {
         payment: true,
       },
     },
+    tickets: {
+      include: {
+        ticket: {
+          select: {
+            id: true,
+            name: true,
+            modality: true,
+          },
+        },
+      },
+    },
   } as const;
 
   async findUserRegistrations(userId: string, filterDto: FilterRegistrationsDto = {}) {
@@ -468,30 +479,38 @@ export class RegistrationsService {
       prismaRead.registration.count({ where }),
     ]);
 
-    // Formatar registrations para substituir qrCode pelo link e formatar produtos
-    const formattedRegistrations = filteredRegistrations.map((reg: any) => ({
-      ...reg,
-      qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
-      products: (reg.products || []).map((rp: any) => ({
-        id: rp.id,
-        product: {
-          id: rp.product.id,
-          name: rp.product.name,
-          image: rp.product.image,
-          basePrice: rp.product.basePrice,
-          variationType: rp.product.variationType || null,
-        },
-        variation: rp.variation ? {
-          id: rp.variation.id,
-          name: rp.variation.name,
-          price: rp.variation.price,
-        } : null,
-        variationName: rp.variation?.name || null,
-        quantity: rp.quantity,
-        unitPrice: rp.unitPrice,
-        totalPrice: rp.totalPrice,
-      })),
-    }));
+    // Formatar registrations para substituir qrCode pelo link, ingressos (modalidade) e produtos
+    const formattedRegistrations = filteredRegistrations.map((reg: any) => {
+      const { tickets: regTickets, ...regRest } = reg;
+      return {
+        ...regRest,
+        qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
+        tickets: (regTickets || []).map((rt: any) => ({
+          id: rt.ticket?.id,
+          name: rt.ticket?.name,
+          modality: rt.ticket?.modality,
+        })),
+        products: (reg.products || []).map((rp: any) => ({
+          id: rp.id,
+          product: {
+            id: rp.product.id,
+            name: rp.product.name,
+            image: rp.product.image,
+            basePrice: rp.product.basePrice,
+            variationType: rp.product.variationType || null,
+          },
+          variation: rp.variation ? {
+            id: rp.variation.id,
+            name: rp.variation.name,
+            price: rp.variation.price,
+          } : null,
+          variationName: rp.variation?.name || null,
+          quantity: rp.quantity,
+          unitPrice: rp.unitPrice,
+          totalPrice: rp.totalPrice,
+        })),
+      };
+    });
 
     const totalPages = Math.ceil(total / limit);
 
