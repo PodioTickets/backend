@@ -1,12 +1,12 @@
 /**
- * Worker thread: ClamAV + Sharp (WebP lossless). Mesma lógica de segurança do UploadService.
+ * Worker thread: ClamAV (opcional) + Sharp WebP otimizado.
  * Compilado para dist/.../image-pipeline.worker.js pelo Nest.
  */
 import { parentPort, workerData } from 'worker_threads';
-import sharp from 'sharp';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as ClamScan from 'clamscan';
+import { encodeImageBufferToWebp } from './upload-image-pipeline';
 
 type WorkerIn = {
   buffer: ArrayBuffer;
@@ -14,21 +14,36 @@ type WorkerIn = {
   originalname: string;
 };
 
-async function scanForMalware(
-  buffer: Buffer,
-  filename: string,
-  uploadDir: string,
-): Promise<void> {
-  try {
-    const clamscan = await ClamScan.createScanner({
+let clamScannerPromise: ReturnType<typeof ClamScan.createScanner> | null = null;
+
+function getOrCreateClamScanner() {
+  if (!clamScannerPromise) {
+    clamScannerPromise = ClamScan.createScanner({
       removeInfected: false,
       quarantineInfected: false,
       scanLog: null,
       debugMode: false,
       fileList: null,
-      scanArchives: true,
-      scanRecursively: true,
+      scanArchives: false,
+      scanRecursively: false,
+    }).catch((err) => {
+      clamScannerPromise = null;
+      throw err;
     });
+  }
+  return clamScannerPromise;
+}
+
+async function scanForMalware(
+  buffer: Buffer,
+  filename: string,
+  uploadDir: string,
+): Promise<void> {
+  if (process.env.UPLOAD_SKIP_CLAMAV === 'true') {
+    return;
+  }
+  try {
+    const clamscan = await getOrCreateClamScanner();
 
     const tempFilename = `temp-scan-${Date.now()}-${Math.round(Math.random() * 1e9)}`;
     const tempFilePath = path.join(uploadDir, tempFilename);
@@ -63,9 +78,7 @@ async function main() {
   const buf = Buffer.from(ab);
   await scanForMalware(buf, originalname || 'uploaded-file', uploadDir);
 
-  const webp = await sharp(buf)
-    .webp({ quality: 100, effort: 6, lossless: true })
-    .toBuffer();
+  const webp = await encodeImageBufferToWebp(buf);
 
   const copy = new ArrayBuffer(webp.length);
   new Uint8Array(copy).set(webp);

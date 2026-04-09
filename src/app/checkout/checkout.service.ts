@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ProcessCheckoutDto } from './dto/process-checkout.dto';
+import { normalizeBillingPostalCodeForStorage } from './dto/checkout-billing-address.dto';
 import { PaymentMethod, PaymentStatus, RegistrationStatus } from '@prisma/client';
 import { CieloService } from '../payments/cielo.service';
 import { RegistrationsService } from '../registrations/registrations.service';
@@ -981,6 +982,12 @@ export class CheckoutService {
   ) {
     const registrations = [];
 
+    const b = dto.billingAddress;
+    const billingPostalStored = normalizeBillingPostalCodeForStorage(
+      b.country,
+      b.postalCode,
+    );
+
     // 1. Criar o Order primeiro com todos os dados financeiros
     // Converter valores para centavos (multiplicar por 100)
     const order = await prisma.order.create({
@@ -993,6 +1000,14 @@ export class CheckoutService {
         finalAmount: prices.finalTotal, // Já está em centavos
         ...(couponResult.couponId && { couponId: couponResult.couponId }),
         ...(voucherResult.voucherId && { voucherId: voucherResult.voucherId }),
+        billingCountry: b.country,
+        billingPostalCode: billingPostalStored,
+        billingStateUf: b.stateUf ?? null,
+        billingStreet: b.street,
+        billingNumber: b.number,
+        billingComplement: b.complement ?? null,
+        billingNeighborhood: b.neighborhood,
+        billingCity: b.city,
       },
     });
 
@@ -1064,6 +1079,17 @@ export class CheckoutService {
         serviceFee: prices.serviceFee,
         discount: prices.couponDiscount + prices.voucherDiscount,
         finalTotal: prices.finalTotal,
+      },
+
+      billingAddress: {
+        country: b.country,
+        postalCode: billingPostalStored,
+        stateUf: b.stateUf ?? null,
+        street: b.street,
+        number: b.number,
+        complement: b.complement ?? null,
+        neighborhood: b.neighborhood,
+        city: b.city,
       },
 
       // Timestamps

@@ -59,7 +59,7 @@ function clientIp(req: ExpressRequest): string {
 @ApiTags('Events')
 @Controller('api/v1/events')
 export class EventsController {
-  constructor(private readonly eventsService: EventsService) {}
+  constructor(private readonly eventsService: EventsService) { }
 
   @Post()
   @UseGuards(JwtAuthGuard)
@@ -101,9 +101,9 @@ export class EventsController {
 
   @Get('search')
   @CacheTTL(120_000)
-  @ApiOperation({ 
-    summary: 'Search events', 
-    description: 'Advanced search for events with text search, location filters, and date ranges. Optimized for performance.' 
+  @ApiOperation({
+    summary: 'Search events',
+    description: 'Advanced search for events with text search, location filters, and date ranges. Optimized for performance.'
   })
   @ApiQuery({ name: 'q', required: false, description: 'Search query (searches in name, description, location, city, state)' })
   @ApiQuery({ name: 'country', required: false, description: 'Filter by country' })
@@ -495,14 +495,14 @@ export class EventsController {
         : [rawQuery['ticketIds[]']];
       delete normalizedQuery['ticketIds[]'];
     }
-    
+
     // Transformar e validar manualmente para evitar erro de whitelist
     const queryDto = plainToClass(DashboardQueryDto, normalizedQuery);
     const errors = await validate(queryDto);
     if (errors.length > 0) {
       throw new BadRequestException('Validation failed');
     }
-    
+
     return this.eventsService.getDashboard(req.user.id, eventId, queryDto);
   }
 
@@ -622,9 +622,33 @@ export class EventsController {
     return this.eventsService.getFinancialChargebacks(req.user.id, eventId, page || 1, limit || 20);
   }
 
+  // ========== ORDERS (organizador) ==========
+  @Get(':eventId/orders/:orderId')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Obter pedido por ID',
+    description:
+      'Retorna um pedido do evento (valores, comprador, pagamento, endereço de cobrança e inscrições vinculadas). Apenas membros autorizados da organização.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiParam({ name: 'orderId', description: 'Order UUID' })
+  @ApiResponse({ status: 200, description: 'Pedido retornado com sucesso' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  @ApiResponse({ status: 404, description: 'Evento ou pedido não encontrado' })
+  getOrganizerOrder(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Param('orderId') orderId: string,
+  ) {
+    return this.eventsService.getOrderForOrganizer(req.user.id, eventId, orderId);
+  }
+
   // ========== REGISTRATIONS ==========
   @Get(':eventId/registrations')
   @UseGuards(JwtAuthGuard)
+  @NoCache()
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get event registrations',
@@ -652,14 +676,14 @@ export class EventsController {
         : [rawQuery['ticketIds[]']];
       delete normalizedQuery['ticketIds[]'];
     }
-    
+
     // Transformar e validar manualmente para evitar erro de whitelist
     const queryDto = plainToClass(RegistrationsQueryDto, normalizedQuery);
     const errors = await validate(queryDto);
     if (errors.length > 0) {
       throw new BadRequestException('Validation failed');
     }
-    
+
     return this.eventsService.getRegistrations(req.user.id, eventId, queryDto);
   }
 

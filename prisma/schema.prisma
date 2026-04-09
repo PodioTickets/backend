@@ -595,6 +595,15 @@ model Order {
   finalAmount Int // Valor final a pagar em centavos
   couponId    String?  @db.Uuid // Cupom aplicado no pedido
   voucherId   String?  @db.Uuid // Voucher aplicado no pedido
+  /// Endereço de cobrança (checkout)
+  billingCountry       String?
+  billingPostalCode    String?
+  billingStateUf       String?
+  billingStreet        String?
+  billingNumber        String?
+  billingComplement    String?
+  billingNeighborhood  String?
+  billingCity          String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

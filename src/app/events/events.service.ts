@@ -76,6 +76,61 @@ export class EventsService {
   }
 
   /**
+   * Endereço de cobrança: colunas do Order; fallback para payment.metadata.billingAddress (pedidos antigos).
+   */
+  private resolveOrderBillingAddress(
+    order: any,
+    payment?: { metadata?: unknown } | null,
+  ): {
+    country: string;
+    postalCode: string | null;
+    stateUf: string | null;
+    street: string | null;
+    number: string | null;
+    complement: string | null;
+    neighborhood: string | null;
+    city: string | null;
+  } | null {
+    if (!order) return null;
+    const hasDb =
+      order.billingCountry != null && String(order.billingCountry).trim() !== '';
+    if (hasDb) {
+      return {
+        country: String(order.billingCountry).trim(),
+        postalCode: order.billingPostalCode ?? null,
+        stateUf: order.billingStateUf ?? null,
+        street: order.billingStreet ?? null,
+        number: order.billingNumber ?? null,
+        complement: order.billingComplement ?? null,
+        neighborhood: order.billingNeighborhood ?? null,
+        city: order.billingCity ?? null,
+      };
+    }
+    let metadata: any = payment?.metadata;
+    if (typeof metadata === 'string') {
+      try {
+        metadata = JSON.parse(metadata);
+      } catch {
+        metadata = null;
+      }
+    }
+    const b = metadata?.billingAddress;
+    if (b && typeof b === 'object' && b.country) {
+      return {
+        country: String(b.country),
+        postalCode: b.postalCode ?? null,
+        stateUf: b.stateUf ?? null,
+        street: b.street ?? null,
+        number: b.number ?? null,
+        complement: b.complement ?? null,
+        neighborhood: b.neighborhood ?? null,
+        city: b.city ?? null,
+      };
+    }
+    return null;
+  }
+
+  /**
    * Garante que kitSelectionDisplay referencia apenas tickets/categorias/produtos do evento.
    * Duas leituras em paralelo (ingressos + categorias).
    */
@@ -2279,26 +2334,25 @@ export class EventsService {
     // Calcular ticket médio (valores já estão em centavos)
     const averageTicket = paidRegistrations.length > 0 ? netRevenue / paidRegistrations.length : 0;
 
-    // Comparar com semana passada (para mudanças percentuais)
-    const lastWeekStart = new Date(now);
-    lastWeekStart.setDate(now.getDate() - 14);
-    const lastWeekEnd = new Date(now);
-    lastWeekEnd.setDate(now.getDate() - 7);
-
-    const lastWeekRegistrations = await prismaRead.registration.findMany({
-      where: {
-        eventId,
-        order: {
-          createdAt: {
-            gte: lastWeekStart,
-            lte: lastWeekEnd,
-          },
-          payment: {
-            status: PaymentStatus.PAID,
-          },
+    // Comparar com o período anterior equivalente (ex.: 15d atuais vs 15d imediatamente antes)
+    const { prevStart, prevEndExclusive } = this.getDashboardComparisonBounds(dateRange, now);
+    const previousWhere: any = {
+      eventId,
+      order: {
+        createdAt: {
+          gte: prevStart,
+          lt: prevEndExclusive,
         },
-        status: RegistrationStatus.CONFIRMED,
       },
+    };
+    if (ticketIds && ticketIds.length > 0) {
+      previousWhere.tickets = {
+        some: { ticketId: { in: ticketIds } },
+      };
+    }
+
+    const previousRegistrations = await prismaRead.registration.findMany({
+      where: previousWhere,
       include: {
         order: {
           include: {
@@ -2308,12 +2362,29 @@ export class EventsService {
       },
     });
 
-    const lastWeekRevenue = lastWeekRegistrations.reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
-    const lastWeekCount = lastWeekRegistrations.length;
-    const lastWeekAvgTicket = lastWeekCount > 0 ? lastWeekRevenue / lastWeekCount : 0;
-    const netRevenueChange = lastWeekRevenue > 0 ? ((netRevenue - lastWeekRevenue) / lastWeekRevenue) * 100 : 0;
-    const totalRegistrationsChange = lastWeekCount > 0 ? ((totalRegistrations - lastWeekCount) / lastWeekCount) * 100 : 0;
-    const averageTicketChange = lastWeekAvgTicket > 0 ? ((averageTicket - lastWeekAvgTicket) / lastWeekAvgTicket) * 100 : 0;
+    const previousPaid = previousRegistrations.filter(
+      (r) =>
+        r.order?.payment &&
+        r.order.payment.status === PaymentStatus.PAID &&
+        r.status === RegistrationStatus.CONFIRMED,
+    );
+    const previousNetRevenue = previousPaid.reduce(
+      (sum, r) => sum + this.normalizeToCents(r.order?.finalAmount),
+      0,
+    );
+    const previousTotalRegistrations = previousRegistrations.length;
+    const previousAverageTicket =
+      previousPaid.length > 0 ? previousNetRevenue / previousPaid.length : 0;
+
+    const netRevenueChange = this.percentChangeVsPrevious(netRevenue, previousNetRevenue);
+    const totalRegistrationsChange = this.percentChangeVsPrevious(
+      totalRegistrations,
+      previousTotalRegistrations,
+    );
+    const averageTicketChange = this.percentChangeVsPrevious(
+      averageTicket,
+      previousAverageTicket,
+    );
     const cancellationRate = totalRegistrations > 0 ? (cancellations / totalRegistrations) * 100 : 0;
     const cancellationsStatus = cancellationRate > 10 ? 'Crítico' : cancellationRate > 5 ? 'Atenção' : 'Normal';
     const refundRate = totalRegistrations > 0 ? (refunds / totalRegistrations) * 100 : 0;
@@ -2592,6 +2663,39 @@ export class EventsService {
     });
 
     return result.sort((a, b) => b.participantCount - a.participantCount);
+  }
+
+  /**
+   * Variação % vs período de referência: (atual − anterior) / anterior × 100.
+   * Quando o anterior é 0 e o atual > 0, retorna 100 (subida a partir de zero).
+   */
+  private percentChangeVsPrevious(current: number, previous: number): number {
+    if (previous === 0 && current === 0) return 0;
+    if (previous === 0) return current > 0 ? 100 : 0;
+    const raw = ((current - previous) / previous) * 100;
+    return Math.round(raw * 100) / 100;
+  }
+
+  /**
+   * Intervalo usado só para métricas de comparação (%).
+   * Com filtro de data: mesma duração do período selecionado, imediatamente antes (sem sobrepor o atual).
+   * GERAL: últimos 7 dias vs os 7 dias anteriores (receita/inscrições/ticket médio só para essa comparação).
+   */
+  private getDashboardComparisonBounds(
+    dateRange: { start: Date | null; end: Date | null },
+    now: Date,
+  ): { prevStart: Date; prevEndExclusive: Date } {
+    if (dateRange.start && dateRange.end) {
+      const durationMs = dateRange.end.getTime() - dateRange.start.getTime();
+      const prevStart = new Date(dateRange.start.getTime() - durationMs);
+      const prevEndExclusive = new Date(dateRange.start.getTime());
+      return { prevStart, prevEndExclusive };
+    }
+    const prevEndExclusive = new Date(now);
+    prevEndExclusive.setDate(prevEndExclusive.getDate() - 7);
+    const prevStart = new Date(prevEndExclusive);
+    prevStart.setDate(prevStart.getDate() - 7);
+    return { prevStart, prevEndExclusive };
   }
 
   /**
@@ -4030,6 +4134,7 @@ export class EventsService {
           email: reg.order.user.email,
           avatarUrl: reg.order.user.avatarUrl,
         } : null,
+        billingAddress: this.resolveOrderBillingAddress(reg.order, reg.order.payment),
         // Informações do pagamento
         payment: reg.order.payment ? (() => {
           const payment = reg.order.payment;
@@ -4157,6 +4262,110 @@ export class EventsService {
           limit,
           total,
           totalPages: Math.ceil(total / limit),
+        },
+      },
+    };
+  }
+
+  /**
+   * Detalhe de um pedido do evento (organizador): valores, comprador, pagamento e endereço de cobrança.
+   */
+  async getOrderForOrganizer(userId: string, eventId: string, orderId: string) {
+    await this.verifyOrganizerAccess(userId, eventId, 'dashboard');
+    this.validateUUID(eventId, 'eventId');
+    this.validateUUID(orderId, 'orderId');
+
+    const prismaRead = this.prisma.getReadClient();
+    const order = await prismaRead.order.findFirst({
+      where: { id: orderId, eventId },
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            documentNumber: true,
+            avatarUrl: true,
+          },
+        },
+        payment: {
+          select: {
+            id: true,
+            status: true,
+            method: true,
+            amount: true,
+            paymentDate: true,
+            transactionId: true,
+            metadata: true,
+            createdAt: true,
+          },
+        },
+        registrations: {
+          select: { id: true, status: true, userId: true, createdAt: true },
+        },
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException('Pedido não encontrado para este evento');
+    }
+
+    let paymentMetadata: any = order.payment?.metadata;
+    if (typeof paymentMetadata === 'string') {
+      try {
+        paymentMetadata = JSON.parse(paymentMetadata);
+      } catch {
+        paymentMetadata = null;
+      }
+    }
+
+    return {
+      message: 'Order fetched successfully',
+      data: {
+        order: {
+          id: order.id,
+          eventId: order.eventId,
+          totalAmount: this.normalizeToCents(order.totalAmount),
+          serviceFee: this.normalizeToCents(order.serviceFee),
+          discount: this.normalizeToCents(order.discount),
+          finalAmount: this.normalizeToCents(order.finalAmount),
+          purchaseDate: order.createdAt.toISOString(),
+          updatedAt: order.updatedAt.toISOString(),
+          couponId: order.couponId,
+          voucherId: order.voucherId,
+          buyer: order.user
+            ? {
+                id: order.user.id,
+                firstName: order.user.firstName,
+                lastName: order.user.lastName,
+                fullName: `${order.user.firstName} ${order.user.lastName}`,
+                email: order.user.email,
+                phone: order.user.phone,
+                documentNumber: order.user.documentNumber,
+                avatarUrl: order.user.avatarUrl,
+              }
+            : null,
+          billingAddress: this.resolveOrderBillingAddress(order, order.payment),
+          payment: order.payment
+            ? {
+                id: order.payment.id,
+                status: order.payment.status,
+                method: order.payment.method,
+                amount: this.normalizeToCents(order.payment.amount),
+                paymentDate: order.payment.paymentDate?.toISOString() ?? null,
+                transactionId: order.payment.transactionId,
+                createdAt: order.payment.createdAt.toISOString(),
+                metadata: paymentMetadata ?? null,
+              }
+            : null,
+          registrations: order.registrations.map((r) => ({
+            id: r.id,
+            status: r.status,
+            userId: r.userId,
+            createdAt: r.createdAt.toISOString(),
+          })),
         },
       },
     };
@@ -4498,6 +4707,7 @@ export class EventsService {
             documentNumber: order.user.documentNumber,
             avatarUrl: order.user.avatarUrl,
           } : null,
+          billingAddress: this.resolveOrderBillingAddress(order, order.payment),
           registrationsCount: order.registrations.length,
         });
 

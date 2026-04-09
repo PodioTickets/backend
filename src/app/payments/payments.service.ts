@@ -622,6 +622,20 @@ export class PaymentsService {
     const creditCardInfo = metadata.creditCard || {};
     const pixInfo = metadata.pix || {};
     const boletoInfo = metadata.boleto || {};
+    const orderRow = payment.order as any;
+    const billingFromOrder =
+      orderRow?.billingCountry != null && String(orderRow.billingCountry).trim() !== ''
+        ? {
+            country: orderRow.billingCountry,
+            postalCode: orderRow.billingPostalCode,
+            stateUf: orderRow.billingStateUf,
+            street: orderRow.billingStreet,
+            number: orderRow.billingNumber,
+            complement: orderRow.billingComplement,
+            neighborhood: orderRow.billingNeighborhood,
+            city: orderRow.billingCity,
+          }
+        : metadata.billingAddress ?? null;
 
     // Buscar cupom usado (se houver)
     let coupon = null;
@@ -660,15 +674,12 @@ export class PaymentsService {
           emergencyPhone: buyer?.reservePhone,
           gender: buyer?.gender,
         },
+        billingAddress: billingFromOrder,
         // Informações do pagamento
         payment: {
           id: payment.id,
           method: payment.method,
           status: payment.status,
-          // payment.amount e order.finalAmount são Float no schema
-          // Como order.finalAmount foi salvo como centavos (Math.round), mas é Float, pode estar em reais
-          // Precisamos normalizar: se o valor parece estar em reais (pequeno), multiplicar por 100
-          // Se parece estar em centavos (grande), usar diretamente
           totalAmount: payment.order?.finalAmount
             ? this.normalizeToCents(payment.order.finalAmount)
             : this.normalizeToCents(payment.amount),

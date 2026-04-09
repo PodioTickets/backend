@@ -18,6 +18,7 @@ import {
 import { Type, Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PaymentMethod } from '@prisma/client';
+import { CheckoutBillingAddressDto } from './checkout-billing-address.dto';
 
 export class CheckoutTicketDto {
   @IsString()
@@ -214,6 +215,15 @@ export class ProcessCheckoutDto {
   @Type(() => CheckoutParticipantDto)
   @ApiProperty({ description: 'Participants (one for each ticket)', type: [CheckoutParticipantDto] })
   participants: CheckoutParticipantDto[];
+
+  @IsDefined({ message: 'billingAddress is required' })
+  @ValidateNested()
+  @Type(() => CheckoutBillingAddressDto)
+  @ApiProperty({
+    description: 'Endereço de cobrança confirmado antes do pagamento',
+    type: CheckoutBillingAddressDto,
+  })
+  billingAddress: CheckoutBillingAddressDto;
 
   @IsOptional()
   @IsString()
