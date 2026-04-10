@@ -3882,17 +3882,18 @@ export class EventsService {
           where.status = status as RegistrationStatus;
 
           // Se o filtro for CANCELLED, excluir registrations com payment REFUNDED
-          // (chargeback e refund devem ser filtrados separadamente)
+          // (chargeback e refund devem ser filtrados separadamente).
+          // Usamos OR para incluir também registrations sem order ou sem payment
+          // (ex: pagamento nunca foi criado ou falhou antes de registrar).
           if (status === 'CANCELLED') {
-            // Mesclar com where.order existente (se houver de startDate/endDate)
-            if (!where.order) {
-              where.order = {};
-            }
-            where.order.payment = {
-              status: {
-                not: PaymentStatus.REFUNDED, // Excluir REFUNDED (chargeback/refund)
-              },
-            };
+            if (!where.AND) where.AND = [];
+            where.AND.push({
+              OR: [
+                { order: { is: null } },
+                { order: { payment: { is: null } } },
+                { order: { payment: { status: { not: PaymentStatus.REFUNDED } } } },
+              ],
+            });
           }
         }
       }
@@ -4105,6 +4106,9 @@ export class EventsService {
       }
       if (where.OR) {
         finalWhere.OR = where.OR;
+      }
+      if (where.AND && where.AND.length > 0) {
+        finalWhere.AND = where.AND;
       }
       // where.order só deve ser incluído se tiver filtros reais (já foi verificado acima)
       if (where.order && (where.order.createdAt || where.order.payment)) {

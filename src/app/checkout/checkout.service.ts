@@ -1367,10 +1367,12 @@ export class CheckoutService {
         }
 
         // Criar Registration para este participante
-        // Status: CONFIRMED se pagamento aprovado, PENDING caso contrário (mesmo se falhou)
+        // CONFIRMED se aprovado, CANCELLED se falhou, PENDING se aguardando confirmação (PIX/Boleto)
         const registrationStatus = paymentResult.status === 'approved'
           ? RegistrationStatus.CONFIRMED
-          : RegistrationStatus.PENDING;
+          : paymentResult.status === 'failed' || !paymentResult.success
+            ? RegistrationStatus.CANCELLED
+            : RegistrationStatus.PENDING;
 
         const registration = await prisma.registration.create({
           data: {
