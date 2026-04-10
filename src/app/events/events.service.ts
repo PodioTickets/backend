@@ -462,10 +462,15 @@ export class EventsService {
     });
   }
 
-  /**
-   * Where clause compartilhado entre GET /events/search e GET /events/search/locations
-   * (catálogo público: mesmo status padrão, datas e busca textual).
-   */
+  /** Mapeamento de código de modalidade -> label armazenado em Ticket.modality */
+  private static readonly MODALITY_CODE_TO_LABEL: Record<string, string> = {
+    corrida: 'Corrida',
+    natacao: 'Natação',
+    ciclismo: 'Ciclismo',
+    triathlon: 'Triathlon',
+    outros: 'Outros',
+  };
+
   private buildPublicEventSearchWhere(params: {
     q?: string;
     country?: string;
@@ -475,6 +480,7 @@ export class EventsService {
     endDate?: string;
     status?: EventStatus;
     includePast?: boolean;
+    modalities?: string;
   }): Prisma.EventWhereInput {
     const {
       q,
@@ -485,6 +491,7 @@ export class EventsService {
       endDate,
       status,
       includePast = false,
+      modalities,
     } = params;
 
     const where: Prisma.EventWhereInput = {
@@ -548,6 +555,25 @@ export class EventsService {
       where.eventDate = {
         gte: new Date(),
       };
+    }
+
+    if (modalities && modalities.trim().length > 0) {
+      const codes = modalities
+        .split(',')
+        .map((c) => c.trim())
+        .filter(Boolean);
+      const labels = codes
+        .map((c) => EventsService.MODALITY_CODE_TO_LABEL[c])
+        .filter((label): label is string => label !== undefined);
+
+      if (labels.length > 0) {
+        where.tickets = {
+          some: {
+            isActive: true,
+            modality: { in: labels },
+          },
+        };
+      }
     }
 
     return where;

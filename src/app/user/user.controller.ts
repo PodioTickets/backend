@@ -165,12 +165,6 @@ export class UserController {
     return this.userService.update(id, updateUserDto);
   }
 
-  @Delete(':id')
-  @UseGuards(JwtAuthGuard, AdminGuard)
-  remove(@Param('id') id: string) {
-    return this.userService.remove(id);
-  }
-
   @Post('avatar')
   @UseGuards(JwtAuthGuard)
   @UseInterceptors(FileInterceptor('file'))
@@ -226,6 +220,29 @@ export class UserController {
         `Erro ao fazer upload do avatar: ${error.message}`,
       );
     }
+  }
+
+  @Delete('avatar')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Remover avatar do usuário',
+    description: 'Remove a imagem de perfil do usuário autenticado, setando avatarUrl como null',
+  })
+  @ApiResponse({ status: 200, description: 'Avatar removido com sucesso' })
+  @ApiResponse({ status: 401, description: 'Não autorizado' })
+  async removeAvatar(@Request() req) {
+    const result = await this.userService.update(req.user.id, { avatarUrl: null } as any);
+    return {
+      message: 'Avatar removido com sucesso',
+      data: result.data,
+    };
+  }
+
+  @Delete(':id')
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  remove(@Param('id') id: string) {
+    return this.userService.remove(id);
   }
 
   @Post(':id/avatar')

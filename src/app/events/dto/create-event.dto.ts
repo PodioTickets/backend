@@ -282,6 +282,10 @@ export class SearchEventsDto {
   @Max(100)
   @Type(() => Number)
   limit?: number = 20;
+
+  @IsOptional()
+  @IsString()
+  modalities?: string; // CSV de códigos de modalidade (ex: "corrida,natacao")
 }
 
 /** Mesmos filtros opcionais de {@link SearchEventsDto}, exceto paginação e filtro por estado/cidade (facetas cobrem todos os pares). */
