@@ -22,7 +22,7 @@ export class PaymentsController {
     private readonly paymentsService: PaymentsService,
     private readonly cieloService: CieloService,
     private readonly webhookService: PaymentsWebhookService,
-  ) {}
+  ) { }
 
   @Post()
   @UseGuards(JwtAuthGuard)
@@ -75,19 +75,10 @@ export class PaymentsController {
     @Body() body: any,
   ) {
     const payload = req.rawBody?.toString() || JSON.stringify(body);
-
-    if (!payload || !signature) {
-      return { received: false };
-    }
-
+    if (!payload || !signature) return { received: false };
     const event = await this.cieloService.handleWebhook(signature, payload);
-
-    if (!event) {
-      return { received: false, error: 'Invalid signature' };
-    }
-
+    if (!event) return { received: false, error: 'Invalid signature' };
     await this.webhookService.handleWebhook(event);
-
     return { received: true };
   }
 
