@@ -509,6 +509,7 @@ export class EventsController {
   // ========== FINANCIAL ==========
   @Get(':eventId/financial')
   @UseGuards(JwtAuthGuard)
+  @NoCache()
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get event financial data',

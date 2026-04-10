@@ -39,6 +39,7 @@ export class OrganizersController {
   }
 
   @Get('me')
+  @NoCache()
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get my organizer profile', description: 'Retrieves the organizer profile of the authenticated user' })
@@ -63,6 +64,7 @@ export class OrganizersController {
 
   @Get('me/organizations')
   @UseGuards(JwtAuthGuard)
+  @NoCache()
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get my organizations',
@@ -173,6 +175,7 @@ export class OrganizersController {
   }
 
   @Get(':organizationId/messages')
+  @NoCache()
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get organization messages', description: 'Retrieves all contact messages for an organization. Only organization members can access messages.' })
