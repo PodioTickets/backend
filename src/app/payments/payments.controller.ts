@@ -8,6 +8,7 @@ import {
   ApiBody,
   ApiHeader,
 } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { PaymentsService } from './payments.service';
 import { CreatePaymentDto, ProcessPaymentDto, ConfirmPaymentDto } from './dto/create-payment.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -63,6 +64,7 @@ export class PaymentsController {
   }
 
   @Post('webhook')
+  @Throttle({ short: { limit: 60, ttl: 60000 } })
   @ApiOperation({ summary: 'Cielo webhook endpoint', description: 'Receives webhook events from Cielo for payment status updates' })
   @ApiHeader({ name: 'cielo-signature', description: 'Cielo webhook signature' })
   @ApiResponse({ status: 200, description: 'Webhook received successfully' })

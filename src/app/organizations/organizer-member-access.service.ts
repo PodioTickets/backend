@@ -62,7 +62,7 @@ export class OrganizerMemberAccessService {
     };
   }
 
-  private effectivePermission(
+  hasPermission(
     member: OrganizerMemberWithAccess,
     key: OrganizerPermissionKey,
   ): boolean {
@@ -71,6 +71,13 @@ export class OrganizerMemberAccessService {
       permissionsJson: member.permissions,
     });
     return map[key] === true;
+  }
+
+  private effectivePermission(
+    member: OrganizerMemberWithAccess,
+    key: OrganizerPermissionKey,
+  ): boolean {
+    return this.hasPermission(member, key);
   }
 
   private eventInScope(member: OrganizerMemberWithAccess, eventId: string): boolean {

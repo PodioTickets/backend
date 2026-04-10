@@ -61,6 +61,53 @@ export class OrganizersController {
     return this.organizersService.update(req.user.id, updateOrganizerDto);
   }
 
+  @Get('me/organizations')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get my organizations',
+    description: 'Retorna todas as organizações em que o usuário autenticado é membro (qualquer role: OWNER, ADMIN, etc.)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Organizations retrieved successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string' },
+        data: {
+          type: 'object',
+          properties: {
+            organizations: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  name: { type: 'string' },
+                  description: { type: 'string' },
+                  logoUrl: { type: 'string' },
+                  email: { type: 'string' },
+                  phone: { type: 'string' },
+                  city: { type: 'string' },
+                  state: { type: 'string' },
+                  role: { type: 'string' },
+                  joinedAt: { type: 'string', format: 'date-time' },
+                  membersCount: { type: 'number' },
+                  eventsCount: { type: 'number' },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  getMyOrganizations(@Request() req) {
+    return this.organizersService.findMyOrganizations(req.user.id);
+  }
+
   @Get('me/events')
   @UseGuards(JwtAuthGuard)
   @NoCache()

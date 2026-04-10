@@ -565,7 +565,7 @@ export class OrganizationsService {
     const member = await prismaRead.organizationMember.findFirst({
       where: {
         userId,
-        role: 'OWNER',
+        // Aceita qualquer role: OWNER, ADMIN, MEMBER, etc.
       },
       include: {
         organization: {

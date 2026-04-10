@@ -735,6 +735,10 @@ export class RegistrationsService {
         unitPrice: rp.unitPrice,
         totalPrice: rp.totalPrice,
       })),
+      emergencyContact: {
+        name: reg.emergencyContactName ?? null,
+        phone: reg.emergencyContactPhone ?? null,
+      },
     };
 
     return {

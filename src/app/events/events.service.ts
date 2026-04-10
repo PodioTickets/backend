@@ -918,6 +918,21 @@ export class EventsService {
 
     const orgMember =
       await this.organizerMemberAccess.getMemberForOrganizerUser(userId);
+
+    // Membros não-OWNER precisam ter a permissão view_event para ver qualquer evento
+    if (
+      orgMember.role !== 'OWNER' &&
+      !this.organizerMemberAccess.hasPermission(orgMember, 'view_event')
+    ) {
+      return {
+        message: 'Events fetched successfully',
+        data: {
+          events: [],
+          pagination: { page, limit, total: 0, totalPages: 0 },
+        },
+      };
+    }
+
     const scopeWhere = this.organizerMemberAccess.buildOrganizerEventsWhere(
       orgMember,
     );
@@ -2517,9 +2532,13 @@ export class EventsService {
       }
     }
 
-    const productIds = Array.from(salesByProduct.keys());
+    // Desduplicar productIds (o Map garante unicidade, mas defensivo contra edge cases)
+    const productIds = [...new Set(Array.from(salesByProduct.keys()).filter(Boolean))];
+
+    if (productIds.length === 0) return [];
+
     const productsWithVariations = await prismaRead.product.findMany({
-      where: { id: { in: productIds }, eventId },
+      where: { id: { in: productIds } },
       select: {
         id: true,
         name: true,
@@ -2528,7 +2547,15 @@ export class EventsService {
       },
     });
 
-    const result = productsWithVariations.map((product) => {
+    // Desduplicar por id antes de mapear (defesa contra retornos inesperados do ORM)
+    const seenProductIds = new Set<string>();
+    const uniqueProducts = productsWithVariations.filter((p) => {
+      if (seenProductIds.has(p.id)) return false;
+      seenProductIds.add(p.id);
+      return true;
+    });
+
+    const result = uniqueProducts.map((product) => {
       const sales = salesByProduct.get(product.id);
       if (!sales) return null;
       const totalSold = Array.from(sales.byVariation.values()).reduce((sum, v) => sum + v.quantitySold, 0);
@@ -2579,12 +2606,15 @@ export class EventsService {
         productId: product.id,
         productName: product.name,
         productImage: product.image ?? null,
+        totalQuantitySold: totalSold,
         totalSoldAmount: sales.totalSoldAmount,
         variations: variationRows,
       };
     });
 
-    return result.filter((r): r is NonNullable<typeof r> => r !== null);
+    return result
+      .filter((r): r is NonNullable<typeof r> => r !== null)
+      .sort((a, b) => b.totalQuantitySold - a.totalQuantitySold);
   }
 
   /**

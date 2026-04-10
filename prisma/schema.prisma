@@ -493,10 +493,12 @@ model Registration {
   eventId       String             @db.Uuid
   orderId       String             @db.Uuid // Pedido ao qual esta inscrição pertence (obrigatório)
   userId        String             @db.Uuid // Usuário participante (pode ser diferente do comprador do pedido)
-  status        RegistrationStatus @default(PENDING)
-  qrCode        String? // Código/payload do QR (UUID ou código curto de 36-64 chars) - QR é gerado dinamicamente no frontend/backend
-  termsAccepted Boolean            @default(false)
-  rulesAccepted Boolean            @default(false)
+  status                RegistrationStatus @default(PENDING)
+  qrCode                String? // Código/payload do QR (UUID ou código curto de 36-64 chars) - QR é gerado dinamicamente no frontend/backend
+  termsAccepted         Boolean            @default(false)
+  rulesAccepted         Boolean            @default(false)
+  emergencyContactName  String? // Nome do contato de emergência informado no momento da compra
+  emergencyContactPhone String? // Telefone do contato de emergência informado no momento da compra
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
 
@@ -593,8 +595,9 @@ model Order {
   serviceFee  Int // Taxa de serviço total em centavos
   discount    Int      @default(0) // Desconto total (cupom/voucher) em centavos
   finalAmount Int // Valor final a pagar em centavos
-  couponId    String?  @db.Uuid // Cupom aplicado no pedido
-  voucherId   String?  @db.Uuid // Voucher aplicado no pedido
+  couponId        String?  @db.Uuid // Cupom aplicado no pedido
+  voucherId       String?  @db.Uuid // Voucher aplicado no pedido
+  idempotencyKey  String?  @unique  // Chave de idempotência para evitar pedidos duplicados
   /// Endereço de cobrança (checkout)
   billingCountry       String?
   billingPostalCode    String?

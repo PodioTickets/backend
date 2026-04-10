@@ -20,7 +20,15 @@ export class ConcurrencyLimiterMiddleware implements NestMiddleware {
   constructor(
     @Optional()
     private readonly concurrencyRedis?: ConcurrencyRedisService,
-  ) {}
+  ) {
+    if (!concurrencyRedis) {
+      this.logger.warn(
+        'Redis not available — concurrency limiting is in-memory only. ' +
+        'Multiple server instances will NOT share rate limit state. ' +
+        'Set REDIS_URL to enable distributed rate limiting.',
+      );
+    }
+  }
 
   async use(req: Request, res: Response, next: NextFunction) {
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
