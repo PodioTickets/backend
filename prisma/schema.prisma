@@ -11,6 +11,12 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum OrderStatus {
+  PENDING
+  PAID
+  CANCELLED
+}
+
 enum Gender {
   MALE
   FEMALE
@@ -610,17 +616,27 @@ model Order {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  event         Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  coupon        Coupon?        @relation(fields: [couponId], references: [id], onDelete: SetNull)
-  voucher       Voucher?       @relation(fields: [voucherId], references: [id], onDelete: SetNull)
-  payment       Payment?
-  registrations Registration[]
+  status              OrderStatus @default(PENDING)
+  expiresAt           DateTime?
+  reservedAt          DateTime?
+  cancelledAt         DateTime?
+  cancelledReason     String?
+  pendingParticipants Json?
+  pendingProducts     Json?
+
+  user            User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  event           Event                @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  coupon          Coupon?              @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  voucher         Voucher?             @relation(fields: [voucherId], references: [id], onDelete: SetNull)
+  payment         Payment?
+  registrations   Registration[]
+  reservedTickets OrderReservedTicket[]
 
   @@index([userId])
   @@index([eventId])
   @@index([createdAt])
   @@index([eventId, createdAt]) // Janelas por data do pedido (métricas / relatórios)
+  @@index([status, expiresAt])
 }
 
 model Payment {
@@ -644,6 +660,26 @@ model Payment {
   @@index([transactionId])
   @@index([status, createdAt]) // Para relatórios de pagamento
   @@index([method, status]) // Para análise por método
+}
+
+model OrderReservedTicket {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId    String   @db.Uuid
+  ticketId   String   @db.Uuid
+  batchId    String   @db.Uuid
+  quantity   Int
+  unitPrice  Int
+  batchName  String?
+  ticketName String?
+  createdAt  DateTime @default(now())
+
+  order  Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  ticket Ticket      @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  batch  TicketBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([ticketId])
+  @@index([batchId])
 }
 
 model ContactMessage {
@@ -778,12 +814,13 @@ model Ticket {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  event         Event                @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  category      TicketCategory?      @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  kit           Kit?                 @relation(fields: [kitId], references: [id], onDelete: SetNull)
-  batches       TicketBatch[]
-  products      TicketProduct[]
-  registrations RegistrationTicket[]
+  event           Event                @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  category        TicketCategory?      @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  kit             Kit?                 @relation(fields: [kitId], references: [id], onDelete: SetNull)
+  batches         TicketBatch[]
+  products        TicketProduct[]
+  registrations   RegistrationTicket[]
+  reservedTickets OrderReservedTicket[]
 
   @@index([eventId])
   @@index([categoryId])
@@ -792,17 +829,19 @@ model Ticket {
 }
 
 model TicketBatch {
-  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  ticketId  String    @db.Uuid
-  quantity  Int
-  price     Int // Preço em centavos
-  startDate DateTime?
-  endDate   DateTime?
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticketId          String    @db.Uuid
+  quantity          Int
+  availableQuantity Int
+  price             Int // Preço em centavos
+  startDate         DateTime?
+  endDate           DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
-  ticket        Ticket               @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  registrations RegistrationTicket[]
+  ticket         Ticket               @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  registrations  RegistrationTicket[]
+  reservedBatches OrderReservedTicket[]
 
   @@index([ticketId])
   @@index([ticketId, startDate, endDate])

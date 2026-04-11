@@ -1,0 +1,990 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import {
+  ConflictException,
+  HttpException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  UnprocessableEntityException,
+} from '@nestjs/common';
+import { PaymentMethod, PaymentStatus, RegistrationStatus } from '@prisma/client';
+import { PrismaService } from '../../prisma/prisma.service';
+import { CieloService } from '../payments/cielo.service';
+import { OrdersRedisService } from './orders-redis.service';
+import { ReserveOrderDto } from './dto/reserve-order.dto';
+import { PatchParticipantsDto } from './dto/patch-participants.dto';
+import { PatchProductsDto } from './dto/patch-products.dto';
+import { PatchBillingAddressDto } from './dto/patch-billing-address.dto';
+import { PayOrderDto } from './dto/pay-order.dto';
+
+// ─── typed error helpers ─────────────────────────────────────────────────────
+
+class AppConflictException extends ConflictException {
+  constructor(code: string, message: string) {
+    super({ code, message });
+  }
+}
+
+class AppUnprocessableException extends UnprocessableEntityException {
+  constructor(code: string, message: string) {
+    super({ code, message });
+  }
+}
+
+// ─── constants ───────────────────────────────────────────────────────────────
+
+const RESERVATION_TTL_MINUTES = 30;
+
+// ─── shape helper ────────────────────────────────────────────────────────────
+
+function orderShape(order: any): Record<string, any> {
+  return {
+    id: order.id,
+    eventId: order.eventId,
+    status: order.status,
+    totalAmount: order.totalAmount,
+    serviceFee: order.serviceFee,
+    discount: order.discount,
+    finalAmount: order.finalAmount,
+    expiresAt: order.expiresAt ?? null,
+    reservedAt: order.reservedAt ?? null,
+    cancelledAt: order.cancelledAt ?? null,
+    cancelledReason: order.cancelledReason ?? null,
+    reservedTickets: order.reservedTickets ?? [],
+    pendingParticipants: order.pendingParticipants ?? null,
+    pendingProducts: order.pendingProducts ?? null,
+    billingCountry: order.billingCountry ?? null,
+    billingPostalCode: order.billingPostalCode ?? null,
+    billingStateUf: order.billingStateUf ?? null,
+    billingStreet: order.billingStreet ?? null,
+    billingNumber: order.billingNumber ?? null,
+    billingComplement: order.billingComplement ?? null,
+    billingNeighborhood: order.billingNeighborhood ?? null,
+    billingCity: order.billingCity ?? null,
+    createdAt: order.createdAt,
+    updatedAt: order.updatedAt,
+    serverTime: new Date(),
+  };
+}
+
+// ─── service ─────────────────────────────────────────────────────────────────
+
+@Injectable()
+export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cieloService: CieloService,
+    private readonly redisService: OrdersRedisService,
+  ) {}
+
+  // ── 1. reserve ─────────────────────────────────────────────────────────────
+
+  async reserve(userId: string, dto: ReserveOrderDto): Promise<Record<string, any>> {
+    const r: any = this.prisma.getReadClient();
+    const w: any = this.prisma.getWriteClient();
+
+    // 1.1 Rate limit
+    const allowed = await this.redisService.checkRateLimit(userId, 5, 60);
+    if (!allowed) {
+      throw new HttpException(
+        {
+          code: 'RATE_LIMIT_EXCEEDED',
+          message: 'Muitas tentativas. Aguarde alguns segundos e tente novamente.',
+        },
+        429,
+      );
+    }
+
+    // 1.2 Cap: max 3 PENDING orders per user (ignora pedidos já expirados)
+    const pendingCount = await r.order.count({
+      where: {
+        userId,
+        status: 'PENDING',
+        expiresAt: { gt: new Date() },
+      },
+    });
+    if (pendingCount >= 3) {
+      throw new AppConflictException(
+        'TOO_MANY_PENDING_ORDERS',
+        'Você já possui 3 pedidos pendentes. Conclua ou cancele-os antes de reservar um novo.',
+      );
+    }
+
+    // 1.3 Validate event
+    const event = await r.event.findUnique({
+      where: { id: dto.eventId },
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        registrationStartDate: true,
+        registrationEndDate: true,
+      },
+    });
+    if (!event) throw new NotFoundException('Evento não encontrado');
+    if (event.status !== 'PUBLISHED') {
+      throw new AppConflictException(
+        'EVENT_NOT_PUBLISHED',
+        'Evento não está disponível para compra',
+      );
+    }
+    const now = new Date();
+    if (event.registrationStartDate && now < new Date(event.registrationStartDate)) {
+      throw new AppConflictException(
+        'REGISTRATION_NOT_OPEN',
+        'Inscrições ainda não abertas para este evento',
+      );
+    }
+    if (event.registrationEndDate && now > new Date(event.registrationEndDate)) {
+      throw new AppConflictException('REGISTRATION_CLOSED', 'Período de inscrição encerrado');
+    }
+
+    // 1.4 Idempotency: return existing PENDING order for same user+event
+    // Filtra apenas pedidos não-expirados para não devolver uma reserva cujo
+    // timer já passou (o job de expiração pode estar atrasado).
+    const existingPending = await r.order.findFirst({
+      where: {
+        userId,
+        eventId: dto.eventId,
+        status: 'PENDING',
+        expiresAt: { gt: new Date() },
+      },
+      include: { reservedTickets: true },
+    });
+    if (existingPending) {
+      this.logger.log(
+        `Reserve idempotent: returning existing order ${existingPending.id} for user ${userId}`,
+      );
+      return orderShape(existingPending);
+    }
+
+    // 1.5 Validate each ticket/batch
+    type BatchInfo = {
+      batchId: string;
+      ticketId: string;
+      quantity: number;
+      unitPrice: number;
+      ticketName: string;
+    };
+    const batchInfos: BatchInfo[] = [];
+
+    for (const item of dto.tickets) {
+      const ticket = await r.ticket.findUnique({
+        where: { id: item.ticketId },
+        select: { id: true, name: true, isActive: true, eventId: true },
+      });
+      if (!ticket || !ticket.isActive) {
+        throw new NotFoundException(`Ingresso ${item.ticketId} não encontrado ou inativo`);
+      }
+      if (ticket.eventId !== dto.eventId) {
+        throw new NotFoundException(`Ingresso ${item.ticketId} não pertence a este evento`);
+      }
+
+      const batch = await r.ticketBatch.findUnique({
+        where: { id: item.batchId },
+        select: { id: true, ticketId: true, price: true, startDate: true, endDate: true },
+      });
+      if (!batch || batch.ticketId !== item.ticketId) {
+        throw new NotFoundException(
+          `Lote ${item.batchId} não encontrado ou não pertence ao ingresso`,
+        );
+      }
+
+      if (batch.startDate && now < new Date(batch.startDate)) {
+        throw new AppConflictException(
+          'BATCH_NOT_STARTED',
+          `Lote ainda não iniciado para o ingresso "${ticket.name}"`,
+        );
+      }
+      if (batch.endDate && now > new Date(batch.endDate)) {
+        throw new AppConflictException(
+          'BATCH_EXPIRED',
+          `Lote encerrado para o ingresso "${ticket.name}"`,
+        );
+      }
+
+      batchInfos.push({
+        batchId: item.batchId,
+        ticketId: item.ticketId,
+        quantity: item.quantity,
+        unitPrice: batch.price,
+        ticketName: ticket.name,
+      });
+    }
+
+    // 1.6 Atomic stock decrement + order creation inside a single transaction
+    const order = await w.$transaction(async (tx: any) => {
+      // Decrement availableQuantity atomically; 0 rows → sold out → rollback
+      for (const info of batchInfos) {
+        const rows: any[] = await tx.$queryRaw`
+          UPDATE "TicketBatch"
+          SET "availableQuantity" = "availableQuantity" - ${info.quantity}
+          WHERE id = ${info.batchId}::uuid
+            AND "availableQuantity" >= ${info.quantity}
+          RETURNING id
+        `;
+        if (!rows || rows.length === 0) {
+          throw new AppConflictException(
+            'BATCH_SOLD_OUT',
+            `Sem vagas disponíveis para o ingresso "${info.ticketName}". Lote esgotado.`,
+          );
+        }
+      }
+
+      // 1.7 Calculate totals
+      const totalAmount = batchInfos.reduce(
+        (sum, info) => sum + info.unitPrice * info.quantity,
+        0,
+      );
+
+      // 1.8 Create Order
+      const createdOrder = await tx.order.create({
+        data: {
+          userId,
+          eventId: dto.eventId,
+          totalAmount,
+          serviceFee: 0,
+          discount: 0,
+          finalAmount: totalAmount,
+          status: 'PENDING',
+          expiresAt: new Date(Date.now() + RESERVATION_TTL_MINUTES * 60 * 1000),
+          reservedAt: new Date(),
+        },
+      });
+
+      // 1.9 Create OrderReservedTicket rows
+      for (const info of batchInfos) {
+        await tx.orderReservedTicket.create({
+          data: {
+            orderId: createdOrder.id,
+            ticketId: info.ticketId,
+            batchId: info.batchId,
+            quantity: info.quantity,
+            unitPrice: info.unitPrice,
+            ticketName: info.ticketName,
+          },
+        });
+      }
+
+      return tx.order.findUnique({
+        where: { id: createdOrder.id },
+        include: { reservedTickets: true },
+      });
+    });
+
+    this.logger.log(`Reserved order ${order.id} for user ${userId}, event ${dto.eventId}`);
+    return orderShape(order);
+  }
+
+  // ── 2. findOrder ───────────────────────────────────────────────────────────
+
+  async findOrder(userId: string, orderId: string): Promise<Record<string, any>> {
+    const r: any = this.prisma.getReadClient();
+    const order = await r.order.findUnique({
+      where: { id: orderId },
+      include: { reservedTickets: true },
+    });
+    // Anti-IDOR: always 404
+    if (!order || order.userId !== userId) {
+      throw new NotFoundException('Pedido não encontrado');
+    }
+    return orderShape(order);
+  }
+
+  // ── 3. patchParticipants ──────────────────────────────────────────────────
+
+  async patchParticipants(
+    userId: string,
+    orderId: string,
+    dto: PatchParticipantsDto,
+  ): Promise<Record<string, any>> {
+    const order = await this.findOrderForWrite(userId, orderId);
+    this.assertPending(order);
+
+    const w: any = this.prisma.getWriteClient();
+    const updated = await w.order.update({
+      where: { id: orderId },
+      data: { pendingParticipants: dto.participants, updatedAt: new Date() },
+      include: { reservedTickets: true },
+    });
+    return orderShape(updated);
+  }
+
+  // ── 4. patchProducts ──────────────────────────────────────────────────────
+
+  async patchProducts(
+    userId: string,
+    orderId: string,
+    dto: PatchProductsDto,
+  ): Promise<Record<string, any>> {
+    const order = await this.findOrderForWrite(userId, orderId);
+    this.assertPending(order);
+
+    const r: any = this.prisma.getReadClient();
+    const w: any = this.prisma.getWriteClient();
+
+    // Recalculate product subtotal
+    let productsSubtotal = 0;
+    for (const item of dto.products) {
+      const product = await r.product.findUnique({
+        where: { id: item.productId },
+        include: { variations: true },
+      });
+      if (!product) throw new NotFoundException(`Produto ${item.productId} não encontrado`);
+
+      let unitPrice: number = product.basePrice;
+      if (item.variationId) {
+        const variation = product.variations.find((v: any) => v.id === item.variationId);
+        if (!variation) {
+          throw new NotFoundException(`Variação ${item.variationId} não encontrada`);
+        }
+        unitPrice = variation.name === 'Sem interesse' ? 0 : variation.price;
+      }
+      productsSubtotal += unitPrice * item.quantity;
+    }
+
+    const ticketsSubtotal = (order.reservedTickets as any[]).reduce(
+      (sum: number, rt: any) => sum + rt.unitPrice * rt.quantity,
+      0,
+    );
+    const totalAmount = ticketsSubtotal + productsSubtotal;
+
+    const updated = await w.order.update({
+      where: { id: orderId },
+      data: {
+        pendingProducts: dto.products,
+        totalAmount,
+        finalAmount: totalAmount,
+        updatedAt: new Date(),
+      },
+      include: { reservedTickets: true },
+    });
+    return orderShape(updated);
+  }
+
+  // ── 5. patchBillingAddress ────────────────────────────────────────────────
+
+  async patchBillingAddress(
+    userId: string,
+    orderId: string,
+    dto: PatchBillingAddressDto,
+  ): Promise<Record<string, any>> {
+    const order = await this.findOrderForWrite(userId, orderId);
+    this.assertPending(order);
+
+    const b = dto.billingAddress;
+    const w: any = this.prisma.getWriteClient();
+    const updated = await w.order.update({
+      where: { id: orderId },
+      data: {
+        billingCountry: b.country ?? null,
+        billingPostalCode: b.postalCode,
+        billingStateUf: b.stateUf,
+        billingStreet: b.street,
+        billingNumber: b.number,
+        billingComplement: b.complement ?? null,
+        billingNeighborhood: b.neighborhood ?? null,
+        billingCity: b.city,
+        updatedAt: new Date(),
+      },
+      include: { reservedTickets: true },
+    });
+    return orderShape(updated);
+  }
+
+  // ── 6. pay ────────────────────────────────────────────────────────────────
+
+  async pay(
+    userId: string,
+    orderId: string,
+    idempotencyKey: string | undefined,
+    dto: PayOrderDto,
+  ): Promise<Record<string, any>> {
+    const r: any = this.prisma.getReadClient();
+    const w: any = this.prisma.getWriteClient();
+
+    // 6.1 Idempotency check
+    if (idempotencyKey) {
+      const cached = await this.redisService.getIdempotencyResult(idempotencyKey);
+      if (cached) {
+        this.logger.log(`Idempotent pay: returning cached response for key ${idempotencyKey}`);
+        return cached.body;
+      }
+    }
+
+    // 6.2 Ownership check
+    const order = await r.order.findUnique({
+      where: { id: orderId },
+      include: { reservedTickets: true },
+    });
+    if (!order || order.userId !== userId) {
+      throw new NotFoundException('Pedido não encontrado');
+    }
+
+    // 6.3 Status + expiry check
+    if (
+      order.status !== 'PENDING' ||
+      (order.expiresAt && new Date() > new Date(order.expiresAt))
+    ) {
+      throw new AppConflictException(
+        'ORDER_NOT_PENDING',
+        'Pedido não está mais pendente ou expirou',
+      );
+    }
+
+    // 6.4 Billing address required
+    if (!order.billingPostalCode || !order.billingStreet || !order.billingCity) {
+      throw new AppUnprocessableException(
+        'BILLING_ADDRESS_REQUIRED',
+        'Endereço de cobrança é obrigatório',
+      );
+    }
+
+    // 6.5 Participants required
+    if (!order.pendingParticipants || (order.pendingParticipants as any[]).length === 0) {
+      throw new AppUnprocessableException(
+        'PARTICIPANTS_REQUIRED',
+        'Dados dos participantes são obrigatórios',
+      );
+    }
+
+    const reservedTickets = order.reservedTickets as any[];
+    const participants = order.pendingParticipants as any[];
+
+    // 6.6 Calculate final total
+    const ticketsSubtotal = reservedTickets.reduce(
+      (sum: number, rt: any) => sum + rt.unitPrice * rt.quantity,
+      0,
+    );
+    let productsSubtotal = 0;
+    const pendingProducts = order.pendingProducts as any[] | null;
+    if (pendingProducts?.length) {
+      for (const item of pendingProducts) {
+        const product = await r.product.findUnique({
+          where: { id: item.productId },
+          include: { variations: true },
+        });
+        if (product) {
+          let unitPrice: number = product.basePrice;
+          if (item.variationId) {
+            const variation = product.variations.find((v: any) => v.id === item.variationId);
+            if (variation) unitPrice = variation.name === 'Sem interesse' ? 0 : variation.price;
+          }
+          productsSubtotal += unitPrice * item.quantity;
+        }
+      }
+    }
+
+    const preDiscountTotal = ticketsSubtotal + productsSubtotal;
+
+    // 6.7 Apply coupon/voucher (mutually exclusive)
+    if (dto.couponCode && dto.voucherCode) {
+      throw new AppUnprocessableException(
+        'DISCOUNT_CONFLICT',
+        'Não é possível usar cupom e voucher ao mesmo tempo',
+      );
+    }
+
+    let couponDiscount = 0;
+    let couponId: string | undefined;
+    let voucherDiscount = 0;
+    let voucherId: string | undefined;
+
+    if (dto.couponCode) {
+      const coupon = await r.coupon.findFirst({
+        where: {
+          eventId: order.eventId,
+          code: dto.couponCode.toUpperCase().trim(),
+          status: 'ACTIVE',
+        },
+      });
+      if (coupon && (!coupon.expiryDate || new Date(coupon.expiryDate) > new Date())) {
+        couponDiscount =
+          coupon.type === 'PERCENTAGE'
+            ? Math.floor(preDiscountTotal * (coupon.value / 100))
+            : Math.min(coupon.value, preDiscountTotal);
+        couponId = coupon.id;
+      }
+    }
+
+    if (dto.voucherCode) {
+      const voucher = await r.voucher.findUnique({
+        where: { code: dto.voucherCode.toUpperCase().trim() },
+      });
+      if (
+        voucher &&
+        voucher.eventId === order.eventId &&
+        voucher.status === 'ACTIVE' &&
+        (!voucher.expiryDate || new Date(voucher.expiryDate) > new Date())
+      ) {
+        voucherDiscount = ticketsSubtotal;
+        voucherId = voucher.id;
+      }
+    }
+
+    const discountedTotal = Math.max(0, preDiscountTotal - couponDiscount - voucherDiscount);
+    const pixDiscount =
+      dto.method === PaymentMethod.PIX ? Math.floor(discountedTotal * 0.05) : 0;
+    const finalTotal = discountedTotal - pixDiscount;
+
+    // 6.8 Prepare payment data
+    const user = await r.user.findUnique({
+      where: { id: userId },
+      select: { firstName: true, lastName: true, email: true },
+    });
+
+    const firstCpf = participants[0]?.cpf?.replace(/\D/g, '') || undefined;
+    const merchantOrderId = `order-${orderId}-${Date.now()}`;
+
+    let cardData:
+      | { number: string; holder: string; expiry: string; cvv: string; installments: number }
+      | undefined;
+    if (dto.method === PaymentMethod.CREDIT_CARD) {
+      if (!dto.card) {
+        throw new AppUnprocessableException('CARD_REQUIRED', 'Dados do cartão são obrigatórios');
+      }
+      cardData = {
+        number: dto.card.number,
+        holder: dto.card.name,
+        expiry: dto.card.expiry,
+        cvv: dto.card.cvv,
+        installments: dto.card.installments ?? 1,
+      };
+    }
+
+    // 6.9 Call Cielo
+    let cieloResult: any;
+    let paymentFailed = false;
+    try {
+      cieloResult = await this.cieloService.createPayment(
+        finalTotal,
+        'BRL',
+        dto.method,
+        merchantOrderId,
+        {
+          name: `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim(),
+          email: user?.email,
+          identity: firstCpf,
+          identityType: firstCpf ? 'CPF' : undefined,
+        },
+        cardData,
+      );
+      if (!cieloResult.success) {
+        paymentFailed = true;
+      }
+    } catch (err: any) {
+      this.logger.warn(`Payment failed for order ${orderId}: ${err.message}`);
+      paymentFailed = true;
+      cieloResult = { success: false, error: err.message };
+    }
+
+    // 6.10 Payment failed → cancel order + restore stock
+    if (paymentFailed) {
+      await this.cancelOrderAndRestoreStock(orderId, 'PAYMENT_REFUSED', w);
+      const errBody = {
+        error: true,
+        code: 'PAYMENT_REFUSED',
+        message: cieloResult.error || 'Pagamento recusado. Verifique os dados e tente novamente.',
+      };
+      if (idempotencyKey) {
+        await this.redisService.setIdempotencyResult(idempotencyKey, 402, errBody);
+      }
+      throw new HttpException(errBody, 402);
+    }
+
+    // 6.11 PIX: extend expiry, create PENDING payment, return QR code
+    if (dto.method === PaymentMethod.PIX) {
+      const newExpiresAt = new Date(Date.now() + RESERVATION_TTL_MINUTES * 60 * 1000);
+
+      await w.$transaction(async (tx: any) => {
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            expiresAt: newExpiresAt,
+            discount: couponDiscount + voucherDiscount,
+            finalAmount: finalTotal,
+            totalAmount: preDiscountTotal,
+            ...(couponId && { couponId }),
+            ...(voucherId && { voucherId }),
+            updatedAt: new Date(),
+          },
+        });
+
+        await tx.payment.create({
+          data: {
+            orderId,
+            userId,
+            method: dto.method,
+            status: PaymentStatus.PENDING,
+            amount: finalTotal,
+            transactionId: cieloResult.paymentId ?? null,
+            metadata: {
+              cieloPaymentId: cieloResult.paymentId,
+              qrCode: cieloResult.qrCode,
+              pixCode: cieloResult.pixCode,
+              expiresAt: cieloResult.expiresAt?.toISOString() ?? null,
+            },
+          },
+        });
+      });
+
+      const body: Record<string, any> = {
+        orderId,
+        status: 'PENDING',
+        payment: {
+          method: dto.method,
+          status: 'PENDING',
+          pix: {
+            qrCode: cieloResult.qrCode ?? null,
+            qrCodeBase64: cieloResult.qrCode ?? null,
+            pixCode: cieloResult.pixCode ?? null,
+            expiresAt: cieloResult.expiresAt ?? newExpiresAt,
+          },
+        },
+        expiresAt: newExpiresAt,
+        serverTime: new Date(),
+      };
+
+      if (idempotencyKey) {
+        await this.redisService.setIdempotencyResult(idempotencyKey, 202, body);
+      }
+      return body;
+    }
+
+    // 6.12 CREDIT_CARD: verify approval
+    const isApproved =
+      cieloResult.cieloStatus === 'Authorized' ||
+      cieloResult.cieloStatus === 'PaymentConfirmed';
+
+    if (!isApproved) {
+      await this.cancelOrderAndRestoreStock(orderId, 'PAYMENT_REFUSED', w);
+      const errBody = { error: true, code: 'PAYMENT_REFUSED', message: 'Pagamento não autorizado' };
+      if (idempotencyKey) {
+        await this.redisService.setIdempotencyResult(idempotencyKey, 402, errBody);
+      }
+      throw new HttpException(errBody, 402);
+    }
+
+    // 6.13 Finalize: mark PAID, create Payment, create Registrations
+    const registrations: any[] = await w.$transaction(async (tx: any) => {
+      // Atomic guard — only proceed if order is still PENDING
+      const guardRows: any[] = await tx.$queryRaw`
+        UPDATE "Order"
+        SET "status" = 'PAID'::"OrderStatus",
+            "updatedAt" = NOW()
+        WHERE id = ${orderId}::uuid
+          AND "status" = 'PENDING'::"OrderStatus"
+        RETURNING id
+      `;
+      if (!guardRows || guardRows.length === 0) {
+        throw new AppConflictException('ORDER_NOT_PENDING', 'Pedido não está mais pendente');
+      }
+
+      // Update financial fields
+      await tx.order.update({
+        where: { id: orderId },
+        data: {
+          discount: couponDiscount + voucherDiscount,
+          finalAmount: finalTotal,
+          totalAmount: preDiscountTotal,
+          ...(couponId && { couponId }),
+          ...(voucherId && { voucherId }),
+          updatedAt: new Date(),
+        },
+      });
+
+      // Create Payment record
+      await tx.payment.create({
+        data: {
+          orderId,
+          userId,
+          method: dto.method,
+          status: PaymentStatus.PAID,
+          amount: finalTotal,
+          transactionId: cieloResult.paymentId ?? null,
+          paymentDate: new Date(),
+          metadata: {
+            cieloPaymentId: cieloResult.paymentId,
+            authorizationCode: cieloResult.authorizationCode,
+            proofOfSale: cieloResult.proofOfSale,
+            cieloStatus: cieloResult.cieloStatus,
+          },
+        },
+      });
+
+      // Apply coupon usage
+      if (couponId) {
+        await tx.coupon.update({
+          where: { id: couponId },
+          data: { usageCount: { increment: 1 } },
+        });
+      }
+      // Mark voucher as used
+      if (voucherId) {
+        await tx.voucher.update({
+          where: { id: voucherId },
+          data: { status: 'USED', usedAt: new Date(), usedBy: userId },
+        });
+      }
+
+      // Create Registrations from pendingParticipants
+      const createdRegs: any[] = [];
+      const buyerUser = await tx.user.findUnique({
+        where: { id: userId },
+        select: { email: true },
+      });
+
+      let pIdx = 0;
+      for (const rt of reservedTickets) {
+        for (let i = 0; i < rt.quantity; i++) {
+          const pData = participants[pIdx];
+          if (!pData) break;
+
+          // Resolve or create participant user
+          let participantUserId = userId;
+          if (pData.email?.toLowerCase() !== buyerUser?.email?.toLowerCase()) {
+            let invitedUser = await tx.user.findFirst({
+              where: { email: pData.email },
+            });
+            if (!invitedUser) {
+              const clean = (pData.cpf ?? '').replace(/\D/g, '');
+              invitedUser = await tx.user.create({
+                data: {
+                  email: pData.email,
+                  firstName: pData.name.split(' ')[0],
+                  lastName: pData.name.split(' ').slice(1).join(' ') || '',
+                  documentNumber: pData.cpf ?? '',
+                  documentNumberClean: clean,
+                  password: '',
+                  isActive: false,
+                },
+              });
+            }
+            participantUserId = invitedUser.id;
+          }
+
+          const reg = await tx.registration.create({
+            data: {
+              eventId: order.eventId,
+              orderId,
+              userId: participantUserId,
+              invitedById: participantUserId !== userId ? userId : null,
+              status: RegistrationStatus.CONFIRMED,
+              termsAccepted: true,
+              rulesAccepted: true,
+              emergencyContactName: pData.emergencyContactName?.trim() || null,
+              emergencyContactPhone: pData.emergencyPhone?.trim() || null,
+            },
+          });
+
+          const qrPayload = JSON.stringify({
+            registrationId: reg.id,
+            eventId: order.eventId,
+            userId: participantUserId,
+          });
+          const updatedReg = await tx.registration.update({
+            where: { id: reg.id },
+            data: { qrCode: qrPayload },
+            select: { id: true, qrCode: true, status: true },
+          });
+
+          await tx.registrationTicket.create({
+            data: {
+              registrationId: reg.id,
+              ticketId: rt.ticketId,
+              batchId: rt.batchId,
+            },
+          });
+
+          // Question answers
+          if (pData.questionAnswers?.length) {
+            for (const qa of pData.questionAnswers) {
+              await tx.questionAnswer.create({
+                data: {
+                  registrationId: reg.id,
+                  questionId: qa.questionId,
+                  answer: String(qa.answer),
+                },
+              });
+            }
+          }
+
+          createdRegs.push(updatedReg);
+          pIdx++;
+        }
+      }
+
+      return createdRegs;
+    });
+
+    const body: Record<string, any> = {
+      orderId,
+      status: 'PAID',
+      registrations: registrations.map((reg) => ({
+        id: reg.id,
+        status: reg.status,
+        qrCode: reg.qrCode,
+      })),
+      payment: {
+        method: dto.method,
+        status: 'PAID',
+        transactionId: cieloResult.paymentId ?? null,
+        creditCard: cardData
+          ? {
+              installments: cardData.installments,
+              installmentValue: Math.floor(finalTotal / cardData.installments),
+            }
+          : undefined,
+      },
+      pricing: {
+        ticketsSubtotal,
+        productsSubtotal,
+        discount: couponDiscount + voucherDiscount,
+        pixDiscount,
+        finalTotal,
+      },
+      serverTime: new Date(),
+    };
+
+    if (idempotencyKey) {
+      await this.redisService.setIdempotencyResult(idempotencyKey, 201, body);
+    }
+
+    this.logger.log(`Order ${orderId} paid successfully for user ${userId}`);
+    return body;
+  }
+
+  // ── 7. getPaymentStatus ───────────────────────────────────────────────────
+
+  async getPaymentStatus(userId: string, orderId: string): Promise<Record<string, any>> {
+    const r: any = this.prisma.getReadClient();
+    const order = await r.order.findUnique({
+      where: { id: orderId },
+      include: { payment: true },
+    });
+    if (!order || order.userId !== userId) {
+      throw new NotFoundException('Pedido não encontrado');
+    }
+
+    return {
+      orderId,
+      orderStatus: order.status,
+      expiresAt: order.expiresAt ?? null,
+      payment: order.payment
+        ? {
+            id: order.payment.id,
+            method: order.payment.method,
+            status: order.payment.status,
+            amount: order.payment.amount,
+            transactionId: order.payment.transactionId ?? null,
+            paymentDate: order.payment.paymentDate ?? null,
+          }
+        : null,
+      serverTime: new Date(),
+    };
+  }
+
+  // ── 8. cancelExpiredOrders (cron) ─────────────────────────────────────────
+
+  async cancelExpiredOrders(): Promise<number> {
+    const w: any = this.prisma.getWriteClient();
+
+    const expired = await w.order.findMany({
+      where: { status: 'PENDING', expiresAt: { lte: new Date() } },
+      select: {
+        id: true,
+        reservedTickets: { select: { batchId: true, quantity: true } },
+      },
+    });
+
+    if (!expired.length) return 0;
+
+    let cancelled = 0;
+    for (const order of expired) {
+      // Atomic cancel — only if still PENDING
+      const rows: any[] = await w.$queryRaw`
+        UPDATE "Order"
+        SET "status" = 'CANCELLED'::"OrderStatus",
+            "cancelledAt" = NOW(),
+            "cancelledReason" = 'EXPIRED',
+            "updatedAt" = NOW()
+        WHERE id = ${order.id}::uuid
+          AND "status" = 'PENDING'::"OrderStatus"
+        RETURNING id
+      `;
+
+      if (rows?.length > 0) {
+        // Restore stock
+        for (const rt of order.reservedTickets as any[]) {
+          await w.$executeRaw`
+            UPDATE "TicketBatch"
+            SET "availableQuantity" = "availableQuantity" + ${rt.quantity}
+            WHERE id = ${rt.batchId}::uuid
+          `;
+        }
+        cancelled++;
+        this.logger.debug(`Cancelled expired order ${order.id}`);
+      }
+    }
+
+    return cancelled;
+  }
+
+  // ── private helpers ───────────────────────────────────────────────────────
+
+  private async findOrderForWrite(userId: string, orderId: string): Promise<any> {
+    const r: any = this.prisma.getReadClient();
+    const order = await r.order.findUnique({
+      where: { id: orderId },
+      include: { reservedTickets: true },
+    });
+    if (!order || order.userId !== userId) {
+      throw new NotFoundException('Pedido não encontrado');
+    }
+    return order;
+  }
+
+  private assertPending(order: any): void {
+    if (order.status !== 'PENDING') {
+      throw new AppConflictException(
+        'ORDER_NOT_PENDING',
+        'Pedido não está mais pendente e não pode ser alterado',
+      );
+    }
+  }
+
+  private async cancelOrderAndRestoreStock(
+    orderId: string,
+    reason: string,
+    w: any,
+  ): Promise<void> {
+    const order = await w.order.findUnique({
+      where: { id: orderId },
+      include: { reservedTickets: true },
+    });
+    if (!order) return;
+
+    const rows: any[] = await w.$queryRaw`
+      UPDATE "Order"
+      SET "status" = 'CANCELLED'::"OrderStatus",
+          "cancelledAt" = NOW(),
+          "cancelledReason" = ${reason},
+          "updatedAt" = NOW()
+      WHERE id = ${orderId}::uuid
+        AND "status" = 'PENDING'::"OrderStatus"
+      RETURNING id
+    `;
+
+    if (rows?.length > 0) {
+      for (const rt of order.reservedTickets as any[]) {
+        await w.$executeRaw`
+          UPDATE "TicketBatch"
+          SET "availableQuantity" = "availableQuantity" + ${rt.quantity}
+          WHERE id = ${rt.batchId}::uuid
+        `;
+      }
+    }
+  }
+}

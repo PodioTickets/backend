@@ -30,6 +30,7 @@ import { TicketCategoriesModule } from './app/ticket-categories/ticket-categorie
 import { TicketsModule } from './app/tickets/tickets.module';
 import { ProductsModule } from './app/products/products.module';
 import { CheckoutModule } from './app/checkout/checkout.module';
+import { OrdersModule } from './app/orders/orders.module';
 
 @Module({
   imports: [
@@ -64,6 +65,7 @@ import { CheckoutModule } from './app/checkout/checkout.module';
     TicketsModule,
     ProductsModule,
     CheckoutModule,
+    OrdersModule,
   ],
   controllers: [],
   providers: [

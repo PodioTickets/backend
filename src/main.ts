@@ -72,7 +72,7 @@ async function bootstrap() {
       );
       res.header(
         'Access-Control-Allow-Headers',
-        'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With',
+        'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With,Idempotency-Key',
       );
       res.header('Access-Control-Allow-Credentials', 'true');
       res.header('Access-Control-Max-Age', '86400');
@@ -155,6 +155,7 @@ async function bootstrap() {
       'Origin',
       'Accept',
       'X-Requested-With',
+      'Idempotency-Key',
     ],
     credentials: true,
     preflightContinue: false,
@@ -182,7 +183,7 @@ async function bootstrap() {
       );
       res.header(
         'Access-Control-Allow-Headers',
-        'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With',
+        'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With,Idempotency-Key',
       );
       res.header('Access-Control-Allow-Credentials', 'true');
       res.header('Access-Control-Max-Age', '86400');

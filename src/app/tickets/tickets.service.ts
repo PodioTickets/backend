@@ -100,6 +100,7 @@ export class TicketsService {
         batches: {
           create: createTicketDto.batches.map((b) => ({
             quantity: b.quantity,
+            availableQuantity: b.quantity,
             price: b.price,
             startDate: b.startDate ? new Date(b.startDate) : null,
             endDate: b.endDate ? new Date(b.endDate) : null,
@@ -515,6 +516,7 @@ export class TicketsService {
         for (const b of updateTicketDto.batches) {
           const data = {
             quantity: b.quantity,
+            availableQuantity: b.quantity,
             price: b.price,
             startDate: b.startDate ? new Date(b.startDate) : null,
             endDate: b.endDate ? new Date(b.endDate) : null,
@@ -680,6 +682,7 @@ export class TicketsService {
         batches: {
           create: originalTicket.batches.map((batch) => ({
             quantity: batch.quantity,
+            availableQuantity: batch.quantity,
             price: batch.price,
             startDate: batch.startDate,
             endDate: batch.endDate,
