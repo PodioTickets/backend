@@ -14,6 +14,23 @@ import {
   type TicketBeforeAudit,
 } from './ticket-audit.helpers';
 
+function resolveImageUrl(url: string | null | undefined, baseUrl: string): string | null | undefined {
+  if (!url) return url;
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  return `${baseUrl}${url.startsWith('/') ? '' : '/'}${url}`;
+}
+
+function resolveProductImages<T extends { image?: string | null; images?: string[] }>(
+  product: T,
+  baseUrl: string,
+): T {
+  return {
+    ...product,
+    image: resolveImageUrl(product.image, baseUrl) as string | null | undefined,
+    images: (product.images ?? []).map((img) => resolveImageUrl(img, baseUrl) as string),
+  };
+}
+
 @Injectable()
 export class TicketsService {
   constructor(
@@ -134,7 +151,7 @@ export class TicketsService {
     };
   }
 
-  async findAll(eventId: string, filterDto: FilterTicketsDto = {}) {
+  async findAll(eventId: string, filterDto: FilterTicketsDto = {}, baseUrl?: string) {
     const prismaRead = this.prisma.getReadClient();
 
     const page = filterDto.page || 1;
@@ -203,6 +220,12 @@ export class TicketsService {
         max: ticket.ageLimitMax,
       },
       productIds: ticket.products.map((tp) => tp.productId),
+      products: baseUrl
+        ? ticket.products.map((tp) => ({
+            ...tp,
+            product: tp.product ? resolveProductImages(tp.product, baseUrl) : tp.product,
+          }))
+        : ticket.products,
     }));
 
     const totalPages = Math.ceil(total / limit);
@@ -221,7 +244,7 @@ export class TicketsService {
     };
   }
 
-  async findOne(id: string) {
+  async findOne(id: string, baseUrl?: string) {
     const prismaRead = this.prisma.getReadClient();
     const ticket = await prismaRead.ticket.findUnique({
       where: { id },
@@ -266,6 +289,9 @@ export class TicketsService {
             where: {
               ticketId: id,
               batchId: { in: batchIds },
+              registration: {
+                status: { in: ['CONFIRMED', 'COMPLETED'] },
+              },
             },
             _count: { id: true },
           })
@@ -287,6 +313,12 @@ export class TicketsService {
         max: ticket.ageLimitMax,
       },
       productIds: ticket.products.map((tp) => tp.productId),
+      products: baseUrl
+        ? ticket.products.map((tp) => ({
+            ...tp,
+            product: tp.product ? resolveProductImages(tp.product, baseUrl) : tp.product,
+          }))
+        : ticket.products,
     };
 
     return {

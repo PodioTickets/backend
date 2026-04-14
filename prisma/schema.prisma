@@ -229,6 +229,9 @@ model OrganizationMember {
   role           OrganizationMemberRole @default(EMPLOYEE)
   /// Permissões do painel (chaves canônicas do frontend). null = legado (tratar como acesso total).
   permissions    Json?
+  /// Quando true, o membro só acessa os eventos em eventAccesses (mesmo que a lista esteja vazia).
+  /// Quando false (padrão), lista vazia = acesso a todos os eventos da organização.
+  restrictedToEvents Boolean @default(false)
   createdAt      DateTime               @default(now())
   updatedAt      DateTime               @updatedAt
 
@@ -736,6 +739,8 @@ model Coupon {
   minQuantity   Int? // Para couponType QUANTITY
   ageRule       String? // 'MIN' ou 'MAX' para couponType AGE
   ageValue      String? // Ex: '9 anos'
+  minAge        Int? // Idade mínima em anos (restrição de faixa etária)
+  maxAge        Int? // Idade máxima em anos (restrição de faixa etária)
   status        CouponStatus       @default(ACTIVE)
   usageCount    Int                @default(0)
   createdAt     DateTime           @default(now())
@@ -852,6 +857,8 @@ model Product {
   eventId            String   @db.Uuid
   name               String
   image              String?
+  images             String[]
+  primaryImageIndex  Int      @default(0)
   isIncludedInTicket Boolean  @default(false)
   basePrice          Int      @default(0) // Preço base em centavos
   isRequired         Boolean  @default(false)

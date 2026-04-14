@@ -12,6 +12,7 @@ import {
   ValidateIf,
   IsNotEmpty,
   IsUUID,
+  IsPositive,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -167,6 +168,26 @@ export class CreateCouponDto {
     example: '9 anos',
   })
   ageValue?: string;
+
+  @IsOptional()
+  @IsInt()
+  @IsPositive()
+  @ApiPropertyOptional({
+    description: 'Minimum age in years (inclusive)',
+    example: 18,
+  })
+  @Type(() => Number)
+  minAge?: number;
+
+  @IsOptional()
+  @IsInt()
+  @IsPositive()
+  @ApiPropertyOptional({
+    description: 'Maximum age in years (inclusive)',
+    example: 65,
+  })
+  @Type(() => Number)
+  maxAge?: number;
 }
 
 export class UpdateCouponDto {
@@ -233,6 +254,18 @@ export class UpdateCouponDto {
   @IsOptional()
   @IsString()
   ageValue?: string;
+
+  @IsOptional()
+  @IsInt()
+  @IsPositive()
+  @Type(() => Number)
+  minAge?: number;
+
+  @IsOptional()
+  @IsInt()
+  @IsPositive()
+  @Type(() => Number)
+  maxAge?: number;
 
   @IsOptional()
   @IsEnum(CouponStatus)

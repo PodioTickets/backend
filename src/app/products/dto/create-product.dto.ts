@@ -9,6 +9,7 @@ import {
   Max,
   MaxLength,
   ArrayMinSize,
+  ArrayMaxSize,
   IsInt,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -55,10 +56,32 @@ export class CreateProductDto {
   @IsOptional()
   @IsString()
   @ApiPropertyOptional({
-    description: 'Product image URL',
+    description: 'Imagem principal (backward-compat). Equivalente a images[primaryImageIndex].',
     example: '/uploads/images/product.jpg',
   })
-  image?: string;
+  image?: string | null;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(5)
+  @IsString({ each: true })
+  @ApiPropertyOptional({
+    description: 'Array de até 5 fotos (data URL ou URL pública). Omitido quando vazio.',
+    type: [String],
+  })
+  images?: string[];
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(4)
+  @Type(() => Number)
+  @ApiPropertyOptional({
+    description: 'Índice (0-based) da imagem principal dentro de images. Omitido quando há apenas 1 foto.',
+    minimum: 0,
+    maximum: 4,
+  })
+  primaryImageIndex?: number;
 
   @IsOptional()
   @IsBoolean()
@@ -135,7 +158,20 @@ export class UpdateProductDto {
 
   @IsOptional()
   @IsString()
-  image?: string;
+  image?: string | null;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(5)
+  @IsString({ each: true })
+  images?: string[];
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(4)
+  @Type(() => Number)
+  primaryImageIndex?: number;
 
   @IsOptional()
   @IsBoolean()

@@ -36,6 +36,12 @@ function clientIp(req: ExpressRequest): string {
   return (req as ExpressRequest & { ip?: string }).ip || '';
 }
 
+function baseUrl(req: ExpressRequest): string {
+  const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+  const host = (req.headers['x-forwarded-host'] as string) || req.get('host') || '';
+  return `${proto}://${host}`;
+}
+
 @ApiTags('Products')
 @Controller('api/v1/products')
 export class ProductsController {
@@ -65,6 +71,7 @@ export class ProductsController {
       eventId,
       createProductDto,
       clientIp(req),
+      baseUrl(req),
     );
   }
 
@@ -80,8 +87,12 @@ export class ProductsController {
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20)' })
   @ApiResponse({ status: 200, description: 'Products retrieved successfully' })
   @ApiResponse({ status: 404, description: 'Event not found' })
-  findAll(@Param('eventId') eventId: string, @Query() filterDto: FilterProductsDto) {
-    return this.productsService.findAll(eventId, filterDto);
+  findAll(
+    @Request() req: ExpressRequest,
+    @Param('eventId') eventId: string,
+    @Query() filterDto: FilterProductsDto,
+  ) {
+    return this.productsService.findAll(eventId, filterDto, baseUrl(req));
   }
 
   @Get(':id')
@@ -93,8 +104,8 @@ export class ProductsController {
   @ApiParam({ name: 'id', description: 'Product UUID' })
   @ApiResponse({ status: 200, description: 'Product retrieved successfully' })
   @ApiResponse({ status: 404, description: 'Product not found' })
-  findOne(@Param('id') id: string) {
-    return this.productsService.findOne(id);
+  findOne(@Request() req: ExpressRequest, @Param('id') id: string) {
+    return this.productsService.findOne(id, baseUrl(req));
   }
 
   @Patch('events/:eventId/:productId')
@@ -124,6 +135,7 @@ export class ProductsController {
       productId,
       updateProductDto,
       clientIp(req),
+      baseUrl(req),
     );
   }
 

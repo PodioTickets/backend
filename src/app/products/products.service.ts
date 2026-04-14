@@ -2,6 +2,7 @@ import { Injectable, NotFoundException, BadRequestException } from '@nestjs/comm
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateProductDto, UpdateProductDto, FilterProductsDto, ProductVariationDto } from './dto/create-product.dto';
 import { OrganizationsService } from '../organizations/organizations.service';
+import { UploadService } from '../upload/upload.service';
 import { stripDeletedProductFromKitSelectionDisplay } from '../events/kit-selection-display.prune';
 import { Prisma } from '@prisma/client';
 import {
@@ -17,7 +18,92 @@ export class ProductsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly organizationsService: OrganizationsService,
+    private readonly uploadService: UploadService,
   ) {}
+
+  /**
+   * Processa um array de imagens:
+   * - Data URLs (data:image/...;base64,...) são enviadas ao UploadService e substituídas pela URL resultante.
+   * - URLs já existentes (/uploads/... ou http...) são mantidas intactas.
+   */
+  private async processImagesArray(images: string[]): Promise<string[]> {
+    return Promise.all(
+      images.map(async (img) => {
+        if (!img.startsWith('data:')) return img;
+        const matches = img.match(/^data:([a-zA-Z0-9+/]+\/[a-zA-Z0-9+/]+);base64,(.+)$/);
+        if (!matches) {
+          throw new BadRequestException('Formato de data URL inválido em images');
+        }
+        const mimeType = matches[1];
+        const base64Data = matches[2];
+        const ext = mimeType.split('/')[1]?.replace('jpeg', 'jpg') ?? 'jpg';
+        const buffer = Buffer.from(base64Data, 'base64');
+        return this.uploadService.compressImage({
+          buffer,
+          originalname: `product-image.${ext}`,
+        });
+      }),
+    );
+  }
+
+  /**
+   * Converte URLs relativas de imagem (/uploads/...) para absolutas usando o baseUrl da request.
+   * URLs já absolutas são retornadas sem alteração.
+   */
+  resolveProductImageUrls<T extends { image?: string | null; images?: string[] }>(
+    product: T,
+    baseUrl: string,
+  ): T {
+    const abs = (url: string | null | undefined): string | null | undefined => {
+      if (!url) return url;
+      if (url.startsWith('http://') || url.startsWith('https://')) return url;
+      return `${baseUrl}${url.startsWith('/') ? '' : '/'}${url}`;
+    };
+    return {
+      ...product,
+      image: abs(product.image) as string | null | undefined,
+      images: (product.images ?? []).map((img) => abs(img) as string),
+    };
+  }
+
+  /**
+   * Deriva os campos image, images e primaryImageIndex a partir do DTO.
+   * Regras do documento product-images-api.md:
+   * - Se images vier preenchido, processa uploads e usa-o como fonte da verdade.
+   * - primaryImageIndex padrão 0.
+   * - image == images[primaryImageIndex] (backward-compat).
+   * - Se images vier vazio/omitido mas image vier, usa o campo legado.
+   */
+  private async resolveImageFields(dto: {
+    image?: string | null;
+    images?: string[];
+    primaryImageIndex?: number;
+  }): Promise<{ image: string | null; images: string[]; primaryImageIndex: number }> {
+    if (dto.images && dto.images.length > 0) {
+      const processed = await this.processImagesArray(dto.images);
+      const idx = dto.primaryImageIndex ?? 0;
+      return {
+        images: processed,
+        primaryImageIndex: idx,
+        image: processed[idx] ?? processed[0] ?? null,
+      };
+    }
+
+    // Sem images — usa campo legado image (pode ser null)
+    if (dto.image !== undefined) {
+      const imgUrl = dto.image
+        ? (await this.processImagesArray([dto.image]))[0]
+        : null;
+      return {
+        images: imgUrl ? [imgUrl] : [],
+        primaryImageIndex: 0,
+        image: imgUrl,
+      };
+    }
+
+    // Nada enviado — sem alteração de imagem (retorna undefined-like para PATCH ignorar)
+    return { image: null, images: [], primaryImageIndex: 0 };
+  }
 
   /**
    * Para produtos não obrigatórios, garante que exista a variação padrão "Sem interesse".
@@ -116,6 +202,7 @@ export class ProductsService {
     eventId: string,
     createProductDto: CreateProductDto,
     clientIp?: string | null,
+    baseUrl?: string,
   ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
@@ -134,10 +221,14 @@ export class ProductsService {
 
     const buyerVariation = this.normalizeBuyerVariationEditForCreate(createProductDto);
 
+    const { image, images, primaryImageIndex } = await this.resolveImageFields(createProductDto);
+
     const product = await prismaWrite.product.create({
       data: {
         name: createProductDto.name,
-        image: createProductDto.image,
+        image,
+        images,
+        primaryImageIndex,
         isIncludedInTicket: createProductDto.isIncludedInTicket ?? false,
         basePrice: Math.round(createProductDto.basePrice ?? 0), // entrada já em centavos (INT)
         isRequired: createProductDto.isRequired ?? false,
@@ -198,13 +289,17 @@ export class ProductsService {
       });
     }
 
+    const resolved = baseUrl
+      ? this.resolveProductImageUrls(product, baseUrl)
+      : product;
+
     return {
       message: 'Product created successfully',
-      data: { product },
+      data: { product: resolved },
     };
   }
 
-  async findAll(eventId: string, filterDto: FilterProductsDto = {}) {
+  async findAll(eventId: string, filterDto: FilterProductsDto = {}, baseUrl?: string) {
     const prismaRead = this.prisma.getReadClient();
 
     const page = filterDto.page || 1;
@@ -229,10 +324,14 @@ export class ProductsService {
 
     const totalPages = Math.ceil(total / limit);
 
+    const resolvedProducts = baseUrl
+      ? products.map((p) => this.resolveProductImageUrls(p, baseUrl))
+      : products;
+
     return {
       message: 'Products fetched successfully',
       data: {
-        products,
+        products: resolvedProducts,
         pagination: {
           page,
           limit,
@@ -243,7 +342,7 @@ export class ProductsService {
     };
   }
 
-  async findOne(id: string) {
+  async findOne(id: string, baseUrl?: string) {
     const prismaRead = this.prisma.getReadClient();
     const product = await prismaRead.product.findUnique({
       where: { id },
@@ -264,9 +363,13 @@ export class ProductsService {
       throw new NotFoundException('Product not found');
     }
 
+    const resolved = baseUrl
+      ? this.resolveProductImageUrls(product, baseUrl)
+      : product;
+
     return {
       message: 'Product fetched successfully',
-      data: { product },
+      data: { product: resolved },
     };
   }
 
@@ -276,6 +379,7 @@ export class ProductsService {
     productId: string,
     updateProductDto: UpdateProductDto,
     clientIp?: string | null,
+    baseUrl?: string,
   ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
@@ -304,6 +408,10 @@ export class ProductsService {
     delete updateData.variations;
     delete updateData.buyerVariationEditAllowed;
     delete updateData.variationEditDeadlineDays;
+    // Campos de imagem são resolvidos separadamente abaixo
+    delete updateData.image;
+    delete updateData.images;
+    delete updateData.primaryImageIndex;
     for (const k of Object.keys(updateData)) {
       if (updateData[k] === undefined) {
         delete updateData[k];
@@ -312,6 +420,17 @@ export class ProductsService {
 
     if (updateData.basePrice !== undefined) {
       updateData.basePrice = Math.round(Number(updateData.basePrice));
+    }
+
+    // Resolve campos de imagem somente se o DTO trouxer ao menos um deles
+    const hasImageFields =
+      updateProductDto.image !== undefined ||
+      updateProductDto.images !== undefined;
+    if (hasImageFields) {
+      const resolved = await this.resolveImageFields(updateProductDto);
+      updateData.image = resolved.image;
+      updateData.images = resolved.images;
+      updateData.primaryImageIndex = resolved.primaryImageIndex;
     }
 
     const mergedBuyerVariation = this.mergeBuyerVariationEditForUpdate(
@@ -396,9 +515,13 @@ export class ProductsService {
       });
     }
 
+    const resolved = baseUrl
+      ? this.resolveProductImageUrls(updatedProduct, baseUrl)
+      : updatedProduct;
+
     return {
       message: 'Product updated successfully',
-      data: { product: updatedProduct },
+      data: { product: resolved },
     };
   }
 

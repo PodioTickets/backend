@@ -3,7 +3,9 @@ import type { UpdateProductDto } from './dto/create-product.dto';
 
 export const PRODUCT_FIELD_LABELS: Record<string, string> = {
   name: 'nome',
-  image: 'imagem',
+  image: 'imagem principal',
+  images: 'fotos',
+  primaryImageIndex: 'índice da foto principal',
   isIncludedInTicket: 'incluso no ingresso',
   basePrice: 'preço base',
   isRequired: 'obrigatório',

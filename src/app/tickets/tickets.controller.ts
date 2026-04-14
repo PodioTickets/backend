@@ -42,6 +42,12 @@ function clientIp(req: ExpressRequest): string {
   return (req as ExpressRequest & { ip?: string }).ip || '';
 }
 
+function baseUrl(req: ExpressRequest): string {
+  const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+  const host = (req.headers['x-forwarded-host'] as string) || req.get('host') || '';
+  return `${proto}://${host}`;
+}
+
 @ApiTags('Tickets')
 @Controller('api/v1/tickets')
 export class TicketsController {
@@ -77,8 +83,12 @@ export class TicketsController {
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20)' })
   @ApiResponse({ status: 200, description: 'Tickets retrieved successfully' })
   @ApiResponse({ status: 404, description: 'Event not found' })
-  findAll(@Param('eventId') eventId: string, @Query() filterDto: FilterTicketsDto) {
-    return this.ticketsService.findAll(eventId, filterDto);
+  findAll(
+    @Request() req: ExpressRequest,
+    @Param('eventId') eventId: string,
+    @Query() filterDto: FilterTicketsDto,
+  ) {
+    return this.ticketsService.findAll(eventId, filterDto, baseUrl(req));
   }
 
   @Patch('events/:eventId/reorder-tickets')
@@ -117,8 +127,8 @@ export class TicketsController {
   @ApiParam({ name: 'id', description: 'Ticket UUID' })
   @ApiResponse({ status: 200, description: 'Ticket retrieved successfully' })
   @ApiResponse({ status: 404, description: 'Ticket not found' })
-  findOne(@Param('id') id: string) {
-    return this.ticketsService.findOne(id);
+  findOne(@Request() req: ExpressRequest, @Param('id') id: string) {
+    return this.ticketsService.findOne(id, baseUrl(req));
   }
 
   @Patch('events/:eventId/:ticketId/products/reorder')

@@ -2,11 +2,13 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { OrganizerMemberAccessService } from '../organizations/organizer-member-access.service';
 import { OrganizationsService } from '../organizations/organizations.service';
 import type { OrganizerPermissionKey } from '../organizations/constants/organizer-permissions';
+import { effectivePermissionsForMember } from '../organizations/constants/organizer-permissions';
 import {
   CreateEventDto,
   UpdateEventDto,
@@ -289,21 +291,34 @@ export class EventsService {
     createEventDto: CreateEventDto,
     clientIp?: string | null,
   ) {
-    // Verificar se o usuário é membro de uma organização - usar write client
+    // Verificar se o usuário tem permissão para criar eventos
     const prismaWrite = this.prisma.getWriteClient();
 
-    const member = await prismaWrite.organizationMember.findFirst({
-      where: {
-        userId,
-        role: 'OWNER', // Apenas OWNER pode criar eventos
-      },
-      include: {
-        organization: true,
-      },
+    const memberships = await prismaWrite.organizationMember.findMany({
+      where: { userId },
+      include: { organization: true },
     });
 
+    if (!memberships.length) {
+      throw new BadRequestException('User is not a member of any organization');
+    }
+
+    // Prefere OWNER; fallback para EMPLOYEE com create_event
+    let member = memberships.find((m) => m.role === 'OWNER') ?? null;
     if (!member) {
-      throw new BadRequestException('User is not an organizer (must be organization owner)');
+      member =
+        memberships.find((m) => {
+          if (m.role !== 'EMPLOYEE') return false;
+          const perms = effectivePermissionsForMember({
+            role: m.role,
+            permissionsJson: m.permissions,
+          });
+          return perms.create_event;
+        }) ?? null;
+    }
+
+    if (!member) {
+      throw new ForbiddenException('Missing permission: create_event');
     }
 
     // Verificar se já existe um evento com o mesmo nome, data e organização
@@ -2302,8 +2317,10 @@ export class EventsService {
     }
 
     // Query base para registrations
+    // Exclui registrations PENDING (placeholders de reserva ainda não pagas)
     const registrationWhere: any = {
       eventId,
+      status: { not: RegistrationStatus.PENDING },
     };
 
     // Aplicar filtro de data no order se houver
@@ -2379,6 +2396,7 @@ export class EventsService {
     const { prevStart, prevEndExclusive } = this.getDashboardComparisonBounds(dateRange, now);
     const previousWhere: any = {
       eventId,
+      status: { not: RegistrationStatus.PENDING },
       order: {
         createdAt: {
           gte: prevStart,
@@ -3493,42 +3511,31 @@ export class EventsService {
   private async buildTicketsTable(prismaRead: any, eventId: string, page: number, limit: number) {
     const skip = (page - 1) * limit;
 
-    // Buscar todas as registrations pagas para calcular vendas
-    const paidRegistrations = await prismaRead.registration.findMany({
+    // Count sold RegistrationTickets per batch (only CONFIRMED/COMPLETED registrations)
+    const batchSoldCounts = await prismaRead.registrationTicket.groupBy({
+      by: ['batchId'],
       where: {
-        eventId,
-        order: {
-          payment: {
-            status: PaymentStatus.PAID,
-          },
+        batchId: { not: null },
+        registration: {
+          eventId,
+          status: { in: [RegistrationStatus.CONFIRMED, RegistrationStatus.COMPLETED] },
         },
       },
-      include: {
-        order: {
-          include: {
-            payment: true,
-          },
-        },
-        tickets: {
-          include: {
-            ticket: {
-              include: {
-                category: true,
-                batches: true,
-              },
-            },
-          },
-        },
-      },
+      _count: { id: true },
     });
 
-    // Buscar categorias e tickets
+    const batchSoldMap = new Map<string, number>();
+    for (const row of batchSoldCounts) {
+      batchSoldMap.set(row.batchId, row._count.id);
+    }
+
+    // Buscar categorias e tickets com batches
     const categories = await prismaRead.ticketCategory.findMany({
       where: { eventId },
       include: {
         tickets: {
           include: {
-            batches: true,
+            batches: { orderBy: { createdAt: 'asc' } },
           },
           orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
         },
@@ -3539,63 +3546,66 @@ export class EventsService {
     const items: any[] = [];
 
     for (const category of categories) {
-      // Calcular vendas da categoria
-      const categoryRegistrations = paidRegistrations.filter((reg: any) =>
-        reg.tickets.some((rt: any) => rt.ticket.categoryId === category.id),
-      );
+      let categorySold = 0;
+      let categoryRevenue = 0;
 
-      const categorySold = categoryRegistrations.length;
-      const categoryRevenue = categoryRegistrations.reduce((sum: number, reg: any) => sum + this.normalizeToCents(reg.order?.finalAmount), 0);
+      const lots = category.tickets.flatMap((ticket: any) => {
+        let ticketSold = 0;
+        let ticketRevenue = 0;
+
+        const batchRows = ticket.batches.map((batch: any) => {
+          const sold = batchSoldMap.get(batch.id) ?? 0;
+          const revenue = sold * batch.price;
+          ticketSold += sold;
+          ticketRevenue += revenue;
+          return {
+            id: batch.id,
+            name: `${ticket.name} - Lote ${batch.id.slice(0, 8)}`,
+            sold,
+            revenue,
+            createdAt: batch.createdAt.toISOString(),
+          };
+        });
+
+        categorySold += ticketSold;
+        categoryRevenue += ticketRevenue;
+
+        return batchRows;
+      });
 
       items.push({
         id: category.id,
         type: 'category' as const,
         name: category.name,
-        sold: `${categorySold}`,
+        sold: categorySold,
         revenue: categoryRevenue,
         createdAt: category.createdAt.toISOString(),
-        lots: category.tickets.flatMap((ticket: any) => {
-          const ticketRegistrations = paidRegistrations.filter((reg: any) =>
-            reg.tickets.some((rt: any) => rt.ticketId === ticket.id),
-          );
-          const ticketSold = ticketRegistrations.length;
-          const ticketRevenue = ticketRegistrations.reduce((sum: number, reg: any) => sum + this.normalizeToCents(reg.order?.finalAmount || reg.finalAmount), 0);
-
-          return ticket.batches.map((batch: any) => ({
-            id: batch.id,
-            name: `${ticket.name} - Lote ${batch.id.slice(0, 8)}`,
-            sold: `${ticketSold}-${batch.quantity}`,
-            revenue: ticketRevenue,
-            createdAt: batch.createdAt.toISOString(),
-          }));
-        }),
+        lots,
       });
     }
 
     // Buscar tickets sem categoria
     const ticketsWithoutCategory = await prismaRead.ticket.findMany({
-      where: {
-        eventId,
-        categoryId: null,
-      },
-      include: {
-        batches: true,
-      },
+      where: { eventId, categoryId: null },
+      include: { batches: { orderBy: { createdAt: 'asc' } } },
       orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
     });
 
     for (const ticket of ticketsWithoutCategory) {
-      const ticketRegistrations = paidRegistrations.filter((reg: any) =>
-        reg.tickets.some((rt: any) => rt.ticketId === ticket.id),
-      );
-      const ticketSold = ticketRegistrations.length;
-      const ticketRevenue = ticketRegistrations.reduce((sum: number, reg: any) => sum + this.normalizeToCents(reg.order?.finalAmount), 0);
+      let ticketSold = 0;
+      let ticketRevenue = 0;
+
+      for (const batch of ticket.batches) {
+        const sold = batchSoldMap.get(batch.id) ?? 0;
+        ticketSold += sold;
+        ticketRevenue += sold * batch.price;
+      }
 
       items.push({
         id: ticket.id,
         type: 'lot' as const,
         name: ticket.name,
-        sold: `${ticketSold}`,
+        sold: ticketSold,
         revenue: ticketRevenue,
         createdAt: ticket.createdAt.toISOString(),
       });
@@ -3763,6 +3773,7 @@ export class EventsService {
           INNER JOIN "Order" o ON o.id = r."orderId"
           LEFT JOIN "Payment" p ON p."orderId" = o.id
           WHERE r."eventId" = ${eventId}::uuid
+            AND r.status::text != 'PENDING'
             AND o."createdAt" >= ${orderCreatedBetween.gte}
             ${upperBoundSql}
         `)
@@ -3792,6 +3803,7 @@ export class EventsService {
           INNER JOIN "Order" o ON o.id = r."orderId"
           LEFT JOIN "Payment" p ON p."orderId" = o.id
           WHERE r."eventId" = ${eventId}::uuid
+            AND r.status::text != 'PENDING'
         `);
 
     const row = rows[0];

@@ -451,6 +451,33 @@ export class PaymentsService {
         include: {
           order: {
             include: {
+              // Registrations carregadas diretamente no order para garantir campos escalares
+              registrations: {
+                include: {
+                  user: {
+                    select: {
+                      id: true,
+                      firstName: true,
+                      lastName: true,
+                      email: true,
+                      phone: true,
+                      documentNumber: true,
+                      dateOfBirth: true,
+                      reservePhone: true,
+                      gender: true,
+                    },
+                  },
+                  tickets: {
+                    include: {
+                      ticket: {
+                        include: {
+                          category: TICKET_CATEGORY_DETAIL_INCLUDE,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
               payment: {
                 include: {
                   order: {
@@ -471,32 +498,6 @@ export class PaymentsService {
                                       avatarUrl: true,
                                     },
                                   },
-                                },
-                              },
-                            },
-                          },
-                        },
-                      },
-                      registrations: {
-                        include: {
-                          user: {
-                            select: {
-                              id: true,
-                              firstName: true,
-                              lastName: true,
-                              email: true,
-                              phone: true,
-                              documentNumber: true,
-                              dateOfBirth: true,
-                              reservePhone: true,
-                              gender: true,
-                            },
-                          },
-                          tickets: {
-                            include: {
-                              ticket: {
-                                include: {
-                                  category: TICKET_CATEGORY_DETAIL_INCLUDE,
                                 },
                               },
                             },
@@ -534,48 +535,18 @@ export class PaymentsService {
       }
 
       payment = registration.order.payment;
-      // Garantir que payment.order tenha todas as registrations do pedido
-      // Como payment é do tipo Payment e não tem order tipado, precisamos fazer cast
-      // Preservar todas as propriedades do order, incluindo registrations
-      (payment as any).order = registration.order;
-      
-      // Se as registrations não estiverem carregadas, buscar diretamente do banco
-      if (!(payment as any).order.registrations || (payment as any).order.registrations.length === 0) {
-        const orderWithRegistrations = await prismaRead.order.findUnique({
-          where: { id: registration.orderId },
-          include: {
-            registrations: {
-              include: {
-                user: {
-                  select: {
-                    id: true,
-                    firstName: true,
-                    lastName: true,
-                    email: true,
-                    phone: true,
-                    documentNumber: true,
-                    dateOfBirth: true,
-                    reservePhone: true,
-                    gender: true,
-                  },
-                },
-                tickets: {
-                  include: {
-                    ticket: {
-                      include: {
-                        category: TICKET_CATEGORY_DETAIL_INCLUDE,
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        });
-        if (orderWithRegistrations) {
-          (payment as any).order.registrations = orderWithRegistrations.registrations;
-        }
-      }
+      // Monta payment.order combinando: event/organizer de payment.order e
+      // registrations (com campos de emergência) de registration.order
+      (payment as any).order = {
+        ...(payment as any).order,
+        registrations: (registration.order as any).registrations,
+      };
+      // Preserva o contato de emergência da registration consultada diretamente
+      (payment as any)._queriedRegistration = {
+        id: registration.id,
+        emergencyContactName: (registration as any).emergencyContactName ?? null,
+        emergencyContactPhone: (registration as any).emergencyContactPhone ?? null,
+      };
     }
 
     if (!payment) {
@@ -747,19 +718,35 @@ export class PaymentsService {
           const orderRegistrations = (payment as any).order?.registrations || [];
           
           // Mapear as registrations existentes
-          const mappedRegistrations = orderRegistrations.map((reg: any) => ({
-            id: reg.id,
-            name: reg.user ? `${reg.user.firstName} ${reg.user.lastName}` : null,
-            email: reg.user?.email || null,
-            ticket: reg.tickets && reg.tickets.length > 0 ? {
-              id: reg.tickets[0].ticket.id,
-              name: reg.tickets[0].ticket.name,
-            } : null,
-            ticketCategory: reg.tickets && reg.tickets.length > 0 && reg.tickets[0].ticket.category ? {
-              id: reg.tickets[0].ticket.category.id,
-              name: reg.tickets[0].ticket.category.name,
-            } : null,
-          }));
+          const queriedReg = (payment as any)._queriedRegistration ?? null;
+          const mappedRegistrations = orderRegistrations.map((reg: any) => {
+            // Para a registration consultada diretamente, usa os campos escalares dela
+            const isQueried = queriedReg && reg.id === queriedReg.id;
+            const emergencyName = isQueried
+              ? queriedReg.emergencyContactName
+              : (reg.emergencyContactName ?? null);
+            const emergencyPhone = isQueried
+              ? queriedReg.emergencyContactPhone
+              : (reg.emergencyContactPhone ?? null);
+
+            return {
+              id: reg.id,
+              name: reg.user ? `${reg.user.firstName} ${reg.user.lastName}` : null,
+              email: reg.user?.email || null,
+              ticket: reg.tickets && reg.tickets.length > 0 ? {
+                id: reg.tickets[0].ticket.id,
+                name: reg.tickets[0].ticket.name,
+              } : null,
+              ticketCategory: reg.tickets && reg.tickets.length > 0 && reg.tickets[0].ticket.category ? {
+                id: reg.tickets[0].ticket.category.id,
+                name: reg.tickets[0].ticket.category.name,
+              } : null,
+              emergencyContact: emergencyName || emergencyPhone ? {
+                name: emergencyName,
+                phone: emergencyPhone,
+              } : null,
+            };
+          });
           
           // Verificar se o comprador (buyer) já está na lista de registrations
           const buyerId = buyer?.id;

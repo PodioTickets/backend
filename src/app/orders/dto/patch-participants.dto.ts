@@ -1,5 +1,6 @@
 import {
   IsArray,
+  IsBoolean,
   IsEmail,
   IsOptional,
   IsString,
@@ -38,6 +39,10 @@ export class ParticipantDto {
   @IsOptional()
   @IsString()
   gender?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  hasEmergencyContact?: boolean;
 
   @IsOptional()
   @IsString()

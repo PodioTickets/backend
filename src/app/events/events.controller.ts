@@ -467,6 +467,7 @@ export class EventsController {
 
   // ========== DASHBOARD ==========
   @Get(':eventId/dashboard')
+  @NoCache()
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({
@@ -646,7 +647,6 @@ export class EventsController {
     return this.eventsService.getOrderForOrganizer(req.user.id, eventId, orderId);
   }
 
-  // ========== REGISTRATIONS ==========
   @Get(':eventId/registrations')
   @UseGuards(JwtAuthGuard)
   @NoCache()

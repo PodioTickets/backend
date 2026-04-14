@@ -249,23 +249,30 @@ export class OrganizationsService {
   ) {
     await this.assertEventsBelongToOrganization(organizationId, eventIds);
     const prismaWrite = this.prisma.getWriteClient();
-    await prismaWrite.organizationMemberEventAccess.deleteMany({
-      where: { organizationMemberId },
-    });
-    if (eventIds.length > 0) {
-      await prismaWrite.organizationMemberEventAccess.createMany({
-        data: eventIds.map((eventId) => ({
-          organizationMemberId,
-          eventId,
-        })),
+    await prismaWrite.$transaction(async (tx: any) => {
+      await tx.organizationMember.update({
+        where: { id: organizationMemberId },
+        data: { restrictedToEvents: true },
       });
-    }
+      await tx.organizationMemberEventAccess.deleteMany({
+        where: { organizationMemberId },
+      });
+      if (eventIds.length > 0) {
+        await tx.organizationMemberEventAccess.createMany({
+          data: eventIds.map((eventId) => ({
+            organizationMemberId,
+            eventId,
+          })),
+        });
+      }
+    });
   }
 
   private async resolveMemberEventIdsForApi(params: {
     role: OrganizationMemberRole;
     organizationId: string;
     eventAccesses: { eventId: string }[];
+    restrictedToEvents?: boolean;
   }): Promise<string[]> {
     const prismaRead = this.prisma.getReadClient();
     const allInOrg = async () => {
@@ -278,7 +285,8 @@ export class OrganizationsService {
     if (params.role === 'OWNER') {
       return allInOrg();
     }
-    if (params.eventAccesses.length === 0) {
+    // Sem restrição explícita e sem eventos cadastrados → acesso irrestrito (legado)
+    if (!params.restrictedToEvents && params.eventAccesses.length === 0) {
       return allInOrg();
     }
     return params.eventAccesses.map((e) => e.eventId);
@@ -606,9 +614,20 @@ export class OrganizationsService {
       throw new NotFoundException('Organizer not found');
     }
 
+    const permMap = effectivePermissionsForMember({
+      role: member.role,
+      permissionsJson: member.permissions,
+    });
+
     return {
       message: 'Organization fetched successfully',
-      data: { organization: member.organization },
+      data: {
+        organization: member.organization,
+        member: {
+          role: member.role,
+          permissions: grantedPermissionKeys(permMap),
+        },
+      },
     };
   }
 
@@ -1182,6 +1201,7 @@ export class OrganizationsService {
           role: m.role,
           organizationId: m.organizationId,
           eventAccesses: m.eventAccesses,
+          restrictedToEvents: m.restrictedToEvents,
         });
         return this.mapMemberForListResponse(m, eventIds);
       }),
@@ -1341,6 +1361,7 @@ export class OrganizationsService {
       role: row.role,
       organizationId,
       eventAccesses: row.eventAccesses,
+      restrictedToEvents: row.restrictedToEvents,
     });
     return {
       message: 'Member event access retrieved successfully',
@@ -1392,6 +1413,7 @@ export class OrganizationsService {
         role: row.role,
         organizationId,
         eventAccesses: row.eventAccesses,
+        restrictedToEvents: row.restrictedToEvents,
       })
     )
       .slice()
@@ -1472,6 +1494,7 @@ export class OrganizationsService {
       role: row.role,
       organizationId,
       eventAccesses: row.eventAccesses,
+      restrictedToEvents: row.restrictedToEvents,
     });
     const { eventAccesses: _ea, permissions: _perm, ...memberRest } = row;
     return {
@@ -1560,6 +1583,10 @@ export class OrganizationsService {
       }
       if (appliedEventIdsUpdate) {
         await this.assertEventsBelongToOrganization(organizationId, dto.eventIds);
+        await tx.organizationMember.update({
+          where: { id: row.id },
+          data: { restrictedToEvents: true },
+        });
         await tx.organizationMemberEventAccess.deleteMany({
           where: { organizationMemberId: row.id },
         });
@@ -1626,6 +1653,7 @@ export class OrganizationsService {
           role: row.role,
           organizationId,
           eventAccesses: row.eventAccesses,
+          restrictedToEvents: row.restrictedToEvents,
         })
       )
         .slice()
@@ -1635,6 +1663,7 @@ export class OrganizationsService {
           role: fresh.role,
           organizationId,
           eventAccesses: fresh.eventAccesses,
+          restrictedToEvents: fresh.restrictedToEvents,
         })
       )
         .slice()
@@ -1678,6 +1707,7 @@ export class OrganizationsService {
       role: fresh.role,
       organizationId,
       eventAccesses: fresh.eventAccesses,
+      restrictedToEvents: fresh.restrictedToEvents,
     });
     const { eventAccesses: _e, permissions: _p, ...memberRest } = fresh;
 

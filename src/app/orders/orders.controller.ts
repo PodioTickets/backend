@@ -66,6 +66,25 @@ export class OrdersController {
     return this.ordersService.findOrder(req.user.id, orderId);
   }
 
+  // ── GET /orders/:orderId/details ──────────────────────────────────────────
+
+  @Get(':orderId/details')
+  @NoCache()
+  @ApiOperation({
+    summary: 'Get full order details',
+    description:
+      'Returns complete order data including event, payment info, billing address and all registrations with participant details, emergency contacts, tickets and question answers.',
+  })
+  @ApiParam({ name: 'orderId', type: String, format: 'uuid' })
+  @ApiResponse({ status: 200, description: 'Order details' })
+  @ApiResponse({ status: 404, description: 'Order not found' })
+  async getOrderDetails(
+    @Request() req: any,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+  ) {
+    return this.ordersService.getOrderDetails(req.user.id, orderId);
+  }
+
   // ── PATCH /orders/:orderId/participants ────────────────────────────────
 
   @Patch(':orderId/participants')

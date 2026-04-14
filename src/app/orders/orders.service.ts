@@ -268,6 +268,32 @@ export class OrdersService {
         });
       }
 
+      // 1.10 Create placeholder PENDING Registrations (one per ingresso reservado)
+      // Permite que o organizador veja as vagas ocupadas mesmo antes do pagamento.
+      // Ao pagar: registrations são deletadas e recriadas como CONFIRMED com dados reais.
+      // Ao cancelar/expirar: registrations são marcadas como CANCELLED.
+      for (const info of batchInfos) {
+        for (let i = 0; i < info.quantity; i++) {
+          const reg = await tx.registration.create({
+            data: {
+              eventId: dto.eventId,
+              orderId: createdOrder.id,
+              userId,
+              status: 'PENDING',
+              termsAccepted: false,
+              rulesAccepted: false,
+            },
+          });
+          await tx.registrationTicket.create({
+            data: {
+              registrationId: reg.id,
+              ticketId: info.ticketId,
+              batchId: info.batchId,
+            },
+          });
+        }
+      }
+
       return tx.order.findUnique({
         where: { id: createdOrder.id },
         include: { reservedTickets: true },
@@ -291,6 +317,264 @@ export class OrdersService {
       throw new NotFoundException('Pedido não encontrado');
     }
     return orderShape(order);
+  }
+
+  // ── 2b. getOrderDetails ────────────────────────────────────────────────────
+
+  async getOrderDetails(userId: string, orderId: string): Promise<Record<string, any>> {
+    const r: any = this.prisma.getReadClient();
+
+    const order = await r.order.findUnique({
+      where: { id: orderId },
+      include: {
+        reservedTickets: true,
+        payment: true,
+        coupon: {
+          select: { id: true, code: true, type: true, value: true, couponType: true },
+        },
+        voucher: {
+          select: { id: true, code: true, name: true, status: true },
+        },
+        event: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+            eventDate: true,
+            bannerUrl: true,
+            logoUrl: true,
+            location: true,
+            city: true,
+            state: true,
+            organization: {
+              select: { id: true, name: true, logoUrl: true, email: true, phone: true },
+            },
+          },
+        },
+        registrations: {
+          where: { status: { not: RegistrationStatus.PENDING } },
+          include: {
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+                documentNumber: true,
+                phone: true,
+                dateOfBirth: true,
+                gender: true,
+                avatarUrl: true,
+              },
+            },
+            tickets: {
+              include: {
+                ticket: {
+                  include: {
+                    category: { select: { id: true, name: true } },
+                    products: {
+                      orderBy: { sortOrder: 'asc' },
+                      include: {
+                        product: { include: { variations: true } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            modalities: {
+              include: {
+                modality: {
+                  select: { id: true, name: true, group: { select: { id: true, name: true } } },
+                },
+              },
+            },
+            questionAnswers: {
+              include: {
+                question: { select: { id: true, question: true, type: true } },
+              },
+            },
+            products: {
+              include: {
+                product: { select: { id: true, name: true, image: true, basePrice: true, variationType: true } },
+                variation: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!order || order.userId !== userId) {
+      throw new NotFoundException('Pedido não encontrado');
+    }
+
+    const payment = order.payment as any;
+    const metadata = (payment?.metadata as any) ?? {};
+
+    // Billing address: prefer fields on order, fallback to payment metadata
+    const billingAddress =
+      order.billingPostalCode
+        ? {
+            country: order.billingCountry ?? null,
+            postalCode: order.billingPostalCode ?? null,
+            stateUf: order.billingStateUf ?? null,
+            street: order.billingStreet ?? null,
+            number: order.billingNumber ?? null,
+            complement: order.billingComplement ?? null,
+            neighborhood: order.billingNeighborhood ?? null,
+            city: order.billingCity ?? null,
+          }
+        : (metadata.billingAddress ?? null);
+
+    // Build a map of productId → { variationId, quantity } from the order's pending products
+    const pendingProductsMap = new Map<string, { variationId?: string; quantity: number }>();
+    for (const pp of (order.pendingProducts as any[] | null) ?? []) {
+      pendingProductsMap.set(pp.productId, { variationId: pp.variationId, quantity: pp.quantity });
+    }
+
+    return {
+      message: 'Order details fetched successfully',
+      data: {
+        order: {
+          id: order.id,
+          status: order.status,
+          createdAt: order.createdAt,
+          expiresAt: order.expiresAt ?? null,
+          reservedAt: order.reservedAt ?? null,
+          cancelledAt: order.cancelledAt ?? null,
+          cancelledReason: order.cancelledReason ?? null,
+          pricing: {
+            subtotal: order.totalAmount,
+            discount: order.discount,
+            serviceFee: order.serviceFee,
+            total: order.finalAmount,
+            currency: 'BRL',
+          },
+          billingAddress,
+          coupon: order.coupon
+            ? { id: order.coupon.id, code: order.coupon.code, type: order.coupon.type, value: order.coupon.value }
+            : null,
+          voucher: order.voucher
+            ? { id: order.voucher.id, code: order.voucher.code, name: order.voucher.name, status: order.voucher.status }
+            : null,
+        },
+        event: order.event ?? null,
+        payment: payment
+          ? {
+              id: payment.id,
+              method: payment.method,
+              status: payment.status,
+              amount: payment.amount,
+              transactionId: payment.transactionId ?? null,
+              paymentDate: payment.paymentDate ?? null,
+              createdAt: payment.createdAt,
+              pix:
+                metadata.pix?.qrCode || metadata.pix?.pixCode || metadata.qrCode || metadata.pixCode
+                  ? {
+                      qrCode: metadata.pix?.qrCode ?? metadata.qrCode ?? null,
+                      pixCode: metadata.pix?.pixCode ?? metadata.pixCode ?? null,
+                      expiresAt: metadata.pix?.expiresAt ?? null,
+                    }
+                  : null,
+              creditCard:
+                metadata.creditCard || metadata.authorizationCode
+                  ? {
+                      brand: metadata.creditCard?.brand ?? null,
+                      last4Digits: metadata.creditCard?.last4Digits ?? null,
+                      holder: metadata.creditCard?.holder ?? null,
+                      installments: metadata.creditCard?.installments ?? null,
+                      authorizationCode: metadata.authorizationCode ?? null,
+                      nsu: metadata.proofOfSale ?? null,
+                    }
+                  : null,
+            }
+          : null,
+        registrations: (order.registrations as any[]).map((reg: any) => ({
+          id: reg.id,
+          status: reg.status,
+          qrCode: reg.qrCode ?? null,
+          createdAt: reg.createdAt,
+          emergencyContact:
+            reg.emergencyContactName || reg.emergencyContactPhone
+              ? { name: reg.emergencyContactName ?? null, phone: reg.emergencyContactPhone ?? null }
+              : null,
+          participant: {
+            id: reg.user?.id ?? null,
+            fullName: reg.user ? `${reg.user.firstName} ${reg.user.lastName}` : null,
+            firstName: reg.user?.firstName ?? null,
+            lastName: reg.user?.lastName ?? null,
+            email: reg.user?.email ?? null,
+            documentNumber: reg.user?.documentNumber ?? null,
+            phone: reg.user?.phone ?? null,
+            dateOfBirth: reg.user?.dateOfBirth ?? null,
+            gender: reg.user?.gender ?? null,
+            avatarUrl: reg.user?.avatarUrl ?? null,
+          },
+          ticket:
+            reg.tickets?.length > 0
+              ? {
+                  id: reg.tickets[0].ticket.id,
+                  name: reg.tickets[0].ticket.name,
+                  category: reg.tickets[0].ticket.category ?? null,
+                  includedProducts: (reg.tickets[0].ticket.products ?? []).map((tp: any) => {
+                    const sel = pendingProductsMap.get(tp.product.id);
+                    const selectedVariation = sel?.variationId
+                      ? (tp.product.variations ?? []).find((v: any) => v.id === sel.variationId) ?? null
+                      : null;
+                    return {
+                      id: tp.product.id,
+                      name: tp.product.name,
+                      image: tp.product.image ?? null,
+                      basePrice: tp.product.basePrice,
+                      variationType: tp.product.variationType ?? null,
+                      selectedVariation: selectedVariation
+                        ? { id: selectedVariation.id, name: selectedVariation.name, price: selectedVariation.price }
+                        : null,
+                      variations: (tp.product.variations ?? []).map((v: any) => ({
+                        id: v.id,
+                        name: v.name,
+                        price: v.price,
+                        stock: v.stock,
+                      })),
+                    };
+                  }),
+                }
+              : null,
+          modality:
+            reg.modalities?.length > 0
+              ? {
+                  id: reg.modalities[0].modality.id,
+                  name: reg.modalities[0].modality.name,
+                  group: reg.modalities[0].modality.group ?? null,
+                }
+              : null,
+          questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => ({
+            question: qa.question.question,
+            type: qa.question.type,
+            answer: qa.answer,
+          })),
+          products: (reg.products ?? []).map((rp: any) => ({
+            id: rp.id,
+            product: {
+              id: rp.product.id,
+              name: rp.product.name,
+              image: rp.product.image ?? null,
+              basePrice: rp.product.basePrice,
+              variationType: rp.product.variationType ?? null,
+            },
+            variation: rp.variation
+              ? { id: rp.variation.id, name: rp.variation.name, price: rp.variation.price }
+              : null,
+            variationName: rp.variation?.name ?? null,
+            quantity: rp.quantity,
+            unitPrice: rp.unitPrice,
+            totalPrice: rp.totalPrice,
+          })),
+        })),
+        serverTime: new Date(),
+      },
+    };
   }
 
   // ── 3. patchParticipants ──────────────────────────────────────────────────
@@ -729,6 +1013,11 @@ export class OrdersService {
         });
       }
 
+      // Remove placeholder PENDING registrations criadas na reserva
+      await tx.registration.deleteMany({
+        where: { orderId, status: RegistrationStatus.PENDING },
+      });
+
       // Create Registrations from pendingParticipants
       const createdRegs: any[] = [];
       const buyerUser = await tx.user.findUnique({
@@ -797,6 +1086,32 @@ export class OrdersService {
               batchId: rt.batchId,
             },
           });
+
+          // Create RegistrationProduct records for the first participant only
+          if (pIdx === 0 && pendingProducts?.length) {
+            for (const item of pendingProducts) {
+              const product = await r.product.findUnique({
+                where: { id: item.productId },
+                include: { variations: true },
+              });
+              if (!product) continue;
+              let unitPrice: number = product.basePrice;
+              if (item.variationId) {
+                const variation = product.variations.find((v: any) => v.id === item.variationId);
+                if (variation) unitPrice = variation.name === 'Sem interesse' ? 0 : variation.price;
+              }
+              await tx.registrationProduct.create({
+                data: {
+                  registrationId: reg.id,
+                  productId: item.productId,
+                  variationId: item.variationId ?? null,
+                  quantity: item.quantity ?? 1,
+                  unitPrice,
+                  totalPrice: unitPrice * (item.quantity ?? 1),
+                },
+              });
+            }
+          }
 
           // Question answers
           if (pData.questionAnswers?.length) {
@@ -924,6 +1239,11 @@ export class OrdersService {
             WHERE id = ${rt.batchId}::uuid
           `;
         }
+        // Cancel placeholder registrations
+        await w.registration.updateMany({
+          where: { orderId: order.id, status: 'PENDING' },
+          data: { status: 'CANCELLED' },
+        });
         cancelled++;
         this.logger.debug(`Cancelled expired order ${order.id}`);
       }
@@ -985,6 +1305,11 @@ export class OrdersService {
           WHERE id = ${rt.batchId}::uuid
         `;
       }
+      // Cancel placeholder registrations
+      await w.registration.updateMany({
+        where: { orderId, status: 'PENDING' },
+        data: { status: 'CANCELLED' },
+      });
     }
   }
 }

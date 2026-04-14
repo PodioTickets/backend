@@ -646,6 +646,11 @@ export class RegistrationsService {
     // Usar type assertion para contornar problemas de tipagem do Prisma
     const reg = registration as any;
 
+    const pendingProductsMap = new Map<string, { variationId?: string; quantity: number }>();
+    for (const pp of (reg.order?.pendingProducts as any[] | null) ?? []) {
+      pendingProductsMap.set(pp.productId, { variationId: pp.variationId, quantity: pp.quantity });
+    }
+
     const formattedRegistration = {
       id: reg.id,
       qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
@@ -683,19 +688,28 @@ export class RegistrationsService {
           id: reg.tickets[0].ticket.category.id,
           name: reg.tickets[0].ticket.category.name,
         } : null,
-        includedProducts: (reg.tickets[0].ticket.products || []).map((tp: any) => ({
-          id: tp.product.id,
-          name: tp.product.name,
-          image: tp.product.image,
-          basePrice: tp.product.basePrice ? Math.round(tp.product.basePrice * 100) : 0, // Em centavos
-          variationType: tp.product.variationType || null,
-          variations: (tp.product.variations || []).map((v: any) => ({
-            id: v.id,
-            name: v.name,
-            price: Math.round(v.price * 100), // Em centavos
-            stock: v.stock,
-          })),
-        })),
+        includedProducts: (reg.tickets[0].ticket.products || []).map((tp: any) => {
+          const sel = pendingProductsMap.get(tp.product.id);
+          const selectedVariation = sel?.variationId
+            ? (tp.product.variations || []).find((v: any) => v.id === sel.variationId) ?? null
+            : null;
+          return {
+            id: tp.product.id,
+            name: tp.product.name,
+            image: tp.product.image,
+            basePrice: tp.product.basePrice ? Math.round(tp.product.basePrice * 100) : 0,
+            variationType: tp.product.variationType || null,
+            selectedVariation: selectedVariation
+              ? { id: selectedVariation.id, name: selectedVariation.name, price: selectedVariation.price }
+              : null,
+            variations: (tp.product.variations || []).map((v: any) => ({
+              id: v.id,
+              name: v.name,
+              price: Math.round(v.price * 100),
+              stock: v.stock,
+            })),
+          };
+        }),
       } : null,
       questionAnswers: (reg.questionAnswers || []).map((qa: any) => ({
         id: qa.id,
@@ -950,6 +964,12 @@ export class RegistrationsService {
       }
     }
 
+    // Build map of productId → selected variationId from order.pendingProducts
+    const pendingProductsMap = new Map<string, { variationId?: string; quantity: number }>();
+    for (const pp of (reg.order?.pendingProducts as any[] | null) ?? []) {
+      pendingProductsMap.set(pp.productId, { variationId: pp.variationId, quantity: pp.quantity });
+    }
+
     const formattedRegistration = {
       id: reg.id,
       status: reg.status,
@@ -975,6 +995,10 @@ export class RegistrationsService {
         lastName: reg.invitedBy.lastName,
         email: reg.invitedBy.email,
         fullName: `${reg.invitedBy.firstName} ${reg.invitedBy.lastName}`,
+      } : null,
+      emergencyContact: reg.emergencyContactName || reg.emergencyContactPhone ? {
+        name: reg.emergencyContactName ?? null,
+        phone: reg.emergencyContactPhone ?? null,
       } : null,
       event: {
         id: reg.event.id,
@@ -1030,19 +1054,28 @@ export class RegistrationsService {
             startDate: batch.startDate,
             endDate: batch.endDate,
           })),
-          products: (rt.ticket.products || []).map((tp: any) => ({
-            id: tp.product.id,
-            name: tp.product.name,
-            image: tp.product.image,
-            basePrice: tp.product.basePrice,
-            variationType: tp.product.variationType || null,
-            variations: (tp.product.variations || []).map((v: any) => ({
-              id: v.id,
-              name: v.name,
-              price: v.price,
-              stock: v.stock,
-            })),
-          })),
+          products: (rt.ticket.products || []).map((tp: any) => {
+            const sel = pendingProductsMap.get(tp.product.id);
+            const selectedVariation = sel?.variationId
+              ? (tp.product.variations || []).find((v: any) => v.id === sel.variationId) ?? null
+              : null;
+            return {
+              id: tp.product.id,
+              name: tp.product.name,
+              image: tp.product.image,
+              basePrice: tp.product.basePrice,
+              variationType: tp.product.variationType || null,
+              selectedVariation: selectedVariation
+                ? { id: selectedVariation.id, name: selectedVariation.name, price: selectedVariation.price }
+                : null,
+              variations: (tp.product.variations || []).map((v: any) => ({
+                id: v.id,
+                name: v.name,
+                price: v.price,
+                stock: v.stock,
+              })),
+            };
+          }),
           kit: rt.ticket.kit ? {
             id: rt.ticket.kit.id,
             name: rt.ticket.kit.name,
