@@ -141,9 +141,8 @@ export class OrdersService {
       throw new AppConflictException('REGISTRATION_CLOSED', 'Período de inscrição encerrado');
     }
 
-    // 1.4 Idempotency: return existing PENDING order for same user+event
-    // Filtra apenas pedidos não-expirados para não devolver uma reserva cujo
-    // timer já passou (o job de expiração pode estar atrasado).
+    // 1.4 Idempotency: return existing PENDING order somente se os tickets/quantidades
+    // forem idênticos ao pedido atual. Se forem diferentes, cancela o antigo e cria novo.
     const existingPending = await r.order.findFirst({
       where: {
         userId,
@@ -154,10 +153,28 @@ export class OrdersService {
       include: { reservedTickets: true },
     });
     if (existingPending) {
+      const existingItems = (existingPending.reservedTickets as any[])
+        .map((rt) => `${rt.batchId}:${rt.quantity}`)
+        .sort()
+        .join(',');
+      const requestedItems = dto.tickets
+        .map((t) => `${t.batchId}:${t.quantity}`)
+        .sort()
+        .join(',');
+
+      if (existingItems === requestedItems) {
+        this.logger.log(
+          `Reserve idempotent: returning existing order ${existingPending.id} for user ${userId}`,
+        );
+        return orderShape(existingPending);
+      }
+
+      // Pedido existente tem tickets diferentes — cancela e permite criar novo
       this.logger.log(
-        `Reserve idempotent: returning existing order ${existingPending.id} for user ${userId}`,
+        `Reserve: cancelling stale pending order ${existingPending.id} (different tickets) for user ${userId}`,
       );
-      return orderShape(existingPending);
+      const w2: any = this.prisma.getWriteClient();
+      await this.cancelOrderAndRestoreStock(existingPending.id, 'REPLACED', w2);
     }
 
     // 1.5 Validate each ticket/batch
@@ -184,7 +201,15 @@ export class OrdersService {
 
       const batch = await r.ticketBatch.findUnique({
         where: { id: item.batchId },
-        select: { id: true, ticketId: true, price: true, startDate: true, endDate: true },
+        select: {
+          id: true,
+          ticketId: true,
+          price: true,
+          quantity: true,
+          availableQuantity: true,
+          startDate: true,
+          endDate: true,
+        },
       });
       if (!batch || batch.ticketId !== item.ticketId) {
         throw new NotFoundException(
@@ -205,6 +230,14 @@ export class OrdersService {
         );
       }
 
+      // Camada 1 — pre-check otimista antes de entrar na transaction
+      if (batch.availableQuantity < item.quantity) {
+        throw new AppConflictException(
+          'BATCH_SOLD_OUT',
+          `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
+        );
+      }
+
       batchInfos.push({
         batchId: item.batchId,
         ticketId: item.ticketId,
@@ -217,13 +250,26 @@ export class OrdersService {
     // 1.6 Atomic stock decrement + order creation inside a single transaction
     const order = await w.$transaction(async (tx: any) => {
       // Decrement availableQuantity atomically; 0 rows → sold out → rollback
+      // A condição dupla garante consistência mesmo se availableQuantity estiver
+      // fora de sincronia com o banco (ex: após update do lote pelo organizador):
+      //   1) availableQuantity >= quantity_solicitada  (counter atômico)
+      //   2) quantity - vendas_reais >= quantity_solicitada  (fonte de verdade)
       for (const info of batchInfos) {
         const rows: any[] = await tx.$queryRaw`
-          UPDATE "TicketBatch"
-          SET "availableQuantity" = "availableQuantity" - ${info.quantity}
-          WHERE id = ${info.batchId}::uuid
-            AND "availableQuantity" >= ${info.quantity}
-          RETURNING id
+          UPDATE "TicketBatch" tb
+          SET "availableQuantity" = tb."availableQuantity" - ${info.quantity}
+          WHERE tb.id = ${info.batchId}::uuid
+            AND tb."availableQuantity" >= ${info.quantity}
+            AND (
+              tb."quantity" - (
+                SELECT COUNT(*)::int
+                FROM "RegistrationTicket" rt
+                JOIN "Registration" r ON rt."registrationId" = r.id
+                WHERE rt."batchId" = tb.id
+                  AND r.status != 'CANCELLED'
+              )
+            ) >= ${info.quantity}
+          RETURNING tb.id
         `;
         if (!rows || rows.length === 0) {
           throw new AppConflictException(
@@ -1231,18 +1277,20 @@ export class OrdersService {
       `;
 
       if (rows?.length > 0) {
-        // Restore stock
-        for (const rt of order.reservedTickets as any[]) {
-          await w.$executeRaw`
-            UPDATE "TicketBatch"
-            SET "availableQuantity" = "availableQuantity" + ${rt.quantity}
-            WHERE id = ${rt.batchId}::uuid
-          `;
-        }
-        // Cancel placeholder registrations
-        await w.registration.updateMany({
-          where: { orderId: order.id, status: 'PENDING' },
-          data: { status: 'CANCELLED' },
+        // Restore stock + cancel registrations atomicamente
+        await w.$transaction(async (tx: any) => {
+          for (const rt of order.reservedTickets as any[]) {
+            // LEAST garante que availableQuantity nunca ultrapasse quantity (evita over-restore)
+            await tx.$executeRaw`
+              UPDATE "TicketBatch"
+              SET "availableQuantity" = LEAST("availableQuantity" + ${rt.quantity}, "quantity")
+              WHERE id = ${rt.batchId}::uuid
+            `;
+          }
+          await tx.registration.updateMany({
+            where: { orderId: order.id, status: 'PENDING' },
+            data: { status: 'CANCELLED' },
+          });
         });
         cancelled++;
         this.logger.debug(`Cancelled expired order ${order.id}`);
@@ -1298,17 +1346,20 @@ export class OrdersService {
     `;
 
     if (rows?.length > 0) {
-      for (const rt of order.reservedTickets as any[]) {
-        await w.$executeRaw`
-          UPDATE "TicketBatch"
-          SET "availableQuantity" = "availableQuantity" + ${rt.quantity}
-          WHERE id = ${rt.batchId}::uuid
-        `;
-      }
-      // Cancel placeholder registrations
-      await w.registration.updateMany({
-        where: { orderId, status: 'PENDING' },
-        data: { status: 'CANCELLED' },
+      // Restore stock + cancel registrations atomicamente
+      await w.$transaction(async (tx: any) => {
+        for (const rt of order.reservedTickets as any[]) {
+          // LEAST garante que availableQuantity nunca ultrapasse quantity (evita over-restore)
+          await tx.$executeRaw`
+            UPDATE "TicketBatch"
+            SET "availableQuantity" = LEAST("availableQuantity" + ${rt.quantity}, "quantity")
+            WHERE id = ${rt.batchId}::uuid
+          `;
+        }
+        await tx.registration.updateMany({
+          where: { orderId, status: 'PENDING' },
+          data: { status: 'CANCELLED' },
+        });
       });
     }
   }

@@ -3,7 +3,8 @@
     "allow": [
       "Bash(npx jest:*)",
       "Bash(npx tsc:*)",
-      "Bash(npx prisma:*)"
+      "Bash(npx prisma:*)",
+      "Bash(grep -l \"TicketBatch\\\\|OrderReserved\" /c/Users/muril/Projects/PodioTickets/server/prisma/migrations/*/migration.sql)"
     ]
   }
 }

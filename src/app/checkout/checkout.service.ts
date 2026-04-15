@@ -519,6 +519,19 @@ export class CheckoutService {
         );
       }
 
+      // Camada 5 — verifica availableQuantity diretamente (fonte de verdade do estoque)
+      if (ticketItem.batchId) {
+        const batch = await prisma.ticketBatch.findUnique({
+          where: { id: ticketItem.batchId },
+          select: { id: true, availableQuantity: true },
+        });
+        if (!batch || batch.availableQuantity < ticketItem.quantity) {
+          throw new BadRequestException(
+            `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
+          );
+        }
+      }
+
       const result = await this.findAvailableBatch(
         prisma,
         ticketItem.ticketId,

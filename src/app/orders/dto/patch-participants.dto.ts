@@ -7,7 +7,7 @@ import {
   IsUUID,
   ValidateNested,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 
 export class QuestionAnswerDto {
   @IsUUID()
@@ -60,6 +60,11 @@ export class ParticipantDto {
 }
 
 export class PatchParticipantsDto {
+  @Transform(({ value }) =>
+    Array.isArray(value)
+      ? value.filter((p: any) => p && (p.name || p.email))
+      : value,
+  )
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => ParticipantDto)

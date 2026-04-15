@@ -33,7 +33,7 @@ import { PayOrderDto } from './dto/pay-order.dto';
 @UseGuards(JwtAuthGuard)
 @ApiBearerAuth()
 export class OrdersController {
-  constructor(private readonly ordersService: OrdersService) {}
+  constructor(private readonly ordersService: OrdersService) { }
 
   // ── POST /orders/reserve ───────────────────────────────────────────────
 
@@ -55,6 +55,7 @@ export class OrdersController {
   // ── GET /orders/:orderId ───────────────────────────────────────────────
 
   @Get(':orderId')
+  @NoCache()
   @ApiOperation({ summary: 'Get order by ID' })
   @ApiParam({ name: 'orderId', type: String, format: 'uuid' })
   @ApiResponse({ status: 200, description: 'Order details' })

@@ -18,6 +18,7 @@ export type OrganizerMemberWithAccess = {
   userId: string;
   role: OrganizationMemberRole;
   permissions: Prisma.JsonValue | null;
+  restrictedToEvents: boolean;
   eventAccesses: { eventId: string }[];
 };
 
@@ -32,7 +33,13 @@ export class OrganizerMemberAccessService {
     const prismaRead = this.prisma.getReadClient();
     const member = await prismaRead.organizationMember.findFirst({
       where: { userId },
-      include: {
+      select: {
+        id: true,
+        organizationId: true,
+        userId: true,
+        role: true,
+        permissions: true,
+        restrictedToEvents: true,
         eventAccesses: { select: { eventId: true } },
       },
     });
@@ -43,8 +50,9 @@ export class OrganizerMemberAccessService {
   }
 
   /**
-   * Filtro de eventos no painel: owner vê a org inteira; colaborador sem linhas em eventAccesses vê todos os eventos da org;
-   * com linhas, apenas os IDs listados.
+   * Filtro de eventos no painel: owner vê a org inteira; colaborador com restrictedToEvents=false e sem
+   * eventAccesses vê todos os eventos da org; com restrictedToEvents=true e sem eventAccesses não vê nenhum;
+   * com linhas em eventAccesses, apenas os IDs listados.
    */
   buildOrganizerEventsWhere(member: OrganizerMemberWithAccess): { organizationId: string; id?: { in: string[] } } {
     const base: { organizationId: string; id?: { in: string[] } } = {
@@ -54,6 +62,10 @@ export class OrganizerMemberAccessService {
       return base;
     }
     if (member.eventAccesses.length === 0) {
+      if (member.restrictedToEvents) {
+        // Sem eventos atribuídos e acesso restrito → retorna filtro impossível (nenhum evento)
+        return { ...base, id: { in: [] } };
+      }
       return base;
     }
     return {
@@ -85,7 +97,7 @@ export class OrganizerMemberAccessService {
       return true;
     }
     if (member.eventAccesses.length === 0) {
-      return true;
+      return !member.restrictedToEvents;
     }
     return member.eventAccesses.some((e) => e.eventId === eventId);
   }
@@ -115,7 +127,15 @@ export class OrganizerMemberAccessService {
           userId,
         },
       },
-      include: { eventAccesses: { select: { eventId: true } } },
+      select: {
+        id: true,
+        organizationId: true,
+        userId: true,
+        role: true,
+        permissions: true,
+        restrictedToEvents: true,
+        eventAccesses: { select: { eventId: true } },
+      },
     });
 
     if (!member || (member.role !== 'OWNER' && member.role !== 'EMPLOYEE')) {

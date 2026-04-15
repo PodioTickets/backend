@@ -152,7 +152,9 @@ export class TicketsService {
   }
 
   async findAll(eventId: string, filterDto: FilterTicketsDto = {}, baseUrl?: string) {
-    const prismaRead = this.prisma.getReadClient();
+    // Write client (primary) garante leitura sem lag de réplica,
+    // essencial para refletir reservas recém-feitas imediatamente.
+    const db = this.prisma.getWriteClient();
 
     const page = filterDto.page || 1;
     const limit = filterDto.limit || 20;
@@ -164,7 +166,7 @@ export class TicketsService {
     }
 
     const [tickets, total] = await Promise.all([
-      prismaRead.ticket.findMany({
+      db.ticket.findMany({
         where,
         skip,
         take: limit,
@@ -191,15 +193,20 @@ export class TicketsService {
         },
         orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
       }),
-      prismaRead.ticket.count({ where }),
+      db.ticket.count({ where }),
     ]);
 
     const batchIds = tickets.flatMap((t) => t.batches.map((b) => b.id));
+
+    // Conta inscrições não-canceladas por lote — fonte de verdade para vagas vendidas
     const soldByBatch =
       batchIds.length > 0
-        ? await prismaRead.registrationTicket.groupBy({
+        ? await db.registrationTicket.groupBy({
             by: ['batchId'],
-            where: { batchId: { in: batchIds } },
+            where: {
+              batchId: { in: batchIds },
+              registration: { status: { not: 'CANCELLED' } },
+            },
             _count: { id: true },
           })
         : [];
@@ -208,25 +215,42 @@ export class TicketsService {
     );
 
     // Transformar para o formato esperado
-    const transformedTickets = tickets.map((ticket) => ({
-      ...ticket,
-      price: ticket.batches[0]?.price || 0, // Preço do primeiro lote
-      batches: ticket.batches.map((batch) => ({
-        ...batch,
-        quantitySold: soldByBatchMap.get(batch.id) ?? 0,
-      })),
-      ageLimit: {
-        min: ticket.ageLimitMin,
-        max: ticket.ageLimitMax,
-      },
-      productIds: ticket.products.map((tp) => tp.productId),
-      products: baseUrl
-        ? ticket.products.map((tp) => ({
-            ...tp,
-            product: tp.product ? resolveProductImages(tp.product, baseUrl) : tp.product,
-          }))
-        : ticket.products,
-    }));
+    const transformedTickets = tickets.map((ticket) => {
+      const batches = ticket.batches.map((batch) => {
+        const quantitySold = soldByBatchMap.get(batch.id) ?? 0;
+        const remainingQuantity = Math.max(0, batch.quantity - quantitySold);
+        return {
+          ...batch,
+          quantitySold,
+          remainingQuantity,
+        };
+      });
+
+      const totalQuantity = batches.reduce((sum, b) => sum + b.quantity, 0);
+      const totalSold = batches.reduce((sum, b) => sum + b.quantitySold, 0);
+      const totalAvailable = batches.reduce((sum, b) => sum + b.remainingQuantity, 0);
+
+      return {
+        ...ticket,
+        price: ticket.batches[0]?.price || 0,
+        totalQuantity,
+        availableQuantity: totalAvailable,
+        quantitySold: totalSold,
+        isSoldOut: totalAvailable === 0,
+        batches,
+        ageLimit: {
+          min: ticket.ageLimitMin,
+          max: ticket.ageLimitMax,
+        },
+        productIds: ticket.products.map((tp) => tp.productId),
+        products: baseUrl
+          ? ticket.products.map((tp) => ({
+              ...tp,
+              product: tp.product ? resolveProductImages(tp.product, baseUrl) : tp.product,
+            }))
+          : ticket.products,
+      };
+    });
 
     const totalPages = Math.ceil(total / limit);
 
@@ -546,21 +570,28 @@ export class TicketsService {
           }
         }
         for (const b of updateTicketDto.batches) {
-          const data = {
-            quantity: b.quantity,
-            availableQuantity: b.quantity,
+          const baseData = {
             price: b.price,
             startDate: b.startDate ? new Date(b.startDate) : null,
             endDate: b.endDate ? new Date(b.endDate) : null,
           };
           if (b.id) {
+            // Lote existente: preserva vendas já realizadas ao recalcular availableQuantity
+            const sold = await tx.registrationTicket.count({
+              where: {
+                batchId: b.id,
+                registration: { status: { not: 'CANCELLED' } },
+              },
+            });
+            const availableQuantity = Math.max(0, b.quantity - sold);
             await tx.ticketBatch.update({
               where: { id: b.id },
-              data,
+              data: { ...baseData, quantity: b.quantity, availableQuantity },
             });
           } else {
+            // Lote novo: availableQuantity começa igual à capacidade total
             await tx.ticketBatch.create({
-              data: { ...data, ticketId },
+              data: { ...baseData, quantity: b.quantity, availableQuantity: b.quantity, ticketId },
             });
           }
         }
