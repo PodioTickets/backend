@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  UnprocessableEntityException,
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -566,8 +567,8 @@ export class CheckoutService {
               (v) => v.id === productItem.variationId,
             );
             if (!variation) {
-              throw new NotFoundException(
-                `Variação ${productItem.variationId} não encontrada`,
+              throw new UnprocessableEntityException(
+                `Variação selecionada não encontrada para "${product.name}". Selecione uma opção válida.`,
               );
             }
 

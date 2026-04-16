@@ -34,6 +34,7 @@ class AppUnprocessableException extends UnprocessableEntityException {
 // ─── constants ───────────────────────────────────────────────────────────────
 
 const RESERVATION_TTL_MINUTES = 30;
+const MAX_TICKETS_PER_ORDER = 20;
 
 // ─── shape helper ────────────────────────────────────────────────────────────
 
@@ -112,7 +113,16 @@ export class OrdersService {
       );
     }
 
-    // 1.3 Validate event
+    // 1.3 Ticket limit per order
+    const totalTickets = dto.tickets.reduce((sum, t) => sum + t.quantity, 0);
+    if (totalTickets > MAX_TICKETS_PER_ORDER) {
+      throw new AppUnprocessableException(
+        'ORDER_TICKET_LIMIT_EXCEEDED',
+        `Limite de ${MAX_TICKETS_PER_ORDER} ingressos por pedido excedido. Total solicitado: ${totalTickets}.`,
+      );
+    }
+
+    // 1.5 Validate event
     const event = await r.event.findUnique({
       where: { id: dto.eventId },
       select: {
@@ -141,7 +151,7 @@ export class OrdersService {
       throw new AppConflictException('REGISTRATION_CLOSED', 'Período de inscrição encerrado');
     }
 
-    // 1.4 Idempotency: return existing PENDING order somente se os tickets/quantidades
+    // 1.6 Idempotency: return existing PENDING order somente se os tickets/quantidades
     // forem idênticos ao pedido atual. Se forem diferentes, cancela o antigo e cria novo.
     const existingPending = await r.order.findFirst({
       where: {
@@ -177,7 +187,7 @@ export class OrdersService {
       await this.cancelOrderAndRestoreStock(existingPending.id, 'REPLACED', w2);
     }
 
-    // 1.5 Validate each ticket/batch
+    // 1.7 Validate each ticket/batch
     type BatchInfo = {
       batchId: string;
       ticketId: string;
@@ -247,7 +257,7 @@ export class OrdersService {
       });
     }
 
-    // 1.6 Atomic stock decrement + order creation inside a single transaction
+    // 1.8 Atomic stock decrement + order creation inside a single transaction
     const order = await w.$transaction(async (tx: any) => {
       // Decrement availableQuantity atomically; 0 rows → sold out → rollback
       // A condição dupla garante consistência mesmo se availableQuantity estiver
@@ -658,7 +668,8 @@ export class OrdersService {
     // Recalculate product subtotal
     let productsSubtotal = 0;
     for (const item of dto.products) {
-      const product = await r.product.findUnique({
+      // Usa write client para evitar lag de replicação na leitura de variações
+      const product = await w.product.findUnique({
         where: { id: item.productId },
         include: { variations: true },
       });
@@ -668,7 +679,9 @@ export class OrdersService {
       if (item.variationId) {
         const variation = product.variations.find((v: any) => v.id === item.variationId);
         if (!variation) {
-          throw new NotFoundException(`Variação ${item.variationId} não encontrada`);
+          throw new UnprocessableEntityException(
+            `Variação selecionada não encontrada para "${product.name}". Selecione uma opção válida.`,
+          );
         }
         unitPrice = variation.name === 'Sem interesse' ? 0 : variation.price;
       }

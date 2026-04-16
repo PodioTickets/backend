@@ -790,16 +790,27 @@ export class OrganizationsService {
 
       // Verificar se email já existe (conta ORGANIZER)
       const existingUser = await prismaRead.user.findUnique({
-        where: { 
+        where: {
           email_accountType: {
             email: addMemberDto.email,
             accountType: 'ORGANIZER',
-          }
+          },
+        },
+        include: {
+          organizationMembers: {
+            select: { organizationId: true },
+          },
         },
       });
 
       if (existingUser) {
-        throw new BadRequestException('User with this email already exists');
+        const belongsToThisOrg = existingUser.organizationMembers.some(
+          (m: any) => m.organizationId === organizationId,
+        );
+        if (belongsToThisOrg) {
+          throw new ConflictException('Esse email já foi cadastrado.');
+        }
+        throw new ConflictException('Este usuário já está em uma organização.');
       }
 
       // Hash da senha
@@ -1016,14 +1027,20 @@ export class OrganizationsService {
       },
     });
 
-    // Remover membro
-    await prismaWrite.organizationMember.delete({
-      where: {
-        organizationId_userId: {
-          organizationId,
-          userId: memberUserId,
+    // Remover membro e deletar usuário em uma única transação
+    await prismaWrite.$transaction(async (tx: any) => {
+      await tx.organizationMember.delete({
+        where: {
+          organizationId_userId: {
+            organizationId,
+            userId: memberUserId,
+          },
         },
-      },
+      });
+
+      await tx.user.delete({
+        where: { id: memberUserId },
+      });
     });
 
     return {
@@ -2023,16 +2040,27 @@ export class OrganizationsService {
 
       // Verificar se email já existe (conta ORGANIZER)
       const existingUser = await prismaRead.user.findUnique({
-        where: { 
+        where: {
           email_accountType: {
             email: addMemberDto.email,
             accountType: 'ORGANIZER',
-          }
+          },
+        },
+        include: {
+          organizationMembers: {
+            select: { organizationId: true },
+          },
         },
       });
 
       if (existingUser) {
-        throw new BadRequestException('User with this email already exists');
+        const belongsToThisOrg = existingUser.organizationMembers.some(
+          (m: any) => m.organizationId === organizationId,
+        );
+        if (belongsToThisOrg) {
+          throw new ConflictException('Esse email já foi cadastrado.');
+        }
+        throw new ConflictException('Este usuário já está em uma organização.');
       }
 
       // Hash da senha
@@ -2275,14 +2303,20 @@ export class OrganizationsService {
       throw new NotFoundException('Member not found');
     }
 
-    // Remover membro
-    await prismaWrite.organizationMember.delete({
-      where: {
-        organizationId_userId: {
-          organizationId,
-          userId: memberUserId,
+    // Remover membro e deletar usuário em uma única transação
+    await prismaWrite.$transaction(async (tx: any) => {
+      await tx.organizationMember.delete({
+        where: {
+          organizationId_userId: {
+            organizationId,
+            userId: memberUserId,
+          },
         },
-      },
+      });
+
+      await tx.user.delete({
+        where: { id: memberUserId },
+      });
     });
 
     return {
