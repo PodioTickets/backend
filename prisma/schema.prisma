@@ -841,14 +841,19 @@ model TicketBatch {
   price             Int // Preço em centavos
   startDate         DateTime?
   endDate           DateTime?
+  /// Ordem sequencial dentro do ticket (0 = primeiro lote).
+  sortOrder         Int       @default(0)
+  /// BY_TIME → ativa quando startDate é atingida. AFTER_PREVIOUS_SOLD_OUT → ativa quando o lote anterior vender tudo.
+  triggerType       String    @default("BY_TIME")
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
-  ticket         Ticket               @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  registrations  RegistrationTicket[]
+  ticket          Ticket               @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  registrations   RegistrationTicket[]
   reservedBatches OrderReservedTicket[]
 
   @@index([ticketId])
+  @@index([ticketId, sortOrder])
   @@index([ticketId, startDate, endDate])
 }
 

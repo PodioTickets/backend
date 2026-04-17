@@ -20,6 +20,56 @@ function resolveImageUrl(url: string | null | undefined, baseUrl: string): strin
   return `${baseUrl}${url.startsWith('/') ? '' : '/'}${url}`;
 }
 
+type BatchWithSold = {
+  id: string;
+  quantity: number;
+  availableQuantity: number;
+  price: number;
+  startDate: Date | null;
+  endDate: Date | null;
+  sortOrder: number;
+  triggerType: string;
+  quantitySold: number;
+};
+
+function resolveActiveBatch(
+  batches: BatchWithSold[],
+  now: Date,
+): { batch: BatchWithSold; batchNumber: number; status: 'AVAILABLE' | 'SOLD_OUT' } {
+  const sorted = [...batches].sort((a, b) => a.sortOrder - b.sortOrder);
+
+  let activeIdx = 0;
+
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[activeIdx];
+    const curr = sorted[i];
+
+    if (curr.triggerType === 'AFTER_PREVIOUS_SOLD_OUT') {
+      // Abre somente quando todas as vagas do lote anterior foram VENDIDAS (pagamento confirmado)
+      // Reservas pendentes não contam — quando expirarem, availableQuantity sobe e o lote anterior reaparece disponível
+      if (prev.quantitySold >= prev.quantity) {
+        activeIdx = i;
+      }
+    } else {
+      // BY_TIME: abre SOMENTE quando startDate for definida e já tiver chegado
+      if (curr.startDate && now >= curr.startDate) {
+        activeIdx = i;
+      }
+    }
+  }
+
+  const batch = sorted[activeIdx];
+  const status = batch.availableQuantity > 0 ? 'AVAILABLE' : 'SOLD_OUT';
+  return { batch, batchNumber: activeIdx + 1, status };
+}
+
+function batchOrdinalLabel(n: number, total: number): string | null {
+  if (total <= 1) return null;
+  const ordinals = ['1º', '2º', '3º', '4º', '5º', '6º', '7º', '8º', '9º', '10º'];
+  const prefix = ordinals[n - 1] ?? `${n}º`;
+  return `${prefix} lote`;
+}
+
 function resolveProductImages<T extends { image?: string | null; images?: string[] }>(
   product: T,
   baseUrl: string,
@@ -115,12 +165,14 @@ export class TicketsService {
         kitId: createTicketDto.kitId,
         eventId,
         batches: {
-          create: createTicketDto.batches.map((b) => ({
+          create: createTicketDto.batches.map((b, i) => ({
             quantity: b.quantity,
             availableQuantity: b.quantity,
             price: b.price,
             startDate: b.startDate ? new Date(b.startDate) : null,
             endDate: b.endDate ? new Date(b.endDate) : null,
+            sortOrder: i,
+            triggerType: b.triggerType ?? 'BY_TIME',
           })),
         },
         products: createTicketDto.productIds
@@ -172,7 +224,7 @@ export class TicketsService {
         take: limit,
         include: {
           batches: {
-            orderBy: { price: 'asc' },
+            orderBy: { sortOrder: 'asc' },
           },
           products: {
             orderBy: { sortOrder: 'asc' },
@@ -214,29 +266,34 @@ export class TicketsService {
       soldByBatch.map((s) => [s.batchId, s._count.id]),
     );
 
+    const now = new Date();
+
     // Transformar para o formato esperado
     const transformedTickets = tickets.map((ticket) => {
-      const batches = ticket.batches.map((batch) => {
-        const quantitySold = soldByBatchMap.get(batch.id) ?? 0;
-        const remainingQuantity = Math.max(0, batch.quantity - quantitySold);
-        return {
-          ...batch,
-          quantitySold,
-          remainingQuantity,
-        };
-      });
+      const batches: BatchWithSold[] = ticket.batches.map((batch) => ({
+        ...batch,
+        quantitySold: soldByBatchMap.get(batch.id) ?? 0,
+      }));
 
       const totalQuantity = batches.reduce((sum, b) => sum + b.quantity, 0);
       const totalSold = batches.reduce((sum, b) => sum + b.quantitySold, 0);
-      const totalAvailable = batches.reduce((sum, b) => sum + b.remainingQuantity, 0);
+
+      const { batch: activeBatch, batchNumber, status: activeBatchStatus } =
+        resolveActiveBatch(batches, now);
+
+      const label = batchOrdinalLabel(batchNumber, batches.length);
 
       return {
         ...ticket,
-        price: ticket.batches[0]?.price || 0,
+        price: activeBatch.price,
         totalQuantity,
-        availableQuantity: totalAvailable,
+        availableQuantity: activeBatch.availableQuantity,
         quantitySold: totalSold,
-        isSoldOut: totalAvailable === 0,
+        isSoldOut: activeBatch.availableQuantity === 0,
+        activeBatch,
+        activeBatchNumber: batchNumber,
+        activeBatchLabel: activeBatchStatus === 'SOLD_OUT' && label ? `${label} esgotado` : label,
+        activeBatchStatus,
         batches,
         ageLimit: {
           min: ticket.ageLimitMin,
@@ -324,14 +381,33 @@ export class TicketsService {
       soldByBatch.map((s) => [s.batchId, s._count.id]),
     );
 
-    const batchesWithSold = ticket.batches.map((batch) => ({
+    const now = new Date();
+
+    const batches: BatchWithSold[] = ticket.batches.map((batch) => ({
       ...batch,
       quantitySold: soldByBatchMap.get(batch.id) ?? 0,
     }));
 
+    const totalQuantity = batches.reduce((sum, b) => sum + b.quantity, 0);
+    const totalSold = batches.reduce((sum, b) => sum + b.quantitySold, 0);
+
+    const { batch: activeBatch, batchNumber, status: activeBatchStatus } =
+      resolveActiveBatch(batches, now);
+
+    const label = batchOrdinalLabel(batchNumber, batches.length);
+
     const transformed = {
       ...ticket,
-      batches: batchesWithSold,
+      price: activeBatch.price,
+      totalQuantity,
+      availableQuantity: activeBatch.availableQuantity,
+      quantitySold: totalSold,
+      isSoldOut: activeBatch.availableQuantity === 0,
+      activeBatch,
+      activeBatchNumber: batchNumber,
+      activeBatchLabel: activeBatchStatus === 'SOLD_OUT' && label ? `${label} esgotado` : label,
+      activeBatchStatus,
+      batches,
       ageLimit: {
         min: ticket.ageLimitMin,
         max: ticket.ageLimitMax,
@@ -569,11 +645,13 @@ export class TicketsService {
             await tx.ticketBatch.delete({ where: { id: eid } });
           }
         }
-        for (const b of updateTicketDto.batches) {
+        for (const [i, b] of updateTicketDto.batches.entries()) {
           const baseData = {
             price: b.price,
             startDate: b.startDate ? new Date(b.startDate) : null,
             endDate: b.endDate ? new Date(b.endDate) : null,
+            sortOrder: i,
+            triggerType: b.triggerType ?? 'BY_TIME',
           };
           if (b.id) {
             // Lote existente: preserva vendas já realizadas ao recalcular availableQuantity

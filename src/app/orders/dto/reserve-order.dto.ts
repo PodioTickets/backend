@@ -1,12 +1,13 @@
-import { IsArray, IsInt, IsUUID, Min, ValidateNested } from 'class-validator';
+import { IsArray, IsInt, IsOptional, IsUUID, Min, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class ReserveTicketItemDto {
   @IsUUID()
   ticketId: string;
 
+  @IsOptional()
   @IsUUID()
-  batchId: string;
+  batchId?: string;
 
   @IsInt()
   @Min(1)

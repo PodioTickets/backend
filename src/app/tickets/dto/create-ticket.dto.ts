@@ -11,6 +11,7 @@ import {
   ArrayMinSize,
   ValidateIf,
   ArrayUnique,
+  IsIn,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -62,6 +63,17 @@ export class TicketBatchDto {
   @IsDateString()
   @ApiPropertyOptional({ description: 'Batch end date (ISO 8601)', example: '2024-12-31T23:59:59Z' })
   endDate?: string;
+
+  @IsOptional()
+  @IsIn(['BY_TIME', 'AFTER_PREVIOUS_SOLD_OUT'])
+  @ApiPropertyOptional({
+    description:
+      'BY_TIME (default): lote abre quando startDate é atingida. ' +
+      'AFTER_PREVIOUS_SOLD_OUT: lote abre quando todas as vagas do lote anterior forem vendidas (pagamentos confirmados).',
+    enum: ['BY_TIME', 'AFTER_PREVIOUS_SOLD_OUT'],
+    default: 'BY_TIME',
+  })
+  triggerType?: string;
 }
 
 export class CreateTicketDto {

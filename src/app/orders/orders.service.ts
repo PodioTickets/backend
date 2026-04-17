@@ -31,9 +31,41 @@ class AppUnprocessableException extends UnprocessableEntityException {
   }
 }
 
+// ─── batch resolver (mesma lógica do tickets service) ────────────────────────
+
+function resolveActiveBatchForReserve(
+  batches: Array<{
+    id: string;
+    quantity: number;
+    availableQuantity: number;
+    price: number;
+    startDate: Date | null;
+    endDate: Date | null;
+    sortOrder: number;
+    triggerType: string;
+    quantitySold: number;
+  }>,
+  now: Date,
+) {
+  const sorted = [...batches].sort((a, b) => a.sortOrder - b.sortOrder);
+  let activeIdx = 0;
+
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[activeIdx];
+    const curr = sorted[i];
+    if (curr.triggerType === 'AFTER_PREVIOUS_SOLD_OUT') {
+      if (prev.quantitySold >= prev.quantity) activeIdx = i;
+    } else {
+      if (curr.startDate && now >= curr.startDate) activeIdx = i;
+    }
+  }
+
+  return sorted[activeIdx];
+}
+
 // ─── constants ───────────────────────────────────────────────────────────────
 
-const RESERVATION_TTL_MINUTES = 30;
+const RESERVATION_TTL_MINUTES = Number(process.env.RESERVATION_TTL_MINUTES ?? 30);
 const MAX_TICKETS_PER_ORDER = 20;
 
 // ─── shape helper ────────────────────────────────────────────────────────────
@@ -113,7 +145,19 @@ export class OrdersService {
       );
     }
 
-    // 1.3 Ticket limit per order
+    // 1.3 Ticket duplicates — cada ticketId deve aparecer uma única vez no array
+    const ticketIdsSeen = new Set<string>();
+    for (const t of dto.tickets) {
+      if (ticketIdsSeen.has(t.ticketId)) {
+        throw new AppUnprocessableException(
+          'DUPLICATE_TICKET_ID',
+          `ticketId "${t.ticketId}" aparece mais de uma vez. Para reservar múltiplas vagas use quantity.`,
+        );
+      }
+      ticketIdsSeen.add(t.ticketId);
+    }
+
+    // 1.4 Ticket limit per order
     const totalTickets = dto.tickets.reduce((sum, t) => sum + t.quantity, 0);
     if (totalTickets > MAX_TICKETS_PER_ORDER) {
       throw new AppUnprocessableException(
@@ -164,11 +208,11 @@ export class OrdersService {
     });
     if (existingPending) {
       const existingItems = (existingPending.reservedTickets as any[])
-        .map((rt) => `${rt.batchId}:${rt.quantity}`)
+        .map((rt) => `${rt.ticketId}:${rt.quantity}`)
         .sort()
         .join(',');
       const requestedItems = dto.tickets
-        .map((t) => `${t.batchId}:${t.quantity}`)
+        .map((t) => `${t.ticketId}:${t.quantity}`)
         .sort()
         .join(',');
 
@@ -209,8 +253,9 @@ export class OrdersService {
         throw new NotFoundException(`Ingresso ${item.ticketId} não pertence a este evento`);
       }
 
-      const batch = await r.ticketBatch.findUnique({
-        where: { id: item.batchId },
+      // Busca todos os lotes do ingresso para resolver o lote ativo
+      const allBatches = await r.ticketBatch.findMany({
+        where: { ticketId: item.ticketId },
         select: {
           id: true,
           ticketId: true,
@@ -219,13 +264,43 @@ export class OrdersService {
           availableQuantity: true,
           startDate: true,
           endDate: true,
+          sortOrder: true,
+          triggerType: true,
         },
+        orderBy: { sortOrder: 'asc' },
       });
-      if (!batch || batch.ticketId !== item.ticketId) {
+
+      if (allBatches.length === 0) {
         throw new NotFoundException(
-          `Lote ${item.batchId} não encontrado ou não pertence ao ingresso`,
+          `Nenhum lote encontrado para o ingresso "${ticket.name}"`,
         );
       }
+
+      // Conta vendas confirmadas por lote para resolução do lote ativo
+      const batchIds = allBatches.map((b) => b.id);
+      const soldAgg = await r.registrationTicket.groupBy({
+        by: ['batchId'],
+        where: { batchId: { in: batchIds }, registration: { status: { not: 'CANCELLED' } } },
+        _count: { id: true },
+      });
+      const soldMap = new Map(soldAgg.map((s) => [s.batchId, s._count.id]));
+      const batchesWithSold = allBatches.map((b) => ({
+        ...b,
+        quantitySold: soldMap.get(b.id) ?? 0,
+      }));
+
+      // Resolve o lote ativo com a mesma lógica do endpoint de tickets
+      const activeBatch = resolveActiveBatchForReserve(batchesWithSold, now);
+
+      // Se batchId foi enviado, valida que é o lote ativo
+      if (item.batchId && item.batchId !== activeBatch.id) {
+        throw new AppConflictException(
+          'BATCH_NOT_ACTIVE',
+          `O lote enviado não é o lote ativo para "${ticket.name}". Use o lote ${activeBatch.id}.`,
+        );
+      }
+
+      const batch = activeBatch;
 
       if (batch.startDate && now < new Date(batch.startDate)) {
         throw new AppConflictException(
@@ -249,7 +324,7 @@ export class OrdersService {
       }
 
       batchInfos.push({
-        batchId: item.batchId,
+        batchId: batch.id,
         ticketId: item.ticketId,
         quantity: item.quantity,
         unitPrice: batch.price,
@@ -583,6 +658,8 @@ export class OrdersService {
                       name: tp.product.name,
                       image: tp.product.image ?? null,
                       basePrice: tp.product.basePrice,
+                      isIncludedInTicket: tp.product.isIncludedInTicket ?? false,
+                      isRequired: tp.product.isRequired ?? false,
                       variationType: tp.product.variationType ?? null,
                       selectedVariation: selectedVariation
                         ? { id: selectedVariation.id, name: selectedVariation.name, price: selectedVariation.price }
@@ -1269,6 +1346,7 @@ export class OrdersService {
       where: { status: 'PENDING', expiresAt: { lte: new Date() } },
       select: {
         id: true,
+        billingPostalCode: true,
         reservedTickets: { select: { batchId: true, quantity: true } },
       },
     });
@@ -1277,40 +1355,75 @@ export class OrdersService {
 
     let cancelled = 0;
     for (const order of expired) {
-      // Atomic cancel — only if still PENDING
-      const rows: any[] = await w.$queryRaw`
-        UPDATE "Order"
-        SET "status" = 'CANCELLED'::"OrderStatus",
-            "cancelledAt" = NOW(),
-            "cancelledReason" = 'EXPIRED',
-            "updatedAt" = NOW()
-        WHERE id = ${order.id}::uuid
-          AND "status" = 'PENDING'::"OrderStatus"
-        RETURNING id
-      `;
+      const reachedBilling = !!order.billingPostalCode;
 
-      if (rows?.length > 0) {
-        // Restore stock + cancel registrations atomicamente
+      if (reachedBilling) {
+        // Chegou na etapa de endereço/pagamento → mantém registro como CANCELLED
+        const rows: any[] = await w.$queryRaw`
+          UPDATE "Order"
+          SET "status" = 'CANCELLED'::"OrderStatus",
+              "cancelledAt" = NOW(),
+              "cancelledReason" = 'EXPIRED',
+              "updatedAt" = NOW()
+          WHERE id = ${order.id}::uuid
+            AND "status" = 'PENDING'::"OrderStatus"
+          RETURNING id
+        `;
+
+        if (rows?.length > 0) {
+          await w.$transaction(async (tx: any) => {
+            for (const rt of order.reservedTickets as any[]) {
+              await tx.$executeRaw`
+                UPDATE "TicketBatch"
+                SET "availableQuantity" = LEAST("availableQuantity" + ${rt.quantity}, "quantity")
+                WHERE id = ${rt.batchId}::uuid
+              `;
+            }
+            await tx.registration.updateMany({
+              where: { orderId: order.id, status: 'PENDING' },
+              data: { status: 'CANCELLED' },
+            });
+          });
+          cancelled++;
+          this.logger.debug(`Cancelled expired order ${order.id}`);
+        }
+      } else {
+        // Nunca chegou na etapa de endereço → deleta o pedido (sem histórico necessário)
+        // Restaura estoque e deleta em transação; cascade remove registrations e reservedTickets
         await w.$transaction(async (tx: any) => {
           for (const rt of order.reservedTickets as any[]) {
-            // LEAST garante que availableQuantity nunca ultrapasse quantity (evita over-restore)
             await tx.$executeRaw`
               UPDATE "TicketBatch"
               SET "availableQuantity" = LEAST("availableQuantity" + ${rt.quantity}, "quantity")
               WHERE id = ${rt.batchId}::uuid
             `;
           }
-          await tx.registration.updateMany({
-            where: { orderId: order.id, status: 'PENDING' },
-            data: { status: 'CANCELLED' },
-          });
+          await tx.order.delete({ where: { id: order.id } });
         });
         cancelled++;
-        this.logger.debug(`Cancelled expired order ${order.id}`);
+        this.logger.debug(`Deleted incomplete expired order ${order.id}`);
       }
     }
 
     return cancelled;
+  }
+
+  // ── dev helpers (non-production only) ────────────────────────────────────
+
+  async forceExpire(userId: string, orderId: string): Promise<{ message: string }> {
+    const w: any = this.prisma.getWriteClient();
+    const order = await w.order.findUnique({ where: { id: orderId } });
+    if (!order || order.userId !== userId) {
+      throw new NotFoundException('Pedido não encontrado');
+    }
+    if (order.status !== 'PENDING') {
+      throw new AppConflictException('ORDER_NOT_PENDING', 'Pedido não está mais pendente');
+    }
+    await w.order.update({
+      where: { id: orderId },
+      data: { expiresAt: new Date(Date.now() - 1000) },
+    });
+    return { message: 'expiresAt set to past — cron will process it within 30s' };
   }
 
   // ── private helpers ───────────────────────────────────────────────────────

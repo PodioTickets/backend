@@ -142,83 +142,28 @@ export class EventsService {
     payload: EventKitSelectionDisplayDto,
   ): Promise<void> {
     const [tickets, categories] = await Promise.all([
-      prismaRead.ticket.findMany({
-        where: { eventId },
-        select: {
-          id: true,
-          categoryId: true,
-          products: { select: { productId: true } },
-        },
-      }),
-      prismaRead.ticketCategory.findMany({
-        where: { eventId },
-        select: { id: true },
-      }),
+      prismaRead.ticket.findMany({ where: { eventId }, select: { id: true } }),
+      prismaRead.ticketCategory.findMany({ where: { eventId }, select: { id: true } }),
     ]);
 
     const ticketIds = new Set(tickets.map((t) => t.id));
     const categoryIds = new Set(categories.map((c) => c.id));
 
-    const productIdsByTicket = new Map<string, Set<string>>();
-    for (const t of tickets) {
-      productIdsByTicket.set(
-        t.id,
-        new Set(t.products.map((p) => p.productId)),
-      );
-    }
-
-    const productIdsByCategoryKey = new Map<string, Set<string>>();
-    for (const t of tickets) {
-      const key = t.categoryId ?? UNCATEGORIZED_CATEGORY_KEY;
-      if (!productIdsByCategoryKey.has(key)) {
-        productIdsByCategoryKey.set(key, new Set());
-      }
-      const bucket = productIdsByCategoryKey.get(key)!;
-      for (const p of t.products) {
-        bucket.add(p.productId);
-      }
-    }
-
-    for (const [tid, pid] of Object.entries(
-      payload.primaryKitProductByTicketId,
-    )) {
+    for (const tid of Object.keys(payload.primaryKitProductByTicketId)) {
       this.validateUUID(tid, 'ticketId in primaryKitProductByTicketId');
-      this.validateUUID(pid, 'productId in primaryKitProductByTicketId');
       if (!ticketIds.has(tid)) {
         throw new BadRequestException(
           `kitSelectionDisplay: ticket "${tid}" does not belong to this event`,
         );
       }
-      const allowed = productIdsByTicket.get(tid)!;
-      if (!allowed.has(pid)) {
-        throw new BadRequestException(
-          `kitSelectionDisplay: product "${pid}" is not linked to ticket "${tid}"`,
-        );
-      }
     }
 
-    for (const [catKey, pid] of Object.entries(
-      payload.primaryKitProductByCategoryId,
-    )) {
-      this.validateUUID(pid, 'productId in primaryKitProductByCategoryId');
-
-      if (catKey !== UNCATEGORIZED_CATEGORY_KEY) {
-        this.validateUUID(catKey, 'categoryId in primaryKitProductByCategoryId');
-        if (!categoryIds.has(catKey)) {
-          throw new BadRequestException(
-            `kitSelectionDisplay: category "${catKey}" does not belong to this event`,
-          );
-        }
-      }
-
-      const allowed = productIdsByCategoryKey.get(catKey);
-      if (!allowed || allowed.size === 0) {
-        continue;
-      }
-
-      if (!allowed.has(pid)) {
+    for (const catKey of Object.keys(payload.primaryKitProductByCategoryId)) {
+      if (catKey === UNCATEGORIZED_CATEGORY_KEY) continue;
+      this.validateUUID(catKey, 'categoryId in primaryKitProductByCategoryId');
+      if (!categoryIds.has(catKey)) {
         throw new BadRequestException(
-          `kitSelectionDisplay: product "${pid}" is not among kit products for bucket "${catKey}"`,
+          `kitSelectionDisplay: category "${catKey}" does not belong to this event`,
         );
       }
     }
@@ -959,20 +904,6 @@ export class EventsService {
 
     const orgMember =
       await this.organizerMemberAccess.getMemberForOrganizerUser(userId);
-
-    // Membros não-OWNER precisam ter a permissão view_event para ver qualquer evento
-    if (
-      orgMember.role !== 'OWNER' &&
-      !this.organizerMemberAccess.hasPermission(orgMember, 'view_event')
-    ) {
-      return {
-        message: 'Events fetched successfully',
-        data: {
-          events: [],
-          pagination: { page, limit, total: 0, totalPages: 0 },
-        },
-      };
-    }
 
     const scopeWhere = this.organizerMemberAccess.buildOrganizerEventsWhere(
       orgMember,

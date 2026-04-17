@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Headers,
   Param,
@@ -159,6 +160,22 @@ export class OrdersController {
     @Body() dto: PayOrderDto,
   ) {
     return this.ordersService.pay(req.user.id, orderId, idempotencyKey, dto);
+  }
+
+  // ── POST /orders/:orderId/force-expire (dev only) ─────────────────────
+
+  @Post(':orderId/force-expire')
+  @NoCache()
+  @ApiOperation({ summary: '[DEV] Force order expiry for testing — unavailable in production' })
+  @ApiParam({ name: 'orderId', type: String, format: 'uuid' })
+  async forceExpire(
+    @Request() req: any,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+  ) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new ForbiddenException('Not available in production');
+    }
+    return this.ordersService.forceExpire(req.user.id, orderId);
   }
 
   // ── GET /orders/:orderId/payment-status ───────────────────────────────

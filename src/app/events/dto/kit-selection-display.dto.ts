@@ -26,7 +26,7 @@ export class EventKitSelectionDisplayDto {
 
   @IsObject()
   @ApiProperty({
-    description: 'ticketId → productId (produto deve estar vinculado ao ingresso)',
+    description: 'ticketId → imageUrl (URL da imagem primária do kit para esse ingresso)',
     type: 'object',
     additionalProperties: { type: 'string' },
   })
@@ -34,7 +34,7 @@ export class EventKitSelectionDisplayDto {
 
   @IsObject()
   @ApiProperty({
-    description: 'categoryId ou "uncategorized" → productId',
+    description: 'categoryId ou "uncategorized" → imageUrl (URL da imagem primária do kit para essa categoria)',
     type: 'object',
     additionalProperties: { type: 'string' },
   })

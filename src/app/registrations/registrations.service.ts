@@ -737,6 +737,8 @@ export class RegistrationsService {
           name: rp.product.name,
           image: rp.product.image,
           basePrice: rp.product.basePrice,
+          isIncludedInTicket: rp.product.isIncludedInTicket ?? false,
+          isRequired: rp.product.isRequired ?? false,
           variationType: rp.product.variationType || null,
         },
         variation: rp.variation ? {
@@ -809,36 +811,12 @@ export class RegistrationsService {
             email: true,
           },
         },
-        modalities: {
-          include: {
-            modality: {
-              include: {
-                group: true,
-              },
-            },
-          },
-        },
         tickets: {
           include: {
             ticket: {
               include: {
-                category: true,
-                batches: {
-                  orderBy: {
-                    createdAt: 'desc' as const,
-                  },
-                },
-                products: {
-                  orderBy: { sortOrder: 'asc' },
-                  include: {
-                    product: {
-                      include: {
-                        variations: true,
-                      },
-                    },
-                  },
-                },
-                kit: true,
+                category: { select: { id: true, name: true } },
+                kit: { select: { id: true, name: true } },
               },
             },
           },
@@ -846,39 +824,26 @@ export class RegistrationsService {
         questionAnswers: {
           include: {
             question: {
-              select: {
-                id: true,
-                question: true,
-                type: true,
-                isRequired: true,
-              },
-            },
-          },
-        },
-        kitItems: {
-          include: {
-            kitItem: {
-              include: {
-                product: {
-                  select: {
-                    id: true,
-                    name: true,
-                    image: true,
-                    basePrice: true,
-                  },
-                },
-              },
+              select: { id: true, question: true, type: true, isRequired: true },
             },
           },
         },
         products: {
           include: {
             product: {
-              include: {
-                variations: true,
+              select: {
+                id: true,
+                name: true,
+                image: true,
+                basePrice: true,
+                isIncludedInTicket: true,
+                isRequired: true,
+                variationType: true,
               },
             },
-            variation: true,
+            variation: {
+              select: { id: true, name: true, price: true },
+            },
           },
         },
         order: {
@@ -895,47 +860,22 @@ export class RegistrationsService {
               },
             },
             payment: {
-              include: {
-                user: {
-                  select: {
-                    id: true,
-                    firstName: true,
-                    lastName: true,
-                    email: true,
-                  },
-                },
+              select: {
+                id: true,
+                status: true,
+                method: true,
+                amount: true,
+                transactionId: true,
+                paymentDate: true,
+                createdAt: true,
               },
             },
-            registrations: {
-              include: {
-                user: {
-                  select: {
-                    id: true,
-                    firstName: true,
-                    lastName: true,
-                    email: true,
-                  },
-                },
-                tickets: {
-                  include: {
-                    ticket: {
-                      select: {
-                        id: true,
-                        name: true,
-                        category: {
-                          select: {
-                            id: true,
-                            name: true,
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
+            coupon: {
+              select: { id: true, code: true, type: true, value: true },
             },
-            coupon: true,
-            voucher: true,
+            voucher: {
+              select: { id: true, code: true, name: true, status: true },
+            },
           },
         },
       },
@@ -952,34 +892,17 @@ export class RegistrationsService {
 
     const reg = registration as any;
 
-    // Formatar payment metadata se existir
-    let paymentMetadata = null;
-    if (reg.order?.payment?.metadata) {
-      try {
-        paymentMetadata = typeof reg.order.payment.metadata === 'string'
-          ? JSON.parse(reg.order.payment.metadata)
-          : reg.order.payment.metadata;
-      } catch (e) {
-        paymentMetadata = reg.order.payment.metadata;
-      }
-    }
-
-    // Build map of productId → selected variationId from order.pendingProducts
-    const pendingProductsMap = new Map<string, { variationId?: string; quantity: number }>();
-    for (const pp of (reg.order?.pendingProducts as any[] | null) ?? []) {
-      pendingProductsMap.set(pp.productId, { variationId: pp.variationId, quantity: pp.quantity });
-    }
-
     const formattedRegistration = {
       id: reg.id,
       status: reg.status,
       qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
       createdAt: reg.createdAt,
       updatedAt: reg.updatedAt,
-      user: {
+      participant: {
         id: reg.user.id,
         firstName: reg.user.firstName,
         lastName: reg.user.lastName,
+        fullName: `${reg.user.firstName} ${reg.user.lastName}`,
         email: reg.user.email,
         documentNumber: reg.user.documentNumber,
         avatarUrl: reg.user.avatarUrl,
@@ -987,14 +910,11 @@ export class RegistrationsService {
         gender: reg.user.gender,
         phone: reg.user.phone,
         reservePhone: reg.user.reservePhone,
-        fullName: `${reg.user.firstName} ${reg.user.lastName}`,
       },
       invitedBy: reg.invitedBy ? {
         id: reg.invitedBy.id,
-        firstName: reg.invitedBy.firstName,
-        lastName: reg.invitedBy.lastName,
-        email: reg.invitedBy.email,
         fullName: `${reg.invitedBy.firstName} ${reg.invitedBy.lastName}`,
+        email: reg.invitedBy.email,
       } : null,
       emergencyContact: reg.emergencyContactName || reg.emergencyContactPhone ? {
         name: reg.emergencyContactName ?? null,
@@ -1004,83 +924,56 @@ export class RegistrationsService {
         id: reg.event.id,
         name: reg.event.name,
         slug: reg.event.slug,
-        description: reg.event.description,
         startDate: reg.event.startDate,
         endDate: reg.event.endDate,
-        registrationStartDate: reg.event.registrationStartDate,
-        registrationEndDate: reg.event.registrationEndDate,
         imageUrl: reg.event.imageUrl,
         bannerUrl: reg.event.bannerUrl,
         logoUrl: reg.event.logoUrl,
         status: reg.event.status,
         location: reg.event.location,
-        organization: reg.event.organization,
-        regulationTopic: reg.event.topics && reg.event.topics.length > 0 ? reg.event.topics[0] : null,
+        locations: reg.event.locations ?? [],
+        organization: reg.event.organization ?? null,
+        regulationTopic: reg.event.topics?.[0] ?? null,
       },
-      modalities: (reg.modalities || []).map((rm: any) => ({
-        id: rm.id,
-        modality: {
-          id: rm.modality.id,
-          name: rm.modality.name,
-          price: rm.modality.price,
-          group: rm.modality.group ? {
-            id: rm.modality.group.id,
-            name: rm.modality.group.name,
-          } : null,
+      ticket: reg.tickets?.[0] ? {
+        id: reg.tickets[0].ticket.id,
+        name: reg.tickets[0].ticket.name,
+        description: reg.tickets[0].ticket.description ?? null,
+        modality: reg.tickets[0].ticket.modality ?? null,
+        distance: reg.tickets[0].ticket.distance ?? null,
+        distanceUnit: reg.tickets[0].ticket.distanceUnit ?? null,
+        gender: reg.tickets[0].ticket.gender ?? null,
+        ageLimitMin: reg.tickets[0].ticket.ageLimitMin ?? null,
+        ageLimitMax: reg.tickets[0].ticket.ageLimitMax ?? null,
+        hasKit: reg.tickets[0].ticket.hasKit,
+        category: reg.tickets[0].ticket.category ? {
+          id: reg.tickets[0].ticket.category.id,
+          name: reg.tickets[0].ticket.category.name,
+        } : null,
+        kit: reg.tickets[0].ticket.kit ? {
+          id: reg.tickets[0].ticket.kit.id,
+          name: reg.tickets[0].ticket.kit.name,
+        } : null,
+      } : null,
+      products: (reg.products || []).map((rp: any) => ({
+        id: rp.id,
+        product: {
+          id: rp.product.id,
+          name: rp.product.name,
+          image: rp.product.image ?? null,
+          basePrice: rp.product.basePrice,
+          isIncludedInTicket: rp.product.isIncludedInTicket ?? false,
+          isRequired: rp.product.isRequired ?? false,
+          variationType: rp.product.variationType || null,
         },
-      })),
-      tickets: (reg.tickets || []).map((rt: any) => ({
-        id: rt.id,
-        ticket: {
-          id: rt.ticket.id,
-          name: rt.ticket.name,
-          description: rt.ticket.description,
-          modality: rt.ticket.modality,
-          distance: rt.ticket.distance,
-          distanceUnit: rt.ticket.distanceUnit,
-          gender: rt.ticket.gender,
-          ageLimitMin: rt.ticket.ageLimitMin,
-          ageLimitMax: rt.ticket.ageLimitMax,
-          hasKit: rt.ticket.hasKit,
-          category: rt.ticket.category ? {
-            id: rt.ticket.category.id,
-            name: rt.ticket.category.name,
-            description: rt.ticket.category.description,
-          } : null,
-          batches: (rt.ticket.batches || []).map((batch: any) => ({
-            id: batch.id,
-            quantity: batch.quantity,
-            price: batch.price,
-            startDate: batch.startDate,
-            endDate: batch.endDate,
-          })),
-          products: (rt.ticket.products || []).map((tp: any) => {
-            const sel = pendingProductsMap.get(tp.product.id);
-            const selectedVariation = sel?.variationId
-              ? (tp.product.variations || []).find((v: any) => v.id === sel.variationId) ?? null
-              : null;
-            return {
-              id: tp.product.id,
-              name: tp.product.name,
-              image: tp.product.image,
-              basePrice: tp.product.basePrice,
-              variationType: tp.product.variationType || null,
-              selectedVariation: selectedVariation
-                ? { id: selectedVariation.id, name: selectedVariation.name, price: selectedVariation.price }
-                : null,
-              variations: (tp.product.variations || []).map((v: any) => ({
-                id: v.id,
-                name: v.name,
-                price: v.price,
-                stock: v.stock,
-              })),
-            };
-          }),
-          kit: rt.ticket.kit ? {
-            id: rt.ticket.kit.id,
-            name: rt.ticket.kit.name,
-          } : null,
-        },
+        variation: rp.variation ? {
+          id: rp.variation.id,
+          name: rp.variation.name,
+          price: rp.variation.price,
+        } : null,
+        quantity: rp.quantity,
+        unitPrice: rp.unitPrice,
+        totalPrice: rp.totalPrice,
       })),
       questionAnswers: (reg.questionAnswers || []).map((qa: any) => ({
         id: qa.id,
@@ -1092,36 +985,6 @@ export class RegistrationsService {
         },
         answer: qa.answer as string,
       })),
-      kitItems: (reg.kitItems || []).map((ki: any) => ({
-        id: ki.id,
-        kitItem: {
-          id: ki.kitItem.id,
-          name: ki.kitItem.name || ki.kitItem.product?.name || 'Item',
-          price: ki.kitItem.product?.basePrice || 0,
-          image: ki.kitItem.product?.image || null,
-        },
-        selectedSize: ki.selectedSize,
-        quantity: ki.quantity,
-      })),
-      products: (reg.products || []).map((rp: any) => ({
-        id: rp.id,
-        product: {
-          id: rp.product.id,
-          name: rp.product.name,
-          image: rp.product.image,
-          basePrice: rp.product.basePrice,
-          variationType: rp.product.variationType || null,
-        },
-        variation: rp.variation ? {
-          id: rp.variation.id,
-          name: rp.variation.name,
-          price: rp.variation.price,
-        } : null,
-        variationName: rp.variation?.name || null,
-        quantity: rp.quantity,
-        unitPrice: rp.unitPrice,
-        totalPrice: rp.totalPrice,
-      })),
       order: reg.order ? {
         id: reg.order.id,
         totalAmount: reg.order.totalAmount,
@@ -1129,28 +992,6 @@ export class RegistrationsService {
         discount: reg.order.discount,
         finalAmount: reg.order.finalAmount,
         purchaseDate: reg.order.createdAt,
-        buyer: reg.order.buyer ? {
-          id: reg.order.buyer.id,
-          firstName: reg.order.buyer.firstName,
-          lastName: reg.order.buyer.lastName,
-          email: reg.order.buyer.email,
-          phone: reg.order.buyer.phone,
-          documentNumber: reg.order.buyer.documentNumber,
-          avatarUrl: reg.order.buyer.avatarUrl,
-          fullName: `${reg.order.buyer.firstName} ${reg.order.buyer.lastName}`,
-        } : null,
-        payment: reg.order.payment ? {
-          id: reg.order.payment.id,
-          status: reg.order.payment.status,
-          method: reg.order.payment.method,
-          amount: reg.order.payment.amount,
-          transactionId: reg.order.payment.transactionId,
-          paymentDate: reg.order.payment.paymentDate,
-          createdAt: reg.order.payment.createdAt,
-          gateway: reg.order.payment.gateway,
-          metadata: paymentMetadata,
-          refundType: paymentMetadata?.refundType || null,
-        } : null,
         coupon: reg.order.coupon ? {
           id: reg.order.coupon.id,
           code: reg.order.coupon.code,
@@ -1160,28 +1001,26 @@ export class RegistrationsService {
         voucher: reg.order.voucher ? {
           id: reg.order.voucher.id,
           code: reg.order.voucher.code,
-          type: reg.order.voucher.type,
-          value: reg.order.voucher.value,
+          name: reg.order.voucher.name,
+          status: reg.order.voucher.status,
         } : null,
-        registrations: (reg.order.registrations || []).map((orderReg: any) => ({
-          id: orderReg.id,
-          status: orderReg.status,
-          user: {
-            id: orderReg.user.id,
-            firstName: orderReg.user.firstName,
-            lastName: orderReg.user.lastName,
-            email: orderReg.user.email,
-            fullName: `${orderReg.user.firstName} ${orderReg.user.lastName}`,
-          },
-          tickets: (orderReg.tickets || []).map((orderTicket: any) => ({
-            id: orderTicket.ticket.id,
-            name: orderTicket.ticket.name,
-            category: orderTicket.ticket.category ? {
-              id: orderTicket.ticket.category.id,
-              name: orderTicket.ticket.category.name,
-            } : null,
-          })),
-        })),
+        buyer: reg.order.user ? {
+          id: reg.order.user.id,
+          fullName: `${reg.order.user.firstName} ${reg.order.user.lastName}`,
+          email: reg.order.user.email,
+          phone: reg.order.user.phone,
+          documentNumber: reg.order.user.documentNumber,
+          avatarUrl: reg.order.user.avatarUrl,
+        } : null,
+        payment: reg.order.payment ? {
+          id: reg.order.payment.id,
+          status: reg.order.payment.status,
+          method: reg.order.payment.method,
+          amount: reg.order.payment.amount,
+          transactionId: reg.order.payment.transactionId ?? null,
+          paymentDate: reg.order.payment.paymentDate ?? null,
+          createdAt: reg.order.payment.createdAt,
+        } : null,
       } : null,
     };
 
