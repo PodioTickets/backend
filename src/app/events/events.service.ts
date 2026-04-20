@@ -431,6 +431,21 @@ export class EventsService {
     outros: 'Outros',
   };
 
+  private async findEventIdsMatchingText(q: string): Promise<string[]> {
+    const prismaRead = this.prisma.getReadClient();
+    const term = `%${q.trim()}%`;
+    const rows = await prismaRead.$queryRaw<{ id: string }[]>`
+      SELECT id FROM "Event"
+      WHERE
+        unaccent(name)        ILIKE unaccent(${term}) OR
+        unaccent(description) ILIKE unaccent(${term}) OR
+        unaccent(location)    ILIKE unaccent(${term}) OR
+        unaccent(city)        ILIKE unaccent(${term}) OR
+        unaccent(state)       ILIKE unaccent(${term})
+    `;
+    return rows.map((r) => r.id);
+  }
+
   private buildPublicEventSearchWhere(params: {
     q?: string;
     country?: string;
@@ -441,6 +456,7 @@ export class EventsService {
     status?: EventStatus;
     includePast?: boolean;
     modalities?: string;
+    textMatchIds?: string[];
   }): Prisma.EventWhereInput {
     const {
       q,
@@ -452,6 +468,7 @@ export class EventsService {
       status,
       includePast = false,
       modalities,
+      textMatchIds,
     } = params;
 
     const where: Prisma.EventWhereInput = {
@@ -459,39 +476,8 @@ export class EventsService {
     };
 
     if (q && q.trim().length > 0) {
-      const searchTerm = q.trim();
-      where.OR = [
-        {
-          name: {
-            contains: searchTerm,
-            mode: 'insensitive',
-          },
-        },
-        {
-          description: {
-            contains: searchTerm,
-            mode: 'insensitive',
-          },
-        },
-        {
-          location: {
-            contains: searchTerm,
-            mode: 'insensitive',
-          },
-        },
-        {
-          city: {
-            contains: searchTerm,
-            mode: 'insensitive',
-          },
-        },
-        {
-          state: {
-            contains: searchTerm,
-            mode: 'insensitive',
-          },
-        },
-      ];
+      // IDs pré-filtrados via unaccent no DB (accent-insensitive)
+      where.id = { in: textMatchIds ?? [] };
     }
 
     if (country) {
@@ -540,7 +526,11 @@ export class EventsService {
   }
 
   async searchLocationFacets(dto: SearchEventLocationsDto) {
-    const where = this.buildPublicEventSearchWhere(dto);
+    const textMatchIds = dto.q?.trim().length
+      ? await this.findEventIdsMatchingText(dto.q)
+      : undefined;
+
+    const where = this.buildPublicEventSearchWhere({ ...dto, textMatchIds });
 
     const prismaRead = this.prisma.getReadClient();
     const rows = await prismaRead.event.groupBy({
@@ -586,7 +576,12 @@ export class EventsService {
 
   async search(searchDto: SearchEventsDto) {
     const { page = 1, limit = 20, ...searchFilters } = searchDto;
-    const where = this.buildPublicEventSearchWhere(searchFilters);
+
+    const textMatchIds = searchFilters.q?.trim().length
+      ? await this.findEventIdsMatchingText(searchFilters.q)
+      : undefined;
+
+    const where = this.buildPublicEventSearchWhere({ ...searchFilters, textMatchIds });
 
     // Usar read replica para performance
     const prismaRead = this.prisma.getReadClient();
@@ -3815,6 +3810,7 @@ export class EventsService {
     // Construir where clause
     const where: any = {
       eventId,
+      status: { not: RegistrationStatus.PENDING },
     };
 
     // Filtro por status - suporta status de registro e status de pagamento (CHARGEBACK, REFUNDED)
@@ -3846,7 +3842,7 @@ export class EventsService {
       } else {
         // Status normal de registro (PENDING, CONFIRMED, CANCELLED, COMPLETED)
         // Garantir que o status seja um valor válido do enum
-        const validStatuses = ['PENDING', 'CONFIRMED', 'CANCELLED', 'COMPLETED'];
+        const validStatuses = ['CONFIRMED', 'CANCELLED', 'COMPLETED'];
         if (validStatuses.includes(status)) {
           where.status = status as RegistrationStatus;
 
@@ -3973,11 +3969,28 @@ export class EventsService {
                   name: true,
                 },
               },
-              batches: {
-                orderBy: {
-                  createdAt: 'desc' as const,
-                },
-              },
+            },
+          },
+          batch: {
+            select: {
+              id: true,
+              price: true,
+            },
+          },
+        },
+      },
+      products: {
+        include: {
+          product: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+          variation: {
+            select: {
+              id: true,
+              name: true,
             },
           },
         },
@@ -4064,12 +4077,11 @@ export class EventsService {
       // Garantir que where está limpo e correto
       const finalWhere: any = {
         eventId,
+        status: where.status ?? { not: RegistrationStatus.PENDING },
       };
 
       // Aplicar filtros apenas se existirem
-      if (where.status) {
-        finalWhere.status = where.status;
-      }
+      // (status já aplicado acima)
       if (where.tickets) {
         finalWhere.tickets = where.tickets;
       }
@@ -4202,28 +4214,37 @@ export class EventsService {
         const registrationTicket = reg.tickets[0];
         const ticket = registrationTicket.ticket;
 
-        // Calcular o valor pago pelo ticket
-        // Prioridade: 1) Preço da modality (se houver), 2) Preço do batch mais recente, 3) 0
-        // Todos os preços já estão em centavos
-        let ticketPrice = 0;
-        if (reg.modalities && reg.modalities.length > 0) {
-          // Se houver modality, usar o preço médio das modalities (já está em centavos)
-          ticketPrice = Math.round(reg.modalities.reduce((sum: number, rm: any) => sum + rm.modality.price, 0) / reg.modalities.length);
-        } else if (ticket.batches && ticket.batches.length > 0) {
-          // Se não houver modality, usar o preço do batch mais recente (já está em centavos)
-          ticketPrice = ticket.batches[0].price;
-        }
+        // Preço do lote no momento da compra (já em centavos)
+        const ticketPrice = registrationTicket.batch?.price ?? 0;
+
+        // Soma dos produtos adicionados para este participante (já em centavos)
+        const productsTotal = (reg.products ?? []).reduce(
+          (sum: number, rp: any) => sum + (rp.totalPrice ?? 0),
+          0,
+        );
 
         return {
           id: ticket.id,
           name: ticket.name,
+          batchId: registrationTicket.batch?.id ?? null,
           category: ticket.category ? {
             id: ticket.category.id,
             name: ticket.category.name,
           } : null,
           price: ticketPrice,
+          productsTotal,
+          total: ticketPrice + productsTotal,
         };
       })() : null,
+      // Produtos adicionados para este participante
+      products: (reg.products ?? []).map((rp: any) => ({
+        id: rp.id,
+        product: { id: rp.product.id, name: rp.product.name },
+        variation: rp.variation ? { id: rp.variation.id, name: rp.variation.name } : null,
+        quantity: rp.quantity,
+        unitPrice: rp.unitPrice,
+        totalPrice: rp.totalPrice,
+      })),
       // Itens de kit do participante
       kitItems: reg.kitItems.map((ki: any) => ({
         id: ki.id,

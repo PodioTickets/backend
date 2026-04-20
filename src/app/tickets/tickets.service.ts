@@ -510,13 +510,32 @@ export class TicketsService {
       });
       const existingIds = new Set(existingBatches.map((b) => b.id));
 
-      const soldAgg = await prismaRead.registrationTicket.groupBy({
-        by: ['batchId'],
-        where: { ticketId, batchId: { not: null } },
-        _count: { id: true },
-      });
+      const [soldAgg, reservedAgg] = await Promise.all([
+        prismaRead.registrationTicket.groupBy({
+          by: ['batchId'],
+          where: {
+            ticketId,
+            batchId: { not: null },
+            registration: { status: { notIn: ['CANCELLED', 'PENDING'] } },
+          },
+          _count: { id: true },
+        }),
+        prismaRead.registrationTicket.groupBy({
+          by: ['batchId'],
+          where: {
+            ticketId,
+            batchId: { not: null },
+            registration: { status: 'PENDING' },
+          },
+          _count: { id: true },
+        }),
+      ]);
+
       const soldByBatch = new Map<string, number>(
         soldAgg.map((r) => [r.batchId!, r._count.id]),
+      );
+      const reservedByBatch = new Map<string, number>(
+        reservedAgg.map((r) => [r.batchId!, r._count.id]),
       );
 
       const seenDtoIds = new Set<string>();
@@ -553,9 +572,14 @@ export class TicketsService {
 
       for (const b of updateTicketDto.batches) {
         const sold = b.id ? (soldByBatch.get(b.id) ?? 0) : 0;
-        if (b.quantity < sold) {
+        const reserved = b.id ? (reservedByBatch.get(b.id) ?? 0) : 0;
+        const minimum = sold + reserved;
+        if (b.quantity < minimum) {
+          const parts: string[] = [];
+          if (sold > 0) parts.push(`${sold} vendida${sold !== 1 ? 's' : ''}`);
+          if (reserved > 0) parts.push(`${reserved} reservada${reserved !== 1 ? 's' : ''} (aguardando pagamento)`);
           throw new BadRequestException(
-            `Batch quantity cannot be less than the number already sold (${sold})`,
+            `A quantidade do lote não pode ser menor que o total ocupado: ${parts.join(' + ')} = ${minimum} vaga${minimum !== 1 ? 's' : ''}. Reduza para no mínimo ${minimum}.`,
           );
         }
       }

@@ -3,9 +3,6 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { stat } from 'fs/promises';
 import * as ClamScan from 'clamscan';
-import { Worker } from 'worker_threads';
-import { encodeImageBufferToWebp } from './upload-image-pipeline';
-
 @Injectable()
 export class UploadService {
   private readonly uploadDir = path.join(process.cwd(), 'uploads', 'images');
@@ -37,101 +34,29 @@ export class UploadService {
     }
   }
 
-  private shouldUseImageWorker(): boolean {
-    if (process.env.UPLOAD_DISABLE_WORKER_THREADS === 'true') {
-      return false;
-    }
-    if (typeof process.env.JEST_WORKER_ID !== 'undefined') {
-      return false;
-    }
-    return true;
-  }
-
-  private runImagePipelineInWorker(
-    buf: Buffer,
-    originalname: string,
-  ): Promise<Buffer> {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const workerPath = path.join(__dirname, 'image-pipeline.worker.js');
-      const w = new Worker(workerPath, {
-        workerData: {
-          buffer: buf.buffer.slice(
-            buf.byteOffset,
-            buf.byteOffset + buf.byteLength,
-          ),
-          uploadDir: this.uploadDir,
-          originalname,
-        },
-      });
-      const finish = (fn: () => void) => {
-        if (settled) return;
-        settled = true;
-        void w.terminate().catch(() => undefined);
-        fn();
-      };
-      w.once('message', (msg: { ok?: boolean; ab?: ArrayBuffer; error?: string }) => {
-        if (msg?.ok && msg.ab instanceof ArrayBuffer) {
-          finish(() => resolve(Buffer.from(msg.ab)));
-        } else {
-          finish(() =>
-            reject(new Error(msg?.error || 'Worker image pipeline failed')),
-          );
-        }
-      });
-      w.once('error', (err) => finish(() => reject(err)));
-      w.once('exit', (code) => {
-        if (!settled && code !== 0) {
-          finish(() =>
-            reject(new Error(`Worker image pipeline exited with code ${code}`)),
-          );
-        }
-      });
-    });
-  }
-
   async compressImage(file: any) {
     try {
       if (!file || !file.buffer) {
         throw new Error('No file uploaded or file buffer missing');
       }
 
-      let compressedBuffer: Buffer;
-      if (this.shouldUseImageWorker()) {
-        try {
-          compressedBuffer = await this.runImagePipelineInWorker(
-            file.buffer,
-            file.originalname || 'uploaded-file',
-          );
-        } catch (workerErr: any) {
-          console.warn(
-            '⚠️ Image worker failed, falling back to main thread:',
-            workerErr?.message || workerErr,
-          );
-          await this.scanForMalware(
-            file.buffer,
-            file.originalname || 'uploaded-file',
-          );
-          compressedBuffer = await encodeImageBufferToWebp(file.buffer);
-        }
-      } else {
-        await this.scanForMalware(
-          file.buffer,
-          file.originalname || 'uploaded-file',
-        );
-        compressedBuffer = await encodeImageBufferToWebp(file.buffer);
-      }
+      await this.scanForMalware(
+        file.buffer,
+        file.originalname || 'uploaded-file',
+      );
 
-      const filename = `${Date.now()}-${Math.round(Math.random() * 1e9)}.webp`;
+      // Preservar o formato original sem nenhum re-encoding para evitar perda de qualidade
+      const originalExt = path.extname(file.originalname || '').toLowerCase() || '.jpg';
+      const filename = `${Date.now()}-${Math.round(Math.random() * 1e9)}${originalExt}`;
       const filePath = path.join(this.uploadDir, filename);
-      await fs.writeFile(filePath, compressedBuffer);
+      await fs.writeFile(filePath, file.buffer);
 
       console.log(
-        `✅ File processed and saved: ${filename} (${this.formatFileSize(compressedBuffer.length)})`,
+        `✅ File saved: ${filename} (${this.formatFileSize(file.buffer.length)})`,
       );
       return `/uploads/images/${filename}`;
     } catch (error) {
-      console.error('❌ Failed to compress and save image:', error);
+      console.error('❌ Failed to save image:', error);
       throw new Error(`Failed to process image: ${error.message}`);
     }
   }

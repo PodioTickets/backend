@@ -63,7 +63,7 @@ export class CreateProductDto {
 
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(5)
+  @ArrayMaxSize(7)
   @IsString({ each: true })
   @ApiPropertyOptional({
     description: 'Array de até 5 fotos (data URL ou URL pública). Omitido quando vazio.',
@@ -162,7 +162,7 @@ export class UpdateProductDto {
 
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(5)
+  @ArrayMaxSize(7)
   @IsString({ each: true })
   images?: string[];
 

@@ -1000,17 +1000,13 @@ export class OrdersService {
       cieloResult = { success: false, error: err.message };
     }
 
-    // 6.10 Payment failed → cancel order + restore stock
+    // 6.10 Payment failed → retornar erro sem cancelar o pedido (usuário pode tentar novamente)
     if (paymentFailed) {
-      await this.cancelOrderAndRestoreStock(orderId, 'PAYMENT_REFUSED', w);
       const errBody = {
         error: true,
         code: 'PAYMENT_REFUSED',
         message: cieloResult.error || 'Pagamento recusado. Verifique os dados e tente novamente.',
       };
-      if (idempotencyKey) {
-        await this.redisService.setIdempotencyResult(idempotencyKey, 402, errBody);
-      }
       throw new HttpException(errBody, 402);
     }
 
@@ -1079,11 +1075,7 @@ export class OrdersService {
       cieloResult.cieloStatus === 'PaymentConfirmed';
 
     if (!isApproved) {
-      await this.cancelOrderAndRestoreStock(orderId, 'PAYMENT_REFUSED', w);
-      const errBody = { error: true, code: 'PAYMENT_REFUSED', message: 'Pagamento não autorizado' };
-      if (idempotencyKey) {
-        await this.redisService.setIdempotencyResult(idempotencyKey, 402, errBody);
-      }
+      const errBody = { error: true, code: 'PAYMENT_REFUSED', message: 'Pagamento não autorizado. Verifique os dados do cartão e tente novamente.' };
       throw new HttpException(errBody, 402);
     }
 

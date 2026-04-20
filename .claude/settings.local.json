@@ -12,7 +12,8 @@
       "Bash(claude skills *)",
       "Bash(mkdir -p /c/Users/muril/.claude/commands)",
       "Bash(cp /c/Users/muril/.claude/skills/compress.md /c/Users/muril/.claude/skills/resume.md /c/Users/muril/.claude/skills/preserve.md /c/Users/muril/.claude/skills/daily-note.md /c/Users/muril/.claude/skills/meeting-note.md /c/Users/muril/.claude/skills/inbox-process.md /c/Users/muril/.claude/skills/weekly-review.md /c/Users/muril/.claude/commands/)",
-      "Read(//c/Users/muril/.claude/**)"
+      "Read(//c/Users/muril/.claude/**)",
+      "mcp__obsidian__*"
     ]
   }
 }

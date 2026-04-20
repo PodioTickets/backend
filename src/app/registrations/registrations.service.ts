@@ -303,7 +303,11 @@ export class RegistrationsService {
     status?: RegistrationFilterStatus,
   ): Prisma.RegistrationWhereInput {
     const participant: Prisma.RegistrationWhereInput = {
-      OR: [{ userId }, { invitedById: userId }],
+      OR: [
+        { userId },
+        { invitedById: userId },
+        { order: { userId } },
+      ],
     };
     if (!status) {
       return participant;
@@ -885,8 +889,8 @@ export class RegistrationsService {
       throw new NotFoundException('Registration not found');
     }
 
-    // Verificar se o usuário tem acesso (é o dono da inscrição ou foi convidado por ele)
-    if (registration.userId !== userId && registration.invitedById !== userId) {
+    const isBuyer = registration.order?.userId === userId;
+    if (registration.userId !== userId && registration.invitedById !== userId && !isBuyer) {
       throw new BadRequestException('Access denied - You can only view your own registrations');
     }
 
@@ -1054,7 +1058,8 @@ export class RegistrationsService {
       throw new NotFoundException('Registration not found');
     }
 
-    if (registration.userId !== userId && registration.invitedById !== userId) {
+    const isBuyerCancel = registration.order?.userId === userId;
+    if (registration.userId !== userId && registration.invitedById !== userId && !isBuyerCancel) {
       throw new BadRequestException('Access denied');
     }
 
