@@ -28,6 +28,7 @@ import { PatchParticipantsDto } from './dto/patch-participants.dto';
 import { PatchProductsDto } from './dto/patch-products.dto';
 import { PatchBillingAddressDto } from './dto/patch-billing-address.dto';
 import { PayOrderDto } from './dto/pay-order.dto';
+import { PatchCouponDto } from './dto/patch-coupon.dto';
 
 @ApiTags('Orders')
 @Controller('api/v1/orders')
@@ -130,6 +131,25 @@ export class OrdersController {
     @Body() dto: PatchBillingAddressDto,
   ) {
     return this.ordersService.patchBillingAddress(req.user.id, orderId, dto);
+  }
+
+  // ── PATCH /orders/:orderId/coupon ─────────────────────────────────────
+
+  @Patch(':orderId/coupon')
+  @ApiOperation({
+    summary: 'Apply or remove coupon/voucher',
+    description: 'Apply a DISCOUNT coupon or voucher to the order. Send empty body to remove. Automatic coupons (QUANTITY/AGE) are applied automatically on PATCH /participants.',
+  })
+  @ApiParam({ name: 'orderId', type: String, format: 'uuid' })
+  @ApiResponse({ status: 200, description: 'Coupon/voucher applied' })
+  @ApiResponse({ status: 409, description: 'Order is no longer pending' })
+  @ApiResponse({ status: 422, description: 'Invalid coupon or voucher' })
+  async patchCoupon(
+    @Request() req: any,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Body() dto: PatchCouponDto,
+  ) {
+    return this.ordersService.patchCoupon(req.user.id, orderId, dto);
   }
 
   // ── POST /orders/:orderId/pay ──────────────────────────────────────────

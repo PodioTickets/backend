@@ -124,6 +124,17 @@ export class CheckoutService {
         }
       }
 
+      // 5b. Auto-aplicar cupons QUANTITY/AGE (sem código) se nenhum cupom/voucher manual foi usado
+      if (!couponResult.isValid && !dto.voucherCode) {
+        couponResult = await this.applyAutomaticCoupon(
+          dto.eventId,
+          dto.tickets,
+          dto.participants,
+          initialPrices.subtotal,
+          prismaRead,
+        );
+      }
+
       // 6. Validar e aplicar voucher
       let voucherResult: VoucherValidationResult = {
         isValid: false,
@@ -844,6 +855,59 @@ export class CheckoutService {
       discount: discount, // Já está em centavos
       couponId: coupon.id,
     };
+  }
+
+  private async applyAutomaticCoupon(
+    eventId: string,
+    tickets: ProcessCheckoutDto['tickets'],
+    participants: ProcessCheckoutDto['participants'],
+    subtotal: number,
+    prisma: any,
+  ): Promise<CouponValidationResult> {
+    const totalQuantity = tickets.reduce((sum, t) => sum + t.quantity, 0);
+    const ticketIds = tickets.map((t) => t.ticketId);
+
+    const autoCoupons = await prisma.coupon.findMany({
+      where: {
+        eventId,
+        status: 'ACTIVE',
+        couponType: { in: ['QUANTITY', 'AGE'] },
+        OR: [{ expiryDate: null }, { expiryDate: { gt: new Date() } }],
+      },
+    });
+
+    for (const coupon of autoCoupons) {
+      // Verificar appliesTo
+      if (coupon.appliesTo && coupon.appliesTo !== 'all') {
+        let allowed: string[] = [];
+        try { allowed = JSON.parse(coupon.appliesTo); } catch { allowed = [coupon.appliesTo]; }
+        if (!ticketIds.some((id) => allowed.includes(id))) continue;
+      }
+
+      // Verificar minCartValue
+      if (coupon.minCartValue && subtotal < coupon.minCartValue) continue;
+
+      if (coupon.couponType === 'QUANTITY') {
+        if (coupon.minQuantity && totalQuantity < coupon.minQuantity) continue;
+      } else if (coupon.couponType === 'AGE') {
+        const allMatch = participants.every((p) => {
+          const age = this.calculateAge(p.birthDate);
+          if (coupon.ageRule === 'MIN' && age < parseInt(coupon.ageValue || '0')) return false;
+          if (coupon.ageRule === 'MAX' && age > parseInt(coupon.ageValue || '999')) return false;
+          return true;
+        });
+        if (!allMatch) continue;
+      }
+
+      const discount =
+        coupon.type === 'PERCENTAGE'
+          ? subtotal * (coupon.value / 100)
+          : Math.min(coupon.value, subtotal);
+
+      return { isValid: true, discount, couponId: coupon.id };
+    }
+
+    return { isValid: false, discount: 0 };
   }
 
   private async validateAndApplyVoucher(

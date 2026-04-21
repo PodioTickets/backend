@@ -16,6 +16,7 @@ import { PatchParticipantsDto } from './dto/patch-participants.dto';
 import { PatchProductsDto } from './dto/patch-products.dto';
 import { PatchBillingAddressDto } from './dto/patch-billing-address.dto';
 import { PayOrderDto } from './dto/pay-order.dto';
+import { PatchCouponDto } from './dto/patch-coupon.dto';
 
 // ─── typed error helpers ─────────────────────────────────────────────────────
 
@@ -68,22 +69,75 @@ function resolveActiveBatchForReserve(
 const RESERVATION_TTL_MINUTES = Number(process.env.RESERVATION_TTL_MINUTES ?? 30);
 const MAX_TICKETS_PER_ORDER = 20;
 
-// ─── shape helper ────────────────────────────────────────────────────────────
+// ─── shared include ──────────────────────────────────────────────────────────
 
-function orderShape(order: any): Record<string, any> {
+const ORDER_INCLUDE = {
+  reservedTickets: true,
+  coupon: { select: { id: true, code: true, couponType: true, type: true, value: true } },
+  voucher: { select: { id: true, code: true, name: true, status: true } },
+} as const;
+
+// ─── shape helpers ───────────────────────────────────────────────────────────
+
+/**
+ * Distribui o desconto total proporcionalmente entre os tickets.
+ * Funciona para cupons PERCENTAGE e FIXED sem precisar saber o tipo.
+ * O último ticket absorve o centavo residual de arredondamento.
+ */
+function distributeDiscount(reservedTickets: any[], totalDiscount: number): any[] {
+  if (!totalDiscount || totalDiscount <= 0 || !reservedTickets.length) {
+    return reservedTickets.map((rt) => ({
+      ...rt,
+      unitDiscount: 0,
+      totalDiscount: 0,
+      finalUnitPrice: rt.unitPrice,
+      finalTotalPrice: rt.unitPrice * rt.quantity,
+    }));
+  }
+
+  const subtotal = reservedTickets.reduce((s, rt) => s + rt.unitPrice * rt.quantity, 0);
+  let distributed = 0;
+
+  return reservedTickets.map((rt, idx) => {
+    const ticketTotal = rt.unitPrice * rt.quantity;
+    const isLast = idx === reservedTickets.length - 1;
+
+    const ticketDiscount = isLast
+      ? totalDiscount - distributed
+      : Math.round(totalDiscount * (ticketTotal / subtotal));
+
+    distributed += ticketDiscount;
+
+    const unitDiscount = Math.round(ticketDiscount / rt.quantity);
+    return {
+      ...rt,
+      unitDiscount,
+      totalDiscount: ticketDiscount,
+      finalUnitPrice: rt.unitPrice - unitDiscount,
+      finalTotalPrice: ticketTotal - ticketDiscount,
+    };
+  });
+}
+
+function orderShape(order: any, discountOverride?: number): Record<string, any> {
+  const discount = discountOverride ?? order.discount ?? 0;
+  const tickets = distributeDiscount(order.reservedTickets ?? [], discount);
+
   return {
     id: order.id,
     eventId: order.eventId,
     status: order.status,
     totalAmount: order.totalAmount,
     serviceFee: order.serviceFee,
-    discount: order.discount,
+    discount,
     finalAmount: order.finalAmount,
+    coupon: order.coupon ?? null,
+    voucher: order.voucher ?? null,
     expiresAt: order.expiresAt ?? null,
     reservedAt: order.reservedAt ?? null,
     cancelledAt: order.cancelledAt ?? null,
     cancelledReason: order.cancelledReason ?? null,
-    reservedTickets: order.reservedTickets ?? [],
+    reservedTickets: tickets,
     pendingParticipants: order.pendingParticipants ?? null,
     pendingProducts: order.pendingProducts ?? null,
     billingCountry: order.billingCountry ?? null,
@@ -204,7 +258,7 @@ export class OrdersService {
         status: 'PENDING',
         expiresAt: { gt: new Date() },
       },
-      include: { reservedTickets: true },
+      include: ORDER_INCLUDE,
     });
     if (existingPending) {
       const existingItems = (existingPending.reservedTickets as any[])
@@ -427,7 +481,7 @@ export class OrdersService {
 
       return tx.order.findUnique({
         where: { id: createdOrder.id },
-        include: { reservedTickets: true },
+        include: ORDER_INCLUDE,
       });
     });
 
@@ -441,7 +495,7 @@ export class OrdersService {
     const r: any = this.prisma.getReadClient();
     const order = await r.order.findUnique({
       where: { id: orderId },
-      include: { reservedTickets: true },
+      include: ORDER_INCLUDE,
     });
     // Anti-IDOR: always 404
     if (!order || order.userId !== userId) {
@@ -721,12 +775,171 @@ export class OrdersService {
     this.assertPending(order);
 
     const w: any = this.prisma.getWriteClient();
+    const r: any = this.prisma.getReadClient();
+
+    const reservedTickets = (order.reservedTickets ?? []) as any[];
+    const participants = dto.participants as any[];
+
+    // Auto-aplicar cupons QUANTITY/AGE — só se ainda não há cupom/voucher no pedido
+    let autoCouponId: string | undefined;
+    let autoDiscount = 0;
+
+    if (!order.couponId && !order.voucherId) {
+      const totalQuantity = reservedTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
+      const ticketIds = reservedTickets.map((rt: any) => rt.ticketId);
+      const ticketsSubtotal = reservedTickets.reduce((sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0);
+
+      const autoCoupons = await r.coupon.findMany({
+        where: {
+          eventId: order.eventId,
+          status: 'ACTIVE',
+          couponType: { in: ['QUANTITY', 'AGE'] },
+          OR: [{ expiryDate: null }, { expiryDate: { gt: new Date() } }],
+        },
+      });
+
+      for (const coupon of autoCoupons) {
+        // Verificar appliesTo
+        if (coupon.appliesTo && coupon.appliesTo !== 'all') {
+          let allowed: string[] = [];
+          try { allowed = JSON.parse(coupon.appliesTo); } catch { allowed = [coupon.appliesTo]; }
+          if (!ticketIds.some((id: string) => allowed.includes(id))) continue;
+        }
+
+        if (coupon.minCartValue && ticketsSubtotal < coupon.minCartValue) continue;
+
+        if (coupon.couponType === 'QUANTITY') {
+          if (coupon.minQuantity && totalQuantity < coupon.minQuantity) continue;
+        } else if (coupon.couponType === 'AGE') {
+          const now = new Date();
+          const allMatch = participants.every((p: any) => {
+            if (!p.birthDate) return false;
+            const age = Math.floor((now.getTime() - new Date(p.birthDate).getTime()) / (365.25 * 24 * 60 * 60 * 1000));
+            const min = coupon.minAge ?? 0;
+            const max = coupon.maxAge ?? Infinity;
+            return age >= min && age <= max;
+          });
+          if (!allMatch) continue;
+        }
+
+        autoDiscount = coupon.type === 'PERCENTAGE'
+          ? Math.floor(ticketsSubtotal * (coupon.value / 100))
+          : Math.min(coupon.value, ticketsSubtotal);
+        autoCouponId = coupon.id;
+        break;
+      }
+    }
+
+    const newFinalAmount = autoCouponId
+      ? Math.max(0, order.totalAmount - autoDiscount)
+      : undefined;
+
     const updated = await w.order.update({
       where: { id: orderId },
-      data: { pendingParticipants: dto.participants, updatedAt: new Date() },
-      include: { reservedTickets: true },
+      data: {
+        pendingParticipants: dto.participants,
+        ...(autoCouponId && {
+          couponId: autoCouponId,
+          discount: autoDiscount,
+          finalAmount: newFinalAmount,
+        }),
+        updatedAt: new Date(),
+      },
+      include: ORDER_INCLUDE,
     });
-    return orderShape(updated);
+    return orderShape(updated, autoCouponId ? autoDiscount : undefined);
+  }
+
+  // ── 3b. patchCoupon ───────────────────────────────────────────────────────
+
+  async patchCoupon(
+    userId: string,
+    orderId: string,
+    dto: PatchCouponDto,
+  ): Promise<Record<string, any>> {
+    const order = await this.findOrderForWrite(userId, orderId);
+    this.assertPending(order);
+
+    if (dto.couponCode && dto.voucherCode) {
+      throw new AppUnprocessableException(
+        'DISCOUNT_CONFLICT',
+        'Não é possível usar cupom e voucher ao mesmo tempo',
+      );
+    }
+
+    const w: any = this.prisma.getWriteClient();
+    const r: any = this.prisma.getReadClient();
+    const reservedTickets = (order.reservedTickets ?? []) as any[];
+    const ticketsSubtotal = reservedTickets.reduce((sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0);
+
+    let couponId: string | null = null;
+    let voucherId: string | null = null;
+    let discount = 0;
+
+    if (dto.couponCode) {
+      const coupon = await r.coupon.findFirst({
+        where: {
+          eventId: order.eventId,
+          code: dto.couponCode.toUpperCase().trim(),
+          status: 'ACTIVE',
+          couponType: 'DISCOUNT',
+        },
+      });
+
+      if (!coupon) throw new AppUnprocessableException('COUPON_NOT_FOUND', 'Cupom não encontrado ou inválido');
+      if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) throw new AppUnprocessableException('COUPON_EXPIRED', 'Cupom expirado');
+      if (coupon.minCartValue && ticketsSubtotal < coupon.minCartValue) {
+        throw new AppUnprocessableException('COUPON_MIN_VALUE', `Valor mínimo do pedido para este cupom: R$ ${(coupon.minCartValue / 100).toFixed(2)}`);
+      }
+
+      discount = coupon.type === 'PERCENTAGE'
+        ? Math.floor(ticketsSubtotal * (coupon.value / 100))
+        : Math.min(coupon.value, ticketsSubtotal);
+      couponId = coupon.id;
+
+    } else if (dto.voucherCode) {
+      const voucher = await r.voucher.findUnique({
+        where: { code: dto.voucherCode.toUpperCase().trim() },
+      });
+
+      if (!voucher || voucher.eventId !== order.eventId || voucher.status !== 'ACTIVE') {
+        throw new AppUnprocessableException('VOUCHER_NOT_FOUND', 'Voucher não encontrado ou inválido');
+      }
+      if (voucher.expiryDate && new Date(voucher.expiryDate) < new Date()) {
+        throw new AppUnprocessableException('VOUCHER_EXPIRED', 'Voucher expirado');
+      }
+
+      discount = ticketsSubtotal; // voucher = 100% dos ingressos
+      voucherId = voucher.id;
+
+    } else {
+      // Sem código — remover cupom/voucher existente
+      couponId = null;
+      voucherId = null;
+      discount = 0;
+    }
+
+    const finalAmount = Math.max(0, order.totalAmount - discount);
+
+    const updated = await w.order.update({
+      where: { id: orderId },
+      data: {
+        couponId,
+        voucherId,
+        discount,
+        finalAmount,
+        updatedAt: new Date(),
+      },
+      include: ORDER_INCLUDE,
+    });
+
+    return {
+      ...orderShape(updated, discount),
+      appliedDiscount: {
+        type: couponId ? 'coupon' : voucherId ? 'voucher' : null,
+        discount,
+      },
+    };
   }
 
   // ── 4. patchProducts ──────────────────────────────────────────────────────
@@ -779,7 +992,7 @@ export class OrdersService {
         finalAmount: totalAmount,
         updatedAt: new Date(),
       },
-      include: { reservedTickets: true },
+      include: ORDER_INCLUDE,
     });
     return orderShape(updated);
   }
@@ -809,7 +1022,7 @@ export class OrdersService {
         billingCity: b.city,
         updatedAt: new Date(),
       },
-      include: { reservedTickets: true },
+      include: ORDER_INCLUDE,
     });
     return orderShape(updated);
   }
@@ -837,7 +1050,7 @@ export class OrdersService {
     // 6.2 Ownership check
     const order = await r.order.findUnique({
       where: { id: orderId },
-      include: { reservedTickets: true },
+      include: ORDER_INCLUDE,
     });
     if (!order || order.userId !== userId) {
       throw new NotFoundException('Pedido não encontrado');
@@ -913,6 +1126,7 @@ export class OrdersService {
     let voucherId: string | undefined;
 
     if (dto.couponCode) {
+      // Cupom com código (DISCOUNT type)
       const coupon = await r.coupon.findFirst({
         where: {
           eventId: order.eventId,
@@ -926,6 +1140,61 @@ export class OrdersService {
             ? Math.floor(preDiscountTotal * (coupon.value / 100))
             : Math.min(coupon.value, preDiscountTotal);
         couponId = coupon.id;
+      }
+    }
+
+    // Cupons automáticos (QUANTITY / AGE) — sem código, aplicados se condição satisfeita
+    if (!couponId && !dto.voucherCode) {
+      const totalQuantity = reservedTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
+      const ticketIds = reservedTickets.map((rt: any) => rt.ticketId);
+
+      const autoCoupons = await r.coupon.findMany({
+        where: {
+          eventId: order.eventId,
+          status: 'ACTIVE',
+          couponType: { in: ['QUANTITY', 'AGE'] },
+          OR: [{ expiryDate: null }, { expiryDate: { gt: new Date() } }],
+        },
+      });
+
+      for (const coupon of autoCoupons) {
+        // Verificar appliesTo — se não for 'all', checar se algum ticket está na lista
+        if (coupon.appliesTo && coupon.appliesTo !== 'all') {
+          let allowedTicketIds: string[] = [];
+          try {
+            allowedTicketIds = JSON.parse(coupon.appliesTo);
+          } catch {
+            allowedTicketIds = [];
+          }
+          if (!ticketIds.some((id: string) => allowedTicketIds.includes(id))) continue;
+        }
+
+        if (coupon.couponType === 'QUANTITY') {
+          if (totalQuantity < (coupon.minQuantity ?? 0)) continue;
+        } else if (coupon.couponType === 'AGE') {
+          // Validar idade dos participantes
+          const now = new Date();
+          const ages = participants.map((p: any) => {
+            if (!p.birthDate) return null;
+            const born = new Date(p.birthDate);
+            return Math.floor((now.getTime() - born.getTime()) / (365.25 * 24 * 60 * 60 * 1000));
+          }).filter((a: number | null) => a !== null) as number[];
+
+          if (ages.length === 0) continue;
+
+          const minAge = coupon.minAge ?? 0;
+          const maxAge = coupon.maxAge ?? Infinity;
+          const allMatch = ages.every((age: number) => age >= minAge && age <= maxAge);
+          if (!allMatch) continue;
+        }
+
+        // Cupom automático válido — aplicar (pega o primeiro que satisfaz)
+        couponDiscount =
+          coupon.type === 'PERCENTAGE'
+            ? Math.floor(preDiscountTotal * (coupon.value / 100))
+            : Math.min(coupon.value, preDiscountTotal);
+        couponId = coupon.id;
+        break;
       }
     }
 
@@ -1424,7 +1693,7 @@ export class OrdersService {
     const r: any = this.prisma.getReadClient();
     const order = await r.order.findUnique({
       where: { id: orderId },
-      include: { reservedTickets: true },
+      include: ORDER_INCLUDE,
     });
     if (!order || order.userId !== userId) {
       throw new NotFoundException('Pedido não encontrado');
@@ -1448,7 +1717,7 @@ export class OrdersService {
   ): Promise<void> {
     const order = await w.order.findUnique({
       where: { id: orderId },
-      include: { reservedTickets: true },
+      include: ORDER_INCLUDE,
     });
     if (!order) return;
 
