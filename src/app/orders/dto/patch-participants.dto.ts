@@ -17,25 +17,34 @@ export class QuestionAnswerDto {
   answer: string;
 }
 
+const emptyToUndefined = ({ value }: { value: any }) =>
+  value === '' || value === null ? undefined : value;
+
 export class ParticipantDto {
+  @IsOptional()
   @IsString()
-  name: string;
+  name?: string;
 
   @IsOptional()
   @IsString()
   cpf?: string;
 
+  @Transform(emptyToUndefined)
+  @IsOptional()
   @IsEmail()
-  email: string;
+  email?: string;
 
+  @Transform(emptyToUndefined)
   @IsOptional()
   @IsString()
   birthDate?: string;
 
+  @Transform(emptyToUndefined)
   @IsOptional()
   @IsString()
   phone?: string;
 
+  @Transform(emptyToUndefined)
   @IsOptional()
   @IsString()
   gender?: string;
@@ -44,10 +53,12 @@ export class ParticipantDto {
   @IsBoolean()
   hasEmergencyContact?: boolean;
 
+  @Transform(emptyToUndefined)
   @IsOptional()
   @IsString()
   emergencyContactName?: string;
 
+  @Transform(emptyToUndefined)
   @IsOptional()
   @IsString()
   emergencyPhone?: string;
@@ -61,9 +72,7 @@ export class ParticipantDto {
 
 export class PatchParticipantsDto {
   @Transform(({ value }) =>
-    Array.isArray(value)
-      ? value.filter((p: any) => p && (p.name || p.email))
-      : value,
+    Array.isArray(value) ? value.filter((p: any) => p != null) : value,
   )
   @IsArray()
   @ValidateNested({ each: true })

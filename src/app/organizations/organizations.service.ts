@@ -1535,9 +1535,11 @@ export class OrganizationsService {
     if (
       dto.role === undefined &&
       dto.permissions === undefined &&
-      dto.eventIds === undefined
+      dto.eventIds === undefined &&
+      dto.firstName === undefined &&
+      dto.lastName === undefined
     ) {
-      throw new BadRequestException('At least one of role, permissions, eventIds is required');
+      throw new BadRequestException('At least one field is required');
     }
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
@@ -1581,6 +1583,15 @@ export class OrganizationsService {
     }
 
     await prismaWrite.$transaction(async (tx) => {
+      if (dto.firstName !== undefined || dto.lastName !== undefined) {
+        await tx.user.update({
+          where: { id: memberUserId },
+          data: {
+            ...(dto.firstName !== undefined && { firstName: dto.firstName }),
+            ...(dto.lastName !== undefined && { lastName: dto.lastName }),
+          },
+        });
+      }
       if (dto.role !== undefined) {
         await tx.organizationMember.update({
           where: {

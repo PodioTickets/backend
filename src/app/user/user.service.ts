@@ -280,9 +280,8 @@ export class UserService {
       updateData.documentNumberClean = documentNumberClean;
     }
     
-    // Mapear emergencyPhone para reservePhone se fornecido
-    if (updateData.emergencyPhone) {
-      updateData.reservePhone = updateData.emergencyPhone;
+    if ('emergencyPhone' in updateData) {
+      updateData.reservePhone = updateData.emergencyPhone ?? null;
       delete updateData.emergencyPhone;
     }
     

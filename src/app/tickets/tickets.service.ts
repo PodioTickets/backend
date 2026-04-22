@@ -331,7 +331,7 @@ export class TicketsService {
       where: { id },
       include: {
         batches: {
-          orderBy: { price: 'asc' },
+          orderBy: { sortOrder: 'asc' },
         },
         products: {
           orderBy: { sortOrder: 'asc' },
@@ -577,9 +577,9 @@ export class TicketsService {
         if (b.quantity < minimum) {
           const parts: string[] = [];
           if (sold > 0) parts.push(`${sold} vendida${sold !== 1 ? 's' : ''}`);
-          if (reserved > 0) parts.push(`${reserved} reservada${reserved !== 1 ? 's' : ''} (aguardando pagamento)`);
+          if (reserved > 0) parts.push(`${reserved} reservada${reserved !== 1 ? 's' : ''} aguardando pagamento`);
           throw new BadRequestException(
-            `A quantidade do lote não pode ser menor que o total ocupado: ${parts.join(' + ')} = ${minimum} vaga${minimum !== 1 ? 's' : ''}. Reduza para no mínimo ${minimum}.`,
+            `A quantidade do lote deve ser de no mínimo ${minimum} vaga${minimum !== 1 ? 's' : ''} (${parts.join(' + ')}).`,
           );
         }
       }

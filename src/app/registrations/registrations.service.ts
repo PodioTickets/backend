@@ -301,14 +301,17 @@ export class RegistrationsService {
   private buildFindUserRegistrationsWhere(
     userId: string,
     status?: RegistrationFilterStatus,
+    userCpf?: string | null,
   ): Prisma.RegistrationWhereInput {
-    const participant: Prisma.RegistrationWhereInput = {
-      OR: [
-        { userId },
-        { invitedById: userId },
-        { order: { userId } },
-      ],
-    };
+    const orClauses: Prisma.RegistrationWhereInput[] = [
+      { userId },
+      { invitedById: userId },
+      { order: { userId } },
+    ];
+    if (userCpf) {
+      orClauses.push({ user: { documentNumber: userCpf } });
+    }
+    const participant: Prisma.RegistrationWhereInput = { OR: orClauses };
     if (!status) {
       return participant;
     }
@@ -470,7 +473,13 @@ export class RegistrationsService {
     const { page = 1, limit = 20, status } = filterDto;
     const skip = (page - 1) * limit;
 
-    const where = this.buildFindUserRegistrationsWhere(userId, status);
+    const currentUser = await prismaRead.user.findUnique({
+      where: { id: userId },
+      select: { documentNumber: true },
+    });
+    const userCpf = currentUser?.documentNumber ?? null;
+
+    const where = this.buildFindUserRegistrationsWhere(userId, status, userCpf);
 
     const [filteredRegistrations, total] = await Promise.all([
       prismaRead.registration.findMany({
@@ -483,9 +492,18 @@ export class RegistrationsService {
       prismaRead.registration.count({ where }),
     ]);
 
+    // Deduplica por id caso o OR com JOINs retorne a mesma registration mais de uma vez
+    const seenRegIds = new Set<string>();
+    const uniqueRegistrations = filteredRegistrations.filter((reg: any) => {
+      if (seenRegIds.has(reg.id)) return false;
+      seenRegIds.add(reg.id);
+      return true;
+    });
+
     // Formatar registrations para substituir qrCode pelo link, ingressos (modalidade) e produtos
-    const formattedRegistrations = filteredRegistrations.map((reg: any) => {
+    const formattedRegistrations = uniqueRegistrations.map((reg: any) => {
       const { tickets: regTickets, ...regRest } = reg;
+      const seenProductIds = new Set<string>();
       return {
         ...regRest,
         qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
@@ -494,7 +512,11 @@ export class RegistrationsService {
           name: rt.ticket?.name,
           modality: rt.ticket?.modality,
         })),
-        products: (reg.products || []).map((rp: any) => ({
+        products: (reg.products || []).filter((rp: any) => {
+          if (seenProductIds.has(rp.id)) return false;
+          seenProductIds.add(rp.id);
+          return true;
+        }).map((rp: any) => ({
           id: rp.id,
           product: {
             id: rp.product.id,

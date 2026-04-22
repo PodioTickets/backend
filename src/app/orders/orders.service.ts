@@ -830,24 +830,82 @@ export class OrdersService {
       }
     }
 
-    const newFinalAmount = autoCouponId
-      ? Math.max(0, order.totalAmount - autoDiscount)
-      : undefined;
+    // Calcular vagas a liberar se participantes < reservados
+    // Participantes sem email são slots ainda não preenchidos — contam como reserva
+    const totalReserved = reservedTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
+    const totalParticipants = participants.length;
 
-    const updated = await w.order.update({
-      where: { id: orderId },
-      data: {
-        pendingParticipants: dto.participants,
-        ...(autoCouponId && {
-          couponId: autoCouponId,
-          discount: autoDiscount,
+    if (totalParticipants > totalReserved) {
+      throw new AppUnprocessableException(
+        'PARTICIPANTS_EXCEED_TICKETS',
+        `Número de participantes (${totalParticipants}) excede os ingressos reservados (${totalReserved}).`,
+      );
+    }
+
+    // Calcular quais lotes liberar (remove do final da fila de reservas)
+    const releasedBatches: { batchId: string; quantity: number }[] = [];
+    let toRelease = totalReserved - totalParticipants;
+    const updatedReserved = reservedTickets.map((rt: any) => ({ ...rt })).reverse();
+    for (const rt of updatedReserved) {
+      if (toRelease <= 0) break;
+      const release = Math.min(rt.quantity, toRelease);
+      rt.quantity -= release;
+      toRelease -= release;
+      releasedBatches.push({ batchId: rt.batchId, quantity: release });
+    }
+    const newReservedTickets = updatedReserved.reverse().filter((rt: any) => rt.quantity > 0);
+
+    // Recalcular total com os ingressos restantes + produtos pendentes
+    const newTicketsSubtotal = newReservedTickets.reduce(
+      (sum: number, rt: any) => sum + rt.unitPrice * rt.quantity,
+      0,
+    );
+    const productsSubtotal = ((order.pendingProducts as any[] | null) ?? []).reduce(
+      (sum: number, p: any) => sum + (p.unitPrice ?? 0) * (p.quantity ?? 1),
+      0,
+    );
+    const newTotalAmount = newTicketsSubtotal + productsSubtotal;
+    const newDiscount = autoCouponId ? autoDiscount : (order.discount ?? 0);
+    const newFinalAmount = Math.max(0, newTotalAmount - newDiscount);
+
+    const updated = await w.$transaction(async (tx: any) => {
+      // Restaurar availableQuantity nos lotes liberados
+      for (const released of releasedBatches) {
+        await tx.$executeRaw`
+          UPDATE "TicketBatch"
+          SET "availableQuantity" = LEAST("availableQuantity" + ${released.quantity}, "quantity")
+          WHERE id = ${released.batchId}::uuid
+        `;
+      }
+
+      // Atualizar ou deletar os OrderReservedTicket afetados
+      for (const rt of updatedReserved) {
+        if (rt.quantity === 0) {
+          await tx.orderReservedTicket.delete({ where: { id: rt.id } });
+        } else if (releasedBatches.some((rb) => rb.batchId === rt.batchId)) {
+          await tx.orderReservedTicket.update({
+            where: { id: rt.id },
+            data: { quantity: rt.quantity },
+          });
+        }
+      }
+
+      return tx.order.update({
+        where: { id: orderId },
+        data: {
+          pendingParticipants: dto.participants,
+          totalAmount: newTotalAmount,
           finalAmount: newFinalAmount,
-        }),
-        updatedAt: new Date(),
-      },
-      include: ORDER_INCLUDE,
+          ...(autoCouponId && {
+            couponId: autoCouponId,
+            discount: autoDiscount,
+          }),
+          updatedAt: new Date(),
+        },
+        include: ORDER_INCLUDE,
+      });
     });
-    return orderShape(updated, autoCouponId ? autoDiscount : undefined);
+    return orderShape(updated, newDiscount > 0 ? newDiscount : undefined);
   }
 
   // ── 3b. patchCoupon ───────────────────────────────────────────────────────
@@ -952,13 +1010,20 @@ export class OrdersService {
     const order = await this.findOrderForWrite(userId, orderId);
     this.assertPending(order);
 
-    const r: any = this.prisma.getReadClient();
     const w: any = this.prisma.getWriteClient();
 
-    // Recalculate product subtotal
+    const participants = (order.pendingParticipants as any[] | null) ?? [];
+    const validEmails = new Set(participants.map((p: any) => p.email?.toLowerCase()));
+
+    // Recalculate product subtotal validando produtos e participantes
     let productsSubtotal = 0;
     for (const item of dto.products) {
-      // Usa write client para evitar lag de replicação na leitura de variações
+      if (!validEmails.has(item.participantEmail.toLowerCase())) {
+        throw new UnprocessableEntityException(
+          `E-mail "${item.participantEmail}" não pertence a nenhum participante deste pedido.`,
+        );
+      }
+
       const product = await w.product.findUnique({
         where: { id: item.productId },
         include: { variations: true },
@@ -1484,9 +1549,12 @@ export class OrdersService {
             },
           });
 
-          // Create RegistrationProduct records for the first participant only
-          if (pIdx === 0 && pendingProducts?.length) {
-            for (const item of pendingProducts) {
+          // Create RegistrationProduct records para este participante
+          const participantProducts = (pendingProducts ?? []).filter(
+            (item: any) => item.participantEmail?.toLowerCase() === pData.email?.toLowerCase(),
+          );
+          if (participantProducts.length > 0) {
+            for (const item of participantProducts) {
               const product = await r.product.findUnique({
                 where: { id: item.productId },
                 include: { variations: true },

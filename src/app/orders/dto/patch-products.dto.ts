@@ -1,4 +1,4 @@
-import { IsArray, IsInt, IsOptional, IsUUID, Min, ValidateNested } from 'class-validator';
+import { IsArray, IsEmail, IsInt, IsOptional, IsUUID, Min, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class OrderProductItemDto {
@@ -12,6 +12,9 @@ export class OrderProductItemDto {
   @IsInt()
   @Min(1)
   quantity: number;
+
+  @IsEmail()
+  participantEmail: string;
 }
 
 export class PatchProductsDto {

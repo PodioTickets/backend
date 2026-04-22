@@ -466,7 +466,7 @@ export class AuthService {
       select: { id: true, email: true, firstName: true, isActive: true },
     });
 
-    if (!user || !user.isActive) {
+    if (!user) {
       return generic;
     }
 
@@ -643,16 +643,21 @@ export class AuthService {
       throw new BadRequestException('Usuário não encontrado');
     }
 
-    const isSamePassword = await bcrypt.compare(password, user.password);
-    if (isSamePassword) {
-      throw new BadRequestException('A nova senha não pode ser igual à senha atual');
+    if (user.password) {
+      const isSamePassword = await bcrypt.compare(password, user.password);
+      if (isSamePassword) {
+        throw new BadRequestException('A nova senha não pode ser igual à senha atual');
+      }
     }
 
     const hashedPassword = await bcrypt.hash(password, 12);
 
     await prismaWrite.user.update({
       where: { id: user.id },
-      data: { password: hashedPassword },
+      data: {
+        password: hashedPassword,
+        ...(user.isActive ? {} : { isActive: true }),
+      },
     });
 
     await this.invalidatePasswordResetArtifactsForUser(user.id, email, accountType);
@@ -689,16 +694,21 @@ export class AuthService {
       throw new BadRequestException('Usuário não encontrado');
     }
 
-    const isSamePassword = await bcrypt.compare(password, user.password);
-    if (isSamePassword) {
-      throw new BadRequestException('A nova senha não pode ser igual à senha atual');
+    if (user.password) {
+      const isSamePassword = await bcrypt.compare(password, user.password);
+      if (isSamePassword) {
+        throw new BadRequestException('A nova senha não pode ser igual à senha atual');
+      }
     }
 
     const hashedPassword = await bcrypt.hash(password, 12);
 
     await prismaWrite.user.update({
       where: { id: user.id },
-      data: { password: hashedPassword },
+      data: {
+        password: hashedPassword,
+        ...(user.isActive ? {} : { isActive: true }),
+      },
     });
 
     await this.invalidatePasswordResetArtifactsForUser(user.id, email, accountType);
@@ -751,15 +761,17 @@ export class AuthService {
       accountType,
     };
     const resetUrl = this.buildPasswordResetPageUrl(token);
+    console.log('[DEV] Password reset URL:', resetUrl);
     const accountLabel =
       accountType === 'ORGANIZER' ? 'conta de organizador' : 'sua conta PodioGo';
 
-    await this.emailService.sendPasswordResetLink({
-      email: user.email,
-      firstName: user.firstName,
-      resetUrl,
-      accountLabel,
-    });
+    // TODO: habilitar quando email estiver configurado
+    // await this.emailService.sendPasswordResetLink({
+    //   email: user.email,
+    //   firstName: user.firstName,
+    //   resetUrl,
+    //   accountLabel,
+    // });
 
     const prevToken = await this.cacheManager.get<string>(
       `password_reset_active:${user.id}`,

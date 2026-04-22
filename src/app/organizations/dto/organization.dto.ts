@@ -233,6 +233,14 @@ export class PatchMemberSettingsDto {
 
   @IsOptional()
   @IsString()
+  firstName?: string;
+
+  @IsOptional()
+  @IsString()
+  lastName?: string;
+
+  @IsOptional()
+  @IsString()
   clientPage?: string;
 }
 
