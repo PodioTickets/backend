@@ -1705,7 +1705,7 @@ export class EventsService {
     await this.organizerMemberAccess.assertCanAccessEvent(
       userId,
       eventId,
-      'edit_event',
+      'pixel',
     );
 
     const prismaRead = this.prisma.getReadClient();
@@ -1739,7 +1739,7 @@ export class EventsService {
     await this.organizerMemberAccess.assertCanAccessEvent(
       userId,
       eventId,
-      'edit_event',
+      'pixel',
     );
 
     const prismaWrite = this.prisma.getWriteClient();
