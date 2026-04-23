@@ -86,7 +86,7 @@ export class TicketsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly organizationsService: OrganizationsService,
-  ) {}
+  ) { }
 
   async create(userId: string, eventId: string, createTicketDto: CreateTicketDto) {
     await this.verifyOrganizerAccess(userId, eventId);
@@ -177,11 +177,11 @@ export class TicketsService {
         },
         products: createTicketDto.productIds
           ? {
-              create: createTicketDto.productIds.map((productId, index) => ({
-                productId,
-                sortOrder: index,
-              })),
-            }
+            create: createTicketDto.productIds.map((productId, index) => ({
+              productId,
+              sortOrder: index,
+            })),
+          }
           : undefined,
       },
       include: {
@@ -255,13 +255,13 @@ export class TicketsService {
     const soldByBatch =
       batchIds.length > 0
         ? await db.registrationTicket.groupBy({
-            by: ['batchId'],
-            where: {
-              batchId: { in: batchIds },
-              registration: { status: { not: 'CANCELLED' } },
-            },
-            _count: { id: true },
-          })
+          by: ['batchId'],
+          where: {
+            batchId: { in: batchIds },
+            registration: { status: { not: 'CANCELLED' } },
+          },
+          _count: { id: true },
+        })
         : [];
     const soldByBatchMap = new Map(
       soldByBatch.map((s) => [s.batchId, s._count.id]),
@@ -303,9 +303,9 @@ export class TicketsService {
         productIds: ticket.products.map((tp) => tp.productId),
         products: baseUrl
           ? ticket.products.map((tp) => ({
-              ...tp,
-              product: tp.product ? resolveProductImages(tp.product, baseUrl) : tp.product,
-            }))
+            ...tp,
+            product: tp.product ? resolveProductImages(tp.product, baseUrl) : tp.product,
+          }))
           : ticket.products,
       };
     });
@@ -367,16 +367,16 @@ export class TicketsService {
     const soldByBatch =
       batchIds.length > 0
         ? await prismaRead.registrationTicket.groupBy({
-            by: ['batchId'],
-            where: {
-              ticketId: id,
-              batchId: { in: batchIds },
-              registration: {
-                status: { in: ['CONFIRMED', 'COMPLETED'] },
-              },
+          by: ['batchId'],
+          where: {
+            ticketId: id,
+            batchId: { in: batchIds },
+            registration: {
+              status: { in: ['CONFIRMED', 'COMPLETED'] },
             },
-            _count: { id: true },
-          })
+          },
+          _count: { id: true },
+        })
         : [];
     const soldByBatchMap = new Map(
       soldByBatch.map((s) => [s.batchId, s._count.id]),
@@ -416,9 +416,9 @@ export class TicketsService {
       productIds: ticket.products.map((tp) => tp.productId),
       products: baseUrl
         ? ticket.products.map((tp) => ({
-            ...tp,
-            product: tp.product ? resolveProductImages(tp.product, baseUrl) : tp.product,
-          }))
+          ...tp,
+          product: tp.product ? resolveProductImages(tp.product, baseUrl) : tp.product,
+        }))
         : ticket.products,
     };
 
@@ -580,7 +580,7 @@ export class TicketsService {
           if (sold > 0) parts.push(`${sold} vendida${sold !== 1 ? 's' : ''}`);
           if (reserved > 0) parts.push(`${reserved} reservada${reserved !== 1 ? 's' : ''} aguardando pagamento`);
           throw new BadRequestException(
-            `A quantidade do lote deve ser de no mínimo ${minimum} vaga${minimum !== 1 ? 's' : ''} (${parts.join(' + ')}).`,
+            `A quantidade do lote deve ser de no mínimo ${minimum} vaga${minimum !== 1 ? 's' : ''}.`,
           );
         }
       }
@@ -600,7 +600,7 @@ export class TicketsService {
         });
         const foundIds = allProducts.map(p => p.id);
         const missingIds = updateTicketDto.productIds.filter(id => !foundIds.includes(id));
-        
+
         if (missingIds.length > 0) {
           throw new NotFoundException(`Products not found: ${missingIds.join(', ')}`);
         }
@@ -630,7 +630,7 @@ export class TicketsService {
         await tx.ticketProduct.deleteMany({
           where: { ticketId },
         });
-        
+
         // Criar novos produtos se houver
         if (updateTicketDto.productIds.length > 0) {
           await tx.ticketProduct.createMany({
@@ -711,10 +711,10 @@ export class TicketsService {
     const soldAfterUpdate =
       batchIdsAfter.length > 0
         ? await prismaRead.registrationTicket.groupBy({
-            by: ['batchId'],
-            where: { ticketId, batchId: { in: batchIdsAfter } },
-            _count: { id: true },
-          })
+          by: ['batchId'],
+          where: { ticketId, batchId: { in: batchIdsAfter } },
+          _count: { id: true },
+        })
         : [];
     const soldAfterMap = new Map(
       soldAfterUpdate.map((s) => [s.batchId!, s._count.id]),
@@ -856,13 +856,13 @@ export class TicketsService {
         },
         products: originalTicket.products.length > 0
           ? {
-              create: [...originalTicket.products]
-                .sort((a, b) => a.sortOrder - b.sortOrder)
-                .map((tp, index) => ({
-                  productId: tp.productId,
-                  sortOrder: index,
-                })),
-            }
+            create: [...originalTicket.products]
+              .sort((a, b) => a.sortOrder - b.sortOrder)
+              .map((tp, index) => ({
+                productId: tp.productId,
+                sortOrder: index,
+              })),
+          }
           : undefined,
       },
       include: {
