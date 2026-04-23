@@ -140,11 +140,6 @@ export function effectivePermissionsForMember(params: {
     return { ...FULL_ORGANIZER_PERMISSIONS };
   }
 
-  // notify → implica view_event
-  if (parsed.notify) {
-    parsed.view_event = true;
-  }
-
   // dashboard → derivado: qualquer outra permissão ativa garante acesso ao dashboard
   const hasAnyPermission = ORGANIZER_PERMISSION_KEYS
     .filter((k) => k !== 'dashboard')
