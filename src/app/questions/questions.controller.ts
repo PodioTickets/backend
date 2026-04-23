@@ -10,6 +10,7 @@ import {
 import { QuestionsService } from './questions.service';
 import { CreateQuestionDto, UpdateQuestionDto } from './dto/create-question.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 
 @ApiTags('Questions')
@@ -33,12 +34,13 @@ export class QuestionsController {
 
   @Get('events/:eventId')
   @NoCache()
+  @UseGuards(OptionalJwtAuthGuard)
   @ApiOperation({ summary: 'Get all questions for event', description: 'Retrieves all custom questions for a specific event' })
   @ApiParam({ name: 'eventId', description: 'Event UUID' })
   @ApiResponse({ status: 200, description: 'Questions retrieved successfully' })
   @ApiResponse({ status: 404, description: 'Event not found' })
-  findAll(@Param('eventId') eventId: string) {
-    return this.questionsService.findAll(eventId);
+  findAll(@Request() req, @Param('eventId') eventId: string) {
+    return this.questionsService.findAll(eventId, req.user?.id);
   }
 
   @Get(':id')

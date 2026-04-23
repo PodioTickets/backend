@@ -5,9 +5,10 @@ import { EventNotificationsService } from './event-notifications.service';
 import { OrganizerEventNotificationsController } from './organizer-event-notifications.controller';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { OrganizationsModule } from '../organizations/organizations.module';
+import { TicketsModule } from '../tickets/tickets.module';
 
 @Module({
-  imports: [PrismaModule, OrganizationsModule],
+  imports: [PrismaModule, OrganizationsModule, TicketsModule],
   controllers: [EventsController, OrganizerEventNotificationsController],
   providers: [EventsService, EventNotificationsService],
   exports: [EventsService, EventNotificationsService],

@@ -40,6 +40,7 @@ import {
   type EventKitSelectionDisplayDto,
 } from './dto/kit-selection-display.dto';
 import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
+import { TicketsService } from '../tickets/tickets.service';
 
 @Injectable()
 export class EventsService {
@@ -47,6 +48,7 @@ export class EventsService {
     private readonly prisma: PrismaService,
     private readonly organizerMemberAccess: OrganizerMemberAccessService,
     private readonly organizationsService: OrganizationsService,
+    private readonly ticketsService: TicketsService,
   ) {}
 
   /**
@@ -358,6 +360,24 @@ export class EventsService {
       updatedEvent.id,
       createEventDto.description,
     );
+
+    // Garante que o EMPLOYEE criador tenha acesso ao evento que acabou de criar,
+    // independente de restrictedToEvents ou whitelist prévia.
+    if (member.role === 'EMPLOYEE') {
+      await prismaWrite.organizationMemberEventAccess.upsert({
+        where: {
+          organizationMemberId_eventId: {
+            organizationMemberId: member.id,
+            eventId: updatedEvent.id,
+          },
+        },
+        create: {
+          organizationMemberId: member.id,
+          eventId: updatedEvent.id,
+        },
+        update: {},
+      });
+    }
 
     const topics = await prismaWrite.eventTopic.findMany({
       where: { eventId: updatedEvent.id },
@@ -1075,7 +1095,6 @@ export class EventsService {
           },
         },
         questions: {
-          where: { isRequired: true },
           orderBy: { order: 'asc' },
         },
         coupons: {
@@ -1159,7 +1178,6 @@ export class EventsService {
           },
         },
         questions: {
-          where: { isRequired: true },
           orderBy: { order: 'asc' },
         },
         coupons: {
@@ -3344,26 +3362,22 @@ export class EventsService {
     const lastWeekRevenue = lastWeekRegistrations.reduce((sum, r) => sum + this.normalizeToCents(r.order?.totalAmount), 0);
     const revenueChange = lastWeekRevenue > 0 ? ((grossRevenue - lastWeekRevenue) / lastWeekRevenue) * 100 : 0;
 
-    // Dados para gráfico de faturamento
-    const revenueChart = this.buildRevenueChart(registrations, dateRange);
-
-    // Tabela de ingressos/lotes
-    const tickets = await this.buildTicketsTable(prismaRead, eventId, page, limit);
+    // Todos os tickets do evento (ativos e inativos) no mesmo formato do endpoint de tickets
+    const tickets = await this.ticketsService.findAll(eventId, { page, limit });
 
     return {
       message: 'Financial data fetched successfully',
       data: {
         summary: {
-          availableBalance: availableBalance, // Já está normalizado em centavos
-          installmentsToReceive: installmentsToReceive, // Já está normalizado em centavos
-          awaitingRelease: awaitingRelease, // Já está normalizado em centavos
-          totalTransferred: totalTransferred, // Já está normalizado em centavos
-          refunded: refunded, // Já está normalizado em centavos
-          chargebacks: chargebacks, // Já está normalizado em centavos
-          grossRevenue: grossRevenue, // Já está normalizado em centavos
+          availableBalance,
+          installmentsToReceive,
+          awaitingRelease,
+          totalTransferred,
+          refunded,
+          chargebacks,
+          grossRevenue,
           revenueChange,
         },
-        revenueChart,
         tickets,
       },
     };
@@ -4213,9 +4227,10 @@ export class EventsService {
       ticket: reg.tickets && reg.tickets.length > 0 ? (() => {
         const registrationTicket = reg.tickets[0];
         const ticket = registrationTicket.ticket;
+        const snap = registrationTicket.ticketSnapshot as Record<string, any> | null;
 
-        // Preço do lote no momento da compra (já em centavos)
-        const ticketPrice = registrationTicket.batch?.price ?? 0;
+        // Snapshot tem prioridade — preserva dados do momento da compra mesmo após edição/deleção
+        const ticketPrice = snap?.batch?.price ?? registrationTicket.batch?.price ?? 0;
 
         // Soma dos produtos adicionados para este participante (já em centavos)
         const productsTotal = (reg.products ?? []).reduce(
@@ -4225,12 +4240,18 @@ export class EventsService {
 
         return {
           id: ticket.id,
-          name: ticket.name,
-          batchId: registrationTicket.batch?.id ?? null,
-          category: ticket.category ? {
-            id: ticket.category.id,
-            name: ticket.category.name,
-          } : null,
+          name: snap?.name ?? ticket.name,
+          description: snap?.description ?? ticket.description ?? null,
+          modality: snap?.modality ?? ticket.modality ?? null,
+          distance: snap?.distance ?? ticket.distance ?? null,
+          distanceUnit: snap?.distanceUnit ?? ticket.distanceUnit ?? null,
+          gender: snap?.gender ?? ticket.gender ?? null,
+          ageLimitMin: snap?.ageLimitMin ?? ticket.ageLimitMin ?? null,
+          ageLimitMax: snap?.ageLimitMax ?? ticket.ageLimitMax ?? null,
+          batchId: registrationTicket.batchId ?? null,
+          batchName: snap?.batch?.name ?? null,
+          category: snap?.category ?? (ticket.category ? { id: ticket.category.id, name: ticket.category.name } : null),
+          products: snap?.products ?? [],
           price: ticketPrice,
           productsTotal,
           total: ticketPrice + productsTotal,

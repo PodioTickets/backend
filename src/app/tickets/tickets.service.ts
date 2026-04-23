@@ -8,7 +8,7 @@ import {
   ReorderTicketsDto,
 } from './dto/create-ticket.dto';
 import { OrganizationsService } from '../organizations/organizations.service';
-import { Prisma } from '@prisma/client';
+import { OrderStatus, Prisma, RegistrationStatus } from '@prisma/client';
 import {
   summarizeTicketUpdateForAudit,
   type TicketBeforeAudit,
@@ -203,7 +203,7 @@ export class TicketsService {
     };
   }
 
-  async findAll(eventId: string, filterDto: FilterTicketsDto = {}, baseUrl?: string) {
+  async findAll(eventId: string, filterDto: FilterTicketsDto = {}, baseUrl?: string, userId?: string) {
     // Write client (primary) garante leitura sem lag de réplica,
     // essencial para refletir reservas recém-feitas imediatamente.
     const db = this.prisma.getWriteClient();
@@ -212,7 +212,8 @@ export class TicketsService {
     const limit = filterDto.limit || 20;
     const skip = (page - 1) * limit;
 
-    const where: any = { eventId, isActive: true };
+    const isOrganizer = userId ? await this.isOrganizerOfEvent(userId, eventId, db) : false;
+    const where: any = { eventId, ...(isOrganizer ? { isActive: true } : {}) };
     if (filterDto.categoryId) {
       where.categoryId = filterDto.categoryId;
     }
@@ -585,12 +586,8 @@ export class TicketsService {
       }
     }
 
-    // Atualizar products se fornecido
     if (updateTicketDto.productIds !== undefined) {
-      // Validar productIds se fornecido
       if (updateTicketDto.productIds.length > 0) {
-        // Usa prismaWrite para evitar problemas de réplica de leitura
-        // Primeiro verifica se os produtos existem (independente do evento)
         const allProducts = await prismaWrite.product.findMany({
           where: {
             id: { in: updateTicketDto.productIds },
@@ -601,16 +598,12 @@ export class TicketsService {
             name: true,
           },
         });
-        
-        // Verifica se todos os produtos foram encontrados
         const foundIds = allProducts.map(p => p.id);
         const missingIds = updateTicketDto.productIds.filter(id => !foundIds.includes(id));
         
         if (missingIds.length > 0) {
           throw new NotFoundException(`Products not found: ${missingIds.join(', ')}`);
         }
-        
-        // Verifica se todos os produtos pertencem ao mesmo evento
         const wrongEventProducts = allProducts.filter(p => p.eventId !== eventId);
         if (wrongEventProducts.length > 0) {
           const productNames = wrongEventProducts.map(p => p.name).join(', ');
@@ -619,9 +612,6 @@ export class TicketsService {
           );
         }
       }
-      
-      // Remove products do updateData para atualizar separadamente
-      // Isso evita problemas de constraint ao fazer delete + create na mesma operação
       updateData.products = undefined;
     }
 
@@ -777,22 +767,33 @@ export class TicketsService {
     const ticket = await prismaWrite.ticket.findUnique({
       where: { id: ticketId },
       include: {
-        registrations: true,
+        registrations: {
+          where: { registration: { status: { not: RegistrationStatus.CANCELLED } } },
+          take: 1,
+        },
+        reservedTickets: {
+          where: { order: { status: { not: OrderStatus.CANCELLED } } },
+          take: 1,
+        },
       },
     });
 
-    if (!ticket || ticket.eventId !== eventId) {
+    if (!ticket || ticket.eventId !== eventId || !ticket.isActive) {
       throw new NotFoundException('Ticket not found');
     }
 
-    // Validar se o ingresso já foi vendido
-    if (ticket.registrations.length > 0) {
-      throw new BadRequestException('Cannot delete ticket that has been sold');
-    }
+    const hasSales = ticket.registrations.length > 0 || ticket.reservedTickets.length > 0;
 
-    await prismaWrite.ticket.delete({
-      where: { id: ticketId },
-    });
+    if (hasSales) {
+      await prismaWrite.ticket.update({
+        where: { id: ticketId },
+        data: { isActive: false },
+      });
+    } else {
+      await prismaWrite.ticket.delete({
+        where: { id: ticketId },
+      });
+    }
 
     return {
       message: 'Ticket deleted successfully',
@@ -1071,6 +1072,15 @@ export class TicketsService {
       message: 'Tickets reordered successfully',
       data: { categoryId, ticketIds: incoming },
     };
+  }
+
+  private async isOrganizerOfEvent(userId: string, eventId: string, prisma: any): Promise<boolean> {
+    const event = await prisma.event.findUnique({ where: { id: eventId }, select: { organizationId: true } });
+    if (!event) return false;
+    const member = await prisma.organizationMember.findUnique({
+      where: { organizationId_userId: { organizationId: event.organizationId, userId } },
+    });
+    return !!member;
   }
 
   private async verifyOrganizerAccess(userId: string, eventId: string) {

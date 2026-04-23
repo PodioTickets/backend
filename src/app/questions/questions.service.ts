@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateQuestionDto, UpdateQuestionDto } from './dto/create-question.dto';
 
@@ -38,10 +38,13 @@ export class QuestionsService {
     };
   }
 
-  async findAll(eventId: string) {
+  async findAll(eventId: string, userId?: string) {
     const prismaRead = this.prisma.getReadClient();
+
+    const isOrganizer = userId ? await this.isOrganizerOfEvent(userId, eventId, prismaRead) : false;
+
     const questions = await prismaRead.question.findMany({
-      where: { eventId },
+      where: { eventId, ...(isOrganizer ? { isActive: true } : {}) },
       orderBy: { order: 'asc' },
     });
     const transformedQuestions = questions.map((question) => ({
@@ -93,7 +96,7 @@ export class QuestionsService {
       where: { id: questionId },
     });
 
-    if (!question || question.eventId !== eventId) {
+    if (!question || question.eventId !== eventId || !question.isActive) {
       throw new NotFoundException('Question not found');
     }
 
@@ -131,26 +134,38 @@ export class QuestionsService {
 
     const question = await prismaWrite.question.findUnique({
       where: { id: questionId },
-      include: {
-        answers: true,
-      },
+      include: { answers: { take: 1 } },
     });
 
-    if (!question || question.eventId !== eventId) {
+    if (!question || question.eventId !== eventId || !question.isActive) {
       throw new NotFoundException('Question not found');
     }
 
     if (question.answers.length > 0) {
-      throw new BadRequestException('Cannot delete question with answers');
+      // Soft-delete: já tem respostas, mantém histórico
+      await prismaWrite.question.update({
+        where: { id: questionId },
+        data: { isActive: false },
+      });
+    } else {
+      // Hard-delete: sem respostas, remove permanentemente
+      await prismaWrite.question.delete({
+        where: { id: questionId },
+      });
     }
-
-    await prismaWrite.question.delete({
-      where: { id: questionId },
-    });
 
     return {
       message: 'Question deleted successfully',
     };
+  }
+
+  private async isOrganizerOfEvent(userId: string, eventId: string, prisma: any): Promise<boolean> {
+    const event = await prisma.event.findUnique({ where: { id: eventId }, select: { organizationId: true } });
+    if (!event) return false;
+    const member = await prisma.organizationMember.findUnique({
+      where: { organizationId_userId: { organizationId: event.organizationId, userId } },
+    });
+    return !!member;
   }
 
   private async verifyOrganizerAccess(userId: string, eventId: string) {

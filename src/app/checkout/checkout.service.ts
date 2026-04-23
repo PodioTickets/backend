@@ -382,7 +382,7 @@ export class CheckoutService {
   ): Promise<void> {
     const participantTicketIds = this.expandParticipantTicketIds(dto.tickets);
     const questions = await prisma.question.findMany({
-      where: { eventId: dto.eventId, isRequired: true },
+      where: { eventId: dto.eventId, isRequired: true, isActive: true },
       select: { id: true, question: true, isRequired: true, appliesTo: true },
     });
 
@@ -1350,6 +1350,7 @@ export class CheckoutService {
 
     // 3. Mapa ticketId -> batchId: resolve o primeiro lote com vaga disponível
     const ticketIdToBatchId = new Map<string, string>();
+    const ticketIdToBatch = new Map<string, { id: string; price: number; name: string | null }>();
     for (const ticketItem of dto.tickets) {
       const result = await this.findAvailableBatch(
         prisma,
@@ -1359,8 +1360,31 @@ export class CheckoutService {
       );
       if (result) {
         ticketIdToBatchId.set(ticketItem.ticketId, result.batch.id);
+        ticketIdToBatch.set(ticketItem.ticketId, {
+          id: result.batch.id,
+          price: result.batch.price,
+          name: result.batch.name ?? null,
+        });
       }
     }
+
+    // Pré-carregar dados completos dos ingressos para snapshot no momento da compra
+    const snapshotTicketIds = dto.tickets.map((t) => t.ticketId);
+    const snapshotTickets = await prisma.ticket.findMany({
+      where: { id: { in: snapshotTicketIds } },
+      include: {
+        category: { select: { id: true, name: true } },
+        products: {
+          include: {
+            product: {
+              include: { variations: { select: { id: true, name: true, price: true } } },
+            },
+          },
+          orderBy: { sortOrder: 'asc' },
+        },
+      },
+    });
+    const ticketSnapshotDataById = new Map(snapshotTickets.map((t: any) => [t.id, t]));
 
     // Pré-carregar produtos inclusos por ingresso para cálculo de preço
     const ticketIdsForRegistration = dto.tickets.map((t) => t.ticketId);
@@ -1483,12 +1507,38 @@ export class CheckoutService {
           },
         });
 
-        // Criar RegistrationTicket (com batchId para contagem de vendas por lote)
+        // Criar RegistrationTicket com snapshot completo do ingresso no momento da compra
+        const batchId = ticketIdToBatchId.get(ticketItem.ticketId) ?? null;
+        const batchSnapshot = batchId ? ticketIdToBatch.get(ticketItem.ticketId) : null;
+        const ticketData = ticketSnapshotDataById.get(ticketItem.ticketId) as any;
+        const ticketSnapshot = ticketData ? {
+          id: ticketData.id,
+          name: ticketData.name,
+          description: ticketData.description ?? null,
+          modality: ticketData.modality ?? null,
+          distance: ticketData.distance ?? null,
+          distanceUnit: ticketData.distanceUnit ?? null,
+          gender: ticketData.gender ?? null,
+          ageLimitMin: ticketData.ageLimitMin ?? null,
+          ageLimitMax: ticketData.ageLimitMax ?? null,
+          category: ticketData.category ?? null,
+          batch: batchSnapshot ? {
+            id: batchSnapshot.id,
+            name: batchSnapshot.name,
+            price: batchSnapshot.price,
+          } : null,
+          products: (ticketData.products ?? []).map((tp: any) => ({
+            id: tp.product.id,
+            name: tp.product.name,
+            variations: tp.product.variations ?? [],
+          })),
+        } : null;
         await prisma.registrationTicket.create({
           data: {
             registrationId: registration.id,
             ticketId: ticketItem.ticketId,
-            batchId: ticketIdToBatchId.get(ticketItem.ticketId) ?? null,
+            batchId,
+            ticketSnapshot,
           },
         });
 

@@ -31,6 +31,7 @@ import { TicketsModule } from './app/tickets/tickets.module';
 import { ProductsModule } from './app/products/products.module';
 import { CheckoutModule } from './app/checkout/checkout.module';
 import { OrdersModule } from './app/orders/orders.module';
+import { RepasseModule } from './app/repasse/repasse.module';
 
 @Module({
   imports: [
@@ -66,6 +67,7 @@ import { OrdersModule } from './app/orders/orders.module';
     ProductsModule,
     CheckoutModule,
     OrdersModule,
+    RepasseModule,
   ],
   controllers: [],
   providers: [

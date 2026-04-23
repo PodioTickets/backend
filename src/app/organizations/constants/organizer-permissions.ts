@@ -134,5 +134,24 @@ export function effectivePermissionsForMember(params: {
   if (parsed === null) {
     return { ...FULL_ORGANIZER_PERMISSIONS };
   }
+
+  // create_event → acesso equivalente a OWNER em tudo
+  if (parsed.create_event) {
+    return { ...FULL_ORGANIZER_PERMISSIONS };
+  }
+
+  // notify → implica view_event
+  if (parsed.notify) {
+    parsed.view_event = true;
+  }
+
+  // dashboard → derivado: qualquer outra permissão ativa garante acesso ao dashboard
+  const hasAnyPermission = ORGANIZER_PERMISSION_KEYS
+    .filter((k) => k !== 'dashboard')
+    .some((k) => parsed[k]);
+  if (hasAnyPermission) {
+    parsed.dashboard = true;
+  }
+
   return parsed;
 }

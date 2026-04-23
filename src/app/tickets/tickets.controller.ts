@@ -29,6 +29,7 @@ import {
   ReorderTicketsDto,
 } from './dto/create-ticket.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 
 function clientIp(req: ExpressRequest): string {
@@ -73,6 +74,7 @@ export class TicketsController {
 
   @Get('events/:eventId')
   @NoCache()
+  @UseGuards(OptionalJwtAuthGuard)
   @ApiOperation({
     summary: 'List tickets',
     description: 'Retrieves all tickets for a specific event with optional filters',
@@ -84,11 +86,11 @@ export class TicketsController {
   @ApiResponse({ status: 200, description: 'Tickets retrieved successfully' })
   @ApiResponse({ status: 404, description: 'Event not found' })
   findAll(
-    @Request() req: ExpressRequest,
+    @Request() req: ExpressRequest & { user?: any },
     @Param('eventId') eventId: string,
     @Query() filterDto: FilterTicketsDto,
   ) {
-    return this.ticketsService.findAll(eventId, filterDto, baseUrl(req));
+    return this.ticketsService.findAll(eventId, filterDto, baseUrl(req), req.user?.id);
   }
 
   @Patch('events/:eventId/reorder-tickets')

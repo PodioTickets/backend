@@ -7,6 +7,10 @@ export class CreateQuestionDto {
 
   @IsOptional()
   @IsString()
+  description?: string;
+
+  @IsOptional()
+  @IsString()
   type?: string; // text, select, checkbox, radio
 
   @IsOptional()
@@ -31,6 +35,10 @@ export class UpdateQuestionDto {
   @IsOptional()
   @IsString()
   question?: string;
+
+  @IsOptional()
+  @IsString()
+  description?: string;
 
   @IsOptional()
   @IsString()

@@ -119,6 +119,12 @@ enum EventNotificationStatus {
   denied
 }
 
+enum WithdrawalStatus {
+  PENDING
+  COMPLETED
+  CANCELLED
+}
+
 model User {
   id                    String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email                 String
@@ -165,6 +171,8 @@ model User {
   organizerAuditPageDedupes OrganizerAuditPageDedupe[]
   orders                    Order[]
   eventNotificationsCreated EventNotification[]        @relation("EventNotificationCreator")
+  withdrawals               EventWithdrawal[]
+  eventAudits               EventAudit[]
 
   // Índices compostos para permitir mesmo email em contas diferentes
   @@unique([email, accountType])
@@ -320,6 +328,11 @@ model Event {
   createdAt             DateTime    @default(now())
   updatedAt             DateTime    @updatedAt
 
+  /// Taxa cobrada pela Podio sobre cada saque do organizador (ex: 0.04 = 4%)
+  organizerFeeRate   Float       @default(0.04)
+  /// Percentual retido até a auditoria pós-evento (ex: 0.10 = 10%)
+  retentionRate      Float       @default(0.10)
+
   organization       Organization                    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   topics             EventTopic[]
   modalities         Modality[]
@@ -338,6 +351,8 @@ model Event {
   vouchers           Voucher[]
   memberAccessGrants OrganizationMemberEventAccess[]
   eventNotifications EventNotification[]
+  withdrawals        EventWithdrawal[]
+  audit              EventAudit?
 
   @@index([status, eventDate]) // Para buscar eventos publicados futuros
   @@index([status, country, state, city]) // Para filtros de localização (status primeiro para melhor seletividade)
@@ -566,11 +581,13 @@ model RegistrationKitItem {
 model Question {
   id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   eventId    String   @db.Uuid
-  question   String
-  type       String   @default("text") // text, select, checkbox, radio
-  options    Json? // Para tipos select, radio, checkbox
-  appliesTo  String? // 'all' ou JSON array de ticket IDs
-  isRequired Boolean  @default(false)
+  question    String
+  description String?
+  type        String   @default("text") // text, select, checkbox, radio
+  options     Json? // Para tipos select, radio, checkbox
+  appliesTo   String? // 'all' ou JSON array de ticket IDs
+  isRequired  Boolean  @default(false)
+  isActive    Boolean  @default(true)
   order      Int      @default(0)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
@@ -579,6 +596,7 @@ model Question {
   answers QuestionAnswer[]
 
   @@index([eventId])
+  @@index([eventId, isActive])
 }
 
 model QuestionAnswer {
@@ -921,6 +939,8 @@ model RegistrationTicket {
   registrationId String   @db.Uuid
   ticketId       String   @db.Uuid
   batchId        String?  @db.Uuid
+  // Snapshot completo do ingresso no momento da compra (preservado mesmo após edições/deleção)
+  ticketSnapshot Json?
   createdAt      DateTime @default(now())
 
   registration Registration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
@@ -950,4 +970,45 @@ model RegistrationProduct {
   @@index([registrationId])
   @@index([productId])
   @@index([variationId])
+}
+
+// ─── Repasse / Saque ────────────────────────────────────────────────────────
+
+model EventWithdrawal {
+  id            String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId       String           @db.Uuid
+  requestedById String           @db.Uuid
+  /// Valor bruto solicitado pelo organizador (centavos)
+  amount        Int
+  /// Snapshot da taxa Podio no momento do saque (ex: 0.04)
+  feeRate       Float
+  /// Valor da taxa Podio (centavos)
+  feeAmount     Int
+  /// Valor líquido recebido pelo organizador (centavos)
+  netAmount     Int
+  status        WithdrawalStatus @default(PENDING)
+  notes         String?
+  completedAt   DateTime?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  event       Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  requestedBy User  @relation(fields: [requestedById], references: [id], onDelete: Cascade)
+
+  @@index([eventId])
+  @@index([eventId, status])
+  @@index([eventId, createdAt])
+}
+
+model EventAudit {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId           String   @unique @db.Uuid
+  auditedById       String   @db.Uuid
+  /// Valor dos 10% (ou última parcela) liberados pela auditoria (centavos)
+  retentionReleased Int
+  notes             String?
+  createdAt         DateTime @default(now())
+
+  event     Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  auditedBy User  @relation(fields: [auditedById], references: [id], onDelete: Cascade)
 }
