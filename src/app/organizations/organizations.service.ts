@@ -9,6 +9,8 @@ import {
   PutMemberEventsDto,
   PatchMemberSettingsDto,
   OrganizationAuditLogQueryDto,
+  AdminAuditLogQueryDto,
+  AdminOrganizationsListQueryDto,
 } from './dto/organization.dto';
 import { OrganizationMemberRole } from '@prisma/client';
 import { MFAService } from '../../common/services/mfa.service';
@@ -23,6 +25,9 @@ import {
   UnknownOrganizerPermissionKeyError,
   type OrganizerPermissionsMap,
 } from './constants/organizer-permissions';
+import { resolveOrganizerPageViewActionLabel } from './organizer-audit-page-label.util';
+import { formatAuditLogItemForResponse } from './audit-log-item-format.util';
+import { buildAuditChangeDetails } from './audit-log-change-details.util';
 
 @Injectable()
 export class OrganizationsService {
@@ -71,6 +76,63 @@ export class OrganizationsService {
     }
   }
 
+  /** Garante JSON serializável (datas, etc.) e, em `changes`, old/new + valorAnterior/valorNovo. */
+  private serializeAuditValue(value: unknown): unknown {
+    if (value === undefined) return null;
+    if (value === null) return null;
+    if (value instanceof Date) return value.toISOString();
+    if (typeof value === 'bigint') return value.toString();
+    if (Array.isArray(value)) {
+      return value.map((v) => this.serializeAuditValue(v));
+    }
+    if (typeof value === 'object') {
+      const o = value as Record<string, unknown> & { toJSON?: () => unknown };
+      if (typeof o.toJSON === 'function') {
+        return this.serializeAuditValue(o.toJSON());
+      }
+      const out: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(o)) {
+        out[k] = this.serializeAuditValue(val);
+      }
+      return out;
+    }
+    return value;
+  }
+
+  private prepareAuditMetadata(meta: Prisma.InputJsonValue): Prisma.InputJsonValue {
+    if (meta === null || typeof meta !== 'object' || Array.isArray(meta)) {
+      return this.serializeAuditValue(meta) as Prisma.InputJsonValue;
+    }
+    const base = meta as Record<string, unknown>;
+    const out: Record<string, unknown> = { ...base };
+    if (Array.isArray(out.changes)) {
+      out.changes = out.changes.map((entry: unknown) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+          return this.serializeAuditValue(entry);
+        }
+        const e = entry as Record<string, unknown>;
+        const oldS = this.serializeAuditValue(e.old);
+        const newS = this.serializeAuditValue(e.new);
+        const row: Record<string, unknown> = {
+          field: e.field,
+          old: oldS,
+          new: newS,
+          valorAnterior: oldS,
+          valorNovo: newS,
+        };
+        if ('label' in e && e.label !== undefined) {
+          row.label = this.serializeAuditValue(e.label);
+        }
+        return row;
+      });
+    }
+    for (const key of Object.keys(out)) {
+      if (key === 'changes') continue;
+      out[key] = this.serializeAuditValue(out[key]);
+    }
+    return out as Prisma.InputJsonValue;
+  }
+
   async recordOrganizationAuditLog(params: {
     organizationId: string;
     actorUserId: string | null;
@@ -86,7 +148,9 @@ export class OrganizationsService {
         ip: params.ip ?? null,
         action: params.action,
         metadata:
-          params.metadata === undefined ? Prisma.JsonNull : params.metadata,
+          params.metadata === undefined
+            ? Prisma.JsonNull
+            : this.prepareAuditMetadata(params.metadata),
       },
     });
   }
@@ -136,13 +200,19 @@ export class OrganizationsService {
         data: { recorded: false, pageKey: trimmed },
       };
     }
+    const actionLabel = await resolveOrganizerPageViewActionLabel(
+      prismaRead,
+      member.organizationId,
+      trimmed,
+    );
+
     await prismaWrite.$transaction(async (tx) => {
       await tx.organizationAuditLog.create({
         data: {
           organizationId: member.organizationId,
           actorUserId: userId,
           ip: clientIp ?? null,
-          action: `Acessou a página "${trimmed}"`,
+          action: actionLabel,
           metadata: {
             kind: 'PAGE_VIEW',
             page: trimmed,
@@ -179,23 +249,30 @@ export class OrganizationsService {
   ) {
     await this.assertEventsBelongToOrganization(organizationId, eventIds);
     const prismaWrite = this.prisma.getWriteClient();
-    await prismaWrite.organizationMemberEventAccess.deleteMany({
-      where: { organizationMemberId },
-    });
-    if (eventIds.length > 0) {
-      await prismaWrite.organizationMemberEventAccess.createMany({
-        data: eventIds.map((eventId) => ({
-          organizationMemberId,
-          eventId,
-        })),
+    await prismaWrite.$transaction(async (tx: any) => {
+      await tx.organizationMember.update({
+        where: { id: organizationMemberId },
+        data: { restrictedToEvents: true },
       });
-    }
+      await tx.organizationMemberEventAccess.deleteMany({
+        where: { organizationMemberId },
+      });
+      if (eventIds.length > 0) {
+        await tx.organizationMemberEventAccess.createMany({
+          data: eventIds.map((eventId) => ({
+            organizationMemberId,
+            eventId,
+          })),
+        });
+      }
+    });
   }
 
   private async resolveMemberEventIdsForApi(params: {
     role: OrganizationMemberRole;
     organizationId: string;
     eventAccesses: { eventId: string }[];
+    restrictedToEvents?: boolean;
   }): Promise<string[]> {
     const prismaRead = this.prisma.getReadClient();
     const allInOrg = async () => {
@@ -208,7 +285,8 @@ export class OrganizationsService {
     if (params.role === 'OWNER') {
       return allInOrg();
     }
-    if (params.eventAccesses.length === 0) {
+    // Sem restrição explícita e sem eventos cadastrados → acesso irrestrito (legado)
+    if (!params.restrictedToEvents && params.eventAccesses.length === 0) {
       return allInOrg();
     }
     return params.eventAccesses.map((e) => e.eventId);
@@ -495,7 +573,7 @@ export class OrganizationsService {
     const member = await prismaRead.organizationMember.findFirst({
       where: {
         userId,
-        role: 'OWNER',
+        // Aceita qualquer role: OWNER, ADMIN, MEMBER, etc.
       },
       include: {
         organization: {
@@ -536,9 +614,20 @@ export class OrganizationsService {
       throw new NotFoundException('Organizer not found');
     }
 
+    const permMap = effectivePermissionsForMember({
+      role: member.role,
+      permissionsJson: member.permissions,
+    });
+
     return {
       message: 'Organization fetched successfully',
-      data: { organization: member.organization },
+      data: {
+        organization: member.organization,
+        member: {
+          role: member.role,
+          permissions: grantedPermissionKeys(permMap),
+        },
+      },
     };
   }
 
@@ -701,16 +790,27 @@ export class OrganizationsService {
 
       // Verificar se email já existe (conta ORGANIZER)
       const existingUser = await prismaRead.user.findUnique({
-        where: { 
+        where: {
           email_accountType: {
             email: addMemberDto.email,
             accountType: 'ORGANIZER',
-          }
+          },
+        },
+        include: {
+          organizationMembers: {
+            select: { organizationId: true },
+          },
         },
       });
 
       if (existingUser) {
-        throw new BadRequestException('User with this email already exists');
+        const belongsToThisOrg = existingUser.organizationMembers.some(
+          (m: any) => m.organizationId === organizationId,
+        );
+        if (belongsToThisOrg) {
+          throw new ConflictException('Esse email já foi cadastrado.');
+        }
+        throw new ConflictException('Este usuário já está em uma organização.');
       }
 
       // Hash da senha
@@ -824,7 +924,24 @@ export class OrganizationsService {
         lastName: member.user.lastName,
         userId: member.userId,
       })})`,
-      metadata: { kind: 'MEMBER_ADD', memberUserId: userToAddId },
+      metadata: {
+        kind: 'MEMBER_ADD',
+        memberUserId: userToAddId,
+        changes: [
+          {
+            field: 'colaborador',
+            old: null,
+            new: {
+              userId: member.userId,
+              email: member.user.email,
+              nome: `${member.user.firstName ?? ''} ${member.user.lastName ?? ''}`.trim(),
+              role: member.role,
+              permissions: member.permissions,
+              eventIds: member.eventAccesses.map((a) => a.eventId),
+            },
+          },
+        ],
+      },
     });
 
     return {
@@ -867,10 +984,13 @@ export class OrganizationsService {
       include: {
         user: {
           select: {
+            id: true,
+            email: true,
             firstName: true,
             lastName: true,
           },
         },
+        eventAccesses: { select: { eventId: true } },
       },
     });
 
@@ -887,17 +1007,40 @@ export class OrganizationsService {
         lastName: member.user.lastName,
         userId: memberUserId,
       })})`,
-      metadata: { kind: 'MEMBER_REMOVE', memberUserId },
+      metadata: {
+        kind: 'MEMBER_REMOVE',
+        memberUserId,
+        changes: [
+          {
+            field: 'colaborador',
+            old: {
+              userId: memberUserId,
+              email: member.user.email,
+              nome: `${member.user.firstName ?? ''} ${member.user.lastName ?? ''}`.trim(),
+              role: member.role,
+              permissions: member.permissions,
+              eventIds: member.eventAccesses.map((a) => a.eventId),
+            },
+            new: null,
+          },
+        ],
+      },
     });
 
-    // Remover membro
-    await prismaWrite.organizationMember.delete({
-      where: {
-        organizationId_userId: {
-          organizationId,
-          userId: memberUserId,
+    // Remover membro e deletar usuário em uma única transação
+    await prismaWrite.$transaction(async (tx: any) => {
+      await tx.organizationMember.delete({
+        where: {
+          organizationId_userId: {
+            organizationId,
+            userId: memberUserId,
+          },
         },
-      },
+      });
+
+      await tx.user.delete({
+        where: { id: memberUserId },
+      });
     });
 
     return {
@@ -1075,6 +1218,7 @@ export class OrganizationsService {
           role: m.role,
           organizationId: m.organizationId,
           eventAccesses: m.eventAccesses,
+          restrictedToEvents: m.restrictedToEvents,
         });
         return this.mapMemberForListResponse(m, eventIds);
       }),
@@ -1234,6 +1378,7 @@ export class OrganizationsService {
       role: row.role,
       organizationId,
       eventAccesses: row.eventAccesses,
+      restrictedToEvents: row.restrictedToEvents,
     });
     return {
       message: 'Member event access retrieved successfully',
@@ -1285,6 +1430,7 @@ export class OrganizationsService {
         role: row.role,
         organizationId,
         eventAccesses: row.eventAccesses,
+        restrictedToEvents: row.restrictedToEvents,
       })
     )
       .slice()
@@ -1365,6 +1511,7 @@ export class OrganizationsService {
       role: row.role,
       organizationId,
       eventAccesses: row.eventAccesses,
+      restrictedToEvents: row.restrictedToEvents,
     });
     const { eventAccesses: _ea, permissions: _perm, ...memberRest } = row;
     return {
@@ -1388,9 +1535,11 @@ export class OrganizationsService {
     if (
       dto.role === undefined &&
       dto.permissions === undefined &&
-      dto.eventIds === undefined
+      dto.eventIds === undefined &&
+      dto.firstName === undefined &&
+      dto.lastName === undefined
     ) {
-      throw new BadRequestException('At least one of role, permissions, eventIds is required');
+      throw new BadRequestException('At least one field is required');
     }
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
@@ -1434,6 +1583,15 @@ export class OrganizationsService {
     }
 
     await prismaWrite.$transaction(async (tx) => {
+      if (dto.firstName !== undefined || dto.lastName !== undefined) {
+        await tx.user.update({
+          where: { id: memberUserId },
+          data: {
+            ...(dto.firstName !== undefined && { firstName: dto.firstName }),
+            ...(dto.lastName !== undefined && { lastName: dto.lastName }),
+          },
+        });
+      }
       if (dto.role !== undefined) {
         await tx.organizationMember.update({
           where: {
@@ -1453,6 +1611,10 @@ export class OrganizationsService {
       }
       if (appliedEventIdsUpdate) {
         await this.assertEventsBelongToOrganization(organizationId, dto.eventIds);
+        await tx.organizationMember.update({
+          where: { id: row.id },
+          data: { restrictedToEvents: true },
+        });
         await tx.organizationMemberEventAccess.deleteMany({
           where: { organizationMemberId: row.id },
         });
@@ -1519,6 +1681,7 @@ export class OrganizationsService {
           role: row.role,
           organizationId,
           eventAccesses: row.eventAccesses,
+          restrictedToEvents: row.restrictedToEvents,
         })
       )
         .slice()
@@ -1528,6 +1691,7 @@ export class OrganizationsService {
           role: fresh.role,
           organizationId,
           eventAccesses: fresh.eventAccesses,
+          restrictedToEvents: fresh.restrictedToEvents,
         })
       )
         .slice()
@@ -1571,6 +1735,7 @@ export class OrganizationsService {
       role: fresh.role,
       organizationId,
       eventAccesses: fresh.eventAccesses,
+      restrictedToEvents: fresh.restrictedToEvents,
     });
     const { eventAccesses: _e, permissions: _p, ...memberRest } = fresh;
 
@@ -1638,17 +1803,201 @@ export class OrganizationsService {
     return {
       message: 'Audit logs fetched successfully',
       data: {
-        items: items.map((row) => ({
-          id: row.id,
-          ip: row.ip,
-          userId: row.actorUserId,
-          userName: row.actor
-            ? `${row.actor.firstName} ${row.actor.lastName}`.trim()
-            : null,
-          action: row.action,
-          occurredAt: row.occurredAt,
-          metadata: row.metadata,
-        })),
+        items: items.map((row) => {
+          const { action, editedFields } = formatAuditLogItemForResponse(
+            row.action,
+            row.metadata,
+          );
+          return {
+            id: row.id,
+            ip: row.ip,
+            userId: row.actorUserId,
+            userName: row.actor
+              ? `${row.actor.firstName} ${row.actor.lastName}`.trim()
+              : null,
+            action,
+            editedFields,
+            occurredAt: row.occurredAt,
+            metadata: row.metadata,
+          };
+        }),
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit) || 0,
+        },
+      },
+    };
+  }
+
+  /**
+   * Lista organizações com paginação (painel admin). Resposta enxuta + contagens.
+   * Rota: por enquanto só JWT; checagem de papel admin pode ser reativada no controller.
+   */
+  async listOrganizationsAsAdmin(query: AdminOrganizationsListQueryDto) {
+    const prismaRead = this.prisma.getReadClient();
+    const page = query.page ?? 1;
+    const limit = Math.min(query.limit ?? 20, 100);
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.OrganizationWhereInput = {};
+    const q = query.q?.trim();
+    if (q) {
+      where.OR = [
+        { name: { contains: q, mode: 'insensitive' } },
+        { tradeName: { contains: q, mode: 'insensitive' } },
+        { email: { contains: q, mode: 'insensitive' } },
+        { document: { contains: q, mode: 'insensitive' } },
+      ];
+    }
+
+    const [organizations, total] = await Promise.all([
+      prismaRead.organization.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+        select: {
+          id: true,
+          name: true,
+          tradeName: true,
+          document: true,
+          logoUrl: true,
+          email: true,
+          phone: true,
+          city: true,
+          state: true,
+          createdAt: true,
+          updatedAt: true,
+          _count: {
+            select: { members: true, events: true },
+          },
+        },
+      }),
+      prismaRead.organization.count({ where }),
+    ]);
+
+    return {
+      message: 'Organizations fetched successfully',
+      data: {
+        organizations,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit) || 0,
+        },
+      },
+    };
+  }
+
+  /**
+   * Lista todos os audit logs (todas as organizações), com metadata completa
+   * e `changeDetails` quando houver `metadata.changes`.
+   * Nota: a rota não exige papel admin até nova definição (só JWT).
+   */
+  async listAuditLogsAsAdmin(query: AdminAuditLogQueryDto) {
+    const prismaRead = this.prisma.getReadClient();
+    const page = query.page ?? 1;
+    const limit = Math.min(query.limit ?? 20, 100);
+    const where: Prisma.OrganizationAuditLogWhereInput = {};
+    if (query.organizationId) {
+      where.organizationId = query.organizationId;
+    }
+    if (query.q?.trim()) {
+      where.action = {
+        contains: query.q.trim(),
+        mode: 'insensitive',
+      };
+    }
+    if (query.from || query.to) {
+      where.occurredAt = {};
+      if (query.from) {
+        (where.occurredAt as Prisma.DateTimeFilter).gte = new Date(query.from);
+      }
+      if (query.to) {
+        const t = new Date(query.to);
+        t.setUTCHours(23, 59, 59, 999);
+        (where.occurredAt as Prisma.DateTimeFilter).lte = t;
+      }
+    }
+    if (query.kind?.trim()) {
+      where.metadata = {
+        path: ['kind'],
+        equals: query.kind.trim(),
+      };
+    }
+    const userSearch = query.userSearch?.trim();
+    if (userSearch) {
+      where.actor = {
+        OR: [
+          { firstName: { contains: userSearch, mode: 'insensitive' } },
+          { lastName: { contains: userSearch, mode: 'insensitive' } },
+          { email: { contains: userSearch, mode: 'insensitive' } },
+        ],
+      };
+    }
+    const [items, total] = await Promise.all([
+      prismaRead.organizationAuditLog.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { occurredAt: 'desc' },
+        include: {
+          actor: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+            },
+          },
+          organization: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+        },
+      }),
+      prismaRead.organizationAuditLog.count({ where }),
+    ]);
+    return {
+      message: 'Audit logs fetched successfully (admin)',
+      data: {
+        items: items.map((row) => {
+          const { action, editedFields } = formatAuditLogItemForResponse(
+            row.action,
+            row.metadata,
+          );
+          const meta =
+            row.metadata &&
+            typeof row.metadata === 'object' &&
+            !Array.isArray(row.metadata)
+              ? (row.metadata as Record<string, unknown>)
+              : null;
+          const kind =
+            meta && typeof meta.kind === 'string' ? meta.kind : null;
+          return {
+            id: row.id,
+            organizationId: row.organizationId,
+            organization: row.organization,
+            ip: row.ip,
+            userId: row.actorUserId,
+            userName: row.actor
+              ? `${row.actor.firstName} ${row.actor.lastName}`.trim()
+              : null,
+            kind,
+            action,
+            editedFields,
+            changeDetails: buildAuditChangeDetails(row.metadata),
+            occurredAt: row.occurredAt,
+            metadata: row.metadata,
+            storedAction: row.action,
+          };
+        }),
         pagination: {
           page,
           limit,
@@ -1702,16 +2051,27 @@ export class OrganizationsService {
 
       // Verificar se email já existe (conta ORGANIZER)
       const existingUser = await prismaRead.user.findUnique({
-        where: { 
+        where: {
           email_accountType: {
             email: addMemberDto.email,
             accountType: 'ORGANIZER',
-          }
+          },
+        },
+        include: {
+          organizationMembers: {
+            select: { organizationId: true },
+          },
         },
       });
 
       if (existingUser) {
-        throw new BadRequestException('User with this email already exists');
+        const belongsToThisOrg = existingUser.organizationMembers.some(
+          (m: any) => m.organizationId === organizationId,
+        );
+        if (belongsToThisOrg) {
+          throw new ConflictException('Esse email já foi cadastrado.');
+        }
+        throw new ConflictException('Este usuário já está em uma organização.');
       }
 
       // Hash da senha
@@ -1954,14 +2314,20 @@ export class OrganizationsService {
       throw new NotFoundException('Member not found');
     }
 
-    // Remover membro
-    await prismaWrite.organizationMember.delete({
-      where: {
-        organizationId_userId: {
-          organizationId,
-          userId: memberUserId,
+    // Remover membro e deletar usuário em uma única transação
+    await prismaWrite.$transaction(async (tx: any) => {
+      await tx.organizationMember.delete({
+        where: {
+          organizationId_userId: {
+            organizationId,
+            userId: memberUserId,
+          },
         },
-      },
+      });
+
+      await tx.user.delete({
+        where: { id: memberUserId },
+      });
     });
 
     return {

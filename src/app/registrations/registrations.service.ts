@@ -2,7 +2,7 @@ import { Injectable, NotFoundException, BadRequestException } from '@nestjs/comm
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateRegistrationDto, CreateRegistrationWithInvitedUserDto } from './dto/create-registration.dto';
 import { FilterRegistrationsDto, RegistrationFilterStatus } from './dto/filter-registrations.dto';
-import { RegistrationStatus, PaymentStatus } from '@prisma/client';
+import { Prisma, RegistrationStatus, PaymentStatus } from '@prisma/client';
 // QR Code é gerado dinamicamente no frontend/backend usando o payload salvo em qrCode
 import { KitsService } from '../kits/kits.service';
 
@@ -294,165 +294,256 @@ export class RegistrationsService {
     };
   }
 
+  /**
+   * Filtro equivalente ao comportamento anterior de findUserRegistrations (in-memory),
+   * empurrado para o Prisma para permitir paginação no banco.
+   */
+  private buildFindUserRegistrationsWhere(
+    userId: string,
+    status?: RegistrationFilterStatus,
+    userCpf?: string | null,
+  ): Prisma.RegistrationWhereInput {
+    const orClauses: Prisma.RegistrationWhereInput[] = [
+      { userId },
+      { invitedById: userId },
+      { order: { userId } },
+    ];
+    if (userCpf) {
+      orClauses.push({ user: { documentNumber: userCpf } });
+    }
+    const participant: Prisma.RegistrationWhereInput = { OR: orClauses };
+    if (!status) {
+      return participant;
+    }
+
+    const now = new Date();
+
+    switch (status) {
+      case RegistrationFilterStatus.CONFIRMED:
+        return {
+          AND: [
+            participant,
+            {
+              status: {
+                in: [RegistrationStatus.CONFIRMED, RegistrationStatus.COMPLETED],
+              },
+            },
+            {
+              order: {
+                payment: { status: PaymentStatus.PAID },
+              },
+            },
+          ],
+        };
+      case RegistrationFilterStatus.PENDING:
+        return {
+          AND: [
+            participant,
+            {
+              OR: [
+                { status: RegistrationStatus.PENDING },
+                {
+                  order: {
+                    payment: {
+                      status: {
+                        in: [PaymentStatus.PENDING, PaymentStatus.FAILED],
+                      },
+                    },
+                  },
+                },
+                { order: { is: { payment: null } } },
+              ],
+            },
+          ],
+        };
+      case RegistrationFilterStatus.COMPLETED:
+        return {
+          AND: [
+            participant,
+            {
+              event: {
+                eventDate: { lt: now },
+              },
+            },
+          ],
+        };
+      case RegistrationFilterStatus.CANCELLED:
+        return {
+          AND: [
+            participant,
+            {
+              OR: [
+                { status: RegistrationStatus.CANCELLED },
+                {
+                  order: {
+                    payment: { status: PaymentStatus.REFUNDED },
+                  },
+                },
+                {
+                  order: {
+                    payment: {
+                      metadata: {
+                        path: ['refundType'],
+                        equals: 'CHARGEBACK',
+                      },
+                    },
+                  },
+                },
+                {
+                  order: {
+                    payment: {
+                      metadata: {
+                        path: ['refundType'],
+                        equals: 'REFUND',
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          ],
+        };
+      default:
+        return participant;
+    }
+  }
+
+  private readonly findUserRegistrationsInclude = {
+    event: {
+      include: {
+        organization: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+          },
+        },
+      },
+    },
+    user: {
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        documentNumber: true,
+        dateOfBirth: true,
+      },
+    },
+    modalities: {
+      include: {
+        modality: true,
+      },
+    },
+    kitItems: {
+      include: {
+        kitItem: true,
+      },
+    },
+    products: {
+      include: {
+        product: {
+          include: {
+            variations: true,
+          },
+        },
+        variation: true,
+      },
+    },
+    order: {
+      include: {
+        payment: true,
+      },
+    },
+    tickets: {
+      include: {
+        ticket: {
+          select: {
+            id: true,
+            name: true,
+            modality: true,
+          },
+        },
+      },
+    },
+  } as const;
+
   async findUserRegistrations(userId: string, filterDto: FilterRegistrationsDto = {}) {
     const prismaRead = this.prisma.getReadClient();
     const { page = 1, limit = 20, status } = filterDto;
     const skip = (page - 1) * limit;
 
-    // Buscar todas as registrations do usuário
-    const allRegistrations = await prismaRead.registration.findMany({
-      where: {
-        OR: [
-          { userId },
-          { invitedById: userId },
-        ],
-      },
-      include: {
-        event: {
-          include: {
-            organization: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-                phone: true,
-              },
-            },
-          },
-        },
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            documentNumber: true,
-            dateOfBirth: true,
-          },
-        },
-        modalities: {
-          include: {
-            modality: true,
-          },
-        },
-        kitItems: {
-          include: {
-            kitItem: true,
-          },
-        },
-        products: {
-          include: {
-            product: {
-              include: {
-                variations: true,
-              },
-            },
-            variation: true,
-          },
-        },
-        order: {
-          include: {
-            payment: true,
-          },
-        },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
+    const currentUser = await prismaRead.user.findUnique({
+      where: { id: userId },
+      select: { documentNumber: true },
+    });
+    const userCpf = currentUser?.documentNumber ?? null;
+
+    const where = this.buildFindUserRegistrationsWhere(userId, status, userCpf);
+
+    const [filteredRegistrations, total] = await Promise.all([
+      prismaRead.registration.findMany({
+        where,
+        include: this.findUserRegistrationsInclude,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      prismaRead.registration.count({ where }),
+    ]);
+
+    // Deduplica por id caso o OR com JOINs retorne a mesma registration mais de uma vez
+    const seenRegIds = new Set<string>();
+    const uniqueRegistrations = filteredRegistrations.filter((reg: any) => {
+      if (seenRegIds.has(reg.id)) return false;
+      seenRegIds.add(reg.id);
+      return true;
     });
 
-    // Aplicar filtro de status se fornecido
-    let filteredRegistrations = allRegistrations;
-    if (status) {
-      const now = new Date();
-      filteredRegistrations = allRegistrations.filter((reg) => {
-        const eventDate = reg.event.eventDate ? new Date(reg.event.eventDate) : null;
-        const paymentStatus = reg.order?.payment?.status;
-        const registrationStatus = reg.status;
-        
-        // Parse payment metadata para verificar refundType
-        let paymentMetadata = null;
-        if (reg.order?.payment?.metadata) {
-          try {
-            paymentMetadata = typeof reg.order.payment.metadata === 'string'
-              ? JSON.parse(reg.order.payment.metadata)
-              : reg.order.payment.metadata;
-          } catch (e) {
-            paymentMetadata = reg.order.payment.metadata;
-          }
-        }
-        const refundType = paymentMetadata?.refundType;
+    // Formatar registrations para substituir qrCode pelo link, ingressos (modalidade) e produtos
+    const formattedRegistrations = uniqueRegistrations.map((reg: any) => {
+      const { tickets: regTickets, ...regRest } = reg;
+      const seenProductIds = new Set<string>();
+      return {
+        ...regRest,
+        qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
+        tickets: (regTickets || []).map((rt: any) => ({
+          id: rt.ticket?.id,
+          name: rt.ticket?.name,
+          modality: rt.ticket?.modality,
+        })),
+        products: (reg.products || []).filter((rp: any) => {
+          if (seenProductIds.has(rp.id)) return false;
+          seenProductIds.add(rp.id);
+          return true;
+        }).map((rp: any) => ({
+          id: rp.id,
+          product: {
+            id: rp.product.id,
+            name: rp.product.name,
+            image: rp.product.image,
+            basePrice: rp.product.basePrice,
+            variationType: rp.product.variationType || null,
+          },
+          variation: rp.variation ? {
+            id: rp.variation.id,
+            name: rp.variation.name,
+            price: rp.variation.price,
+          } : null,
+          variationName: rp.variation?.name || null,
+          quantity: rp.quantity,
+          unitPrice: rp.unitPrice,
+          totalPrice: rp.totalPrice,
+        })),
+      };
+    });
 
-        switch (status) {
-          case RegistrationFilterStatus.COMPLETED:
-            // Evento já acabou
-            return eventDate && eventDate < now;
-
-          case RegistrationFilterStatus.CANCELLED:
-            // Pagamento cancelado, estorno ou chargeback
-            return (
-              registrationStatus === RegistrationStatus.CANCELLED ||
-              paymentStatus === PaymentStatus.REFUNDED ||
-              refundType === 'CHARGEBACK' ||
-              refundType === 'REFUND'
-            );
-
-          case RegistrationFilterStatus.PENDING:
-            // Esperando pagamento
-            return (
-              registrationStatus === RegistrationStatus.PENDING ||
-              paymentStatus === PaymentStatus.PENDING ||
-              paymentStatus === PaymentStatus.FAILED ||
-              !paymentStatus
-            );
-
-          case RegistrationFilterStatus.CONFIRMED:
-            // Pagamento confirmado ou pago
-            return (
-              (registrationStatus === RegistrationStatus.CONFIRMED ||
-                registrationStatus === RegistrationStatus.COMPLETED) &&
-              paymentStatus === PaymentStatus.PAID
-            );
-
-          default:
-            return true;
-        }
-      });
-    }
-
-    // Formatar registrations para substituir qrCode pelo link e formatar produtos
-    const formattedRegistrations = filteredRegistrations.map((reg: any) => ({
-      ...reg,
-      qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
-      products: (reg.products || []).map((rp: any) => ({
-        id: rp.id,
-        product: {
-          id: rp.product.id,
-          name: rp.product.name,
-          image: rp.product.image,
-          basePrice: rp.product.basePrice,
-          variationType: rp.product.variationType || null,
-        },
-        variation: rp.variation ? {
-          id: rp.variation.id,
-          name: rp.variation.name,
-          price: rp.variation.price,
-        } : null,
-        variationName: rp.variation?.name || null,
-        quantity: rp.quantity,
-        unitPrice: rp.unitPrice,
-        totalPrice: rp.totalPrice,
-      })),
-    }));
-
-    // Aplicar paginação
-    const paginatedRegistrations = formattedRegistrations.slice(skip, skip + limit);
-    const total = formattedRegistrations.length;
     const totalPages = Math.ceil(total / limit);
 
     return {
       message: 'Registrations fetched successfully',
       data: {
-        registrations: paginatedRegistrations,
+        registrations: formattedRegistrations,
         pagination: {
           page,
           limit,
@@ -517,6 +608,7 @@ export class RegistrationsService {
                   },
                 },
                 products: {
+                  orderBy: { sortOrder: 'asc' },
                   include: {
                     product: {
                       include: {
@@ -580,6 +672,11 @@ export class RegistrationsService {
     // Usar type assertion para contornar problemas de tipagem do Prisma
     const reg = registration as any;
 
+    const pendingProductsMap = new Map<string, { variationId?: string; quantity: number }>();
+    for (const pp of (reg.order?.pendingProducts as any[] | null) ?? []) {
+      pendingProductsMap.set(pp.productId, { variationId: pp.variationId, quantity: pp.quantity });
+    }
+
     const formattedRegistration = {
       id: reg.id,
       qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
@@ -617,19 +714,28 @@ export class RegistrationsService {
           id: reg.tickets[0].ticket.category.id,
           name: reg.tickets[0].ticket.category.name,
         } : null,
-        includedProducts: (reg.tickets[0].ticket.products || []).map((tp: any) => ({
-          id: tp.product.id,
-          name: tp.product.name,
-          image: tp.product.image,
-          basePrice: tp.product.basePrice ? Math.round(tp.product.basePrice * 100) : 0, // Em centavos
-          variationType: tp.product.variationType || null,
-          variations: (tp.product.variations || []).map((v: any) => ({
-            id: v.id,
-            name: v.name,
-            price: Math.round(v.price * 100), // Em centavos
-            stock: v.stock,
-          })),
-        })),
+        includedProducts: (reg.tickets[0].ticket.products || []).map((tp: any) => {
+          const sel = pendingProductsMap.get(tp.product.id);
+          const selectedVariation = sel?.variationId
+            ? (tp.product.variations || []).find((v: any) => v.id === sel.variationId) ?? null
+            : null;
+          return {
+            id: tp.product.id,
+            name: tp.product.name,
+            image: tp.product.image,
+            basePrice: tp.product.basePrice ? Math.round(tp.product.basePrice * 100) : 0,
+            variationType: tp.product.variationType || null,
+            selectedVariation: selectedVariation
+              ? { id: selectedVariation.id, name: selectedVariation.name, price: selectedVariation.price }
+              : null,
+            variations: (tp.product.variations || []).map((v: any) => ({
+              id: v.id,
+              name: v.name,
+              price: Math.round(v.price * 100),
+              stock: v.stock,
+            })),
+          };
+        }),
       } : null,
       questionAnswers: (reg.questionAnswers || []).map((qa: any) => ({
         id: qa.id,
@@ -657,6 +763,8 @@ export class RegistrationsService {
           name: rp.product.name,
           image: rp.product.image,
           basePrice: rp.product.basePrice,
+          isIncludedInTicket: rp.product.isIncludedInTicket ?? false,
+          isRequired: rp.product.isRequired ?? false,
           variationType: rp.product.variationType || null,
         },
         variation: rp.variation ? {
@@ -669,6 +777,10 @@ export class RegistrationsService {
         unitPrice: rp.unitPrice,
         totalPrice: rp.totalPrice,
       })),
+      emergencyContact: {
+        name: reg.emergencyContactName ?? null,
+        phone: reg.emergencyContactPhone ?? null,
+      },
     };
 
     return {
@@ -725,35 +837,12 @@ export class RegistrationsService {
             email: true,
           },
         },
-        modalities: {
-          include: {
-            modality: {
-              include: {
-                group: true,
-              },
-            },
-          },
-        },
         tickets: {
           include: {
             ticket: {
               include: {
-                category: true,
-                batches: {
-                  orderBy: {
-                    createdAt: 'desc' as const,
-                  },
-                },
-                products: {
-                  include: {
-                    product: {
-                      include: {
-                        variations: true,
-                      },
-                    },
-                  },
-                },
-                kit: true,
+                category: { select: { id: true, name: true } },
+                kit: { select: { id: true, name: true } },
               },
             },
           },
@@ -761,39 +850,26 @@ export class RegistrationsService {
         questionAnswers: {
           include: {
             question: {
-              select: {
-                id: true,
-                question: true,
-                type: true,
-                isRequired: true,
-              },
-            },
-          },
-        },
-        kitItems: {
-          include: {
-            kitItem: {
-              include: {
-                product: {
-                  select: {
-                    id: true,
-                    name: true,
-                    image: true,
-                    basePrice: true,
-                  },
-                },
-              },
+              select: { id: true, question: true, type: true, isRequired: true },
             },
           },
         },
         products: {
           include: {
             product: {
-              include: {
-                variations: true,
+              select: {
+                id: true,
+                name: true,
+                image: true,
+                basePrice: true,
+                isIncludedInTicket: true,
+                isRequired: true,
+                variationType: true,
               },
             },
-            variation: true,
+            variation: {
+              select: { id: true, name: true, price: true },
+            },
           },
         },
         order: {
@@ -810,47 +886,22 @@ export class RegistrationsService {
               },
             },
             payment: {
-              include: {
-                user: {
-                  select: {
-                    id: true,
-                    firstName: true,
-                    lastName: true,
-                    email: true,
-                  },
-                },
+              select: {
+                id: true,
+                status: true,
+                method: true,
+                amount: true,
+                transactionId: true,
+                paymentDate: true,
+                createdAt: true,
               },
             },
-            registrations: {
-              include: {
-                user: {
-                  select: {
-                    id: true,
-                    firstName: true,
-                    lastName: true,
-                    email: true,
-                  },
-                },
-                tickets: {
-                  include: {
-                    ticket: {
-                      select: {
-                        id: true,
-                        name: true,
-                        category: {
-                          select: {
-                            id: true,
-                            name: true,
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
+            coupon: {
+              select: { id: true, code: true, type: true, value: true },
             },
-            coupon: true,
-            voucher: true,
+            voucher: {
+              select: { id: true, code: true, name: true, status: true },
+            },
           },
         },
       },
@@ -860,24 +911,12 @@ export class RegistrationsService {
       throw new NotFoundException('Registration not found');
     }
 
-    // Verificar se o usuário tem acesso (é o dono da inscrição ou foi convidado por ele)
-    if (registration.userId !== userId && registration.invitedById !== userId) {
+    const isBuyer = registration.order?.userId === userId;
+    if (registration.userId !== userId && registration.invitedById !== userId && !isBuyer) {
       throw new BadRequestException('Access denied - You can only view your own registrations');
     }
 
     const reg = registration as any;
-
-    // Formatar payment metadata se existir
-    let paymentMetadata = null;
-    if (reg.order?.payment?.metadata) {
-      try {
-        paymentMetadata = typeof reg.order.payment.metadata === 'string'
-          ? JSON.parse(reg.order.payment.metadata)
-          : reg.order.payment.metadata;
-      } catch (e) {
-        paymentMetadata = reg.order.payment.metadata;
-      }
-    }
 
     const formattedRegistration = {
       id: reg.id,
@@ -885,10 +924,11 @@ export class RegistrationsService {
       qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
       createdAt: reg.createdAt,
       updatedAt: reg.updatedAt,
-      user: {
+      participant: {
         id: reg.user.id,
         firstName: reg.user.firstName,
         lastName: reg.user.lastName,
+        fullName: `${reg.user.firstName} ${reg.user.lastName}`,
         email: reg.user.email,
         documentNumber: reg.user.documentNumber,
         avatarUrl: reg.user.avatarUrl,
@@ -896,86 +936,70 @@ export class RegistrationsService {
         gender: reg.user.gender,
         phone: reg.user.phone,
         reservePhone: reg.user.reservePhone,
-        fullName: `${reg.user.firstName} ${reg.user.lastName}`,
       },
       invitedBy: reg.invitedBy ? {
         id: reg.invitedBy.id,
-        firstName: reg.invitedBy.firstName,
-        lastName: reg.invitedBy.lastName,
-        email: reg.invitedBy.email,
         fullName: `${reg.invitedBy.firstName} ${reg.invitedBy.lastName}`,
+        email: reg.invitedBy.email,
+      } : null,
+      emergencyContact: reg.emergencyContactName || reg.emergencyContactPhone ? {
+        name: reg.emergencyContactName ?? null,
+        phone: reg.emergencyContactPhone ?? null,
       } : null,
       event: {
         id: reg.event.id,
         name: reg.event.name,
         slug: reg.event.slug,
-        description: reg.event.description,
         startDate: reg.event.startDate,
         endDate: reg.event.endDate,
-        registrationStartDate: reg.event.registrationStartDate,
-        registrationEndDate: reg.event.registrationEndDate,
         imageUrl: reg.event.imageUrl,
         bannerUrl: reg.event.bannerUrl,
+        logoUrl: reg.event.logoUrl,
         status: reg.event.status,
         location: reg.event.location,
-        organization: reg.event.organization,
-        regulationTopic: reg.event.topics && reg.event.topics.length > 0 ? reg.event.topics[0] : null,
+        locations: reg.event.locations ?? [],
+        organization: reg.event.organization ?? null,
+        regulationTopic: reg.event.topics?.[0] ?? null,
       },
-      modalities: (reg.modalities || []).map((rm: any) => ({
-        id: rm.id,
-        modality: {
-          id: rm.modality.id,
-          name: rm.modality.name,
-          price: rm.modality.price,
-          group: rm.modality.group ? {
-            id: rm.modality.group.id,
-            name: rm.modality.group.name,
-          } : null,
+      ticket: reg.tickets?.[0] ? {
+        id: reg.tickets[0].ticket.id,
+        name: reg.tickets[0].ticket.name,
+        description: reg.tickets[0].ticket.description ?? null,
+        modality: reg.tickets[0].ticket.modality ?? null,
+        distance: reg.tickets[0].ticket.distance ?? null,
+        distanceUnit: reg.tickets[0].ticket.distanceUnit ?? null,
+        gender: reg.tickets[0].ticket.gender ?? null,
+        ageLimitMin: reg.tickets[0].ticket.ageLimitMin ?? null,
+        ageLimitMax: reg.tickets[0].ticket.ageLimitMax ?? null,
+        hasKit: reg.tickets[0].ticket.hasKit,
+        category: reg.tickets[0].ticket.category ? {
+          id: reg.tickets[0].ticket.category.id,
+          name: reg.tickets[0].ticket.category.name,
+        } : null,
+        kit: reg.tickets[0].ticket.kit ? {
+          id: reg.tickets[0].ticket.kit.id,
+          name: reg.tickets[0].ticket.kit.name,
+        } : null,
+      } : null,
+      products: (reg.products || []).map((rp: any) => ({
+        id: rp.id,
+        product: {
+          id: rp.product.id,
+          name: rp.product.name,
+          image: rp.product.image ?? null,
+          basePrice: rp.product.basePrice,
+          isIncludedInTicket: rp.product.isIncludedInTicket ?? false,
+          isRequired: rp.product.isRequired ?? false,
+          variationType: rp.product.variationType || null,
         },
-      })),
-      tickets: (reg.tickets || []).map((rt: any) => ({
-        id: rt.id,
-        ticket: {
-          id: rt.ticket.id,
-          name: rt.ticket.name,
-          description: rt.ticket.description,
-          modality: rt.ticket.modality,
-          distance: rt.ticket.distance,
-          distanceUnit: rt.ticket.distanceUnit,
-          gender: rt.ticket.gender,
-          ageLimitMin: rt.ticket.ageLimitMin,
-          ageLimitMax: rt.ticket.ageLimitMax,
-          hasKit: rt.ticket.hasKit,
-          category: rt.ticket.category ? {
-            id: rt.ticket.category.id,
-            name: rt.ticket.category.name,
-            description: rt.ticket.category.description,
-          } : null,
-          batches: (rt.ticket.batches || []).map((batch: any) => ({
-            id: batch.id,
-            quantity: batch.quantity,
-            price: batch.price,
-            startDate: batch.startDate,
-            endDate: batch.endDate,
-          })),
-          products: (rt.ticket.products || []).map((tp: any) => ({
-            id: tp.product.id,
-            name: tp.product.name,
-            image: tp.product.image,
-            basePrice: tp.product.basePrice,
-            variationType: tp.product.variationType || null,
-            variations: (tp.product.variations || []).map((v: any) => ({
-              id: v.id,
-              name: v.name,
-              price: v.price,
-              stock: v.stock,
-            })),
-          })),
-          kit: rt.ticket.kit ? {
-            id: rt.ticket.kit.id,
-            name: rt.ticket.kit.name,
-          } : null,
-        },
+        variation: rp.variation ? {
+          id: rp.variation.id,
+          name: rp.variation.name,
+          price: rp.variation.price,
+        } : null,
+        quantity: rp.quantity,
+        unitPrice: rp.unitPrice,
+        totalPrice: rp.totalPrice,
       })),
       questionAnswers: (reg.questionAnswers || []).map((qa: any) => ({
         id: qa.id,
@@ -987,36 +1011,6 @@ export class RegistrationsService {
         },
         answer: qa.answer as string,
       })),
-      kitItems: (reg.kitItems || []).map((ki: any) => ({
-        id: ki.id,
-        kitItem: {
-          id: ki.kitItem.id,
-          name: ki.kitItem.name || ki.kitItem.product?.name || 'Item',
-          price: ki.kitItem.product?.basePrice || 0,
-          image: ki.kitItem.product?.image || null,
-        },
-        selectedSize: ki.selectedSize,
-        quantity: ki.quantity,
-      })),
-      products: (reg.products || []).map((rp: any) => ({
-        id: rp.id,
-        product: {
-          id: rp.product.id,
-          name: rp.product.name,
-          image: rp.product.image,
-          basePrice: rp.product.basePrice,
-          variationType: rp.product.variationType || null,
-        },
-        variation: rp.variation ? {
-          id: rp.variation.id,
-          name: rp.variation.name,
-          price: rp.variation.price,
-        } : null,
-        variationName: rp.variation?.name || null,
-        quantity: rp.quantity,
-        unitPrice: rp.unitPrice,
-        totalPrice: rp.totalPrice,
-      })),
       order: reg.order ? {
         id: reg.order.id,
         totalAmount: reg.order.totalAmount,
@@ -1024,28 +1018,6 @@ export class RegistrationsService {
         discount: reg.order.discount,
         finalAmount: reg.order.finalAmount,
         purchaseDate: reg.order.createdAt,
-        buyer: reg.order.buyer ? {
-          id: reg.order.buyer.id,
-          firstName: reg.order.buyer.firstName,
-          lastName: reg.order.buyer.lastName,
-          email: reg.order.buyer.email,
-          phone: reg.order.buyer.phone,
-          documentNumber: reg.order.buyer.documentNumber,
-          avatarUrl: reg.order.buyer.avatarUrl,
-          fullName: `${reg.order.buyer.firstName} ${reg.order.buyer.lastName}`,
-        } : null,
-        payment: reg.order.payment ? {
-          id: reg.order.payment.id,
-          status: reg.order.payment.status,
-          method: reg.order.payment.method,
-          amount: reg.order.payment.amount,
-          transactionId: reg.order.payment.transactionId,
-          paymentDate: reg.order.payment.paymentDate,
-          createdAt: reg.order.payment.createdAt,
-          gateway: reg.order.payment.gateway,
-          metadata: paymentMetadata,
-          refundType: paymentMetadata?.refundType || null,
-        } : null,
         coupon: reg.order.coupon ? {
           id: reg.order.coupon.id,
           code: reg.order.coupon.code,
@@ -1055,28 +1027,26 @@ export class RegistrationsService {
         voucher: reg.order.voucher ? {
           id: reg.order.voucher.id,
           code: reg.order.voucher.code,
-          type: reg.order.voucher.type,
-          value: reg.order.voucher.value,
+          name: reg.order.voucher.name,
+          status: reg.order.voucher.status,
         } : null,
-        registrations: (reg.order.registrations || []).map((orderReg: any) => ({
-          id: orderReg.id,
-          status: orderReg.status,
-          user: {
-            id: orderReg.user.id,
-            firstName: orderReg.user.firstName,
-            lastName: orderReg.user.lastName,
-            email: orderReg.user.email,
-            fullName: `${orderReg.user.firstName} ${orderReg.user.lastName}`,
-          },
-          tickets: (orderReg.tickets || []).map((orderTicket: any) => ({
-            id: orderTicket.ticket.id,
-            name: orderTicket.ticket.name,
-            category: orderTicket.ticket.category ? {
-              id: orderTicket.ticket.category.id,
-              name: orderTicket.ticket.category.name,
-            } : null,
-          })),
-        })),
+        buyer: reg.order.user ? {
+          id: reg.order.user.id,
+          fullName: `${reg.order.user.firstName} ${reg.order.user.lastName}`,
+          email: reg.order.user.email,
+          phone: reg.order.user.phone,
+          documentNumber: reg.order.user.documentNumber,
+          avatarUrl: reg.order.user.avatarUrl,
+        } : null,
+        payment: reg.order.payment ? {
+          id: reg.order.payment.id,
+          status: reg.order.payment.status,
+          method: reg.order.payment.method,
+          amount: reg.order.payment.amount,
+          transactionId: reg.order.payment.transactionId ?? null,
+          paymentDate: reg.order.payment.paymentDate ?? null,
+          createdAt: reg.order.payment.createdAt,
+        } : null,
       } : null,
     };
 
@@ -1110,7 +1080,8 @@ export class RegistrationsService {
       throw new NotFoundException('Registration not found');
     }
 
-    if (registration.userId !== userId && registration.invitedById !== userId) {
+    const isBuyerCancel = registration.order?.userId === userId;
+    if (registration.userId !== userId && registration.invitedById !== userId && !isBuyerCancel) {
       throw new BadRequestException('Access denied');
     }
 

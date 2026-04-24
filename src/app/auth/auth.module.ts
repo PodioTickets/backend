@@ -9,6 +9,7 @@ import { GoogleStrategy } from './strategies/google.strategy';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { HttpModule } from '@nestjs/axios';
+import { EmailService } from '../../common/services/email.service';
 
 @Module({
   imports: [
@@ -29,7 +30,7 @@ import { HttpModule } from '@nestjs/axios';
       },
     }),
   ],
-  providers: [AuthService, JwtStrategy, LocalStrategy, GoogleStrategy],
+  providers: [AuthService, EmailService, JwtStrategy, LocalStrategy, GoogleStrategy],
   controllers: [AuthController],
   exports: [JwtModule, AuthService],
 })

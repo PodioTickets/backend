@@ -246,31 +246,42 @@ export class UserService {
     const prismaRead = this.prisma.getReadClient();
 
     const updateData: any = { ...updateUserDto };
-    
-    // Se documentNumber foi atualizado, limpar e validar unicidade
+
+    // Mesma regra do registro (auth): unicidade por (documentNumberClean, accountType)
     if (updateData.documentNumber !== undefined) {
+      const currentUser = await prismaRead.user.findUnique({
+        where: { id },
+        select: { accountType: true },
+      });
+      if (!currentUser) {
+        throw new NotFoundException('User not found');
+      }
+
       const documentNumberClean = this.cleanDocumentNumber(updateData.documentNumber);
-      
+
       if (documentNumberClean) {
-        const existingUser = await prismaRead.user.findFirst({
+        const owner = await prismaRead.user.findUnique({
           where: {
-            documentNumberClean: documentNumberClean,
-            id: { not: id },
+            documentNumberClean_accountType: {
+              documentNumberClean,
+              accountType: currentUser.accountType,
+            },
           },
+          select: { id: true },
         });
 
-        if (existingUser) {
-          throw new BadRequestException('This document number is already in use');
+        if (owner && owner.id !== id) {
+          throw new ConflictException(
+            'User with this document number already exists',
+          );
         }
       }
-      
-      // Adicionar documentNumberClean ao updateData
+
       updateData.documentNumberClean = documentNumberClean;
     }
     
-    // Mapear emergencyPhone para reservePhone se fornecido
-    if (updateData.emergencyPhone) {
-      updateData.reservePhone = updateData.emergencyPhone;
+    if ('emergencyPhone' in updateData) {
+      updateData.reservePhone = updateData.emergencyPhone ?? null;
       delete updateData.emergencyPhone;
     }
     

@@ -15,7 +15,35 @@ export class PrismaService
   private readonly logger = new Logger(PrismaService.name);
   private readonly readReplica: PrismaClient | null = null;
 
+  /**
+   * Anexa connection_limit / pool_timeout à URL do Postgres se definidos em env
+   * e ainda não estiverem na query string (Prisma/pg pool).
+   */
+  private static applyDatabaseUrlPoolParams(
+    urlString: string | undefined,
+  ): string | undefined {
+    if (!urlString) return urlString;
+    const limit = process.env.DATABASE_CONNECTION_LIMIT?.trim();
+    const poolTimeout = process.env.DATABASE_POOL_TIMEOUT?.trim();
+    if (!limit && !poolTimeout) return urlString;
+    try {
+      const u = new URL(urlString);
+      if (limit && !u.searchParams.has('connection_limit')) {
+        u.searchParams.set('connection_limit', limit);
+      }
+      if (poolTimeout && !u.searchParams.has('pool_timeout')) {
+        u.searchParams.set('pool_timeout', poolTimeout);
+      }
+      return u.toString();
+    } catch {
+      return urlString;
+    }
+  }
+
   constructor(private configService: ConfigService) {
+    const databaseUrl = PrismaService.applyDatabaseUrlPoolParams(
+      configService.get<string>('DATABASE_URL'),
+    );
     super({
       log:
         process.env.NODE_ENV === 'development'
@@ -23,14 +51,13 @@ export class PrismaService
           : ['error'],
       datasources: {
         db: {
-          url: configService.get<string>('DATABASE_URL'),
+          url: databaseUrl,
         },
       },
     });
 
-    // Configurar read replica se disponível
-    const readReplicaUrl = configService.get<string>(
-      'DATABASE_READ_REPLICA_URL',
+    const readReplicaUrl = PrismaService.applyDatabaseUrlPoolParams(
+      configService.get<string>('DATABASE_READ_REPLICA_URL'),
     );
     if (readReplicaUrl) {
       this.readReplica = new PrismaClient({

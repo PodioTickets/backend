@@ -4,7 +4,7 @@ import { AppModule } from './app.module';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { ConfigService } from '@nestjs/config';
-import * as bodyParser from 'body-parser';
+import bodyParser from 'body-parser';
 import { join } from 'path';
 import { useContainer } from 'class-validator';
 import helmet from 'helmet';
@@ -13,12 +13,14 @@ import { ConcurrencyLimiterMiddleware } from './common/middleware/concurrency-li
 import { SSRFProtectionMiddleware } from './common/middleware/ssrf-protection.middleware';
 import { HttpAdapterHost } from '@nestjs/core';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
-import * as compression from 'compression';
-import * as passport from 'passport';
-import * as session from 'express-session';
-import * as express from 'express';
-import * as cookieParser from 'cookie-parser';
+import compression from 'compression';
+import passport from 'passport';
+import session from 'express-session';
+import express, { type Request, type Response } from 'express';
+import cookieParser from 'cookie-parser';
 import { initializeSentry } from './config/sentry.config';
+
+type RequestWithRawBody = Request & { rawBody?: Buffer };
 
 initializeSentry();
 
@@ -31,8 +33,17 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
-  app.use(express.json({ limit: '10mb' }));
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bodyParser: false,
+  });
+  app.use(
+    express.json({
+      limit: '10mb',
+      verify: (req: RequestWithRawBody, _res, buf) => {
+        req.rawBody = buf;
+      },
+    }),
+  );
   app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
   const configService = app.get(ConfigService);
@@ -44,7 +55,9 @@ async function bootstrap() {
 
   const allowedOrigins = [
     'http://localhost:3000',
+    'http://app.localhost:3000',
     'https://www.podioticket.com.br',
+    'https://app.podioticket.com.br',
   ];
 
   app.use((req, res, next) => {
@@ -59,7 +72,7 @@ async function bootstrap() {
       );
       res.header(
         'Access-Control-Allow-Headers',
-        'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With',
+        'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With,Idempotency-Key',
       );
       res.header('Access-Control-Allow-Credentials', 'true');
       res.header('Access-Control-Max-Age', '86400');
@@ -142,6 +155,7 @@ async function bootstrap() {
       'Origin',
       'Accept',
       'X-Requested-With',
+      'Idempotency-Key',
     ],
     credentials: true,
     preflightContinue: false,
@@ -156,7 +170,7 @@ async function bootstrap() {
       req.path.startsWith('/uploads/') ||
       req.path.startsWith('/api/v1/auth') ||
       req.headers['x-api-bypass'] ===
-        configService.get<string>('API_BYPASS_SECRET')
+      configService.get<string>('API_BYPASS_SECRET')
     ) {
       if (origin && allowedOrigins.includes(origin)) {
         res.header('Access-Control-Allow-Origin', origin);
@@ -169,7 +183,7 @@ async function bootstrap() {
       );
       res.header(
         'Access-Control-Allow-Headers',
-        'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With',
+        'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With,Idempotency-Key',
       );
       res.header('Access-Control-Allow-Credentials', 'true');
       res.header('Access-Control-Max-Age', '86400');
@@ -230,8 +244,6 @@ async function bootstrap() {
 
     SwaggerModule.setup('api', app, document, swaggerOptions);
   }
-  app.use(bodyParser.json({ limit: '10mb' }));
-  app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
 
   app.use('/api/v1/upload', bodyParser.raw({ limit: '10mb' }));
   app.use(
@@ -272,17 +284,12 @@ async function bootstrap() {
               messages[0] || `Validation failed for property ${error.property}`,
             constraints: constraints,
           };
-
-          // Incluir erros aninhados (children)
           if (error.children && error.children.length > 0) {
             formatted.children = error.children.map((child: any) => formatError(child));
           }
-
           return formatted;
         };
-
         const formattedErrors = errors.map(formatError);
-
         return new BadRequestException({
           message: 'Validation failed',
           errors: formattedErrors.map((e) => e.message),
@@ -295,7 +302,7 @@ async function bootstrap() {
   app.useGlobalInterceptors(new SecurityHeadersInterceptor());
 
   const httpAdapter = app.getHttpAdapter();
-  httpAdapter.get('/health', (req: express.Request, res: express.Response) => {
+  httpAdapter.get('/health', (req: Request, res: Response) => {
     res.status(200).json({
       status: 'ok',
       timestamp: new Date().toISOString(),
@@ -304,7 +311,8 @@ async function bootstrap() {
     });
   });
 
-  await app.listen(process.env.PORT || 3333);
+  const port = Number(process.env.PORT) || 3333;
+  await app.listen(port, '0.0.0.0');
 }
 
 bootstrap();

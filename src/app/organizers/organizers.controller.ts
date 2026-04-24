@@ -10,6 +10,7 @@ import {
 } from '@nestjs/swagger';
 import { OrganizersService } from './organizers.service';
 import { CreateOrganizerDto, UpdateOrganizerDto, ContactOrganizerDto } from './dto/create-organizer.dto';
+import { OrganizerEventsQueryDto } from './dto/organizer-events-query.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EventsService } from '../events/events.service';
@@ -38,6 +39,7 @@ export class OrganizersController {
   }
 
   @Get('me')
+  @NoCache()
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get my organizer profile', description: 'Retrieves the organizer profile of the authenticated user' })
@@ -58,6 +60,54 @@ export class OrganizersController {
   @ApiResponse({ status: 404, description: 'Organizer profile not found' })
   update(@Request() req, @Body() updateOrganizerDto: UpdateOrganizerDto) {
     return this.organizersService.update(req.user.id, updateOrganizerDto);
+  }
+
+  @Get('me/organizations')
+  @UseGuards(JwtAuthGuard)
+  @NoCache()
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get my organizations',
+    description: 'Retorna todas as organizações em que o usuário autenticado é membro (qualquer role: OWNER, ADMIN, etc.)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Organizations retrieved successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string' },
+        data: {
+          type: 'object',
+          properties: {
+            organizations: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  name: { type: 'string' },
+                  description: { type: 'string' },
+                  logoUrl: { type: 'string' },
+                  email: { type: 'string' },
+                  phone: { type: 'string' },
+                  city: { type: 'string' },
+                  state: { type: 'string' },
+                  role: { type: 'string' },
+                  joinedAt: { type: 'string', format: 'date-time' },
+                  membersCount: { type: 'number' },
+                  eventsCount: { type: 'number' },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  getMyOrganizations(@Request() req) {
+    return this.organizersService.findMyOrganizations(req.user.id);
   }
 
   @Get('me/events')
@@ -86,25 +136,19 @@ export class OrganizersController {
   @ApiResponse({ status: 400, description: 'User is not an organizer' })
   async getMyEvents(
     @Request() req,
-    @Query('page') page?: string,
-    @Query('limit') limit?: string,
-    @Query('status') status?: EventStatus,
-    @Query('includePast') includePast?: string,
-    @Query('startDate') startDate?: string,
-    @Query('endDate') endDate?: string,
-    @Query('name') name?: string,
+    @Query() query: OrganizerEventsQueryDto,
   ) {
-    const pageNum = page ? parseInt(page, 10) : 1;
-    const limitNum = limit ? Math.min(parseInt(limit, 10), 100) : 20; // Max 100 por página
+    const pageNum = query.page ?? 1;
+    const limitNum = query.limit != null ? Math.min(query.limit, 100) : 20;
 
     return this.eventsService.findByOrganizer(req.user.id, {
       page: pageNum,
       limit: limitNum,
-      status,
-      includePast: includePast !== 'false',
-      startDate,
-      endDate,
-      name,
+      status: query.status,
+      includePast: query.includePast !== 'false',
+      startDate: query.startDate,
+      endDate: query.endDate,
+      name: query.name,
     });
   }
 
@@ -131,6 +175,7 @@ export class OrganizersController {
   }
 
   @Get(':organizationId/messages')
+  @NoCache()
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get organization messages', description: 'Retrieves all contact messages for an organization. Only organization members can access messages.' })

@@ -10,7 +10,8 @@ import {
   Min,
   ArrayMinSize,
   ValidateIf,
-  IsNotEmpty,
+  ArrayUnique,
+  IsIn,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -62,6 +63,17 @@ export class TicketBatchDto {
   @IsDateString()
   @ApiPropertyOptional({ description: 'Batch end date (ISO 8601)', example: '2024-12-31T23:59:59Z' })
   endDate?: string;
+
+  @IsOptional()
+  @IsIn(['BY_TIME', 'AFTER_PREVIOUS_SOLD_OUT'])
+  @ApiPropertyOptional({
+    description:
+      'BY_TIME (default): lote abre quando startDate é atingida. ' +
+      'AFTER_PREVIOUS_SOLD_OUT: lote abre quando todas as vagas do lote anterior forem vendidas (pagamentos confirmados).',
+    enum: ['BY_TIME', 'AFTER_PREVIOUS_SOLD_OUT'],
+    default: 'BY_TIME',
+  })
+  triggerType?: string;
 }
 
 export class CreateTicketDto {
@@ -78,6 +90,16 @@ export class CreateTicketDto {
   @IsUUID()
   @ApiPropertyOptional({ description: 'Category ID', example: 'uuid' })
   categoryId?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @ApiPropertyOptional({
+    description:
+      'Display order within the same category (or among uncategorized tickets). If omitted, appends after the last ticket in that group.',
+  })
+  @Type(() => Number)
+  sortOrder?: number;
 
   @IsString()
   @ApiProperty({
@@ -153,6 +175,12 @@ export class UpdateTicketDto {
   categoryId?: string;
 
   @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Type(() => Number)
+  sortOrder?: number;
+
+  @IsOptional()
   @IsString()
   modality?: string;
 
@@ -191,6 +219,42 @@ export class UpdateTicketDto {
   @IsArray()
   @IsUUID(undefined, { each: true })
   productIds?: string[];
+}
+
+/** Lista ordenada com todos os productIds já vinculados ao ingresso (mesmo conjunto, nova ordem). */
+export class ReorderTicketProductsDto {
+  @IsArray()
+  @ArrayUnique()
+  @IsUUID(undefined, { each: true })
+  @ApiProperty({
+    description:
+      'All product UUIDs linked to this ticket, in the desired display order (same set as currently linked, no extras or omissions)',
+    type: [String],
+  })
+  productIds: string[];
+}
+
+/** Reordena ingressos dentro de uma categoria ou entre os sem categoria (categoryId omitido ou null). */
+export class ReorderTicketsDto {
+  @IsOptional()
+  @ValidateIf((_, v) => v != null && v !== '')
+  @IsUUID()
+  @ApiPropertyOptional({
+    description:
+      'UUID da categoria. Omita ou envie null para reordenar apenas ingressos sem categoria.',
+    nullable: true,
+  })
+  categoryId?: string | null;
+
+  @IsArray()
+  @ArrayUnique()
+  @IsUUID(undefined, { each: true })
+  @ApiProperty({
+    description:
+      'Todos os UUIDs de ingressos ativos desse grupo (mesma categoria ou sem categoria), na ordem desejada (índice 0 = primeiro).',
+    type: [String],
+  })
+  ticketIds: string[];
 }
 
 export class FilterTicketsDto {

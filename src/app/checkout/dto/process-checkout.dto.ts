@@ -14,10 +14,48 @@ import {
   ValidateIf,
   IsDefined,
   Matches,
+  registerDecorator,
+  ValidationOptions,
 } from 'class-validator';
 import { Type, Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PaymentMethod } from '@prisma/client';
+import { CheckoutBillingAddressDto } from './checkout-billing-address.dto';
+
+function isValidCpf(cpf: string): boolean {
+  const digits = cpf.replace(/\D/g, '');
+  if (digits.length !== 11) return false;
+  if (/^(\d)\1{10}$/.test(digits)) return false; // all same digit
+
+  let sum = 0;
+  for (let i = 0; i < 9; i++) sum += parseInt(digits[i]) * (10 - i);
+  let remainder = (sum * 10) % 11;
+  if (remainder === 10 || remainder === 11) remainder = 0;
+  if (remainder !== parseInt(digits[9])) return false;
+
+  sum = 0;
+  for (let i = 0; i < 10; i++) sum += parseInt(digits[i]) * (11 - i);
+  remainder = (sum * 10) % 11;
+  if (remainder === 10 || remainder === 11) remainder = 0;
+  return remainder === parseInt(digits[10]);
+}
+
+function IsValidCpf(validationOptions?: ValidationOptions) {
+  return function (object: object, propertyName: string) {
+    registerDecorator({
+      name: 'isValidCpf',
+      target: (object as any).constructor,
+      propertyName,
+      options: { message: 'CPF inválido', ...validationOptions },
+      validator: {
+        validate(value: any) {
+          if (typeof value !== 'string') return false;
+          return isValidCpf(value);
+        },
+      },
+    });
+  };
+}
 
 export class CheckoutTicketDto {
   @IsString()
@@ -82,6 +120,7 @@ export class CheckoutParticipantDto {
   name: string;
 
   @IsString()
+  @IsValidCpf()
   @ApiProperty({ description: 'CPF (numbers only)', example: '12345678900' })
   cpf: string;
 
@@ -215,6 +254,15 @@ export class ProcessCheckoutDto {
   @ApiProperty({ description: 'Participants (one for each ticket)', type: [CheckoutParticipantDto] })
   participants: CheckoutParticipantDto[];
 
+  @IsDefined({ message: 'billingAddress is required' })
+  @ValidateNested()
+  @Type(() => CheckoutBillingAddressDto)
+  @ApiProperty({
+    description: 'Endereço de cobrança confirmado antes do pagamento',
+    type: CheckoutBillingAddressDto,
+  })
+  billingAddress: CheckoutBillingAddressDto;
+
   @IsOptional()
   @IsString()
   @ApiPropertyOptional({ description: 'Coupon code', example: 'PROMO2024' })
@@ -226,8 +274,12 @@ export class ProcessCheckoutDto {
   voucherCode?: string;
 
   @IsOptional()
-  @IsNumber()
-  @Type(() => Number)
-  @ApiPropertyOptional({ description: 'Service fee amount (in cents). If not provided, will be calculated as 0.', example: 0 })
-  serviceFee?: number;
+  @IsString()
+  @ApiPropertyOptional({
+    description: 'Chave de idempotência para evitar pedidos duplicados (ex: UUID gerado pelo frontend)',
+    example: 'frontend-uuid-v4',
+  })
+  idempotencyKey?: string;
+
+  // serviceFee removido — calculado exclusivamente no servidor
 }

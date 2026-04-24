@@ -8,6 +8,7 @@ import {
   ApiBody,
   ApiHeader,
 } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { PaymentsService } from './payments.service';
 import { CreatePaymentDto, ProcessPaymentDto, ConfirmPaymentDto } from './dto/create-payment.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -21,7 +22,7 @@ export class PaymentsController {
     private readonly paymentsService: PaymentsService,
     private readonly cieloService: CieloService,
     private readonly webhookService: PaymentsWebhookService,
-  ) {}
+  ) { }
 
   @Post()
   @UseGuards(JwtAuthGuard)
@@ -63,6 +64,7 @@ export class PaymentsController {
   }
 
   @Post('webhook')
+  @Throttle({ short: { limit: 60, ttl: 60000 } })
   @ApiOperation({ summary: 'Cielo webhook endpoint', description: 'Receives webhook events from Cielo for payment status updates' })
   @ApiHeader({ name: 'cielo-signature', description: 'Cielo webhook signature' })
   @ApiResponse({ status: 200, description: 'Webhook received successfully' })
@@ -73,19 +75,10 @@ export class PaymentsController {
     @Body() body: any,
   ) {
     const payload = req.rawBody?.toString() || JSON.stringify(body);
-
-    if (!payload || !signature) {
-      return { received: false };
-    }
-
+    if (!payload || !signature) return { received: false };
     const event = await this.cieloService.handleWebhook(signature, payload);
-
-    if (!event) {
-      return { received: false, error: 'Invalid signature' };
-    }
-
+    if (!event) return { received: false, error: 'Invalid signature' };
     await this.webhookService.handleWebhook(event);
-
     return { received: true };
   }
 

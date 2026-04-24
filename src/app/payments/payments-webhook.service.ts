@@ -23,38 +23,41 @@ export class PaymentsWebhookService {
   async handleWebhook(event: CieloWebhookEvent) {
     this.logger.log(`Processing Cielo webhook: PaymentId ${event.PaymentId}, Status ${event.Status}`);
 
-    const payment = await this.prisma.payment.findFirst({
-      where: { transactionId: event.PaymentId },
-      include: {
-        order: {
-          include: {
-            registrations: true,
-          },
-        },
-      },
-    });
-
-    if (!payment) {
-      this.logger.warn(`Payment not found for payment ID: ${event.PaymentId}`);
-      return;
-    }
-
     const paymentStatus = this.cieloService.mapCieloStatusToPaymentStatus(event.Status);
 
-    // Atualizar apenas se o status mudou
-    if (payment.status === paymentStatus) {
-      this.logger.log(`Payment ${payment.id} already has status ${paymentStatus}`);
-      return;
-    }
-
+    // Atualização atômica dentro de uma única transação.
+    // updateMany com condição "status diferente do novo" garante que:
+    //   • count=1 → este worker processou; prossegue com efeitos colaterais.
+    //   • count=0 → outro worker já aplicou este status; ignora (idempotência).
+    // Elimina a race condition entre webhooks duplicados ou entrega dupla.
     await this.prisma.$transaction(async (prisma) => {
-      await prisma.payment.update({
-        where: { id: payment.id },
+      const updated = await prisma.payment.updateMany({
+        where: {
+          transactionId: event.PaymentId,
+          status: { not: paymentStatus },
+        },
         data: {
           status: paymentStatus,
-          paymentDate: paymentStatus === PaymentStatus.PAID ? new Date() : payment.paymentDate,
+          paymentDate: paymentStatus === PaymentStatus.PAID ? new Date() : undefined,
+        },
+      });
+
+      if (updated.count === 0) {
+        this.logger.log(`Webhook idempotent: payment ${event.PaymentId} already at status ${paymentStatus}`);
+        return;
+      }
+
+      // Recarregar para obter metadata e orderId atualizados
+      const fresh = await prisma.payment.findFirst({
+        where: { transactionId: event.PaymentId },
+      });
+      if (!fresh) return;
+
+      await prisma.payment.update({
+        where: { id: fresh.id },
+        data: {
           metadata: {
-            ...(payment.metadata as any),
+            ...(fresh.metadata as object),
             cieloStatus: this.cieloService.mapCieloStatusToString(event.Status),
             webhookProcessedAt: new Date().toISOString(),
             returnCode: event.ReturnCode,
@@ -63,24 +66,14 @@ export class PaymentsWebhookService {
         },
       });
 
-      // Atualizar status de todas as inscrições do pedido se pago
-      if (paymentStatus === PaymentStatus.PAID && payment.order) {
+      if (paymentStatus === PaymentStatus.PAID) {
         await prisma.registration.updateMany({
-          where: { orderId: payment.orderId },
-          data: {
-            status: 'CONFIRMED',
-          },
+          where: { orderId: fresh.orderId },
+          data: { status: 'CONFIRMED' },
         });
       }
 
-      // Se falhou ou foi cancelado, manter a inscrição como pendente ou cancelar
-      if (paymentStatus === PaymentStatus.FAILED || paymentStatus === PaymentStatus.REFUNDED) {
-        // Não cancelar automaticamente a inscrição, apenas marcar o pagamento como falhou
-        this.logger.log(`Payment ${payment.id} marked as ${paymentStatus}`);
-      }
+      this.logger.log(`Payment ${fresh.id} updated via webhook to status ${paymentStatus}`);
     });
-
-    this.logger.log(`Payment ${payment.id} updated via webhook to status ${paymentStatus}`);
   }
 }
-

@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Product" ADD COLUMN "images" TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE "Product" ADD COLUMN "primaryImageIndex" INTEGER NOT NULL DEFAULT 0;

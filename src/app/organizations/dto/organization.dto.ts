@@ -12,6 +12,7 @@ import {
   Min,
   Max,
 } from 'class-validator';
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import { OrganizationMemberRole } from '@prisma/client';
 
 export class CreateOrganizationDto {
@@ -232,6 +233,14 @@ export class PatchMemberSettingsDto {
 
   @IsOptional()
   @IsString()
+  firstName?: string;
+
+  @IsOptional()
+  @IsString()
+  lastName?: string;
+
+  @IsOptional()
+  @IsString()
   clientPage?: string;
 }
 
@@ -260,6 +269,54 @@ export class OrganizationAuditLogQueryDto {
   @Min(1)
   @Max(100)
   limit?: number;
+}
+
+/** Filtros extras para listagem global de audit logs (admin). */
+export class AdminAuditLogQueryDto extends OrganizationAuditLogQueryDto {
+  @IsOptional()
+  @IsUUID('4')
+  organizationId?: string;
+
+  @IsOptional()
+  @IsString()
+  kind?: string;
+
+  @IsOptional()
+  @IsString()
+  @ApiPropertyOptional({
+    description:
+      'Filtra por usuário autor (ator): substring em nome, sobrenome ou e-mail (case insensitive). Logs sem ator são excluídos quando informado.',
+  })
+  userSearch?: string;
+}
+
+/** Listagem paginada de organizações (painel admin). */
+export class AdminOrganizationsListQueryDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @ApiPropertyOptional({ description: 'Página (default 1)', example: 1 })
+  page?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @ApiPropertyOptional({
+    description: 'Itens por página (default 20, máx. 100)',
+    example: 20,
+  })
+  limit?: number;
+
+  @IsOptional()
+  @IsString()
+  @ApiPropertyOptional({
+    description:
+      'Busca em razão social, nome fantasia, e-mail ou documento (substring)',
+  })
+  q?: string;
 }
 
 export class UpdateMemberRoleDto {

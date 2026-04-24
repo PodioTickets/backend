@@ -1,4 +1,16 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete, Query, UseGuards, Request } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+  Query,
+  UseGuards,
+  Request,
+} from '@nestjs/common';
+import type { Request as ExpressRequest } from 'express';
 import {
   ApiTags,
   ApiOperation,
@@ -9,9 +21,33 @@ import {
   ApiQuery,
 } from '@nestjs/swagger';
 import { TicketsService } from './tickets.service';
-import { CreateTicketDto, UpdateTicketDto, FilterTicketsDto } from './dto/create-ticket.dto';
+import {
+  CreateTicketDto,
+  UpdateTicketDto,
+  FilterTicketsDto,
+  ReorderTicketProductsDto,
+  ReorderTicketsDto,
+} from './dto/create-ticket.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
+
+function clientIp(req: ExpressRequest): string {
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.length > 0) {
+    return xff.split(',')[0].trim();
+  }
+  if (Array.isArray(xff) && xff[0]) {
+    return String(xff[0]).split(',')[0].trim();
+  }
+  return (req as ExpressRequest & { ip?: string }).ip || '';
+}
+
+function baseUrl(req: ExpressRequest): string {
+  const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+  const host = (req.headers['x-forwarded-host'] as string) || req.get('host') || '';
+  return `${proto}://${host}`;
+}
 
 @ApiTags('Tickets')
 @Controller('api/v1/tickets')
@@ -38,6 +74,7 @@ export class TicketsController {
 
   @Get('events/:eventId')
   @NoCache()
+  @UseGuards(OptionalJwtAuthGuard)
   @ApiOperation({
     summary: 'List tickets',
     description: 'Retrieves all tickets for a specific event with optional filters',
@@ -48,8 +85,39 @@ export class TicketsController {
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20)' })
   @ApiResponse({ status: 200, description: 'Tickets retrieved successfully' })
   @ApiResponse({ status: 404, description: 'Event not found' })
-  findAll(@Param('eventId') eventId: string, @Query() filterDto: FilterTicketsDto) {
-    return this.ticketsService.findAll(eventId, filterDto);
+  findAll(
+    @Request() req: ExpressRequest & { user?: any },
+    @Param('eventId') eventId: string,
+    @Query() filterDto: FilterTicketsDto,
+  ) {
+    return this.ticketsService.findAll(eventId, filterDto, baseUrl(req), req.user?.id);
+  }
+
+  @Patch('events/:eventId/reorder-tickets')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Reorder tickets within a category or uncategorized',
+    description:
+      'Body lists every active ticket in that scope (same categoryId, or omit categoryId for tickets without category). Index in the array is the new sortOrder.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiBody({ type: ReorderTicketsDto })
+  @ApiResponse({ status: 200, description: 'Tickets reordered successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid ticketIds (wrong set or duplicates)' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  reorderTickets(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('eventId') eventId: string,
+    @Body() body: ReorderTicketsDto,
+  ) {
+    return this.ticketsService.reorderTickets(
+      req.user.id,
+      eventId,
+      body,
+      clientIp(req),
+    );
   }
 
   @Get(':id')
@@ -61,8 +129,39 @@ export class TicketsController {
   @ApiParam({ name: 'id', description: 'Ticket UUID' })
   @ApiResponse({ status: 200, description: 'Ticket retrieved successfully' })
   @ApiResponse({ status: 404, description: 'Ticket not found' })
-  findOne(@Param('id') id: string) {
-    return this.ticketsService.findOne(id);
+  findOne(@Request() req: ExpressRequest, @Param('id') id: string) {
+    return this.ticketsService.findOne(id, baseUrl(req));
+  }
+
+  @Patch('events/:eventId/:ticketId/products/reorder')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Reorder ticket products',
+    description:
+      'Updates display order only. Body must list every productId currently linked to the ticket, in the desired order (no additions or removals).',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiParam({ name: 'ticketId', description: 'Ticket UUID' })
+  @ApiBody({ type: ReorderTicketProductsDto })
+  @ApiResponse({ status: 200, description: 'Products reordered successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid productIds (wrong set or duplicates)' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  @ApiResponse({ status: 404, description: 'Ticket not found' })
+  reorderTicketProducts(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('eventId') eventId: string,
+    @Param('ticketId') ticketId: string,
+    @Body() body: ReorderTicketProductsDto,
+  ) {
+    return this.ticketsService.reorderTicketProducts(
+      req.user.id,
+      eventId,
+      ticketId,
+      body,
+      clientIp(req),
+    );
   }
 
   @Patch('events/:eventId/:ticketId')
@@ -81,12 +180,18 @@ export class TicketsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can update tickets' })
   @ApiResponse({ status: 404, description: 'Ticket not found' })
   update(
-    @Request() req,
+    @Request() req: ExpressRequest & { user: { id: string } },
     @Param('eventId') eventId: string,
     @Param('ticketId') ticketId: string,
     @Body() updateTicketDto: UpdateTicketDto,
   ) {
-    return this.ticketsService.update(req.user.id, eventId, ticketId, updateTicketDto);
+    return this.ticketsService.update(
+      req.user.id,
+      eventId,
+      ticketId,
+      updateTicketDto,
+      clientIp(req),
+    );
   }
 
   @Delete('events/:eventId/:ticketId')

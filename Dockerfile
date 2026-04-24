@@ -39,8 +39,9 @@ COPY tsconfig.json tsconfig.build.json nest-cli.json ./
 COPY prisma ./prisma
 COPY src ./src
 
+# SWC em vez de tsc: bem mais rápido e usa menos RAM (crítico em VPS 1 vCPU / 1 GB).
 RUN pnpm prisma generate && \
-    pnpm build
+    pnpm run build:docker
 
 # -----------------------------
 # Production

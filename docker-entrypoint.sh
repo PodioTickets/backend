@@ -19,4 +19,4 @@ mkdir -p /usr/src/app/uploads/images /usr/src/app/uploads/pdfs
 chown -R nestjs:nodejs /usr/src/app/uploads 2>/dev/null || true
 
 echo "🚀 Iniciando aplicação"
-exec su-exec nestjs node dist/src/main.js
+exec su-exec nestjs node dist/main.js

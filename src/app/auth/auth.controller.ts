@@ -35,6 +35,7 @@ import { Response } from 'express';
 import { LocalAuthGuard } from './guards/local-auth.guard';
 import { GoogleAuthGuard } from './guards/google-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
+import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 
 @ApiTags('Authentication')
 @Controller('api/v1/auth')
@@ -200,16 +201,19 @@ export class AuthController {
 
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Request password reset code (for USER or ORGANIZER)' })
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ long: { limit: 10, ttl: 60000 } })
+  @ApiOperation({
+    summary: 'Solicitar redefinição de senha (USER ou ORGANIZER)',
+    description:
+      'Envia e-mail com link seguro para a página de redefinição (FRONTEND_URL + PASSWORD_RESET_PATH). Resposta genérica por segurança.',
+  })
   @ApiResponse({
     status: 200,
-    description: 'Reset code sent if account exists',
+    description: 'Pedido aceito; o e-mail só é enviado se a conta existir e estiver ativa',
   })
   async forgotPassword(@Body() forgotPasswordDto: ForgotPasswordDto) {
-    console.log('[CONTROLLER] forgot-password endpoint called');
-    console.log('[CONTROLLER] Request body:', JSON.stringify(forgotPasswordDto, null, 2));
     const accountType = forgotPasswordDto.accountType || 'USER';
-    console.log('[CONTROLLER] Account type:', accountType);
     return this.authService.forgotPassword(forgotPasswordDto, accountType);
   }
 
@@ -229,9 +233,13 @@ export class AuthController {
 
   @Post('resend-reset-code')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Resend reset code (for USER or ORGANIZER)' })
-  @ApiResponse({ status: 200, description: 'Reset code resent' })
-  @ApiResponse({ status: 429, description: 'Rate limit exceeded' })
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ long: { limit: 10, ttl: 60000 } })
+  @ApiOperation({
+    summary: 'Reenviar link de redefinição de senha (USER ou ORGANIZER)',
+    description: 'No máximo um envio efetivo por minuto por e-mail/tipo de conta (silencioso quando em cooldown).',
+  })
+  @ApiResponse({ status: 200, description: 'Pedido aceito' })
   async resendResetCode(@Body() resendResetCodeDto: ResendResetCodeDto) {
     const accountType = resendResetCodeDto.accountType || 'USER';
     return this.authService.resendResetCode(resendResetCodeDto.email, accountType);
@@ -239,9 +247,13 @@ export class AuthController {
 
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Reset password with token (for USER or ORGANIZER)' })
-  @ApiResponse({ status: 200, description: 'Password reset successfully' })
-  @ApiResponse({ status: 400, description: 'Invalid or expired token' })
+  @ApiOperation({
+    summary: 'Redefinir senha com token (USER ou ORGANIZER)',
+    description:
+      'Aceita o token opaco recebido no link do e-mail (query `token`) ou JWT retornado por verify-reset-code (fluxo legado).',
+  })
+  @ApiResponse({ status: 200, description: 'Senha redefinida' })
+  @ApiResponse({ status: 400, description: 'Token ou senha inválidos' })
   async resetPassword(@Body() resetPasswordDto: ResetPasswordDto) {
     return this.authService.resetPassword(resetPasswordDto);
   }

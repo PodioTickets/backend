@@ -2,11 +2,13 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  UnprocessableEntityException,
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ProcessCheckoutDto } from './dto/process-checkout.dto';
-import { PaymentMethod, PaymentStatus, RegistrationStatus } from '@prisma/client';
+import { normalizeBillingPostalCodeForStorage } from './dto/checkout-billing-address.dto';
+import { PaymentMethod, PaymentStatus, Prisma, RegistrationStatus } from '@prisma/client';
 import { CieloService } from '../payments/cielo.service';
 import { RegistrationsService } from '../registrations/registrations.service';
 // QR Code é gerado dinamicamente no frontend/backend usando o payload salvo em qrCode
@@ -41,6 +43,12 @@ interface VoucherValidationResult {
 export class CheckoutService {
   private readonly logger = new Logger(CheckoutService.name);
 
+  // Circuit breaker para a Cielo
+  private cieloFailures = 0;
+  private cieloCircuitOpenUntil = 0;
+  private readonly CIELO_CIRCUIT_THRESHOLD = 5;
+  private readonly CIELO_CIRCUIT_RESET_MS = 30_000;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly cieloService: CieloService,
@@ -62,13 +70,26 @@ export class CheckoutService {
         throw new NotFoundException('Evento não encontrado');
       }
 
-      // 2. Validação inicial
+      // 2. Idempotência — se a chave já existir, retorna o pedido existente
+      if (dto.idempotencyKey) {
+        const existing = await prismaRead.order.findFirst({
+          where: { idempotencyKey: dto.idempotencyKey } as any,
+          select: { id: true },
+        });
+        if (existing) {
+          this.logger.warn(`Idempotent checkout: order already exists for key ${dto.idempotencyKey}`);
+          throw new BadRequestException('Pedido já processado com esta chave de idempotência.');
+        }
+      }
+
+      // 3. Validação inicial
       await this.validateInitialData(dto, prismaRead);
 
       // 3. Validar estoque
       await this.validateStock(dto, prismaRead);
 
       // 4. Calcular preços iniciais (sem descontos)
+      // serviceFee sempre 0 — nunca confiamos no valor enviado pelo cliente
       const initialPrices = await this.calculatePrices(
         dto.eventId,
         dto.tickets,
@@ -77,7 +98,7 @@ export class CheckoutService {
         0, // sem voucher
         dto.paymentMethod,
         prismaRead,
-        dto.serviceFee, // serviceFee do frontend (em centavos)
+        0, // serviceFee calculado server-side
       );
 
       // 5. Validar e aplicar cupom
@@ -101,6 +122,17 @@ export class CheckoutService {
             couponResult.error || 'Cupom inválido',
           );
         }
+      }
+
+      // 5b. Auto-aplicar cupons QUANTITY/AGE (sem código) se nenhum cupom/voucher manual foi usado
+      if (!couponResult.isValid && !dto.voucherCode) {
+        couponResult = await this.applyAutomaticCoupon(
+          dto.eventId,
+          dto.tickets,
+          dto.participants,
+          initialPrices.subtotal,
+          prismaRead,
+        );
       }
 
       // 6. Validar e aplicar voucher
@@ -132,17 +164,28 @@ export class CheckoutService {
         }
       }
 
-      // 7. Recalcular preços com descontos
-      const finalPrices = await this.calculatePrices(
-        dto.eventId,
-        dto.tickets,
-        dto.participants,
-        couponResult.discount,
-        voucherResult.discount,
-        dto.paymentMethod,
-        prismaRead,
-        dto.serviceFee, // serviceFee do frontend (em centavos)
+      // 7. Calcular preços finais aritmeticamente (sem nova ida ao banco)
+      const preDiscountTotal =
+        initialPrices.ticketsSubtotal +
+        initialPrices.productsSubtotal +
+        initialPrices.serviceFee;
+      const discountedTotal = Math.max(
+        0,
+        preDiscountTotal - couponResult.discount - voucherResult.discount,
       );
+      const pixDiscount =
+        dto.paymentMethod === PaymentMethod.PIX
+          ? Math.floor(discountedTotal * 0.05)
+          : 0;
+      const finalPrices: PriceCalculation = {
+        ...initialPrices,
+        couponDiscount: couponResult.discount,
+        voucherDiscount: voucherResult.discount,
+        subtotal: preDiscountTotal,
+        total: discountedTotal,
+        pixDiscount,
+        finalTotal: discountedTotal - pixDiscount,
+      };
 
       // 8. Processar pagamento
       // Obter CPF do primeiro participante para enviar à Cielo (limpar caracteres não numéricos)
@@ -171,31 +214,39 @@ export class CheckoutService {
         });
 
         // Criar um paymentResult com status de falha
+        // SEGURANÇA: nunca incluir número completo, CVV ou dados brutos do cartão
         paymentResult = {
           success: false,
           status: 'failed',
           transactionId: null,
           error: error.message,
           cieloResult: null,
+          // Apenas dados mascarados — sem PAN, sem CVV
           cardData: dto.paymentMethod === PaymentMethod.CREDIT_CARD ? {
-            number: dto.payment?.card?.number,
-            holder: dto.payment?.card?.name,
-            expiry: dto.payment?.card?.expiry,
-            cvv: dto.payment?.card?.cvv,
-            installments: dto.payment?.card?.installments,
+            number: dto.payment?.card?.number
+              ? '*'.repeat(dto.payment.card.number.replace(/\D/g, '').length - 4) +
+                dto.payment.card.number.replace(/\D/g, '').slice(-4)
+              : null,
+            holder: dto.payment?.card?.name?.toUpperCase() ?? null,
+            expiry: null,   // nunca expor data de validade
+            cvv: null,      // nunca expor CVV
+            installments: dto.payment?.card?.installments ?? null,
           } : undefined,
         };
       }
 
       // 9. Criar registrations e participantes (mesmo se o pagamento falhou)
-      const { registrations, order } = await this.createRegistrations(
-        userId,
-        dto,
-        finalPrices,
-        couponResult,
-        voucherResult,
-        paymentResult,
-        prismaWrite,
+      // withSerializableRetry lida com P2034 (serialization failure) com backoff exponencial
+      const { registrations, order } = await this.withSerializableRetry(() =>
+        this.createRegistrations(
+          userId,
+          dto,
+          finalPrices,
+          couponResult,
+          voucherResult,
+          paymentResult,
+          prismaWrite,
+        ),
       );
 
       // Se o pagamento falhou, lançar a exceção DEPOIS de criar os registros
@@ -315,12 +366,153 @@ export class CheckoutService {
       );
     }
 
+    await this.validateParticipantQuestions(dto, prisma);
+
     // 1.4 Validar método de pagamento
     if (
       !['PIX', 'CREDIT_CARD', 'BOLETO', 'CRYPTO'].includes(dto.paymentMethod)
     ) {
       throw new BadRequestException('Método de pagamento inválido');
     }
+  }
+
+  private async validateParticipantQuestions(
+    dto: ProcessCheckoutDto,
+    prisma: any,
+  ): Promise<void> {
+    const participantTicketIds = this.expandParticipantTicketIds(dto.tickets);
+    const questions = await prisma.question.findMany({
+      where: { eventId: dto.eventId, isRequired: true, isActive: true },
+      select: { id: true, question: true, isRequired: true, appliesTo: true },
+    });
+
+    if (questions.length === 0) return;
+
+    for (let participantIndex = 0; participantIndex < dto.participants.length; participantIndex++) {
+      const participant = dto.participants[participantIndex];
+      const ticketId = participantTicketIds[participantIndex];
+      const answeredQuestionIds = new Set(
+        (participant.questionAnswers || []).map((qa) => qa.questionId),
+      );
+
+      const missingQuestions = questions.filter((question) => {
+        if (!question.isRequired) return false;
+        if (!this.questionAppliesToTicket(question.appliesTo, ticketId)) return false;
+        return !answeredQuestionIds.has(question.id);
+      });
+
+      if (missingQuestions.length > 0) {
+        throw new BadRequestException(
+          `Participante ${participantIndex + 1} sem resposta para perguntas obrigatorias: ${missingQuestions.map((q) => q.question).join(', ')}`,
+        );
+      }
+    }
+  }
+
+  private expandParticipantTicketIds(
+    tickets: ProcessCheckoutDto['tickets'],
+  ): string[] {
+    return tickets.flatMap((ticketItem) =>
+      Array.from({ length: ticketItem.quantity }, () => ticketItem.ticketId),
+    );
+  }
+
+  private questionAppliesToTicket(
+    appliesTo: string | null,
+    ticketId: string,
+  ): boolean {
+    if (!appliesTo || appliesTo === 'all') return true;
+
+    try {
+      const parsed = JSON.parse(appliesTo);
+      if (Array.isArray(parsed)) {
+        return parsed.includes(ticketId);
+      }
+      return appliesTo === ticketId;
+    } catch {
+      return appliesTo === ticketId;
+    }
+  }
+
+  /**
+   * Encontra o primeiro lote com vagas disponíveis para um ticket.
+   * Percorre os lotes na ordem (startDate asc, createdAt asc) e retorna o
+   * primeiro que ainda tenha capacidade restante (quantity - vendas não canceladas).
+   * Se batchId for fornecido explicitamente, valida apenas aquele lote.
+   */
+  private async findAvailableBatch(
+    prisma: any,
+    ticketId: string,
+    batchId: string | undefined,
+    quantityNeeded: number,
+  ) {
+    const batches = await prisma.ticketBatch.findMany({
+      where: { ticketId },
+      orderBy: [
+        { startDate: 'asc' },
+        { createdAt: 'asc' },
+      ],
+    });
+
+    const batchIds = batches.map((b) => b.id);
+
+    // Contar vendas por lote (inscrições não canceladas)
+    const soldCounts: { batchId: string; _count: { id: number } }[] =
+      batchIds.length > 0
+        ? await prisma.registrationTicket.groupBy({
+            by: ['batchId'],
+            where: {
+              batchId: { in: batchIds },
+              registration: { status: { not: RegistrationStatus.CANCELLED } },
+            },
+            _count: { id: true },
+          })
+        : [];
+
+    const soldMap = new Map(soldCounts.map((s) => [s.batchId, s._count.id]));
+
+    if (batchId) {
+      // Lote explicitamente informado — só valida capacidade dele
+      const batch = batches.find((b) => b.id === batchId);
+      if (!batch) return null;
+      const sold = soldMap.get(batch.id) ?? 0;
+      const remaining = batch.quantity - sold;
+      return remaining >= quantityNeeded ? { batch, remaining } : null;
+    }
+
+    // Percorre em ordem e retorna o primeiro lote com vaga suficiente
+    for (const batch of batches) {
+      const sold = soldMap.get(batch.id) ?? 0;
+      const remaining = batch.quantity - sold;
+      if (remaining >= quantityNeeded) {
+        return { batch, remaining };
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Resolve o preço unitário de um produto para um participante:
+   * - Produto incluso no ingresso → 0
+   * - Variação "Sem interesse" → 0
+   * - Variação selecionada → variation.price
+   * - Sem variação → product.basePrice
+   */
+  private resolveProductPrice(
+    product: { id: string; basePrice: number; variations: { id: string; name: string; price: number }[] },
+    variationId: string | undefined | null,
+    includedProductIds: Set<string>,
+  ): number {
+    if (includedProductIds.has(product.id)) return 0;
+
+    if (variationId) {
+      const variation = product.variations.find((v) => v.id === variationId);
+      if (variation?.name === 'Sem interesse') return 0;
+      if (variation) return variation.price;
+    }
+
+    return product.basePrice;
   }
 
   private async validateStock(
@@ -331,7 +523,6 @@ export class CheckoutService {
     for (const ticketItem of dto.tickets) {
       const ticket = await prisma.ticket.findUnique({
         where: { id: ticketItem.ticketId },
-        include: { batches: true },
       });
 
       if (!ticket || !ticket.isActive) {
@@ -340,28 +531,29 @@ export class CheckoutService {
         );
       }
 
-      // Buscar lote ativo ou especificado
-      const now = new Date();
-      let batch = ticketItem.batchId
-        ? ticket.batches.find((b) => b.id === ticketItem.batchId)
-        : ticket.batches.find(
-          (b) =>
-            (!b.startDate || new Date(b.startDate) <= now) &&
-            (!b.endDate || new Date(b.endDate) >= now),
-        );
-
-      if (!batch) {
-        throw new BadRequestException(
-          `Lote não encontrado ou inativo para ingresso ${ticket.name}`,
-        );
+      // Camada 5 — verifica availableQuantity diretamente (fonte de verdade do estoque)
+      if (ticketItem.batchId) {
+        const batch = await prisma.ticketBatch.findUnique({
+          where: { id: ticketItem.batchId },
+          select: { id: true, availableQuantity: true },
+        });
+        if (!batch || batch.availableQuantity < ticketItem.quantity) {
+          throw new BadRequestException(
+            `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
+          );
+        }
       }
 
-      // Verificar quantidade disponível
-      // Nota: TicketBatch não tem campo de estoque vendido, então assumimos que quantity é o limite
-      // Você pode adicionar um campo sold ou available no futuro
-      if (batch.quantity < ticketItem.quantity) {
+      const result = await this.findAvailableBatch(
+        prisma,
+        ticketItem.ticketId,
+        ticketItem.batchId,
+        ticketItem.quantity,
+      );
+
+      if (!result) {
         throw new BadRequestException(
-          `Estoque insuficiente para ${ticket.name}. Disponível: ${batch.quantity}`,
+          `Sem vagas disponíveis para o ingresso "${ticket.name}". Todos os lotes estão esgotados.`,
         );
       }
     }
@@ -386,8 +578,8 @@ export class CheckoutService {
               (v) => v.id === productItem.variationId,
             );
             if (!variation) {
-              throw new NotFoundException(
-                `Variação ${productItem.variationId} não encontrada`,
+              throw new UnprocessableEntityException(
+                `Variação selecionada não encontrada para "${product.name}". Selecione uma opção válida.`,
               );
             }
 
@@ -448,6 +640,18 @@ export class CheckoutService {
     }
 
     // 2. Calcular subtotal dos produtos
+    // Pré-carregar produtos inclusos nos ingressos desta compra
+    const ticketIdsForPricing = tickets.map((t) => t.ticketId);
+    const includedTicketProductRows = ticketIdsForPricing.length > 0
+      ? await prisma.ticketProduct.findMany({
+          where: { ticketId: { in: ticketIdsForPricing } },
+          select: { productId: true },
+        })
+      : [];
+    const includedProductIds = new Set<string>(
+      includedTicketProductRows.map((tp: { productId: string }) => tp.productId),
+    );
+
     let productsSubtotal = 0;
     for (const participant of participants) {
       if (participant.products) {
@@ -463,17 +667,7 @@ export class CheckoutService {
             );
           }
 
-          let productPrice = product.basePrice;
-          if (productItem.variationId) {
-            const variation = product.variations.find(
-              (v) => v.id === productItem.variationId,
-            );
-            if (variation) {
-              productPrice = variation.price;
-            }
-          }
-
-          // productPrice já está em centavos
+          const productPrice = this.resolveProductPrice(product, productItem.variationId, includedProductIds);
           productsSubtotal += productPrice * productItem.quantity;
         }
       }
@@ -663,6 +857,59 @@ export class CheckoutService {
     };
   }
 
+  private async applyAutomaticCoupon(
+    eventId: string,
+    tickets: ProcessCheckoutDto['tickets'],
+    participants: ProcessCheckoutDto['participants'],
+    subtotal: number,
+    prisma: any,
+  ): Promise<CouponValidationResult> {
+    const totalQuantity = tickets.reduce((sum, t) => sum + t.quantity, 0);
+    const ticketIds = tickets.map((t) => t.ticketId);
+
+    const autoCoupons = await prisma.coupon.findMany({
+      where: {
+        eventId,
+        status: 'ACTIVE',
+        couponType: { in: ['QUANTITY', 'AGE'] },
+        OR: [{ expiryDate: null }, { expiryDate: { gt: new Date() } }],
+      },
+    });
+
+    for (const coupon of autoCoupons) {
+      // Verificar appliesTo
+      if (coupon.appliesTo && coupon.appliesTo !== 'all') {
+        let allowed: string[] = [];
+        try { allowed = JSON.parse(coupon.appliesTo); } catch { allowed = [coupon.appliesTo]; }
+        if (!ticketIds.some((id) => allowed.includes(id))) continue;
+      }
+
+      // Verificar minCartValue
+      if (coupon.minCartValue && subtotal < coupon.minCartValue) continue;
+
+      if (coupon.couponType === 'QUANTITY') {
+        if (coupon.minQuantity && totalQuantity < coupon.minQuantity) continue;
+      } else if (coupon.couponType === 'AGE') {
+        const allMatch = participants.every((p) => {
+          const age = this.calculateAge(p.birthDate);
+          if (coupon.ageRule === 'MIN' && age < parseInt(coupon.ageValue || '0')) return false;
+          if (coupon.ageRule === 'MAX' && age > parseInt(coupon.ageValue || '999')) return false;
+          return true;
+        });
+        if (!allMatch) continue;
+      }
+
+      const discount =
+        coupon.type === 'PERCENTAGE'
+          ? subtotal * (coupon.value / 100)
+          : Math.min(coupon.value, subtotal);
+
+      return { isValid: true, discount, couponId: coupon.id };
+    }
+
+    return { isValid: false, discount: 0 };
+  }
+
   private async validateAndApplyVoucher(
     voucherCode: string,
     eventId: string,
@@ -817,6 +1064,14 @@ export class CheckoutService {
       });
     }
 
+    // Circuit breaker: rejeitar imediatamente se o circuito estiver aberto
+    if (Date.now() < this.cieloCircuitOpenUntil) {
+      const retryAfterSec = Math.ceil((this.cieloCircuitOpenUntil - Date.now()) / 1000);
+      throw new BadRequestException(
+        `Gateway de pagamento temporariamente indisponível. Tente novamente em ${retryAfterSec}s.`,
+      );
+    }
+
     // Processar pagamento na Cielo (passar o enum diretamente)
     const cieloResult = await this.cieloService.createPayment(
       finalTotal,
@@ -833,6 +1088,17 @@ export class CheckoutService {
     );
 
     if (!cieloResult.success) {
+      // Circuit breaker: contar falhas e abrir o circuito se necessário
+      this.cieloFailures++;
+      if (this.cieloFailures >= this.CIELO_CIRCUIT_THRESHOLD) {
+        this.cieloCircuitOpenUntil = Date.now() + this.CIELO_CIRCUIT_RESET_MS;
+        this.cieloFailures = 0;
+        this.logger.warn(
+          `Circuit breaker aberto para Cielo após ${this.CIELO_CIRCUIT_THRESHOLD} falhas consecutivas. ` +
+          `Reabrirá em ${this.CIELO_CIRCUIT_RESET_MS / 1000}s.`,
+        );
+      }
+
       const errorDetails = (cieloResult as any).errorDetails;
       this.logger.error('Payment processing failed:', {
         error: cieloResult.error,
@@ -863,6 +1129,9 @@ export class CheckoutService {
 
       throw new BadRequestException(errorMessage);
     }
+
+    // Cielo respondeu com sucesso — resetar contador de falhas
+    this.cieloFailures = 0;
 
     // Determinar status do pagamento:
     // - PIX e Boleto: sempre 'pending' inicialmente (aguardam webhook para confirmação)
@@ -906,7 +1175,20 @@ export class CheckoutService {
         }
         : undefined,
       cieloResult, // Retornar resultado completo da Cielo para salvar no banco
-      cardData, // Dados do cartão (para salvar informações mascaradas)
+      // SEGURANÇA: mascarar PAN antes de retornar — nunca expor número completo, CVV ou validade
+      cardData: cardData
+        ? {
+          number: cardData.number
+            ? '*'.repeat(
+                Math.max(0, cardData.number.replace(/\D/g, '').length - 4),
+              ) + cardData.number.replace(/\D/g, '').slice(-4)
+            : null,
+          holder: cardData.holder ?? null,
+          expiry: null,  // nunca expor data de validade
+          cvv: null,     // nunca expor CVV
+          installments: cardData.installments,
+        }
+        : undefined,
     };
   }
 
@@ -917,9 +1199,18 @@ export class CheckoutService {
     couponResult: CouponValidationResult,
     voucherResult: VoucherValidationResult,
     paymentResult: any,
-    prisma: any,
+    prismaWrite: any,
   ) {
+    // Toda a criação de dados financeiros e inscrições ocorre numa única transação
+    // serializable, garantindo atomicidade e evitando race conditions de estoque.
+    return await prismaWrite.$transaction(async (prisma) => {
     const registrations = [];
+
+    const b = dto.billingAddress;
+    const billingPostalStored = normalizeBillingPostalCodeForStorage(
+      b.country,
+      b.postalCode,
+    );
 
     // 1. Criar o Order primeiro com todos os dados financeiros
     // Converter valores para centavos (multiplicar por 100)
@@ -927,12 +1218,21 @@ export class CheckoutService {
       data: {
         userId,
         eventId: dto.eventId,
-        totalAmount: prices.ticketsSubtotal + prices.productsSubtotal, // Já está em centavos
-        serviceFee: prices.serviceFee, // Já está em centavos
-        discount: prices.couponDiscount + prices.voucherDiscount, // Já está em centavos
-        finalAmount: prices.finalTotal, // Já está em centavos
+        totalAmount: prices.ticketsSubtotal + prices.productsSubtotal,
+        serviceFee: prices.serviceFee,
+        discount: prices.couponDiscount + prices.voucherDiscount,
+        finalAmount: prices.finalTotal,
+        ...((dto as any).idempotencyKey && { idempotencyKey: (dto as any).idempotencyKey }),
         ...(couponResult.couponId && { couponId: couponResult.couponId }),
         ...(voucherResult.voucherId && { voucherId: voucherResult.voucherId }),
+        billingCountry: b.country,
+        billingPostalCode: billingPostalStored,
+        billingStateUf: b.stateUf ?? null,
+        billingStreet: b.street,
+        billingNumber: b.number,
+        billingComplement: b.complement ?? null,
+        billingNeighborhood: b.neighborhood,
+        billingCity: b.city,
       },
     });
 
@@ -1006,6 +1306,17 @@ export class CheckoutService {
         finalTotal: prices.finalTotal,
       },
 
+      billingAddress: {
+        country: b.country,
+        postalCode: billingPostalStored,
+        stateUf: b.stateUf ?? null,
+        street: b.street,
+        number: b.number,
+        complement: b.complement ?? null,
+        neighborhood: b.neighborhood,
+        city: b.city,
+      },
+
       // Timestamps
       createdAt: new Date().toISOString(),
     };
@@ -1037,70 +1348,133 @@ export class CheckoutService {
       },
     });
 
-    // 3. Mapa ticketId -> batchId para persistir o lote vendido em cada RegistrationTicket
+    // 3. Mapa ticketId -> batchId: resolve o primeiro lote com vaga disponível
     const ticketIdToBatchId = new Map<string, string>();
+    const ticketIdToBatch = new Map<string, { id: string; price: number; name: string | null }>();
     for (const ticketItem of dto.tickets) {
-      const ticket = await prisma.ticket.findUnique({
-        where: { id: ticketItem.ticketId },
-        include: { batches: true },
-      });
-      if (ticket) {
-        const batch = ticketItem.batchId
-          ? ticket.batches.find((b) => b.id === ticketItem.batchId)
-          : ticket.batches.find(
-            (b) =>
-              (!b.startDate || new Date(b.startDate) <= new Date()) &&
-              (!b.endDate || new Date(b.endDate) >= new Date()),
-          );
-        if (batch) ticketIdToBatchId.set(ticketItem.ticketId, batch.id);
+      const result = await this.findAvailableBatch(
+        prisma,
+        ticketItem.ticketId,
+        ticketItem.batchId,
+        ticketItem.quantity,
+      );
+      if (result) {
+        ticketIdToBatchId.set(ticketItem.ticketId, result.batch.id);
+        ticketIdToBatch.set(ticketItem.ticketId, {
+          id: result.batch.id,
+          price: result.batch.price,
+          name: result.batch.name ?? null,
+        });
       }
     }
 
+    // Pré-carregar dados completos dos ingressos para snapshot no momento da compra
+    const snapshotTicketIds = dto.tickets.map((t) => t.ticketId);
+    const snapshotTickets = await prisma.ticket.findMany({
+      where: { id: { in: snapshotTicketIds } },
+      include: {
+        category: { select: { id: true, name: true } },
+        products: {
+          include: {
+            product: {
+              include: { variations: { select: { id: true, name: true, price: true } } },
+            },
+          },
+          orderBy: { sortOrder: 'asc' },
+        },
+      },
+    });
+    const ticketSnapshotDataById = new Map(snapshotTickets.map((t: any) => [t.id, t]));
+
+    // Pré-carregar produtos inclusos por ingresso para cálculo de preço
+    const ticketIdsForRegistration = dto.tickets.map((t) => t.ticketId);
+    const registrationTicketProducts = ticketIdsForRegistration.length > 0
+      ? await prisma.ticketProduct.findMany({
+          where: { ticketId: { in: ticketIdsForRegistration } },
+          select: { ticketId: true, productId: true },
+        })
+      : [];
+    const ticketIdToIncludedProductIds = new Map<string, Set<string>>();
+    for (const row of registrationTicketProducts) {
+      const set = ticketIdToIncludedProductIds.get(row.ticketId) ?? new Set<string>();
+      set.add(row.productId);
+      ticketIdToIncludedProductIds.set(row.ticketId, set);
+    }
+
     // 4. Criar uma Registration por participante vinculada ao Order
+
+    // Pré-carregar buyer user e todos os usuários participantes em lote (evitar N+1)
+    const buyerUser = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+
+    const participantEmailSet = new Set(dto.participants.map((p) => p.email.toLowerCase()));
+    participantEmailSet.delete(buyerUser?.email?.toLowerCase() ?? '');
+    const existingParticipants = participantEmailSet.size > 0
+      ? await prisma.user.findMany({
+          where: { email: { in: [...participantEmailSet] } },
+        })
+      : [];
+    const emailToUser = new Map<string, typeof existingParticipants[0]>(
+      existingParticipants.map((u) => [u.email.toLowerCase(), u]),
+    );
+
+    // Pré-carregar todos os produtos referenciados pelos participantes em lote
+    const allProductIds = [
+      ...new Set(
+        dto.participants.flatMap((p) => (p.products ?? []).map((prod) => prod.productId)),
+      ),
+    ];
+    const allProductsById = new Map<string, any>();
+    if (allProductIds.length > 0) {
+      const products = await prisma.product.findMany({
+        where: { id: { in: allProductIds } },
+        include: { variations: true },
+      });
+      for (const prod of products) {
+        allProductsById.set(prod.id, prod);
+      }
+    }
+
     let participantIndex = 0;
     for (const ticketItem of dto.tickets) {
       // Criar participantes para este ticket
       for (let i = 0; i < ticketItem.quantity; i++) {
         const participantData = dto.participants[participantIndex];
 
-        // Criar ou buscar usuário para o participante
-        const currentUser = await prisma.user.findUnique({
-          where: { id: userId },
-          select: { email: true },
-        });
-
+        // Resolver ou criar usuário participante (usando cache pré-carregado)
         let participantUserId = userId;
-        if (participantData.email !== currentUser?.email) {
-          // Verificar se usuário já existe
-          let invitedUser = await prisma.user.findUnique({
-            where: { email: participantData.email },
-          });
+        if (participantData.email.toLowerCase() !== buyerUser?.email?.toLowerCase()) {
+          let invitedUser = emailToUser.get(participantData.email.toLowerCase()) ?? null;
 
           if (!invitedUser) {
-            // Criar usuário convidado
-            const documentNumber = participantData.cpf.replace(/\D/g, '');
-            const documentNumberClean = documentNumber; // Já está limpo
+            // Criar usuário convidado e adicionar ao cache
+            const documentNumberClean = participantData.cpf.replace(/\D/g, '');
             invitedUser = await prisma.user.create({
               data: {
                 email: participantData.email,
                 firstName: participantData.name.split(' ')[0],
                 lastName:
                   participantData.name.split(' ').slice(1).join(' ') || '',
-                documentNumber: participantData.cpf, // Manter formatação original se houver
-                documentNumberClean: documentNumberClean, // Versão limpa para validação
-                password: '', // Senha será definida depois
+                documentNumber: participantData.cpf,
+                documentNumberClean,
+                password: '',
                 isActive: false,
               },
             });
+            emailToUser.set(participantData.email.toLowerCase(), invitedUser);
           }
           participantUserId = invitedUser.id;
         }
 
         // Criar Registration para este participante
-        // Status: CONFIRMED se pagamento aprovado, PENDING caso contrário (mesmo se falhou)
+        // CONFIRMED se aprovado, CANCELLED se falhou, PENDING se aguardando confirmação (PIX/Boleto)
         const registrationStatus = paymentResult.status === 'approved'
           ? RegistrationStatus.CONFIRMED
-          : RegistrationStatus.PENDING;
+          : paymentResult.status === 'failed' || !paymentResult.success
+            ? RegistrationStatus.CANCELLED
+            : RegistrationStatus.PENDING;
 
         const registration = await prisma.registration.create({
           data: {
@@ -1111,6 +1485,8 @@ export class CheckoutService {
             status: registrationStatus,
             termsAccepted: true,
             rulesAccepted: true,
+            emergencyContactName: participantData.emergencyContactName?.trim() || null,
+            emergencyContactPhone: participantData.emergencyPhone?.trim() || null,
           },
         });
 
@@ -1131,12 +1507,38 @@ export class CheckoutService {
           },
         });
 
-        // Criar RegistrationTicket (com batchId para contagem de vendas por lote)
+        // Criar RegistrationTicket com snapshot completo do ingresso no momento da compra
+        const batchId = ticketIdToBatchId.get(ticketItem.ticketId) ?? null;
+        const batchSnapshot = batchId ? ticketIdToBatch.get(ticketItem.ticketId) : null;
+        const ticketData = ticketSnapshotDataById.get(ticketItem.ticketId) as any;
+        const ticketSnapshot = ticketData ? {
+          id: ticketData.id,
+          name: ticketData.name,
+          description: ticketData.description ?? null,
+          modality: ticketData.modality ?? null,
+          distance: ticketData.distance ?? null,
+          distanceUnit: ticketData.distanceUnit ?? null,
+          gender: ticketData.gender ?? null,
+          ageLimitMin: ticketData.ageLimitMin ?? null,
+          ageLimitMax: ticketData.ageLimitMax ?? null,
+          category: ticketData.category ?? null,
+          batch: batchSnapshot ? {
+            id: batchSnapshot.id,
+            name: batchSnapshot.name,
+            price: batchSnapshot.price,
+          } : null,
+          products: (ticketData.products ?? []).map((tp: any) => ({
+            id: tp.product.id,
+            name: tp.product.name,
+            variations: tp.product.variations ?? [],
+          })),
+        } : null;
         await prisma.registrationTicket.create({
           data: {
             registrationId: registration.id,
             ticketId: ticketItem.ticketId,
-            batchId: ticketIdToBatchId.get(ticketItem.ticketId) ?? null,
+            batchId,
+            ticketSnapshot,
           },
         });
 
@@ -1153,25 +1555,14 @@ export class CheckoutService {
           }
         }
 
-        // Criar produtos escolhidos pelo participante
+        // Criar produtos escolhidos pelo participante (usando cache pré-carregado)
         if (participantData.products) {
           for (const productItem of participantData.products) {
-            // Buscar produto e variação para obter preços
-            const product = await prisma.product.findUnique({
-              where: { id: productItem.productId },
-              include: { variations: true },
-            });
+            const product = allProductsById.get(productItem.productId);
 
             if (product) {
-              let unitPrice = product.basePrice;
-              if (productItem.variationId) {
-                const variation = product.variations.find(
-                  (v) => v.id === productItem.variationId,
-                );
-                if (variation) {
-                  unitPrice = variation.price;
-                }
-              }
+              const ticketIncluded = ticketIdToIncludedProductIds.get(ticketItem.ticketId) ?? new Set<string>();
+              const unitPrice = this.resolveProductPrice(product, productItem.variationId, ticketIncluded);
 
               await prisma.registrationProduct.create({
                 data: {
@@ -1192,8 +1583,28 @@ export class CheckoutService {
       }
     }
 
-    // 4. Atualizar uso de cupom
+    const buyerCheckoutParticipant = dto.participants.find(
+      (p) => p.email?.toLowerCase() === buyerUser?.email?.toLowerCase(),
+    );
+    const emergency = buyerCheckoutParticipant?.emergencyPhone?.trim();
+    if (emergency) {
+      await prisma.user.update({
+        where: { id: userId },
+        data: { reservePhone: emergency },
+      });
+    }
+
+    // 4. Atualizar uso de cupom (com re-verificação dentro da transação para evitar race condition)
     if (couponResult.couponId) {
+      const freshCoupon = await prisma.coupon.findUnique({
+        where: { id: couponResult.couponId },
+        select: { usageCount: true, maxUsage: true },
+      });
+      if (freshCoupon?.maxUsage && freshCoupon.usageCount >= freshCoupon.maxUsage) {
+        throw new BadRequestException(
+          'Cupom esgotado. Prossiga sem desconto ou escolha outro cupom.',
+        );
+      }
       await prisma.coupon.update({
         where: { id: couponResult.couponId },
         data: {
@@ -1215,6 +1626,61 @@ export class CheckoutService {
     }
 
     return { registrations, order };
+    }, {
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      timeout: 30000,
+    });
+  }
+
+  /**
+   * Executa `fn` e, em caso de falha de serialização (P2034), tenta novamente
+   * até `maxRetries` vezes com backoff exponencial.
+   */
+  private async withSerializableRetry<T>(
+    fn: () => Promise<T>,
+    maxRetries = 3,
+  ): Promise<T> {
+    let attempt = 0;
+    while (true) {
+      try {
+        return await fn();
+      } catch (err: any) {
+        if (err?.code === 'P2034' && attempt < maxRetries) {
+          attempt++;
+          await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+          this.logger.warn(`Serialization failure, retrying (attempt ${attempt}/${maxRetries})…`);
+          continue;
+        }
+        if (err?.code === 'P2034') {
+          throw new BadRequestException(
+            'O pedido não pôde ser processado devido à alta concorrência. Tente novamente em instantes.',
+          );
+        }
+        throw err;
+      }
+    }
+  }
+
+  /**
+   * Expira inscrições PENDING mais antigas que `olderThanMinutes` cujo pagamento
+   * não foi confirmado. Deve ser chamado por um job periódico.
+   */
+  async expirePendingRegistrations(olderThanMinutes = 30): Promise<number> {
+    const cutoff = new Date(Date.now() - olderThanMinutes * 60 * 1000);
+    const result = await this.prisma.getWriteClient().registration.updateMany({
+      where: {
+        status: RegistrationStatus.PENDING,
+        createdAt: { lt: cutoff },
+        order: {
+          payment: {
+            status: { notIn: [PaymentStatus.PAID] },
+          },
+        },
+      },
+      data: { status: RegistrationStatus.CANCELLED },
+    });
+    this.logger.log(`Expired ${result.count} pending registrations older than ${olderThanMinutes} min`);
+    return result.count;
   }
 
   private calculateAge(birthDate: string): number {
@@ -1404,25 +1870,56 @@ export class CheckoutService {
       };
     });
 
-    // Buscar produtos inclusos nos tickets (TicketProduct) para cada ticket
-    const ticketProductsMap = new Map();
-    for (const ticketItem of dto.tickets) {
-      const ticketProducts = await prisma.ticketProduct.findMany({
-        where: { ticketId: ticketItem.ticketId },
-        include: {
-          product: {
+    // Produtos inclusos por ticket: uma consulta para todos os ticketIds do checkout
+    const ticketIdsUnique = [...new Set(dto.tickets.map((t) => t.ticketId))];
+    const allTicketProducts =
+      ticketIdsUnique.length > 0
+        ? await prisma.ticketProduct.findMany({
+            where: { ticketId: { in: ticketIdsUnique } },
+            orderBy: [{ ticketId: 'asc' }, { sortOrder: 'asc' }],
             include: {
-              variations: true,
+              product: {
+                include: {
+                  variations: true,
+                },
+              },
             },
-          },
-        },
+          })
+        : [];
+    const ticketProductsMap = new Map<string, typeof allTicketProducts>();
+    for (const row of allTicketProducts) {
+      const list = ticketProductsMap.get(row.ticketId);
+      if (list) {
+        list.push(row);
+      } else {
+        ticketProductsMap.set(row.ticketId, [row]);
+      }
+    }
+
+    const additionalProductIds = new Set<string>();
+    for (const p of dto.participants) {
+      if (p.products) {
+        for (const item of p.products) {
+          additionalProductIds.add(item.productId);
+        }
+      }
+    }
+    const additionalProductsById = new Map<
+      string,
+      { id: string; name: string; basePrice: number; variations: { id: string; name: string; price: number }[] }
+    >();
+    if (additionalProductIds.size > 0) {
+      const loaded = await prisma.product.findMany({
+        where: { id: { in: [...additionalProductIds] } },
+        include: { variations: true },
       });
-      ticketProductsMap.set(ticketItem.ticketId, ticketProducts);
+      for (const prod of loaded) {
+        additionalProductsById.set(prod.id, prod);
+      }
     }
 
     // Formatar informações dos participantes usando dados do DTO e usuários encontrados
-    const participants = await Promise.all(
-      dto.participants.map(async (dtoParticipant, index) => {
+    const participants = dto.participants.map((dtoParticipant, index) => {
         const user = participantUsers.find((u) => u.email === dtoParticipant.email);
 
         // Buscar respostas das perguntas deste participante
@@ -1437,27 +1934,30 @@ export class CheckoutService {
           };
         }) || [];
 
-        // Buscar produtos completos deste participante (produtos adicionais)
         const participantProducts = [];
         if (dtoParticipant.products) {
+          // Resolver quais produtos estão inclusos no ingresso deste participante
+          const participantTicketForPrice = (() => {
+            let tIdx = 0;
+            let pCount = 0;
+            for (let i = 0; i < dto.tickets.length; i++) {
+              if (index < pCount + dto.tickets[i].quantity) { tIdx = i; break; }
+              pCount += dto.tickets[i].quantity;
+            }
+            return dto.tickets[tIdx];
+          })();
+          const includedInParticipantTicket = new Set<string>(
+            (ticketProductsMap.get(participantTicketForPrice?.ticketId) ?? []).map((tp: any) => tp.product.id),
+          );
+
           for (const productItem of dtoParticipant.products) {
-            const product = await prisma.product.findUnique({
-              where: { id: productItem.productId },
-              include: { variations: true },
-            });
+            const product = additionalProductsById.get(productItem.productId);
 
             if (product) {
-              let productPrice = product.basePrice;
-              let variationName = null;
-              if (productItem.variationId) {
-                const variation = product.variations.find(
-                  (v) => v.id === productItem.variationId,
-                );
-                if (variation) {
-                  productPrice = variation.price;
-                  variationName = variation.name;
-                }
-              }
+              const productPrice = this.resolveProductPrice(product, productItem.variationId, includedInParticipantTicket);
+              const variationName = productItem.variationId
+                ? product.variations.find((v) => v.id === productItem.variationId)?.name ?? null
+                : null;
 
               participantProducts.push({
                 productId: product.id,
@@ -1505,8 +2005,7 @@ export class CheckoutService {
           products: participantProducts, // Produtos adicionais
           includedProducts: formattedIncludedProducts, // Produtos inclusos no ingresso
         };
-      })
-    );
+    });
 
     // Formatar informações dos produtos
     let products: any[] = [];
@@ -1528,6 +2027,10 @@ export class CheckoutService {
       });
     } else {
       // Se não houver no banco, buscar dos produtos do DTO
+      // Todos os produtos inclusos nos ingressos desta compra (união)
+      const allIncludedProductIds = new Set<string>(
+        allTicketProducts.map((tp: any) => tp.product.id),
+      );
       const allProducts: any[] = [];
       for (const participant of dto.participants) {
         if (participant.products) {
@@ -1538,15 +2041,7 @@ export class CheckoutService {
             });
 
             if (product) {
-              let productPrice = product.basePrice;
-              if (productItem.variationId) {
-                const variation = product.variations.find(
-                  (v) => v.id === productItem.variationId,
-                );
-                if (variation) {
-                  productPrice = variation.price;
-                }
-              }
+              const productPrice = this.resolveProductPrice(product, productItem.variationId, allIncludedProductIds);
 
               allProducts.push({
                 id: product.id,

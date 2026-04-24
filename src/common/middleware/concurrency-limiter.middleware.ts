@@ -2,37 +2,67 @@ import {
   Injectable,
   NestMiddleware,
   Logger,
-  OnModuleInit,
-  OnModuleDestroy,
+  Optional,
 } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
 import * as crypto from 'crypto';
+import { ConcurrencyRedisService } from '../services/concurrency-redis.service';
 
 @Injectable()
-export class ConcurrencyLimiterMiddleware
-  implements NestMiddleware, OnModuleInit, OnModuleDestroy
-{
+export class ConcurrencyLimiterMiddleware implements NestMiddleware {
   private readonly logger = new Logger(ConcurrencyLimiterMiddleware.name);
   private readonly activeRequests = new Map<string, number>();
-  private readonly maxConcurrentRequests = process.env.NODE_ENV === 'production' ? 5 : 1; // Permitir mais requisições simultâneas em produção
+  private readonly maxConcurrentRequests =
+    process.env.NODE_ENV === 'production' ? 5 : 1;
   private readonly requestTimeout = 30000;
-  private cleanupInterval: NodeJS.Timeout;
+  private readonly redisKeyTtlSeconds = 120;
 
-  onModuleInit() {
-    this.cleanupInterval = setInterval(() => {
-      this.activeRequests.clear();
-    }, 5 * 60 * 1000);
+  constructor(
+    @Optional()
+    private readonly concurrencyRedis?: ConcurrencyRedisService,
+  ) {
+    if (!concurrencyRedis) {
+      this.logger.warn(
+        'Redis not available — concurrency limiting is in-memory only. ' +
+        'Multiple server instances will NOT share rate limit state. ' +
+        'Set REDIS_URL to enable distributed rate limiting.',
+      );
+    }
   }
 
-  onModuleDestroy() {
-    clearInterval(this.cleanupInterval);
-  }
-
-  use(req: Request, res: Response, next: NextFunction) {
+  async use(req: Request, res: Response, next: NextFunction) {
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
 
     const userId = this.getUserIdentifier(req);
     if (!userId) return next();
+
+    if (this.concurrencyRedis) {
+      const slot = await this.concurrencyRedis.tryAcquireInRedis(
+        userId,
+        this.maxConcurrentRequests,
+        this.redisKeyTtlSeconds,
+      );
+      if (slot === false) {
+        return res.status(429).json({
+          statusCode: 429,
+          message: 'Too many concurrent requests. Please try again later.',
+        });
+      }
+      if (slot === true) {
+        let released = false;
+        let timeoutId: NodeJS.Timeout;
+        const release = () => {
+          if (released) return;
+          released = true;
+          clearTimeout(timeoutId);
+          void this.concurrencyRedis!.releaseInRedis(userId);
+        };
+        timeoutId = setTimeout(release, this.requestTimeout);
+        res.once('finish', release);
+        res.once('close', release);
+        return next();
+      }
+    }
 
     const currentCount = this.activeRequests.get(userId) || 0;
 
@@ -53,7 +83,7 @@ export class ConcurrencyLimiterMiddleware
       }
     }, this.requestTimeout);
 
-    res.on('finish', () => {
+    const cleanup = () => {
       clearTimeout(timeoutId);
       const newCount = (this.activeRequests.get(userId) || 1) - 1;
       if (newCount <= 0) {
@@ -61,17 +91,10 @@ export class ConcurrencyLimiterMiddleware
       } else {
         this.activeRequests.set(userId, newCount);
       }
-    });
+    };
 
-    res.on('close', () => {
-      clearTimeout(timeoutId);
-      const newCount = (this.activeRequests.get(userId) || 1) - 1;
-      if (newCount <= 0) {
-        this.activeRequests.delete(userId);
-      } else {
-        this.activeRequests.set(userId, newCount);
-      }
-    });
+    res.on('finish', cleanup);
+    res.on('close', cleanup);
 
     next();
   }

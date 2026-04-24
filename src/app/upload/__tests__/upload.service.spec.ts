@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { UploadService } from '../upload.service';
 import * as fs from 'fs/promises';
-import * as sharp from 'sharp';
+import sharp from 'sharp';
 import * as ClamScan from 'clamscan';
 import * as path from 'path';
 
@@ -40,8 +40,9 @@ describe('UploadService', () => {
       mtime: new Date('2024-01-01'),
     });
 
-    // Mock sharp
+    // Mock sharp (encodeImageBufferToWebp: rotate → resize → webp → toBuffer)
     const mockSharp = {
+      rotate: jest.fn().mockReturnThis(),
       webp: jest.fn().mockReturnThis(),
       resize: jest.fn().mockReturnThis(),
       toBuffer: jest.fn().mockResolvedValue(Buffer.from('compressed-data')),
@@ -87,7 +88,18 @@ describe('UploadService', () => {
     it('should scan for malware before processing', async () => {
       await service.compressImage(mockFile);
 
-      expect(ClamScan.createScanner).toHaveBeenCalled();
+      expect(ClamScan.createScanner).toHaveBeenCalledWith(
+        expect.objectContaining({
+          scanArchives: false,
+          scanRecursively: false,
+        }),
+      );
+    });
+
+    it('should reuse ClamAV scanner on subsequent uploads', async () => {
+      await service.compressImage(mockFile);
+      await service.compressImage(mockFile);
+      expect(ClamScan.createScanner).toHaveBeenCalledTimes(1);
     });
 
     it('should throw error if malware is detected', async () => {
@@ -115,11 +127,18 @@ describe('UploadService', () => {
       expect(fs.writeFile).toHaveBeenCalled();
     });
 
-    it('should not resize image', async () => {
+    it('should limit longest edge by default (inside fit)', async () => {
       await service.compressImage(mockFile);
 
       const mockSharpInstance = (sharp as any).mock.results[0].value;
-      expect(mockSharpInstance.resize).not.toHaveBeenCalled();
+      expect(mockSharpInstance.resize).toHaveBeenCalledWith(
+        2048,
+        2048,
+        expect.objectContaining({
+          fit: 'inside',
+          withoutEnlargement: true,
+        }),
+      );
     });
 
     it('should convert image to WebP format', async () => {
@@ -127,9 +146,8 @@ describe('UploadService', () => {
 
       const mockSharpInstance = (sharp as any).mock.results[0].value;
       expect(mockSharpInstance.webp).toHaveBeenCalledWith({
-        quality: 100,
-        effort: 6,
-        lossless: true,
+        quality: 85,
+        effort: 4,
       });
     });
   });
@@ -342,6 +360,7 @@ describe('UploadService', () => {
 
     beforeEach(() => {
       const mockSharp = {
+        rotate: jest.fn().mockReturnThis(),
         webp: jest.fn().mockReturnThis(),
         resize: jest.fn().mockReturnThis(),
         toBuffer: jest.fn().mockResolvedValue(Buffer.from('compressed')),
@@ -385,6 +404,7 @@ describe('UploadService', () => {
 
     it('should handle partial failures', async () => {
       const mockSharp = {
+        rotate: jest.fn().mockReturnThis(),
         webp: jest.fn().mockReturnThis(),
         resize: jest.fn().mockReturnThis(),
         toBuffer: jest

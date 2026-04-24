@@ -2,20 +2,24 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { OrganizerMemberAccessService } from '../organizations/organizer-member-access.service';
 import { OrganizationsService } from '../organizations/organizations.service';
 import type { OrganizerPermissionKey } from '../organizations/constants/organizer-permissions';
+import { effectivePermissionsForMember } from '../organizations/constants/organizer-permissions';
 import {
   CreateEventDto,
   UpdateEventDto,
   FilterEventsDto,
   type SearchEventsDto,
+  type SearchEventLocationsDto,
 } from './dto/create-event.dto';
 import {
   CreateEventTopicDto,
   UpdateEventTopicDto,
+  ReorderEventTopicsDto,
   CreateEventLocationDto,
 } from './dto/event-topic.dto';
 import { DashboardQueryDto, DashboardPeriod } from './dto/dashboard.dto';
@@ -27,12 +31,16 @@ import {
   PaymentStatus,
   PaymentMethod,
   Prisma,
+  PrismaClient,
 } from '@prisma/client';
 import { generateSlug, generateUniqueSlug } from '../../helpers/SlugHelper';
+import { diffEventUpdateAgainstData } from './event-audit.helpers';
 import {
-  diffEventUpdateForAudit,
-  summarizeEventFieldChanges,
-} from './event-audit.helpers';
+  UNCATEGORIZED_CATEGORY_KEY,
+  type EventKitSelectionDisplayDto,
+} from './dto/kit-selection-display.dto';
+import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
+import { TicketsService } from '../tickets/tickets.service';
 
 @Injectable()
 export class EventsService {
@@ -40,6 +48,7 @@ export class EventsService {
     private readonly prisma: PrismaService,
     private readonly organizerMemberAccess: OrganizerMemberAccessService,
     private readonly organizationsService: OrganizationsService,
+    private readonly ticketsService: TicketsService,
   ) {}
 
   /**
@@ -67,6 +76,98 @@ export class EventsService {
       throw new BadRequestException(
         `Invalid ${fieldName} format. Expected UUID.`,
       );
+    }
+  }
+
+  /**
+   * Endereço de cobrança: colunas do Order; fallback para payment.metadata.billingAddress (pedidos antigos).
+   */
+  private resolveOrderBillingAddress(
+    order: any,
+    payment?: { metadata?: unknown } | null,
+  ): {
+    country: string;
+    postalCode: string | null;
+    stateUf: string | null;
+    street: string | null;
+    number: string | null;
+    complement: string | null;
+    neighborhood: string | null;
+    city: string | null;
+  } | null {
+    if (!order) return null;
+    const hasDb =
+      order.billingCountry != null && String(order.billingCountry).trim() !== '';
+    if (hasDb) {
+      return {
+        country: String(order.billingCountry).trim(),
+        postalCode: order.billingPostalCode ?? null,
+        stateUf: order.billingStateUf ?? null,
+        street: order.billingStreet ?? null,
+        number: order.billingNumber ?? null,
+        complement: order.billingComplement ?? null,
+        neighborhood: order.billingNeighborhood ?? null,
+        city: order.billingCity ?? null,
+      };
+    }
+    let metadata: any = payment?.metadata;
+    if (typeof metadata === 'string') {
+      try {
+        metadata = JSON.parse(metadata);
+      } catch {
+        metadata = null;
+      }
+    }
+    const b = metadata?.billingAddress;
+    if (b && typeof b === 'object' && b.country) {
+      return {
+        country: String(b.country),
+        postalCode: b.postalCode ?? null,
+        stateUf: b.stateUf ?? null,
+        street: b.street ?? null,
+        number: b.number ?? null,
+        complement: b.complement ?? null,
+        neighborhood: b.neighborhood ?? null,
+        city: b.city ?? null,
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Garante que kitSelectionDisplay referencia apenas tickets/categorias/produtos do evento.
+   * Duas leituras em paralelo (ingressos + categorias).
+   */
+  private async assertKitSelectionDisplayConsistent(
+    prismaRead: ReturnType<PrismaService['getReadClient']>,
+    eventId: string,
+    payload: EventKitSelectionDisplayDto,
+  ): Promise<void> {
+    const [tickets, categories] = await Promise.all([
+      prismaRead.ticket.findMany({ where: { eventId }, select: { id: true } }),
+      prismaRead.ticketCategory.findMany({ where: { eventId }, select: { id: true } }),
+    ]);
+
+    const ticketIds = new Set(tickets.map((t) => t.id));
+    const categoryIds = new Set(categories.map((c) => c.id));
+
+    for (const tid of Object.keys(payload.primaryKitProductByTicketId)) {
+      this.validateUUID(tid, 'ticketId in primaryKitProductByTicketId');
+      if (!ticketIds.has(tid)) {
+        throw new BadRequestException(
+          `kitSelectionDisplay: ticket "${tid}" does not belong to this event`,
+        );
+      }
+    }
+
+    for (const catKey of Object.keys(payload.primaryKitProductByCategoryId)) {
+      if (catKey === UNCATEGORIZED_CATEGORY_KEY) continue;
+      this.validateUUID(catKey, 'categoryId in primaryKitProductByCategoryId');
+      if (!categoryIds.has(catKey)) {
+        throw new BadRequestException(
+          `kitSelectionDisplay: category "${catKey}" does not belong to this event`,
+        );
+      }
     }
   }
 
@@ -137,21 +238,34 @@ export class EventsService {
     createEventDto: CreateEventDto,
     clientIp?: string | null,
   ) {
-    // Verificar se o usuário é membro de uma organização - usar write client
+    // Verificar se o usuário tem permissão para criar eventos
     const prismaWrite = this.prisma.getWriteClient();
 
-    const member = await prismaWrite.organizationMember.findFirst({
-      where: {
-        userId,
-        role: 'OWNER', // Apenas OWNER pode criar eventos
-      },
-      include: {
-        organization: true,
-      },
+    const memberships = await prismaWrite.organizationMember.findMany({
+      where: { userId },
+      include: { organization: true },
     });
 
+    if (!memberships.length) {
+      throw new BadRequestException('User is not a member of any organization');
+    }
+
+    // Prefere OWNER; fallback para EMPLOYEE com create_event
+    let member = memberships.find((m) => m.role === 'OWNER') ?? null;
     if (!member) {
-      throw new BadRequestException('User is not an organizer (must be organization owner)');
+      member =
+        memberships.find((m) => {
+          if (m.role !== 'EMPLOYEE') return false;
+          const perms = effectivePermissionsForMember({
+            role: m.role,
+            permissionsJson: m.permissions,
+          });
+          return perms.create_event;
+        }) ?? null;
+    }
+
+    if (!member) {
+      throw new ForbiddenException('Missing permission: create_event');
     }
 
     // Verificar se já existe um evento com o mesmo nome, data e organização
@@ -173,10 +287,13 @@ export class EventsService {
       );
     }
 
+    const { cardImageUrl, ...createEventRest } = createEventDto;
+
     // Criar evento primeiro para ter o ID
     const event = await prismaWrite.event.create({
       data: {
-        ...createEventDto,
+        ...createEventRest,
+        logoUrl: createEventDto.logoUrl ?? cardImageUrl,
         slug: null, // Será gerado depois com o ID
         organizationId: member.organizationId,
         eventDate: new Date(createEventDto.eventDate),
@@ -238,6 +355,35 @@ export class EventsService {
       },
     });
 
+    await this.ensureDefaultDescriptionTopic(
+      prismaWrite,
+      updatedEvent.id,
+      createEventDto.description,
+    );
+
+    // Garante que o EMPLOYEE criador tenha acesso ao evento que acabou de criar,
+    // independente de restrictedToEvents ou whitelist prévia.
+    if (member.role === 'EMPLOYEE') {
+      await prismaWrite.organizationMemberEventAccess.upsert({
+        where: {
+          organizationMemberId_eventId: {
+            organizationMemberId: member.id,
+            eventId: updatedEvent.id,
+          },
+        },
+        create: {
+          organizationMemberId: member.id,
+          eventId: updatedEvent.id,
+        },
+        update: {},
+      });
+    }
+
+    const topics = await prismaWrite.eventTopic.findMany({
+      where: { eventId: updatedEvent.id },
+      orderBy: { order: 'asc' },
+    });
+
     await this.organizationsService.recordOrganizationAuditLog({
       organizationId: member.organizationId,
       actorUserId: userId,
@@ -246,16 +392,92 @@ export class EventsService {
       metadata: {
         kind: 'EVENT_CREATE',
         eventId: updatedEvent.id,
+        changes: [
+          {
+            field: 'evento',
+            old: null,
+            new: {
+              id: updatedEvent.id,
+              name: updatedEvent.name,
+              slug: updatedEvent.slug,
+              status: updatedEvent.status,
+              location: updatedEvent.location,
+              city: updatedEvent.city,
+              state: updatedEvent.state,
+              country: updatedEvent.country,
+              eventDate: updatedEvent.eventDate,
+              registrationStartDate: updatedEvent.registrationStartDate,
+              registrationEndDate: updatedEvent.registrationEndDate,
+              bannerUrl: updatedEvent.bannerUrl,
+              logoUrl: updatedEvent.logoUrl,
+            },
+          },
+        ],
       },
     });
 
     return {
       message: 'Event created successfully',
-      data: { event: updatedEvent },
+      data: { event: { ...updatedEvent, topics } },
     };
   }
 
-  async search(searchDto: SearchEventsDto) {
+  /** Garante o tópico padrão de descrição (o front pode não criar tópicos no POST do evento). */
+  private async ensureDefaultDescriptionTopic(
+    prismaWrite: ReturnType<PrismaService['getWriteClient']>,
+    eventId: string,
+    description?: string | null,
+  ) {
+    const topicData = {
+      eventId,
+      title: 'Descrição do evento',
+      content: (description ?? '').trim(),
+      isEnabled: true,
+      isDefault: true,
+      isRequired: true,
+      order: 0,
+    };
+    await prismaWrite.eventTopic.create({
+      data: topicData as Prisma.EventTopicUncheckedCreateInput,
+    });
+  }
+
+  /** Mapeamento de código de modalidade -> label armazenado em Ticket.modality */
+  private static readonly MODALITY_CODE_TO_LABEL: Record<string, string> = {
+    corrida: 'Corrida',
+    natacao: 'Natação',
+    ciclismo: 'Ciclismo',
+    triathlon: 'Triathlon',
+    outros: 'Outros',
+  };
+
+  private async findEventIdsMatchingText(q: string): Promise<string[]> {
+    const prismaRead = this.prisma.getReadClient();
+    const term = `%${q.trim()}%`;
+    const rows = await prismaRead.$queryRaw<{ id: string }[]>`
+      SELECT id FROM "Event"
+      WHERE
+        unaccent(name)        ILIKE unaccent(${term}) OR
+        unaccent(description) ILIKE unaccent(${term}) OR
+        unaccent(location)    ILIKE unaccent(${term}) OR
+        unaccent(city)        ILIKE unaccent(${term}) OR
+        unaccent(state)       ILIKE unaccent(${term})
+    `;
+    return rows.map((r) => r.id);
+  }
+
+  private buildPublicEventSearchWhere(params: {
+    q?: string;
+    country?: string;
+    state?: string;
+    city?: string;
+    startDate?: string;
+    endDate?: string;
+    status?: EventStatus;
+    includePast?: boolean;
+    modalities?: string;
+    textMatchIds?: string[];
+  }): Prisma.EventWhereInput {
     const {
       q,
       country,
@@ -265,51 +487,19 @@ export class EventsService {
       endDate,
       status,
       includePast = false,
-      page = 1,
-      limit = 20,
-    } = searchDto;
+      modalities,
+      textMatchIds,
+    } = params;
 
-    const where: any = {
+    const where: Prisma.EventWhereInput = {
       status: status || EventStatus.PUBLISHED,
     };
 
     if (q && q.trim().length > 0) {
-      const searchTerm = q.trim();
-      where.OR = [
-        {
-          name: {
-            contains: searchTerm,
-            mode: 'insensitive',
-          },
-        },
-        {
-          description: {
-            contains: searchTerm,
-            mode: 'insensitive',
-          },
-        },
-        {
-          location: {
-            contains: searchTerm,
-            mode: 'insensitive',
-          },
-        },
-        {
-          city: {
-            contains: searchTerm,
-            mode: 'insensitive',
-          },
-        },
-        {
-          state: {
-            contains: searchTerm,
-            mode: 'insensitive',
-          },
-        },
-      ];
+      // IDs pré-filtrados via unaccent no DB (accent-insensitive)
+      where.id = { in: textMatchIds ?? [] };
     }
 
-    // Filtros de localização
     if (country) {
       where.country = country;
     }
@@ -322,18 +512,96 @@ export class EventsService {
       where.city = city;
     }
 
-    // Filtro de data
     if (startDate && endDate) {
       where.eventDate = {
         gte: new Date(startDate),
         lte: new Date(endDate),
       };
     } else if (!includePast) {
-      // Por padrão, apenas eventos futuros
       where.eventDate = {
         gte: new Date(),
       };
     }
+
+    if (modalities && modalities.trim().length > 0) {
+      const codes = modalities
+        .split(',')
+        .map((c) => c.trim())
+        .filter(Boolean);
+      const labels = codes
+        .map((c) => EventsService.MODALITY_CODE_TO_LABEL[c])
+        .filter((label): label is string => label !== undefined);
+
+      if (labels.length > 0) {
+        where.tickets = {
+          some: {
+            isActive: true,
+            modality: { in: labels },
+          },
+        };
+      }
+    }
+
+    return where;
+  }
+
+  async searchLocationFacets(dto: SearchEventLocationsDto) {
+    const textMatchIds = dto.q?.trim().length
+      ? await this.findEventIdsMatchingText(dto.q)
+      : undefined;
+
+    const where = this.buildPublicEventSearchWhere({ ...dto, textMatchIds });
+
+    const prismaRead = this.prisma.getReadClient();
+    const rows = await prismaRead.event.groupBy({
+      by: ['state', 'city'],
+      where,
+      _count: { _all: true },
+    });
+
+    const byState = new Map<string, Set<string>>();
+    for (const row of rows) {
+      const s = row.state.trim();
+      const c = row.city.trim();
+      if (!s || !c) {
+        continue;
+      }
+      if (!byState.has(s)) {
+        byState.set(s, new Set());
+      }
+      byState.get(s)!.add(c);
+    }
+
+    const collator = new Intl.Collator('pt-BR');
+    const states = Array.from(byState.entries())
+      .map(([state, cities]) => ({
+        state,
+        cities: Array.from(cities).sort((a, b) => collator.compare(a, b)),
+      }))
+      .sort((a, b) => collator.compare(a.state, b.state));
+
+    const pairCount = states.reduce((n, s) => n + s.cities.length, 0);
+
+    return {
+      message: 'Location facets retrieved successfully',
+      data: {
+        states,
+        meta: {
+          stateCount: states.length,
+          pairCount,
+        },
+      },
+    };
+  }
+
+  async search(searchDto: SearchEventsDto) {
+    const { page = 1, limit = 20, ...searchFilters } = searchDto;
+
+    const textMatchIds = searchFilters.q?.trim().length
+      ? await this.findEventIdsMatchingText(searchFilters.q)
+      : undefined;
+
+    const where = this.buildPublicEventSearchWhere({ ...searchFilters, textMatchIds });
 
     // Usar read replica para performance
     const prismaRead = this.prisma.getReadClient();
@@ -365,6 +633,7 @@ export class EventsService {
               id: true,
               name: true,
               email: true,
+              logoUrl: true,
             },
           },
           _count: {
@@ -391,7 +660,7 @@ export class EventsService {
           total,
           totalPages: Math.ceil(total / limit),
         },
-        query: q || null,
+        query: searchDto.q || null,
       },
     };
   }
@@ -545,12 +814,34 @@ export class EventsService {
         where: whereFinal,
         skip: (page - 1) * limit,
         take: limit,
-        include: {
+        select: {
+          id: true,
+          organizationId: true,
+          name: true,
+          slug: true,
+          description: true,
+          bannerUrl: true,
+          logoUrl: true,
+          location: true,
+          city: true,
+          state: true,
+          country: true,
+          zipCode: true,
+          neighborhood: true,
+          googleMapsLink: true,
+          regulationUrl: true,
+          eventDate: true,
+          registrationStartDate: true,
+          registrationEndDate: true,
+          status: true,
+          createdAt: true,
+          updatedAt: true,
           organization: {
             select: {
               id: true,
               name: true,
               email: true,
+              logoUrl: true,
             },
           },
         },
@@ -628,6 +919,7 @@ export class EventsService {
 
     const orgMember =
       await this.organizerMemberAccess.getMemberForOrganizerUser(userId);
+
     const scopeWhere = this.organizerMemberAccess.buildOrganizerEventsWhere(
       orgMember,
     );
@@ -686,6 +978,7 @@ export class EventsService {
           status: true,
           createdAt: true,
           updatedAt: true,
+          kitSelectionDisplay: true,
           // Contadores úteis sem carregar relações completas
           _count: {
             select: {
@@ -702,28 +995,33 @@ export class EventsService {
       prismaRead.event.count({ where }),
     ]);
 
-    // Calcular valor total em vendas para cada evento
-    const eventsWithSales = await Promise.all(
-      events.map(async (event) => {
-        // Buscar todos os pedidos pagos deste evento
-        const totalSales = await prismaRead.order.aggregate({
-          where: {
-            eventId: event.id,
-            payment: {
-              status: 'PAID',
-            },
+    // Uma query agregada por eventId (evita N aggregates — um por evento da página)
+    const salesByEventId = new Map<string, number>();
+    if (events.length > 0) {
+      const salesRows = await prismaRead.order.groupBy({
+        by: ['eventId'],
+        where: {
+          eventId: { in: events.map((e) => e.id) },
+          payment: {
+            status: PaymentStatus.PAID,
           },
-          _sum: {
-            finalAmount: true,
-          },
-        });
+        },
+        _sum: {
+          finalAmount: true,
+        },
+      });
+      for (const row of salesRows) {
+        salesByEventId.set(
+          row.eventId,
+          this.normalizeToCents(row._sum.finalAmount),
+        );
+      }
+    }
 
-        return {
-          ...event,
-          totalSales: this.normalizeToCents(totalSales._sum.finalAmount),
-        };
-      }),
-    );
+    const eventsWithSales = events.map((event) => ({
+      ...event,
+      totalSales: salesByEventId.get(event.id) ?? 0,
+    }));
 
     return {
       message: 'Organizer events fetched successfully',
@@ -797,7 +1095,6 @@ export class EventsService {
           },
         },
         questions: {
-          where: { isRequired: true },
           orderBy: { order: 'asc' },
         },
         coupons: {
@@ -812,7 +1109,11 @@ export class EventsService {
 
     return {
       message: 'Event fetched successfully',
-      data: { event },
+      data: {
+        event: this.stripPublicEventAdsTracking(
+          event as unknown as Record<string, unknown>,
+        ),
+      },
     };
   }
 
@@ -824,11 +1125,13 @@ export class EventsService {
     // Usar read replica para query de leitura
     const prismaRead = this.prisma.getReadClient();
 
-    const event = await prismaRead.event.findUnique({
+    // Duas queries: evita o mesmo ingresso ser carregado duas vezes (raiz + por categoria),
+    // o que gerava JOIN explosivo, resposta enorme e timeout ~10s no Nginx/proxy (502).
+    const eventBase = await prismaRead.event.findUnique({
       where: { slug },
       include: {
         organization: {
-          include: {
+          include: {  
             members: {
               where: { role: 'OWNER' },
               include: {
@@ -875,55 +1178,13 @@ export class EventsService {
           },
         },
         questions: {
-          where: { isRequired: true },
           orderBy: { order: 'asc' },
         },
         coupons: {
           orderBy: { createdAt: 'desc' },
         },
         ticketCategories: {
-          include: {
-            tickets: {
-              where: { isActive: true },
-              include: {
-                batches: true,
-                products: {
-                  include: {
-                    product: true,
-                  },
-                },
-              },
-            },
-          },
           orderBy: { order: 'asc' },
-        },
-        tickets: {
-          where: { isActive: true },
-          include: {
-            batches: {
-              orderBy: { price: 'asc' },
-            },
-            products: {
-              include: {
-                product: {
-                  include: {
-                    variations: true,
-                  },
-                },
-              },
-            },
-            category: true,
-            kit: {
-              include: {
-                items: {
-                  include: {
-                    product: true,
-                  },
-                },
-              },
-            },
-          },
-          orderBy: { createdAt: 'desc' },
         },
         products: {
           include: {
@@ -936,9 +1197,68 @@ export class EventsService {
       },
     });
 
-    if (!event) {
+    if (!eventBase) {
       throw new NotFoundException('Event not found');
     }
+
+    const tickets = await prismaRead.ticket.findMany({
+      where: { eventId: eventBase.id, isActive: true },
+      include: {
+        batches: {
+          orderBy: { price: 'asc' },
+        },
+        products: {
+          orderBy: { sortOrder: 'asc' },
+          include: {
+            product: {
+              include: {
+                variations: true,
+              },
+            },
+          },
+        },
+        category: true,
+        kit: {
+          include: {
+            items: {
+              include: {
+                product: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+    });
+
+    const ticketSortCmp = (
+      a: (typeof tickets)[0],
+      b: (typeof tickets)[0],
+    ): number =>
+      a.sortOrder - b.sortOrder ||
+      a.createdAt.getTime() - b.createdAt.getTime();
+
+    const ticketCategories = eventBase.ticketCategories.map((cat) => ({
+      ...cat,
+      tickets: tickets
+        .filter((t) => t.categoryId === cat.id)
+        .sort(ticketSortCmp),
+    }));
+
+    const ticketsOrdered = [
+      ...eventBase.ticketCategories.flatMap((cat) =>
+        tickets
+          .filter((t) => t.categoryId === cat.id)
+          .sort(ticketSortCmp),
+      ),
+      ...tickets.filter((t) => !t.categoryId).sort(ticketSortCmp),
+    ];
+
+    const event = {
+      ...eventBase,
+      ticketCategories,
+      tickets: ticketsOrdered,
+    };
 
     const now = new Date();
     const eventDate = event.eventDate instanceof Date ? event.eventDate : new Date(event.eventDate);
@@ -953,10 +1273,14 @@ export class EventsService {
       );
 
 
+    const eventPublic = this.stripPublicEventAdsTracking(
+      eventToReturn as unknown as Record<string, unknown>,
+    );
+
     return {
       message: 'Event fetched successfully',
       data: {
-        event: { ...eventToReturn, hasRegistrationSlotsAvailable },
+        event: { ...eventPublic, hasRegistrationSlotsAvailable },
       },
     };
   }
@@ -1192,6 +1516,7 @@ export class EventsService {
   ) {
     this.validateUUID(id, 'event ID');
     const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
 
     const event = await prismaWrite.event.findUnique({
       where: { id },
@@ -1207,15 +1532,24 @@ export class EventsService {
       'edit_event',
     );
 
-    const { clientPage, ...patchFields } = updateEventDto;
+    const {
+      clientPage,
+      cardImageUrl,
+      kitSelectionDisplay: kitSelDto,
+      ...patchFields
+    } = updateEventDto;
     const updateData: Record<string, unknown> = { ...patchFields };
     for (const k of Object.keys(updateData)) {
       if (updateData[k] === undefined) {
         delete updateData[k];
       }
     }
-
-    const auditChanges = diffEventUpdateForAudit(event, updateEventDto);
+    if (
+      cardImageUrl !== undefined &&
+      updateEventDto.logoUrl === undefined
+    ) {
+      updateData.logoUrl = cardImageUrl;
+    }
 
     // Gerar slug se o nome ou slug foi alterado
     if (updateEventDto.name || updateEventDto.slug) {
@@ -1243,9 +1577,24 @@ export class EventsService {
       );
     }
 
+    if (kitSelDto !== undefined) {
+      if (kitSelDto === null) {
+        updateData.kitSelectionDisplay = null;
+      } else {
+        await this.assertKitSelectionDisplayConsistent(
+          prismaRead,
+          id,
+          kitSelDto,
+        );
+        updateData.kitSelectionDisplay = kitSelDto;
+      }
+    }
+
     if (Object.keys(updateData).length === 0) {
       throw new BadRequestException('No fields to update');
     }
+
+    const auditChanges = diffEventUpdateAgainstData(event, updateData);
 
     const updatedEvent = await prismaWrite.event.update({
       where: { id },
@@ -1272,24 +1621,19 @@ export class EventsService {
       },
     });
 
-    if (auditChanges.length > 0) {
-      const summary = summarizeEventFieldChanges(auditChanges);
-      await this.organizationsService.recordOrganizationAuditLog({
-        organizationId: event.organizationId,
-        actorUserId: userId,
-        ip: clientIp ?? null,
-        action: summary
-          ? `Editou o evento "${updatedEvent.name}" (${summary})`
-          : `Editou o evento "${updatedEvent.name}"`,
-        metadata: {
-          kind: 'EVENT_UPDATE',
-          eventId: id,
-          page: clientPage ?? 'event-edit',
-          fieldsEdited: auditChanges.map((c) => c.field),
-          changes: auditChanges,
-        } as Prisma.InputJsonValue,
-      });
-    }
+    await this.organizationsService.recordOrganizationAuditLog({
+      organizationId: event.organizationId,
+      actorUserId: userId,
+      ip: clientIp ?? null,
+      action: `Editou o evento "${updatedEvent.name}"`,
+      metadata: {
+        kind: 'EVENT_UPDATE',
+        eventId: id,
+        page: clientPage ?? 'event-edit',
+        fieldsEdited: auditChanges.map((c) => c.field),
+        changes: auditChanges,
+      } as Prisma.InputJsonValue,
+    });
 
     return {
       message: 'Event updated successfully',
@@ -1330,6 +1674,118 @@ export class EventsService {
 
     return {
       message: 'Event deleted successfully',
+    };
+  }
+
+  private eventToAdsTrackingPayload(row: {
+    metaPixelId: string | null;
+    googleAnalyticsId: string | null;
+    googleAdsId: string | null;
+  }) {
+    return {
+      metaPixelId: row.metaPixelId ?? '',
+      googleAnalyticsId: row.googleAnalyticsId ?? '',
+      googleAdsId: row.googleAdsId ?? '',
+    };
+  }
+
+  /** Não expor IDs de ads/analytics em GET públicos do evento (slug / por id). */
+  private stripPublicEventAdsTracking<E extends Record<string, unknown>>(event: E): E {
+    const {
+      metaPixelId: _mp,
+      googleAnalyticsId: _ga,
+      googleAdsId: _gad,
+      ...rest
+    } = event;
+    return rest as E;
+  }
+
+  async getAdsTracking(userId: string, eventId: string) {
+    this.validateUUID(eventId, 'event ID');
+    await this.organizerMemberAccess.assertCanAccessEvent(
+      userId,
+      eventId,
+      'pixel',
+    );
+
+    const prismaRead = this.prisma.getReadClient();
+    const event = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: {
+        id: true,
+        metaPixelId: true,
+        googleAnalyticsId: true,
+        googleAdsId: true,
+      },
+    });
+
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
+
+    return {
+      data: {
+        tracking: this.eventToAdsTrackingPayload(event),
+      },
+    };
+  }
+
+  async updateAdsTracking(
+    userId: string,
+    eventId: string,
+    dto: UpdateEventAdsTrackingDto,
+  ) {
+    this.validateUUID(eventId, 'event ID');
+    await this.organizerMemberAccess.assertCanAccessEvent(
+      userId,
+      eventId,
+      'pixel',
+    );
+
+    const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
+
+    const existing = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: { id: true },
+    });
+    if (!existing) {
+      throw new NotFoundException('Event not found');
+    }
+
+    const data: Prisma.EventUpdateInput = {};
+    const toDb = (s: string | undefined) =>
+      s === undefined ? undefined : s === '' ? null : s;
+
+    if (dto.metaPixelId !== undefined) {
+      data.metaPixelId = toDb(dto.metaPixelId);
+    }
+    if (dto.googleAnalyticsId !== undefined) {
+      data.googleAnalyticsId = toDb(dto.googleAnalyticsId);
+    }
+    if (dto.googleAdsId !== undefined) {
+      data.googleAdsId = toDb(dto.googleAdsId);
+    }
+
+    if (Object.keys(data).length === 0) {
+      throw new BadRequestException('No fields to update');
+    }
+
+    const updated = await prismaWrite.event.update({
+      where: { id: eventId },
+      data,
+      select: {
+        metaPixelId: true,
+        googleAnalyticsId: true,
+        googleAdsId: true,
+      },
+    });
+
+    return {
+      message: 'Event tracking updated successfully',
+      data: {
+        tracking: this.eventToAdsTrackingPayload(updated),
+      },
     };
   }
 
@@ -1383,6 +1839,59 @@ export class EventsService {
     return {
       message: 'Topic updated successfully',
       data: { topic: updatedTopic },
+    };
+  }
+
+  async reorderTopics(
+    userId: string,
+    eventId: string,
+    dto: ReorderEventTopicsDto,
+  ) {
+    this.validateUUID(eventId, 'event ID');
+    await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
+
+    const prismaWrite = this.prisma.getWriteClient();
+
+    const existing = await prismaWrite.eventTopic.findMany({
+      where: { eventId },
+      select: { id: true },
+    });
+    const existingIds = new Set(existing.map((t) => t.id));
+    const incoming = dto.topicIds;
+
+    if (incoming.length !== existingIds.size) {
+      throw new BadRequestException(
+        'topicIds must list every event topic exactly once (same length as current topics)',
+      );
+    }
+    if (new Set(incoming).size !== incoming.length) {
+      throw new BadRequestException('topicIds must not contain duplicates');
+    }
+    for (const id of incoming) {
+      if (!existingIds.has(id)) {
+        throw new BadRequestException(
+          `Topic ${id} does not belong to this event`,
+        );
+      }
+    }
+
+    await prismaWrite.$transaction(
+      incoming.map((id, order) =>
+        prismaWrite.eventTopic.update({
+          where: { id },
+          data: { order },
+        }),
+      ),
+    );
+
+    const topics = await prismaWrite.eventTopic.findMany({
+      where: { eventId },
+      orderBy: { order: 'asc' },
+    });
+
+    return {
+      message: 'Topics reordered successfully',
+      data: { topics },
     };
   }
 
@@ -1752,8 +2261,10 @@ export class EventsService {
     }
 
     // Query base para registrations
+    // Exclui registrations PENDING (placeholders de reserva ainda não pagas)
     const registrationWhere: any = {
       eventId,
+      status: { not: RegistrationStatus.PENDING },
     };
 
     // Aplicar filtro de data no order se houver
@@ -1825,26 +2336,26 @@ export class EventsService {
     // Calcular ticket médio (valores já estão em centavos)
     const averageTicket = paidRegistrations.length > 0 ? netRevenue / paidRegistrations.length : 0;
 
-    // Comparar com semana passada (para mudanças percentuais)
-    const lastWeekStart = new Date(now);
-    lastWeekStart.setDate(now.getDate() - 14);
-    const lastWeekEnd = new Date(now);
-    lastWeekEnd.setDate(now.getDate() - 7);
-
-    const lastWeekRegistrations = await prismaRead.registration.findMany({
-      where: {
-        eventId,
-        order: {
-          createdAt: {
-            gte: lastWeekStart,
-            lte: lastWeekEnd,
-          },
-          payment: {
-            status: PaymentStatus.PAID,
-          },
+    // Comparar com o período anterior equivalente (ex.: 15d atuais vs 15d imediatamente antes)
+    const { prevStart, prevEndExclusive } = this.getDashboardComparisonBounds(dateRange, now);
+    const previousWhere: any = {
+      eventId,
+      status: { not: RegistrationStatus.PENDING },
+      order: {
+        createdAt: {
+          gte: prevStart,
+          lt: prevEndExclusive,
         },
-        status: RegistrationStatus.CONFIRMED,
       },
+    };
+    if (ticketIds && ticketIds.length > 0) {
+      previousWhere.tickets = {
+        some: { ticketId: { in: ticketIds } },
+      };
+    }
+
+    const previousRegistrations = await prismaRead.registration.findMany({
+      where: previousWhere,
       include: {
         order: {
           include: {
@@ -1854,12 +2365,29 @@ export class EventsService {
       },
     });
 
-    const lastWeekRevenue = lastWeekRegistrations.reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
-    const lastWeekCount = lastWeekRegistrations.length;
-    const lastWeekAvgTicket = lastWeekCount > 0 ? lastWeekRevenue / lastWeekCount : 0;
-    const netRevenueChange = lastWeekRevenue > 0 ? ((netRevenue - lastWeekRevenue) / lastWeekRevenue) * 100 : 0;
-    const totalRegistrationsChange = lastWeekCount > 0 ? ((totalRegistrations - lastWeekCount) / lastWeekCount) * 100 : 0;
-    const averageTicketChange = lastWeekAvgTicket > 0 ? ((averageTicket - lastWeekAvgTicket) / lastWeekAvgTicket) * 100 : 0;
+    const previousPaid = previousRegistrations.filter(
+      (r) =>
+        r.order?.payment &&
+        r.order.payment.status === PaymentStatus.PAID &&
+        r.status === RegistrationStatus.CONFIRMED,
+    );
+    const previousNetRevenue = previousPaid.reduce(
+      (sum, r) => sum + this.normalizeToCents(r.order?.finalAmount),
+      0,
+    );
+    const previousTotalRegistrations = previousRegistrations.length;
+    const previousAverageTicket =
+      previousPaid.length > 0 ? previousNetRevenue / previousPaid.length : 0;
+
+    const netRevenueChange = this.percentChangeVsPrevious(netRevenue, previousNetRevenue);
+    const totalRegistrationsChange = this.percentChangeVsPrevious(
+      totalRegistrations,
+      previousTotalRegistrations,
+    );
+    const averageTicketChange = this.percentChangeVsPrevious(
+      averageTicket,
+      previousAverageTicket,
+    );
     const cancellationRate = totalRegistrations > 0 ? (cancellations / totalRegistrations) * 100 : 0;
     const cancellationsStatus = cancellationRate > 10 ? 'Crítico' : cancellationRate > 5 ? 'Atenção' : 'Normal';
     const refundRate = totalRegistrations > 0 ? (refunds / totalRegistrations) * 100 : 0;
@@ -1992,9 +2520,13 @@ export class EventsService {
       }
     }
 
-    const productIds = Array.from(salesByProduct.keys());
+    // Desduplicar productIds (o Map garante unicidade, mas defensivo contra edge cases)
+    const productIds = [...new Set(Array.from(salesByProduct.keys()).filter(Boolean))];
+
+    if (productIds.length === 0) return [];
+
     const productsWithVariations = await prismaRead.product.findMany({
-      where: { id: { in: productIds }, eventId },
+      where: { id: { in: productIds } },
       select: {
         id: true,
         name: true,
@@ -2003,7 +2535,15 @@ export class EventsService {
       },
     });
 
-    const result = productsWithVariations.map((product) => {
+    // Desduplicar por id antes de mapear (defesa contra retornos inesperados do ORM)
+    const seenProductIds = new Set<string>();
+    const uniqueProducts = productsWithVariations.filter((p) => {
+      if (seenProductIds.has(p.id)) return false;
+      seenProductIds.add(p.id);
+      return true;
+    });
+
+    const result = uniqueProducts.map((product) => {
       const sales = salesByProduct.get(product.id);
       if (!sales) return null;
       const totalSold = Array.from(sales.byVariation.values()).reduce((sum, v) => sum + v.quantitySold, 0);
@@ -2054,12 +2594,15 @@ export class EventsService {
         productId: product.id,
         productName: product.name,
         productImage: product.image ?? null,
+        totalQuantitySold: totalSold,
         totalSoldAmount: sales.totalSoldAmount,
         variations: variationRows,
       };
     });
 
-    return result.filter((r): r is NonNullable<typeof r> => r !== null);
+    return result
+      .filter((r): r is NonNullable<typeof r> => r !== null)
+      .sort((a, b) => b.totalQuantitySold - a.totalQuantitySold);
   }
 
   /**
@@ -2141,6 +2684,39 @@ export class EventsService {
   }
 
   /**
+   * Variação % vs período de referência: (atual − anterior) / anterior × 100.
+   * Quando o anterior é 0 e o atual > 0, retorna 100 (subida a partir de zero).
+   */
+  private percentChangeVsPrevious(current: number, previous: number): number {
+    if (previous === 0 && current === 0) return 0;
+    if (previous === 0) return current > 0 ? 100 : 0;
+    const raw = ((current - previous) / previous) * 100;
+    return Math.round(raw * 100) / 100;
+  }
+
+  /**
+   * Intervalo usado só para métricas de comparação (%).
+   * Com filtro de data: mesma duração do período selecionado, imediatamente antes (sem sobrepor o atual).
+   * GERAL: últimos 7 dias vs os 7 dias anteriores (receita/inscrições/ticket médio só para essa comparação).
+   */
+  private getDashboardComparisonBounds(
+    dateRange: { start: Date | null; end: Date | null },
+    now: Date,
+  ): { prevStart: Date; prevEndExclusive: Date } {
+    if (dateRange.start && dateRange.end) {
+      const durationMs = dateRange.end.getTime() - dateRange.start.getTime();
+      const prevStart = new Date(dateRange.start.getTime() - durationMs);
+      const prevEndExclusive = new Date(dateRange.start.getTime());
+      return { prevStart, prevEndExclusive };
+    }
+    const prevEndExclusive = new Date(now);
+    prevEndExclusive.setDate(prevEndExclusive.getDate() - 7);
+    const prevStart = new Date(prevEndExclusive);
+    prevStart.setDate(prevStart.getDate() - 7);
+    return { prevStart, prevEndExclusive };
+  }
+
+  /**
    * Calcula o range de datas baseado no período
    */
   private calculateDateRange(period: DashboardPeriod): { start: Date | null; end: Date | null } {
@@ -2170,111 +2746,183 @@ export class EventsService {
     }
   }
 
-  /**
-   * Constrói dados do gráfico de tendência
-   */
-  private buildChartData(registrations: any[], dateRange: { start: Date | null; end: Date | null }, period?: DashboardPeriod) {
-    // Se o período for "geral", agrupar por mês (últimos 6 meses)
-    if (period === DashboardPeriod.GERAL || !dateRange.start) {
-      return this.buildMonthlyChartData(registrations);
+  /** Chaves UTC `YYYY-MM-DD` de cada dia no intervalo [from, to] (inclusive). */
+  private eachUtcDayKeys(from: Date, to: Date): string[] {
+    const keys: string[] = [];
+    let t = Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate());
+    const endT = Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate());
+    while (t <= endT) {
+      keys.push(new Date(t).toISOString().split('T')[0]);
+      t += 24 * 60 * 60 * 1000;
+      if (keys.length > 500) break;
     }
+    return keys;
+  }
 
-    // Caso contrário, agrupar por dia
-    const dailyData = new Map<string, { revenue: number; confirmed: number; canceled: number; refunded: number }>();
-
-    registrations.forEach((reg) => {
-      const date = new Date(reg.order?.createdAt || reg.createdAt).toISOString().split('T')[0];
-      if (!dailyData.has(date)) {
-        dailyData.set(date, { revenue: 0, confirmed: 0, canceled: 0, refunded: 0 });
-      }
-
-      const dayData = dailyData.get(date)!;
-      if (reg.order?.payment?.status === PaymentStatus.PAID && reg.status === RegistrationStatus.CONFIRMED) {
-        dayData.revenue += this.normalizeToCents(reg.order?.finalAmount);
-        dayData.confirmed += 1;
-      } else if (reg.status === RegistrationStatus.CANCELLED) {
-        dayData.canceled += 1;
-      } else if (reg.order?.payment?.status === PaymentStatus.REFUNDED) {
-        dayData.refunded += 1;
-      }
-    });
-
-    const sortedDates = Array.from(dailyData.keys()).sort();
-    const labels = sortedDates.map((d) => {
-      const date = new Date(d);
-      return date.toLocaleDateString('pt-BR', { month: 'short', day: 'numeric' });
-    });
-    const revenue = sortedDates.map((d) => dailyData.get(d)!.revenue); // Valores já estão em centavos no banco
-
+  private emptyTrendBucket(): {
+    revenue: number;
+    confirmed: number;
+    canceled: number;
+    refunded: number;
+    canceledRevenue: number;
+    refundedRevenue: number;
+  } {
     return {
-      labels,
-      revenue,
-      dailyData: sortedDates.map((date) => {
-        const data = dailyData.get(date)!;
-        return {
-          date,
-          revenue: data.revenue, // Valores já estão em centavos no banco
-          confirmed: data.confirmed,
-          canceled: data.canceled,
-          refunded: data.refunded,
-        };
-      }),
+      revenue: 0,
+      confirmed: 0,
+      canceled: 0,
+      refunded: 0,
+      canceledRevenue: 0,
+      refundedRevenue: 0,
     };
   }
 
   /**
-   * Constrói dados do gráfico agrupados por mês (últimos 6 meses)
+   * Acumula uma inscrição num bucket diário/mensal (centavos + contagens).
+   * Estorno antes de cancelado antes de confirmado, para não duplicar.
+   */
+  private accumulateRegistrationIntoTrendBucket(
+    bucket: {
+      revenue: number;
+      confirmed: number;
+      canceled: number;
+      refunded: number;
+      canceledRevenue: number;
+      refundedRevenue: number;
+    },
+    reg: any,
+  ) {
+    const cents = this.normalizeToCents(reg.order?.finalAmount);
+    const payStatus = reg.order?.payment?.status;
+    if (payStatus === PaymentStatus.REFUNDED) {
+      bucket.refunded += 1;
+      bucket.refundedRevenue += cents;
+      return;
+    }
+    if (reg.status === RegistrationStatus.CANCELLED) {
+      bucket.canceled += 1;
+      bucket.canceledRevenue += cents;
+      return;
+    }
+    if (payStatus === PaymentStatus.PAID && reg.status === RegistrationStatus.CONFIRMED) {
+      bucket.revenue += cents;
+      bucket.confirmed += 1;
+    }
+  }
+
+  /**
+   * Constrói dados do gráfico de tendência (`labels`, `revenue`, `dailyData` alinhados).
+   */
+  private buildChartData(
+    registrations: any[],
+    dateRange: { start: Date | null; end: Date | null },
+    period?: DashboardPeriod,
+  ) {
+    if (period === DashboardPeriod.GERAL || !dateRange.start) {
+      return this.buildMonthlyChartData(registrations);
+    }
+    return this.buildDailyChartData(registrations, dateRange);
+  }
+
+  /**
+   * Agrupa por dia (UTC); preenche todos os dias do período para manter labels/revenue/dailyData com o mesmo tamanho.
+   */
+  private buildDailyChartData(
+    registrations: any[],
+    dateRange: { start: Date; end: Date },
+  ) {
+    const sortedDates = this.eachUtcDayKeys(dateRange.start, dateRange.end);
+    const byDay = new Map<
+      string,
+      {
+        revenue: number;
+        confirmed: number;
+        canceled: number;
+        refunded: number;
+        canceledRevenue: number;
+        refundedRevenue: number;
+      }
+    >();
+    for (const d of sortedDates) {
+      byDay.set(d, this.emptyTrendBucket());
+    }
+
+    registrations.forEach((reg) => {
+      const date = new Date(reg.order?.createdAt || reg.createdAt)
+        .toISOString()
+        .split('T')[0];
+      if (!byDay.has(date)) return;
+      this.accumulateRegistrationIntoTrendBucket(byDay.get(date)!, reg);
+    });
+
+    const labels = sortedDates.map((d) => {
+      const [y, m, day] = d.split('-').map(Number);
+      const date = new Date(Date.UTC(y, m - 1, day));
+      return date.toLocaleDateString('pt-BR', {
+        month: 'short',
+        day: 'numeric',
+        timeZone: 'UTC',
+      });
+    });
+    const revenue = sortedDates.map((d) => byDay.get(d)!.revenue);
+    const dailyData = sortedDates.map((date) => {
+      const data = byDay.get(date)!;
+      return {
+        date,
+        revenue: data.revenue,
+        confirmed: data.confirmed,
+        canceled: data.canceled,
+        refunded: data.refunded,
+        canceledRevenue: data.canceledRevenue,
+        refundedRevenue: data.refundedRevenue,
+      };
+    });
+
+    return { labels, revenue, dailyData };
+  }
+
+  /**
+   * Gráfico período "geral": últimos 6 meses calendário; mesmo contrato que o diário (`dailyData`).
    */
   private buildMonthlyChartData(registrations: any[]) {
-    // Calcular data de início (6 meses atrás)
     const endDate = new Date();
     const startDate = new Date();
     startDate.setMonth(startDate.getMonth() - 6);
-    startDate.setDate(1); // Primeiro dia do mês
+    startDate.setDate(1);
     startDate.setHours(0, 0, 0, 0);
 
-    // Agrupar por mês (YYYY-MM)
-    const monthlyData = new Map<string, { revenue: number; confirmed: number; canceled: number; refunded: number }>();
+    const monthlyData = new Map<
+      string,
+      {
+        revenue: number;
+        confirmed: number;
+        canceled: number;
+        refunded: number;
+        canceledRevenue: number;
+        refundedRevenue: number;
+      }
+    >();
 
-    // Inicializar todos os últimos 6 meses com 0
     for (let i = 5; i >= 0; i--) {
       const date = new Date();
       date.setMonth(date.getMonth() - i);
       date.setDate(1);
       const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-      monthlyData.set(monthKey, { revenue: 0, confirmed: 0, canceled: 0, refunded: 0 });
+      monthlyData.set(monthKey, this.emptyTrendBucket());
     }
 
-    // Agregar valores por mês
     registrations.forEach((reg) => {
       const regDate = new Date(reg.order?.createdAt || reg.createdAt);
-
-      // Só incluir se estiver dentro dos últimos 6 meses
-      if (regDate >= startDate && regDate <= endDate) {
-        const monthKey = `${regDate.getFullYear()}-${String(regDate.getMonth() + 1).padStart(2, '0')}`;
-
-        if (monthlyData.has(monthKey)) {
-          const monthData = monthlyData.get(monthKey)!;
-
-          if (reg.order?.payment?.status === PaymentStatus.PAID && reg.status === RegistrationStatus.CONFIRMED) {
-            monthData.revenue += this.normalizeToCents(reg.order?.finalAmount);
-            monthData.confirmed += 1;
-          } else if (reg.status === RegistrationStatus.CANCELLED) {
-            monthData.canceled += 1;
-          } else if (reg.order?.payment?.status === PaymentStatus.REFUNDED) {
-            monthData.refunded += 1;
-          }
-        }
-      }
+      if (regDate < startDate || regDate > endDate) return;
+      const monthKey = `${regDate.getFullYear()}-${String(regDate.getMonth() + 1).padStart(2, '0')}`;
+      if (!monthlyData.has(monthKey)) return;
+      this.accumulateRegistrationIntoTrendBucket(monthlyData.get(monthKey)!, reg);
     });
 
-    // Ordenar meses
     const sortedMonths = Array.from(monthlyData.keys()).sort();
-
-    // Formatar labels (nomes dos meses em português)
     const monthNames = [
       'Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun',
-      'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'
+      'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez',
     ];
 
     const labels = sortedMonths.map((monthKey) => {
@@ -2284,21 +2932,21 @@ export class EventsService {
     });
 
     const revenue = sortedMonths.map((monthKey) => monthlyData.get(monthKey)!.revenue);
+    const dailyData = sortedMonths.map((monthKey) => {
+      const data = monthlyData.get(monthKey)!;
+      return {
+        date: monthKey,
+        revenue: data.revenue,
+        confirmed: data.confirmed,
+        canceled: data.canceled,
+        refunded: data.refunded,
+        canceledRevenue: data.canceledRevenue,
+        refundedRevenue: data.refundedRevenue,
+      };
+    });
 
-    return {
-      labels,
-      revenue,
-      monthlyData: sortedMonths.map((monthKey) => {
-        const data = monthlyData.get(monthKey)!;
-        return {
-          month: monthKey,
-          revenue: data.revenue,
-          confirmed: data.confirmed,
-          canceled: data.canceled,
-          refunded: data.refunded,
-        };
-      }),
-    };
+    // `monthlyData` espelha `dailyData` (legado); o contrato do dashboard é `dailyData`.
+    return { labels, revenue, dailyData, monthlyData: dailyData };
   }
 
   /**
@@ -2422,148 +3070,153 @@ export class EventsService {
   }
 
   /**
-   * Constrói lista de lotes próximos de esgotamento
+   * Lotes do evento para o dashboard: apenas lotes **ativos** (janela start/end em relação a agora),
+   * com capacidade (>0), em ingressos ativos.
+   * Vendas por `RegistrationTicket.batchId`; vendas sem lote são alocadas FIFO nos lotes ativos do ingresso.
+   * Ordem: menor `remaining` primeiro (mais próximo do esgotamento), depois maior % vendido.
    */
-  private async buildLotsNearDepletion(prismaRead: any, eventId: string) {
-    const tickets = await prismaRead.ticket.findMany({
-      where: { eventId, isActive: true },
-      include: {
-        batches: {
-          orderBy: {
-            createdAt: 'asc', // Ordenar por data de criação para processar na ordem
-          },
-        },
-        category: true,
-        registrations: {
-          include: {
-            registration: {
-              include: {
-                order: {
-                  include: {
-                    payment: true,
-                  },
-                },
-              },
-            },
-          },
-        },
+  private async buildLotsNearDepletion(
+    prismaRead: ReturnType<PrismaService['getReadClient']>,
+    eventId: string,
+  ) {
+    const paidRegistrationWhere = {
+      status: RegistrationStatus.CONFIRMED,
+      eventId,
+      order: { payment: { status: PaymentStatus.PAID } },
+    };
+
+    const now = new Date();
+    const allBatches = await prismaRead.ticketBatch.findMany({
+      where: {
+        ticket: { eventId, isActive: true },
+        quantity: { gt: 0 },
       },
+      include: {
+        ticket: { select: { id: true, name: true } },
+      },
+      orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }],
     });
 
-    console.log('[DEBUG lotsNearDepletion] Tickets found:', tickets.length);
+    const batches = allBatches.filter((b) => {
+      if (b.startDate && new Date(b.startDate) > now) return false;
+      if (b.endDate && new Date(b.endDate) < now) return false;
+      return true;
+    });
 
-    const lots: any[] = [];
-    const now = new Date();
+    if (batches.length === 0) {
+      return [];
+    }
 
-    for (const ticket of tickets) {
-      console.log(`[DEBUG lotsNearDepletion] Processing ticket: ${ticket.name} (${ticket.id})`);
-      console.log(`[DEBUG lotsNearDepletion] Ticket batches:`, ticket.batches.length);
-      console.log(`[DEBUG lotsNearDepletion] Ticket registrations:`, ticket.registrations.length);
+    const batchIds = batches.map((b) => b.id);
 
-      // Contar vendas confirmadas e pagas do ticket
-      const soldCount = ticket.registrations.filter(
-        (rt: any) => rt.registration.order?.payment?.status === PaymentStatus.PAID && rt.registration.status === RegistrationStatus.CONFIRMED,
-      ).length;
+    const [soldByBatch, soldByTicket] = await Promise.all([
+      prismaRead.registrationTicket.groupBy({
+        by: ['batchId'],
+        where: {
+          batchId: { in: batchIds },
+          registration: paidRegistrationWhere,
+        },
+        _count: { _all: true },
+      }),
+      prismaRead.registrationTicket.groupBy({
+        by: ['ticketId'],
+        where: {
+          ticket: { eventId, isActive: true },
+          registration: paidRegistrationWhere,
+        },
+        _count: { _all: true },
+      }),
+    ]);
 
-      console.log(`[DEBUG lotsNearDepletion] Sold count:`, soldCount);
-
-      if (soldCount === 0) {
-        console.log(`[DEBUG lotsNearDepletion] Skipping ticket ${ticket.name} - no sales`);
-        continue; // Pular tickets sem vendas
-      }
-
-      // Filtrar apenas lotes ativos (sem endDate ou endDate no futuro, e com startDate no passado ou null)
-      const activeBatches = ticket.batches.filter((batch: any) => {
-        // Verificar se o lote já começou
-        if (batch.startDate && new Date(batch.startDate) > now) {
-          console.log(`[DEBUG lotsNearDepletion] Batch ${batch.id} not started yet`);
-          return false; // Lote ainda não começou
-        }
-        // Verificar se o lote ainda não terminou
-        if (batch.endDate && new Date(batch.endDate) < now) {
-          console.log(`[DEBUG lotsNearDepletion] Batch ${batch.id} already ended`);
-          return false; // Lote já terminou
-        }
-        return true;
-      });
-
-      console.log(`[DEBUG lotsNearDepletion] Active batches:`, activeBatches.length);
-
-      if (activeBatches.length === 0) {
-        console.log(`[DEBUG lotsNearDepletion] Skipping ticket ${ticket.name} - no active batches`);
-        continue;
-      }
-
-      // Calcular quantidade total disponível nos lotes ativos
-      const totalAvailable = activeBatches.reduce((sum: number, batch: any) => sum + batch.quantity, 0);
-
-      console.log(`[DEBUG lotsNearDepletion] Total available:`, totalAvailable);
-
-      if (totalAvailable === 0) {
-        console.log(`[DEBUG lotsNearDepletion] Skipping ticket ${ticket.name} - no available quantity`);
-        continue; // Pular se não há quantidade disponível
-      }
-
-      // Distribuir vendas entre os lotes ativos proporcionalmente
-      // Começamos pelos lotes mais antigos primeiro
-      let remainingSold = soldCount;
-
-      for (const batch of activeBatches) {
-        if (remainingSold <= 0) break;
-
-        // Calcular quanto deste lote foi vendido (proporcional à quantidade total)
-        const batchProportion = totalAvailable > 0 ? batch.quantity / totalAvailable : 0;
-        const estimatedSold = Math.min(
-          Math.round(soldCount * batchProportion),
-          batch.quantity,
-          remainingSold,
-        );
-
-        const remaining = Math.max(0, batch.quantity - estimatedSold);
-        const percentageSold = batch.quantity > 0 ? (estimatedSold / batch.quantity) * 100 : 0;
-
-        // Também considerar lotes com pouca quantidade restante (menos de 25 unidades)
-        const isLowStock = remaining > 0 && remaining <= 25;
-
-        let status: 'Normal' | 'Atenção' | 'Crítico';
-        if (percentageSold >= 90 || (isLowStock && percentageSold >= 50)) {
-          status = 'Crítico';
-        } else if (percentageSold >= 75 || (isLowStock && percentageSold >= 25)) {
-          status = 'Atenção';
-        } else {
-          status = 'Normal';
-        }
-
-        console.log(`[DEBUG lotsNearDepletion] Batch ${batch.id}:`, {
-          estimatedSold,
-          total: batch.quantity,
-          remaining,
-          percentageSold: Math.round(percentageSold),
-          status,
-        });
-
-        if (status !== 'Normal') {
-          lots.push({
-            lotId: batch.id,
-            ticketId: ticket.id,
-            ticketName: ticket.name,
-            name: `${ticket.name} - Lote ${batch.id.slice(0, 8)}`,
-            status,
-            sold: estimatedSold,
-            total: batch.quantity,
-            remaining,
-            percentageSold: Math.round(percentageSold),
-          });
-        }
-
-        remainingSold -= estimatedSold;
+    const soldCountByBatchId = new Map<string, number>();
+    for (const row of soldByBatch) {
+      if (row.batchId) {
+        soldCountByBatchId.set(row.batchId, row._count._all);
       }
     }
 
-    console.log('[DEBUG lotsNearDepletion] Final lots:', lots.length);
-    console.log('[DEBUG lotsNearDepletion] Final lots data:', lots);
+    const totalSoldByTicketId = new Map<string, number>();
+    for (const row of soldByTicket) {
+      totalSoldByTicketId.set(row.ticketId, row._count._all);
+    }
 
-    return lots.sort((a, b) => b.percentageSold - a.percentageSold);
+    const byTicket = new Map<string, typeof batches>();
+    for (const b of batches) {
+      const list = byTicket.get(b.ticketId) ?? [];
+      list.push(b);
+      byTicket.set(b.ticketId, list);
+    }
+
+    const effectiveSold = new Map<string, number>();
+    for (const b of batches) {
+      effectiveSold.set(b.id, soldCountByBatchId.get(b.id) ?? 0);
+    }
+
+    for (const [, ticketBatches] of byTicket) {
+      const ticketId = ticketBatches[0].ticketId;
+      const total = totalSoldByTicketId.get(ticketId) ?? 0;
+      const assigned = ticketBatches.reduce(
+        (s, bt) => s + (effectiveSold.get(bt.id) ?? 0),
+        0,
+      );
+      let orphan = total - assigned;
+      if (orphan <= 0) continue;
+
+      for (const bt of ticketBatches) {
+        if (orphan <= 0) break;
+        const cap = bt.quantity;
+        const current = effectiveSold.get(bt.id) ?? 0;
+        const room = Math.max(0, cap - current);
+        const add = Math.min(orphan, room);
+        effectiveSold.set(bt.id, current + add);
+        orphan -= add;
+      }
+    }
+
+    const lots = batches.map((batch) => {
+      const total = batch.quantity;
+      const soldRaw = effectiveSold.get(batch.id) ?? 0;
+      const sold = Math.min(soldRaw, total);
+      const remaining = Math.max(0, total - sold);
+      const percentageSold =
+        total > 0 ? Math.round((sold / total) * 10000) / 100 : 0;
+
+      const isLowStock = remaining > 0 && remaining <= 25;
+      let status: 'Normal' | 'Atenção' | 'Crítico';
+      if (
+        percentageSold >= 90 ||
+        remaining === 0 ||
+        (isLowStock && percentageSold >= 50)
+      ) {
+        status = 'Crítico';
+      } else if (percentageSold >= 75 || (isLowStock && percentageSold >= 25)) {
+        status = 'Atenção';
+      } else {
+        status = 'Normal';
+      }
+
+      return {
+        lotId: batch.id,
+        ticketId: batch.ticket.id,
+        ticketName: batch.ticket.name,
+        name: `${batch.ticket.name} - Lote ${batch.id.slice(0, 8)}`,
+        status,
+        sold,
+        total,
+        remaining,
+        percentageSold,
+      };
+    });
+
+    lots.sort((a, b) => {
+      if (a.remaining !== b.remaining) return a.remaining - b.remaining;
+      if (b.percentageSold !== a.percentageSold) {
+        return b.percentageSold - a.percentageSold;
+      }
+      return a.lotId.localeCompare(b.lotId);
+    });
+
+    return lots;
   }
 
   /**
@@ -2709,26 +3362,22 @@ export class EventsService {
     const lastWeekRevenue = lastWeekRegistrations.reduce((sum, r) => sum + this.normalizeToCents(r.order?.totalAmount), 0);
     const revenueChange = lastWeekRevenue > 0 ? ((grossRevenue - lastWeekRevenue) / lastWeekRevenue) * 100 : 0;
 
-    // Dados para gráfico de faturamento
-    const revenueChart = this.buildRevenueChart(registrations, dateRange);
-
-    // Tabela de ingressos/lotes
-    const tickets = await this.buildTicketsTable(prismaRead, eventId, page, limit);
+    // Todos os tickets do evento (ativos e inativos) no mesmo formato do endpoint de tickets
+    const tickets = await this.ticketsService.findAll(eventId, { page, limit });
 
     return {
       message: 'Financial data fetched successfully',
       data: {
         summary: {
-          availableBalance: availableBalance, // Já está normalizado em centavos
-          installmentsToReceive: installmentsToReceive, // Já está normalizado em centavos
-          awaitingRelease: awaitingRelease, // Já está normalizado em centavos
-          totalTransferred: totalTransferred, // Já está normalizado em centavos
-          refunded: refunded, // Já está normalizado em centavos
-          chargebacks: chargebacks, // Já está normalizado em centavos
-          grossRevenue: grossRevenue, // Já está normalizado em centavos
+          availableBalance,
+          installmentsToReceive,
+          awaitingRelease,
+          totalTransferred,
+          refunded,
+          chargebacks,
+          grossRevenue,
           revenueChange,
         },
-        revenueChart,
         tickets,
       },
     };
@@ -2802,43 +3451,33 @@ export class EventsService {
   private async buildTicketsTable(prismaRead: any, eventId: string, page: number, limit: number) {
     const skip = (page - 1) * limit;
 
-    // Buscar todas as registrations pagas para calcular vendas
-    const paidRegistrations = await prismaRead.registration.findMany({
+    // Count sold RegistrationTickets per batch (only CONFIRMED/COMPLETED registrations)
+    const batchSoldCounts = await prismaRead.registrationTicket.groupBy({
+      by: ['batchId'],
       where: {
-        eventId,
-        order: {
-          payment: {
-            status: PaymentStatus.PAID,
-          },
+        batchId: { not: null },
+        registration: {
+          eventId,
+          status: { in: [RegistrationStatus.CONFIRMED, RegistrationStatus.COMPLETED] },
         },
       },
-      include: {
-        order: {
-          include: {
-            payment: true,
-          },
-        },
-        tickets: {
-          include: {
-            ticket: {
-              include: {
-                category: true,
-                batches: true,
-              },
-            },
-          },
-        },
-      },
+      _count: { id: true },
     });
 
-    // Buscar categorias e tickets
+    const batchSoldMap = new Map<string, number>();
+    for (const row of batchSoldCounts) {
+      batchSoldMap.set(row.batchId, row._count.id);
+    }
+
+    // Buscar categorias e tickets com batches
     const categories = await prismaRead.ticketCategory.findMany({
       where: { eventId },
       include: {
         tickets: {
           include: {
-            batches: true,
+            batches: { orderBy: { createdAt: 'asc' } },
           },
+          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
         },
       },
       orderBy: { order: 'asc' },
@@ -2847,62 +3486,66 @@ export class EventsService {
     const items: any[] = [];
 
     for (const category of categories) {
-      // Calcular vendas da categoria
-      const categoryRegistrations = paidRegistrations.filter((reg: any) =>
-        reg.tickets.some((rt: any) => rt.ticket.categoryId === category.id),
-      );
+      let categorySold = 0;
+      let categoryRevenue = 0;
 
-      const categorySold = categoryRegistrations.length;
-      const categoryRevenue = categoryRegistrations.reduce((sum: number, reg: any) => sum + this.normalizeToCents(reg.order?.finalAmount), 0);
+      const lots = category.tickets.flatMap((ticket: any) => {
+        let ticketSold = 0;
+        let ticketRevenue = 0;
+
+        const batchRows = ticket.batches.map((batch: any) => {
+          const sold = batchSoldMap.get(batch.id) ?? 0;
+          const revenue = sold * batch.price;
+          ticketSold += sold;
+          ticketRevenue += revenue;
+          return {
+            id: batch.id,
+            name: `${ticket.name} - Lote ${batch.id.slice(0, 8)}`,
+            sold,
+            revenue,
+            createdAt: batch.createdAt.toISOString(),
+          };
+        });
+
+        categorySold += ticketSold;
+        categoryRevenue += ticketRevenue;
+
+        return batchRows;
+      });
 
       items.push({
         id: category.id,
         type: 'category' as const,
         name: category.name,
-        sold: `${categorySold}`,
+        sold: categorySold,
         revenue: categoryRevenue,
         createdAt: category.createdAt.toISOString(),
-        lots: category.tickets.flatMap((ticket: any) => {
-          const ticketRegistrations = paidRegistrations.filter((reg: any) =>
-            reg.tickets.some((rt: any) => rt.ticketId === ticket.id),
-          );
-          const ticketSold = ticketRegistrations.length;
-          const ticketRevenue = ticketRegistrations.reduce((sum: number, reg: any) => sum + this.normalizeToCents(reg.order?.finalAmount || reg.finalAmount), 0);
-
-          return ticket.batches.map((batch: any) => ({
-            id: batch.id,
-            name: `${ticket.name} - Lote ${batch.id.slice(0, 8)}`,
-            sold: `${ticketSold}-${batch.quantity}`,
-            revenue: ticketRevenue,
-            createdAt: batch.createdAt.toISOString(),
-          }));
-        }),
+        lots,
       });
     }
 
     // Buscar tickets sem categoria
     const ticketsWithoutCategory = await prismaRead.ticket.findMany({
-      where: {
-        eventId,
-        categoryId: null,
-      },
-      include: {
-        batches: true,
-      },
+      where: { eventId, categoryId: null },
+      include: { batches: { orderBy: { createdAt: 'asc' } } },
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
     });
 
     for (const ticket of ticketsWithoutCategory) {
-      const ticketRegistrations = paidRegistrations.filter((reg: any) =>
-        reg.tickets.some((rt: any) => rt.ticketId === ticket.id),
-      );
-      const ticketSold = ticketRegistrations.length;
-      const ticketRevenue = ticketRegistrations.reduce((sum: number, reg: any) => sum + this.normalizeToCents(reg.order?.finalAmount), 0);
+      let ticketSold = 0;
+      let ticketRevenue = 0;
+
+      for (const batch of ticket.batches) {
+        const sold = batchSoldMap.get(batch.id) ?? 0;
+        ticketSold += sold;
+        ticketRevenue += sold * batch.price;
+      }
 
       items.push({
         id: ticket.id,
         type: 'lot' as const,
         name: ticket.name,
-        sold: `${ticketSold}`,
+        sold: ticketSold,
         revenue: ticketRevenue,
         createdAt: ticket.createdAt.toISOString(),
       });
@@ -2919,6 +3562,241 @@ export class EventsService {
         total,
         totalPages: Math.ceil(total / limit),
       },
+    };
+  }
+
+  /** Escapa `%`, `_` e `\` para uso em ILIKE ... ESCAPE '\' */
+  private escapeIlikePattern(fragment: string): string {
+    return fragment.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+  }
+
+  /**
+   * Paginação no banco para filtro CHARGEBACK/REFUNDED por metadata (evita findMany completo + slice).
+   * Preserva a mesma ordenação e critérios do fluxo anterior em memória.
+   */
+  private async queryRegistrationIdsPageForRefundedMetadataFilter(
+    prismaRead: PrismaClient,
+    params: {
+      eventId: string;
+      targetRefundType: 'CHARGEBACK' | 'REFUND';
+      ticketIds?: string[];
+      startDate?: string;
+      endDate?: string;
+      search?: string;
+      sortBy: string;
+      sortOrder: 'asc' | 'desc';
+      skip: number;
+      limit: number;
+    },
+  ): Promise<{ ids: string[]; total: number }> {
+    const parts: Prisma.Sql[] = [
+      Prisma.sql`r."eventId" = ${params.eventId}::uuid`,
+      Prisma.sql`p.status = 'REFUNDED'`,
+    ];
+
+    if (params.targetRefundType === 'CHARGEBACK') {
+      parts.push(Prisma.sql`(p.metadata->>'refundType') = 'CHARGEBACK'`);
+    } else {
+      parts.push(
+        Prisma.sql`(NOT ((p.metadata->>'refundType') = 'CHARGEBACK') AND ((p.metadata->>'refundType') = 'REFUND' OR (p.metadata->>'refundType') IS NULL OR (p.metadata->>'refundType') = ''))`,
+      );
+    }
+
+    if (params.ticketIds && params.ticketIds.length > 0) {
+      const ticketConds = params.ticketIds.map(
+        (id) => Prisma.sql`${id}::uuid`,
+      );
+      parts.push(
+        Prisma.sql`EXISTS (SELECT 1 FROM "RegistrationTicket" rt WHERE rt."registrationId" = r.id AND rt."ticketId" IN (${Prisma.join(ticketConds)}))`,
+      );
+    }
+
+    if (params.startDate) {
+      parts.push(Prisma.sql`o."createdAt" >= ${new Date(params.startDate)}`);
+    }
+    if (params.endDate) {
+      parts.push(Prisma.sql`o."createdAt" <= ${new Date(params.endDate)}`);
+    }
+
+    const searchTrim = params.search?.trim();
+    if (searchTrim) {
+      const pat = `%${this.escapeIlikePattern(searchTrim)}%`;
+      parts.push(
+        Prisma.sql`(r.id::text ILIKE ${pat} ESCAPE '\\' OR EXISTS (SELECT 1 FROM "User" u WHERE u.id = r."userId" AND (u."firstName" ILIKE ${pat} ESCAPE '\\' OR u."lastName" ILIKE ${pat} ESCAPE '\\' OR u.email ILIKE ${pat} ESCAPE '\\' OR COALESCE(u."documentNumber", '') ILIKE ${pat} ESCAPE '\\')))`,
+      );
+    }
+
+    const whereSql = Prisma.join(parts, ' AND ');
+
+    let orderSql: Prisma.Sql;
+    const desc = params.sortOrder !== 'asc';
+    if (params.sortBy === 'amount') {
+      orderSql = desc
+        ? Prisma.sql`o."finalAmount" DESC, r.id DESC`
+        : Prisma.sql`o."finalAmount" ASC, r.id ASC`;
+    } else if (params.sortBy === 'status') {
+      orderSql = desc
+        ? Prisma.sql`r.status DESC, r.id DESC`
+        : Prisma.sql`r.status ASC, r.id ASC`;
+    } else {
+      orderSql = desc
+        ? Prisma.sql`o."createdAt" DESC NULLS LAST, r.id DESC`
+        : Prisma.sql`o."createdAt" ASC NULLS LAST, r.id ASC`;
+    }
+
+    const fromJoin = Prisma.sql`
+      FROM "Registration" r
+      INNER JOIN "Order" o ON o.id = r."orderId"
+      INNER JOIN "Payment" p ON p."orderId" = o.id
+      WHERE ${whereSql}
+    `;
+
+    const [countRows, idRows] = await Promise.all([
+      prismaRead.$queryRaw<{ c: bigint }[]>(
+        Prisma.sql`SELECT COUNT(*)::bigint AS c ${fromJoin}`,
+      ),
+      prismaRead.$queryRaw<{ id: string }[]>(
+        Prisma.sql`SELECT r.id ${fromJoin} ORDER BY ${orderSql} LIMIT ${params.limit} OFFSET ${params.skip}`,
+      ),
+    ]);
+
+    const total = Number(countRows[0]?.c ?? 0);
+    const ids = idRows.map((row) => row.id);
+    return { ids, total };
+  }
+
+  /**
+   * Métricas agregadas de inscrições do evento (sem carregar todas as linhas).
+   * collected replica a soma por inscrição (finalAmount repetido por registro no mesmo pedido).
+   */
+  private async aggregateEventRegistrationMetrics(
+    prismaRead: PrismaClient,
+    eventId: string,
+    orderCreatedBetween?: { gte: Date; lte?: Date; lt?: Date },
+  ): Promise<{
+    total: number;
+    paid: number;
+    cancelled: number;
+    collected: number;
+  }> {
+    const upperBoundSql =
+      orderCreatedBetween?.lt !== undefined
+        ? Prisma.sql`AND o."createdAt" < ${orderCreatedBetween.lt}`
+        : orderCreatedBetween?.lte !== undefined
+          ? Prisma.sql`AND o."createdAt" <= ${orderCreatedBetween.lte}`
+          : Prisma.empty;
+
+    const rows = orderCreatedBetween
+      ? await prismaRead.$queryRaw<
+          {
+            total: bigint;
+            paid: bigint;
+            cancelled: bigint;
+            collected: bigint;
+          }[]
+        >(Prisma.sql`
+          SELECT
+            COUNT(r.id)::bigint AS total,
+            COUNT(*) FILTER (
+              WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
+                AND p.status::text = 'PAID'
+            )::bigint AS paid,
+            COUNT(*) FILTER (WHERE r.status::text = 'CANCELLED')::bigint AS cancelled,
+            COALESCE(
+              SUM(o."finalAmount") FILTER (
+                WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
+                  AND p.status::text = 'PAID'
+              ),
+              0
+            )::bigint AS collected
+          FROM "Registration" r
+          INNER JOIN "Order" o ON o.id = r."orderId"
+          LEFT JOIN "Payment" p ON p."orderId" = o.id
+          WHERE r."eventId" = ${eventId}::uuid
+            AND r.status::text != 'PENDING'
+            AND o."createdAt" >= ${orderCreatedBetween.gte}
+            ${upperBoundSql}
+        `)
+      : await prismaRead.$queryRaw<
+          {
+            total: bigint;
+            paid: bigint;
+            cancelled: bigint;
+            collected: bigint;
+          }[]
+        >(Prisma.sql`
+          SELECT
+            COUNT(r.id)::bigint AS total,
+            COUNT(*) FILTER (
+              WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
+                AND p.status::text = 'PAID'
+            )::bigint AS paid,
+            COUNT(*) FILTER (WHERE r.status::text = 'CANCELLED')::bigint AS cancelled,
+            COALESCE(
+              SUM(o."finalAmount") FILTER (
+                WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
+                  AND p.status::text = 'PAID'
+              ),
+              0
+            )::bigint AS collected
+          FROM "Registration" r
+          INNER JOIN "Order" o ON o.id = r."orderId"
+          LEFT JOIN "Payment" p ON p."orderId" = o.id
+          WHERE r."eventId" = ${eventId}::uuid
+            AND r.status::text != 'PENDING'
+        `);
+
+    const row = rows[0];
+    return {
+      total: Number(row?.total ?? 0),
+      paid: Number(row?.paid ?? 0),
+      cancelled: Number(row?.cancelled ?? 0),
+      collected: Number(row?.collected ?? 0),
+    };
+  }
+
+  /**
+   * Variação percentual: últimos 7 dias vs. 7 dias anteriores (filtro por data de criação do pedido).
+   * Retorna 0% quando a semana anterior não tem base (denominador zero).
+   */
+  private async computeRegistrationWowPercentChanges(
+    prismaRead: PrismaClient,
+    eventId: string,
+    reference: Date = new Date(),
+  ): Promise<{
+    totalChange: number;
+    paidChange: number;
+    cancelledChange: number;
+    totalCollectedChange: number;
+  }> {
+    const now = reference;
+    const currentWeekStart = new Date(now);
+    currentWeekStart.setDate(now.getDate() - 7);
+    const previousWeekStart = new Date(now);
+    previousWeekStart.setDate(now.getDate() - 14);
+
+    const [thisWeek, prevWeek] = await Promise.all([
+      this.aggregateEventRegistrationMetrics(prismaRead, eventId, {
+        gte: currentWeekStart,
+        lte: now,
+      }),
+      this.aggregateEventRegistrationMetrics(prismaRead, eventId, {
+        gte: previousWeekStart,
+        lt: currentWeekStart,
+      }),
+    ]);
+
+    const pct = (cur: number, prev: number): number =>
+      prev > 0 ? ((cur - prev) / prev) * 100 : 0;
+
+    return {
+      totalChange: pct(thisWeek.total, prevWeek.total),
+      paidChange: pct(thisWeek.paid, prevWeek.paid),
+      cancelledChange: pct(thisWeek.cancelled, prevWeek.cancelled),
+      totalCollectedChange: pct(
+        this.normalizeToCents(thisWeek.collected),
+        this.normalizeToCents(prevWeek.collected),
+      ),
     };
   }
 
@@ -2946,6 +3824,7 @@ export class EventsService {
     // Construir where clause
     const where: any = {
       eventId,
+      status: { not: RegistrationStatus.PENDING },
     };
 
     // Filtro por status - suporta status de registro e status de pagamento (CHARGEBACK, REFUNDED)
@@ -2977,22 +3856,23 @@ export class EventsService {
       } else {
         // Status normal de registro (PENDING, CONFIRMED, CANCELLED, COMPLETED)
         // Garantir que o status seja um valor válido do enum
-        const validStatuses = ['PENDING', 'CONFIRMED', 'CANCELLED', 'COMPLETED'];
+        const validStatuses = ['CONFIRMED', 'CANCELLED', 'COMPLETED'];
         if (validStatuses.includes(status)) {
           where.status = status as RegistrationStatus;
 
           // Se o filtro for CANCELLED, excluir registrations com payment REFUNDED
-          // (chargeback e refund devem ser filtrados separadamente)
+          // (chargeback e refund devem ser filtrados separadamente).
+          // Usamos OR para incluir também registrations sem order ou sem payment
+          // (ex: pagamento nunca foi criado ou falhou antes de registrar).
           if (status === 'CANCELLED') {
-            // Mesclar com where.order existente (se houver de startDate/endDate)
-            if (!where.order) {
-              where.order = {};
-            }
-            where.order.payment = {
-              status: {
-                not: PaymentStatus.REFUNDED, // Excluir REFUNDED (chargeback/refund)
-              },
-            };
+            if (!where.AND) where.AND = [];
+            where.AND.push({
+              OR: [
+                { order: { is: null } },
+                { order: { payment: { is: null } } },
+                { order: { payment: { status: { not: PaymentStatus.REFUNDED } } } },
+              ],
+            });
           }
         }
       }
@@ -3103,11 +3983,28 @@ export class EventsService {
                   name: true,
                 },
               },
-              batches: {
-                orderBy: {
-                  createdAt: 'desc' as const,
-                },
-              },
+            },
+          },
+          batch: {
+            select: {
+              id: true,
+              price: true,
+            },
+          },
+        },
+      },
+      products: {
+        include: {
+          product: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+          variation: {
+            select: {
+              id: true,
+              name: true,
             },
           },
         },
@@ -3159,57 +4056,54 @@ export class EventsService {
       },
     };
 
-    if (filterByPaymentMetadata) {
-      // Buscar todos os registrations com payment REFUNDED (sem paginação ainda)
-      const allRefundedRegistrations = await prismaRead.registration.findMany({
-        where,
-        orderBy,
-        include: includeClause,
-      });
-
-      // Filtrar pelo metadata do payment
-      const filteredRegistrations = allRefundedRegistrations.filter((reg: any) => {
-        if (!reg.order?.payment?.metadata) return false;
-
-        let metadata: any = reg.order.payment.metadata;
-        if (typeof metadata === 'string') {
-          try {
-            metadata = JSON.parse(metadata);
-          } catch (e) {
-            return false;
-          }
-        }
-
-        const refundType = metadata?.refundType;
-
-        if (targetRefundType === 'CHARGEBACK') {
-          return refundType === 'CHARGEBACK';
-        } else if (targetRefundType === 'REFUND') {
-          return refundType === 'REFUND' || !refundType; // REFUND ou sem refundType
-        }
-
-        return false;
-      });
-
-      total = filteredRegistrations.length;
-      // Aplicar paginação após filtrar
-      registrations = filteredRegistrations.slice(skip, skip + limit);
+    if (filterByPaymentMetadata && targetRefundType) {
+      const { ids, total: metaTotal } =
+        await this.queryRegistrationIdsPageForRefundedMetadataFilter(
+          prismaRead,
+          {
+            eventId,
+            targetRefundType,
+            ticketIds: ticketIds && ticketIds.length > 0 ? ticketIds : undefined,
+            startDate,
+            endDate,
+            search,
+            sortBy,
+            sortOrder,
+            skip,
+            limit,
+          },
+        );
+      total = metaTotal;
+      if (ids.length === 0) {
+        registrations = [];
+      } else {
+        const unsorted = await prismaRead.registration.findMany({
+          where: { id: { in: ids } },
+          include: includeClause,
+        });
+        const orderMap = new Map(ids.map((id, i) => [id, i]));
+        registrations = [...unsorted].sort(
+          (a, b) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0),
+        );
+      }
     } else {
       // Buscar registrations e total normalmente
       // Garantir que where está limpo e correto
       const finalWhere: any = {
         eventId,
+        status: where.status ?? { not: RegistrationStatus.PENDING },
       };
 
       // Aplicar filtros apenas se existirem
-      if (where.status) {
-        finalWhere.status = where.status;
-      }
+      // (status já aplicado acima)
       if (where.tickets) {
         finalWhere.tickets = where.tickets;
       }
       if (where.OR) {
         finalWhere.OR = where.OR;
+      }
+      if (where.AND && where.AND.length > 0) {
+        finalWhere.AND = where.AND;
       }
       // where.order só deve ser incluído se tiver filtros reais (já foi verificado acima)
       if (where.order && (where.order.createdAt || where.order.payment)) {
@@ -3228,64 +4122,16 @@ export class EventsService {
       ]);
     }
 
-    // Calcular estatísticas
-    const allRegistrations = await prismaRead.registration.findMany({
-      where: { eventId },
-      include: {
-        order: {
-          include: {
-            payment: true,
-          },
-        },
-      },
-    });
+    const [stats, wowChanges] = await Promise.all([
+      this.aggregateEventRegistrationMetrics(prismaRead, eventId),
+      this.computeRegistrationWowPercentChanges(prismaRead, eventId),
+    ]);
 
-    const paid = allRegistrations.filter(
-      (r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED),
-    ).length;
-    const cancelled = allRegistrations.filter((r) => r.status === RegistrationStatus.CANCELLED).length;
-    const totalCollected = allRegistrations
-      .filter((r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED))
-      .reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
+    const paid = stats.paid;
+    const cancelled = stats.cancelled;
+    const totalCollected = this.normalizeToCents(stats.collected);
 
-    // Comparar com semana passada
-    const lastWeekStart = new Date();
-    lastWeekStart.setDate(lastWeekStart.getDate() - 14);
-    const lastWeekEnd = new Date();
-    lastWeekEnd.setDate(lastWeekEnd.getDate() - 7);
-
-    const lastWeekRegistrations = await prismaRead.registration.findMany({
-      where: {
-        eventId,
-        order: {
-          createdAt: {
-            gte: lastWeekStart,
-            lte: lastWeekEnd,
-          },
-        },
-      },
-      include: {
-        order: {
-          include: {
-            payment: true,
-          },
-        },
-      },
-    });
-
-    const lastWeekTotal = lastWeekRegistrations.length;
-    const lastWeekPaid = lastWeekRegistrations.filter(
-      (r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED),
-    ).length;
-    const lastWeekCancelled = lastWeekRegistrations.filter((r) => r.status === RegistrationStatus.CANCELLED).length;
-    const lastWeekCollected = lastWeekRegistrations
-      .filter((r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED))
-      .reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
-
-    const totalChange = lastWeekTotal > 0 ? ((allRegistrations.length - lastWeekTotal) / lastWeekTotal) * 100 : 0;
-    const paidChange = lastWeekPaid > 0 ? ((paid - lastWeekPaid) / lastWeekPaid) * 100 : 0;
-    const cancelledChange = lastWeekCancelled > 0 ? ((cancelled - lastWeekCancelled) / lastWeekCancelled) * 100 : 0;
-    const totalCollectedChange = lastWeekCollected > 0 ? ((totalCollected - lastWeekCollected) / lastWeekCollected) * 100 : 0;
+    const { totalChange, paidChange, cancelledChange, totalCollectedChange } = wowChanges;
 
     // Formatar registrations
     // Cada registration representa um participante do pedido
@@ -3317,6 +4163,7 @@ export class EventsService {
           email: reg.order.user.email,
           avatarUrl: reg.order.user.avatarUrl,
         } : null,
+        billingAddress: this.resolveOrderBillingAddress(reg.order, reg.order.payment),
         // Informações do pagamento
         payment: reg.order.payment ? (() => {
           const payment = reg.order.payment;
@@ -3380,29 +4227,45 @@ export class EventsService {
       ticket: reg.tickets && reg.tickets.length > 0 ? (() => {
         const registrationTicket = reg.tickets[0];
         const ticket = registrationTicket.ticket;
+        const snap = registrationTicket.ticketSnapshot as Record<string, any> | null;
 
-        // Calcular o valor pago pelo ticket
-        // Prioridade: 1) Preço da modality (se houver), 2) Preço do batch mais recente, 3) 0
-        // Todos os preços já estão em centavos
-        let ticketPrice = 0;
-        if (reg.modalities && reg.modalities.length > 0) {
-          // Se houver modality, usar o preço médio das modalities (já está em centavos)
-          ticketPrice = Math.round(reg.modalities.reduce((sum: number, rm: any) => sum + rm.modality.price, 0) / reg.modalities.length);
-        } else if (ticket.batches && ticket.batches.length > 0) {
-          // Se não houver modality, usar o preço do batch mais recente (já está em centavos)
-          ticketPrice = ticket.batches[0].price;
-        }
+        // Snapshot tem prioridade — preserva dados do momento da compra mesmo após edição/deleção
+        const ticketPrice = snap?.batch?.price ?? registrationTicket.batch?.price ?? 0;
+
+        // Soma dos produtos adicionados para este participante (já em centavos)
+        const productsTotal = (reg.products ?? []).reduce(
+          (sum: number, rp: any) => sum + (rp.totalPrice ?? 0),
+          0,
+        );
 
         return {
           id: ticket.id,
-          name: ticket.name,
-          category: ticket.category ? {
-            id: ticket.category.id,
-            name: ticket.category.name,
-          } : null,
+          name: snap?.name ?? ticket.name,
+          description: snap?.description ?? ticket.description ?? null,
+          modality: snap?.modality ?? ticket.modality ?? null,
+          distance: snap?.distance ?? ticket.distance ?? null,
+          distanceUnit: snap?.distanceUnit ?? ticket.distanceUnit ?? null,
+          gender: snap?.gender ?? ticket.gender ?? null,
+          ageLimitMin: snap?.ageLimitMin ?? ticket.ageLimitMin ?? null,
+          ageLimitMax: snap?.ageLimitMax ?? ticket.ageLimitMax ?? null,
+          batchId: registrationTicket.batchId ?? null,
+          batchName: snap?.batch?.name ?? null,
+          category: snap?.category ?? (ticket.category ? { id: ticket.category.id, name: ticket.category.name } : null),
+          products: snap?.products ?? [],
           price: ticketPrice,
+          productsTotal,
+          total: ticketPrice + productsTotal,
         };
       })() : null,
+      // Produtos adicionados para este participante
+      products: (reg.products ?? []).map((rp: any) => ({
+        id: rp.id,
+        product: { id: rp.product.id, name: rp.product.name },
+        variation: rp.variation ? { id: rp.variation.id, name: rp.variation.name } : null,
+        quantity: rp.quantity,
+        unitPrice: rp.unitPrice,
+        totalPrice: rp.totalPrice,
+      })),
       // Itens de kit do participante
       kitItems: reg.kitItems.map((ki: any) => ({
         id: ki.id,
@@ -3430,7 +4293,7 @@ export class EventsService {
       data: {
         registrations: formattedRegistrations,
         stats: {
-          total: allRegistrations.length,
+          total: stats.total,
           paid,
           cancelled,
           totalCollected,
@@ -3450,6 +4313,110 @@ export class EventsService {
   }
 
   /**
+   * Detalhe de um pedido do evento (organizador): valores, comprador, pagamento e endereço de cobrança.
+   */
+  async getOrderForOrganizer(userId: string, eventId: string, orderId: string) {
+    await this.verifyOrganizerAccess(userId, eventId, 'dashboard');
+    this.validateUUID(eventId, 'eventId');
+    this.validateUUID(orderId, 'orderId');
+
+    const prismaRead = this.prisma.getReadClient();
+    const order = await prismaRead.order.findFirst({
+      where: { id: orderId, eventId },
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            documentNumber: true,
+            avatarUrl: true,
+          },
+        },
+        payment: {
+          select: {
+            id: true,
+            status: true,
+            method: true,
+            amount: true,
+            paymentDate: true,
+            transactionId: true,
+            metadata: true,
+            createdAt: true,
+          },
+        },
+        registrations: {
+          select: { id: true, status: true, userId: true, createdAt: true },
+        },
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException('Pedido não encontrado para este evento');
+    }
+
+    let paymentMetadata: any = order.payment?.metadata;
+    if (typeof paymentMetadata === 'string') {
+      try {
+        paymentMetadata = JSON.parse(paymentMetadata);
+      } catch {
+        paymentMetadata = null;
+      }
+    }
+
+    return {
+      message: 'Order fetched successfully',
+      data: {
+        order: {
+          id: order.id,
+          eventId: order.eventId,
+          totalAmount: this.normalizeToCents(order.totalAmount),
+          serviceFee: this.normalizeToCents(order.serviceFee),
+          discount: this.normalizeToCents(order.discount),
+          finalAmount: this.normalizeToCents(order.finalAmount),
+          purchaseDate: order.createdAt.toISOString(),
+          updatedAt: order.updatedAt.toISOString(),
+          couponId: order.couponId,
+          voucherId: order.voucherId,
+          buyer: order.user
+            ? {
+                id: order.user.id,
+                firstName: order.user.firstName,
+                lastName: order.user.lastName,
+                fullName: `${order.user.firstName} ${order.user.lastName}`,
+                email: order.user.email,
+                phone: order.user.phone,
+                documentNumber: order.user.documentNumber,
+                avatarUrl: order.user.avatarUrl,
+              }
+            : null,
+          billingAddress: this.resolveOrderBillingAddress(order, order.payment),
+          payment: order.payment
+            ? {
+                id: order.payment.id,
+                status: order.payment.status,
+                method: order.payment.method,
+                amount: this.normalizeToCents(order.payment.amount),
+                paymentDate: order.payment.paymentDate?.toISOString() ?? null,
+                transactionId: order.payment.transactionId,
+                createdAt: order.payment.createdAt.toISOString(),
+                metadata: paymentMetadata ?? null,
+              }
+            : null,
+          registrations: order.registrations.map((r) => ({
+            id: r.id,
+            status: r.status,
+            userId: r.userId,
+            createdAt: r.createdAt.toISOString(),
+          })),
+        },
+      },
+    };
+  }
+
+  /**
    * Obtém estatísticas de inscrições (endpoint separado)
    */
   async getRegistrationStats(userId: string, eventId: string) {
@@ -3457,69 +4424,23 @@ export class EventsService {
 
     const prismaRead = this.prisma.getReadClient();
 
-    const allRegistrations = await prismaRead.registration.findMany({
-      where: { eventId },
-      include: {
-        order: {
-          include: {
-            payment: true,
-          },
-        },
-      },
-    });
-
-    const paid = allRegistrations.filter(
-      (r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED),
-    ).length;
-    const cancelled = allRegistrations.filter((r) => r.status === RegistrationStatus.CANCELLED).length;
-    const totalCollected = allRegistrations
-      .filter((r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED))
-      .reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
-
-    // Comparar com semana passada
     const now = new Date();
-    const lastWeekStart = new Date(now);
-    lastWeekStart.setDate(now.getDate() - 14);
-    const lastWeekEnd = new Date(now);
-    lastWeekEnd.setDate(now.getDate() - 7);
 
-    const lastWeekRegistrations = await prismaRead.registration.findMany({
-      where: {
-        eventId,
-        order: {
-          createdAt: {
-            gte: lastWeekStart,
-            lte: lastWeekEnd,
-          },
-        },
-      },
-      include: {
-        order: {
-          include: {
-            payment: true,
-          },
-        },
-      },
-    });
+    const [stats, wowChanges] = await Promise.all([
+      this.aggregateEventRegistrationMetrics(prismaRead, eventId),
+      this.computeRegistrationWowPercentChanges(prismaRead, eventId, now),
+    ]);
 
-    const lastWeekTotal = lastWeekRegistrations.length;
-    const lastWeekPaid = lastWeekRegistrations.filter(
-      (r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED),
-    ).length;
-    const lastWeekCancelled = lastWeekRegistrations.filter((r) => r.status === RegistrationStatus.CANCELLED).length;
-    const lastWeekCollected = lastWeekRegistrations
-      .filter((r) => r.order?.payment && r.order.payment.status === PaymentStatus.PAID && (r.status === RegistrationStatus.CONFIRMED || r.status === RegistrationStatus.COMPLETED))
-      .reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
+    const paid = stats.paid;
+    const cancelled = stats.cancelled;
+    const totalCollected = this.normalizeToCents(stats.collected);
 
-    const totalChange = lastWeekTotal > 0 ? ((allRegistrations.length - lastWeekTotal) / lastWeekTotal) * 100 : 0;
-    const paidChange = lastWeekPaid > 0 ? ((paid - lastWeekPaid) / lastWeekPaid) * 100 : 0;
-    const cancelledChange = lastWeekCancelled > 0 ? ((cancelled - lastWeekCancelled) / lastWeekCancelled) * 100 : 0;
-    const totalCollectedChange = lastWeekCollected > 0 ? ((totalCollected - lastWeekCollected) / lastWeekCollected) * 100 : 0;
+    const { totalChange, paidChange, cancelledChange, totalCollectedChange } = wowChanges;
 
     return {
       message: 'Registration stats fetched successfully',
       data: {
-        total: allRegistrations.length,
+        total: stats.total,
         paid,
         cancelled,
         totalCollected,
@@ -3831,6 +4752,7 @@ export class EventsService {
             documentNumber: order.user.documentNumber,
             avatarUrl: order.user.avatarUrl,
           } : null,
+          billingAddress: this.resolveOrderBillingAddress(order, order.payment),
           registrationsCount: order.registrations.length,
         });
 

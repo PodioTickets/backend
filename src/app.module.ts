@@ -5,10 +5,12 @@ import { UserModule } from './app/user/user.module';
 import { UserService } from './app/user/user.service';
 import { HttpCacheInterceptor } from './common/interceptors/http-cache.interceptor';
 import { ConcurrencyLimiterMiddleware } from './common/middleware/concurrency-limiter.middleware';
+import { PerformanceMonitoringMiddleware } from './common/middleware/performance-monitoring.middleware';
 import { AuthModule } from './app/auth/auth.module';
 import { ResponseCompressionInterceptor } from './common/interceptors/response-compression.interceptor';
 import { ScheduleModule } from '@nestjs/schedule';
-import { APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { ThrottlerGuard } from '@nestjs/throttler';
 import { ConfigModule } from '@nestjs/config';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { CommonModule } from './common/common.module';
@@ -28,6 +30,8 @@ import { TicketCategoriesModule } from './app/ticket-categories/ticket-categorie
 import { TicketsModule } from './app/tickets/tickets.module';
 import { ProductsModule } from './app/products/products.module';
 import { CheckoutModule } from './app/checkout/checkout.module';
+import { OrdersModule } from './app/orders/orders.module';
+import { RepasseModule } from './app/repasse/repasse.module';
 
 @Module({
   imports: [
@@ -36,31 +40,18 @@ import { CheckoutModule } from './app/checkout/checkout.module';
       envFilePath: ['.env.local', '.env'],
     }),
     EventEmitterModule.forRoot(),
-    getCacheConfig(), // Redis em produção, cache em memória em desenvolvimento
+    getCacheConfig(),
     ScheduleModule.forRoot(),
     ThrottlerModule.forRoot([
-      {
-        name: 'short',
-        ttl: 1000,
-        limit: 10, // Aumentado de 3 para 10 para não bloquear usuários legítimos
-      },
-      {
-        name: 'medium',
-        ttl: 10000,
-        limit: 50, // Aumentado de 20 para 50
-      },
-      {
-        name: 'long',
-        ttl: 60000,
-        limit: 200, // Aumentado de 100 para 200
-      },
+      { name: 'short', ttl: 1000, limit: 10 },
+      { name: 'medium', ttl: 10000, limit: 50 },
+      { name: 'long', ttl: 60000, limit: 200 },
     ]),
     UploadModule,
     UserModule,
     AuthModule,
     ConfigModule,
     CommonModule,
-    // PodioGo Modules
     EventsModule,
     OrganizersModule,
     OrganizationsModule,
@@ -75,12 +66,17 @@ import { CheckoutModule } from './app/checkout/checkout.module';
     TicketsModule,
     ProductsModule,
     CheckoutModule,
+    OrdersModule,
+    RepasseModule,
   ],
   controllers: [],
   providers: [
     UserService,
+    ConcurrencyLimiterMiddleware,
+    PerformanceMonitoringMiddleware,
     ResponseCompressionInterceptor,
     CdnService,
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_INTERCEPTOR, useClass: HttpCacheInterceptor },
     { provide: APP_INTERCEPTOR, useClass: ResponseCompressionInterceptor },
   ],
@@ -92,5 +88,7 @@ export class AppModule implements NestModule {
       .apply(ConcurrencyLimiterMiddleware)
       .exclude('/api/v1/upload', '/api/v1/upload/*')
       .forRoutes('*');
+
+    consumer.apply(PerformanceMonitoringMiddleware).forRoutes('*');
   }
 }

@@ -141,5 +141,65 @@ export class EmailService {
       throw error;
     }
   }
+
+  async sendPasswordResetLink(data: {
+    email: string;
+    firstName: string;
+    resetUrl: string;
+    accountLabel?: string;
+  }) {
+    if (!this.transporter) {
+      this.logger.warn('Email transporter not configured. Skipping password reset email.');
+      return;
+    }
+
+    const safeName = this.escapeHtml(data.firstName || 'usuário');
+    const label = data.accountLabel
+      ? this.escapeHtml(data.accountLabel)
+      : 'sua conta PodioGo';
+
+    const subject = 'Redefinição de senha — PodioGo';
+    const htmlContent = `
+      <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+          <h2>Redefinir senha</h2>
+          <p>Olá ${safeName},</p>
+          <p>Recebemos um pedido para redefinir a senha de <strong>${label}</strong>.</p>
+          <p>Se você não fez este pedido, ignore este e-mail — sua senha permanece a mesma.</p>
+          <div style="background-color: #f5f5f5; padding: 20px; border-radius: 5px; margin: 20px 0; text-align: center;">
+            <a href="${data.resetUrl}" style="display: inline-block; background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px;">
+              Redefinir senha
+            </a>
+          </div>
+          <p style="color: #666; font-size: 13px;">O link expira em breve por motivos de segurança. Se o botão não funcionar, copie e cole no navegador:</p>
+          <p style="color: #666; font-size: 12px; word-break: break-all;">${this.escapeHtml(data.resetUrl)}</p>
+          <p style="margin-top: 30px; color: #666; font-size: 12px;">
+            PodioGo — este é um e-mail automático, não responda.
+          </p>
+        </body>
+      </html>
+    `;
+
+    try {
+      await this.transporter.sendMail({
+        from: this.configService.get<string>('SMTP_FROM', 'noreply@podiogo.com'),
+        to: data.email,
+        subject,
+        html: htmlContent,
+      });
+      this.logger.log(`Password reset email sent to: ${data.email}`);
+    } catch (error) {
+      this.logger.error('Failed to send password reset email:', error);
+      throw error;
+    }
+  }
+
+  private escapeHtml(text: string): string {
+    return String(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
 }
 

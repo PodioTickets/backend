@@ -11,6 +11,12 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum OrderStatus {
+  PENDING
+  PAID
+  CANCELLED
+}
+
 enum Gender {
   MALE
   FEMALE
@@ -104,11 +110,19 @@ enum VoucherStatus {
   INACTIVE
 }
 
-/** Central de comunicação — envios por evento (painel organizador) */
+/**
+ * Central de comunicação — envios por evento (painel organizador)
+ */
 enum EventNotificationStatus {
   review
   sent
   denied
+}
+
+enum WithdrawalStatus {
+  PENDING
+  COMPLETED
+  CANCELLED
 }
 
 model User {
@@ -146,17 +160,19 @@ model User {
   updatedAt             DateTime      @updatedAt
 
   // Relations
-  registrations        Registration[]       @relation("Participant")
-  contactMessages      ContactMessage[]
-  payments             Payment[]
-  invitedRegistrations Registration[]       @relation("InvitedBy")
-  linkedUsersAsMain    LinkedUser[]         @relation("MainUser")
-  linkedUsersAsLinked  LinkedUser[]         @relation("LinkedUser")
-  organizationMembers  OrganizationMember[]
-  organizationAuditLogs OrganizationAuditLog[]
+  registrations             Registration[]             @relation("Participant")
+  contactMessages           ContactMessage[]
+  payments                  Payment[]
+  invitedRegistrations      Registration[]             @relation("InvitedBy")
+  linkedUsersAsMain         LinkedUser[]               @relation("MainUser")
+  linkedUsersAsLinked       LinkedUser[]               @relation("LinkedUser")
+  organizationMembers       OrganizationMember[]
+  organizationAuditLogs     OrganizationAuditLog[]
   organizerAuditPageDedupes OrganizerAuditPageDedupe[]
-  orders               Order[]
-  eventNotificationsCreated EventNotification[] @relation("EventNotificationCreator")
+  orders                    Order[]
+  eventNotificationsCreated EventNotification[]        @relation("EventNotificationCreator")
+  withdrawals               EventWithdrawal[]
+  eventAudits               EventAudit[]
 
   // Índices compostos para permitir mesmo email em contas diferentes
   @@unique([email, accountType])
@@ -203,10 +219,10 @@ model Organization {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  members         OrganizationMember[]
-  events          Event[]
-  contactMessages ContactMessage[]
-  auditLogs       OrganizationAuditLog[]
+  members          OrganizationMember[]
+  events           Event[]
+  contactMessages  ContactMessage[]
+  auditLogs        OrganizationAuditLog[]
   auditPageDedupes OrganizerAuditPageDedupe[]
 
   @@index([name])
@@ -221,11 +237,14 @@ model OrganizationMember {
   role           OrganizationMemberRole @default(EMPLOYEE)
   /// Permissões do painel (chaves canônicas do frontend). null = legado (tratar como acesso total).
   permissions    Json?
+  /// Quando true, o membro só acessa os eventos em eventAccesses (mesmo que a lista esteja vazia).
+  /// Quando false (padrão), lista vazia = acesso a todos os eventos da organização.
+  restrictedToEvents Boolean @default(false)
   createdAt      DateTime               @default(now())
   updatedAt      DateTime               @updatedAt
 
-  organization Organization                   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  user         User                           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization  Organization                    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user          User                            @relation(fields: [userId], references: [id], onDelete: Cascade)
   eventAccesses OrganizationMemberEventAccess[]
 
   @@unique([organizationId, userId])
@@ -236,9 +255,9 @@ model OrganizationMember {
 
 /// Whitelist de eventos por membro. Sem registros = acesso a todos os eventos da organização (política permissiva para colaboradores).
 model OrganizationMemberEventAccess {
-  id                   String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  organizationMemberId String @db.Uuid
-  eventId              String @db.Uuid
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationMemberId String   @db.Uuid
+  eventId              String   @db.Uuid
   createdAt            DateTime @default(now())
 
   member OrganizationMember @relation(fields: [organizationMemberId], references: [id], onDelete: Cascade)
@@ -300,27 +319,40 @@ model Event {
   registrationStartDate DateTime
   registrationEndDate   DateTime
   status                EventStatus @default(DRAFT)
+  /// Opções avançadas de exibição de imagens do kit na escolha de ingressos (camelCase no JSON).
+  kitSelectionDisplay   Json?       @map("kit_selection_display")
+  /// Meta Pixel (Facebook/Instagram). Não expor em rotas públicas sem decisão explícita de produto.
+  metaPixelId           String?     @map("meta_pixel_id")
+  googleAnalyticsId     String?     @map("google_analytics_id")
+  googleAdsId           String?     @map("google_ads_id")
   createdAt             DateTime    @default(now())
   updatedAt             DateTime    @updatedAt
 
-  organization     Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  topics           EventTopic[]
-  modalities       Modality[]
-  kits             Kit[]
-  registrations    Registration[]
-  orders           Order[]
-  questions        Question[]
-  locations        EventLocation[]
-  ContactMessage   ContactMessage[]
-  modalityGroups   ModalityGroup[]
-  coupons          Coupon[]
-  ticketCategories TicketCategory[]
-  tickets          Ticket[]
-  products         Product[]
+  /// Taxa cobrada pela Podio sobre cada saque do organizador (ex: 0.04 = 4%)
+  organizerFeeRate   Float       @default(0.04)
+  /// Percentual retido até a auditoria pós-evento (ex: 0.10 = 10%)
+  retentionRate      Float       @default(0.10)
+
+  organization       Organization                    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  topics             EventTopic[]
+  modalities         Modality[]
+  kits               Kit[]
+  registrations      Registration[]
+  orders             Order[]
+  questions          Question[]
+  locations          EventLocation[]
+  ContactMessage     ContactMessage[]
+  modalityGroups     ModalityGroup[]
+  coupons            Coupon[]
+  ticketCategories   TicketCategory[]
+  tickets            Ticket[]
+  products           Product[]
   // slug já tem índice automático via @unique, não precisa de índice explícito
-  vouchers         Voucher[]
+  vouchers           Voucher[]
   memberAccessGrants OrganizationMemberEventAccess[]
   eventNotifications EventNotification[]
+  withdrawals        EventWithdrawal[]
+  audit              EventAudit?
 
   @@index([status, eventDate]) // Para buscar eventos publicados futuros
   @@index([status, country, state, city]) // Para filtros de localização (status primeiro para melhor seletividade)
@@ -335,7 +367,9 @@ model EventNotification {
   messageHtml String                  @db.Text
   channels    String[]
   status      EventNotificationStatus @default(review)
-  /** Data/hora exibida na lista (v1 = criação do registro; futuro: pode atualizar ao enviar) */
+  /**
+   * Data/hora exibida na lista (v1 = criação do registro; futuro: pode atualizar ao enviar)
+   */
   occurredAt  DateTime                @default(now())
   createdById String?                 @db.Uuid
   createdAt   DateTime                @default(now())
@@ -349,15 +383,17 @@ model EventNotification {
 }
 
 model EventTopic {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  eventId   String   @db.Uuid
-  title     String
-  content   String
-  isEnabled Boolean  @default(true)
-  isDefault Boolean  @default(false) // Tópicos padrão: Descrição, Kit, Premiação, Regulamento
-  order     Int      @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId    String   @db.Uuid
+  title      String
+  content    String
+  isEnabled  Boolean  @default(true)
+  isDefault  Boolean  @default(false) // Tópicos padrão: Descrição, Kit, Premiação, Regulamento
+  /// Ex.: descrição principal obrigatória no painel (não confundir com validação de formulário).
+  isRequired Boolean  @default(false)
+  order      Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
 
@@ -481,10 +517,12 @@ model Registration {
   eventId       String             @db.Uuid
   orderId       String             @db.Uuid // Pedido ao qual esta inscrição pertence (obrigatório)
   userId        String             @db.Uuid // Usuário participante (pode ser diferente do comprador do pedido)
-  status        RegistrationStatus @default(PENDING)
-  qrCode        String? // Código/payload do QR (UUID ou código curto de 36-64 chars) - QR é gerado dinamicamente no frontend/backend
-  termsAccepted Boolean            @default(false)
-  rulesAccepted Boolean            @default(false)
+  status                RegistrationStatus @default(PENDING)
+  qrCode                String? // Código/payload do QR (UUID ou código curto de 36-64 chars) - QR é gerado dinamicamente no frontend/backend
+  termsAccepted         Boolean            @default(false)
+  rulesAccepted         Boolean            @default(false)
+  emergencyContactName  String? // Nome do contato de emergência informado no momento da compra
+  emergencyContactPhone String? // Telefone do contato de emergência informado no momento da compra
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
 
@@ -506,6 +544,7 @@ model Registration {
   // qrCode não pode ter índice devido ao tamanho (Data URL)
   @@index([eventId, status]) // Para filtrar inscrições por evento e status
   @@index([userId, createdAt]) // Para histórico ordenado do usuário
+  @@index([invitedById, createdAt]) // Lista de convidados ordenada (OR com userId)
   @@index([orderId, createdAt]) // Para ordenar inscrições por pedido
   @@index([status, createdAt]) // Para relatórios
 }
@@ -542,10 +581,13 @@ model RegistrationKitItem {
 model Question {
   id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   eventId    String   @db.Uuid
-  question   String
-  type       String   @default("text") // text, select, checkbox, radio
-  options    Json? // Para tipos select, radio, checkbox
-  isRequired Boolean  @default(false)
+  question    String
+  description String?
+  type        String   @default("text") // text, select, checkbox, radio
+  options     Json? // Para tipos select, radio, checkbox
+  appliesTo   String? // 'all' ou JSON array de ticket IDs
+  isRequired  Boolean  @default(false)
+  isActive    Boolean  @default(true)
   order      Int      @default(0)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
@@ -554,6 +596,7 @@ model Question {
   answers QuestionAnswer[]
 
   @@index([eventId])
+  @@index([eventId, isActive])
 }
 
 model QuestionAnswer {
@@ -579,21 +622,42 @@ model Order {
   serviceFee  Int // Taxa de serviço total em centavos
   discount    Int      @default(0) // Desconto total (cupom/voucher) em centavos
   finalAmount Int // Valor final a pagar em centavos
-  couponId    String?  @db.Uuid // Cupom aplicado no pedido
-  voucherId   String?  @db.Uuid // Voucher aplicado no pedido
+  couponId        String?  @db.Uuid // Cupom aplicado no pedido
+  voucherId       String?  @db.Uuid // Voucher aplicado no pedido
+  idempotencyKey  String?  @unique  // Chave de idempotência para evitar pedidos duplicados
+  /// Endereço de cobrança (checkout)
+  billingCountry       String?
+  billingPostalCode    String?
+  billingStateUf       String?
+  billingStreet        String?
+  billingNumber        String?
+  billingComplement    String?
+  billingNeighborhood  String?
+  billingCity          String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  event         Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  coupon        Coupon?        @relation(fields: [couponId], references: [id], onDelete: SetNull)
-  voucher       Voucher?       @relation(fields: [voucherId], references: [id], onDelete: SetNull)
-  payment       Payment?
-  registrations Registration[]
+  status              OrderStatus @default(PENDING)
+  expiresAt           DateTime?
+  reservedAt          DateTime?
+  cancelledAt         DateTime?
+  cancelledReason     String?
+  pendingParticipants Json?
+  pendingProducts     Json?
+
+  user            User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  event           Event                @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  coupon          Coupon?              @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  voucher         Voucher?             @relation(fields: [voucherId], references: [id], onDelete: SetNull)
+  payment         Payment?
+  registrations   Registration[]
+  reservedTickets OrderReservedTicket[]
 
   @@index([userId])
   @@index([eventId])
   @@index([createdAt])
+  @@index([eventId, createdAt]) // Janelas por data do pedido (métricas / relatórios)
+  @@index([status, expiresAt])
 }
 
 model Payment {
@@ -617,6 +681,26 @@ model Payment {
   @@index([transactionId])
   @@index([status, createdAt]) // Para relatórios de pagamento
   @@index([method, status]) // Para análise por método
+}
+
+model OrderReservedTicket {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId    String   @db.Uuid
+  ticketId   String   @db.Uuid
+  batchId    String   @db.Uuid
+  quantity   Int
+  unitPrice  Int
+  batchName  String?
+  ticketName String?
+  createdAt  DateTime @default(now())
+
+  order  Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  ticket Ticket      @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  batch  TicketBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([ticketId])
+  @@index([batchId])
 }
 
 model ContactMessage {
@@ -673,6 +757,8 @@ model Coupon {
   minQuantity   Int? // Para couponType QUANTITY
   ageRule       String? // 'MIN' ou 'MAX' para couponType AGE
   ageValue      String? // Ex: '9 anos'
+  minAge        Int? // Idade mínima em anos (restrição de faixa etária)
+  maxAge        Int? // Idade máxima em anos (restrição de faixa etária)
   status        CouponStatus       @default(ACTIVE)
   usageCount    Int                @default(0)
   createdAt     DateTime           @default(now())
@@ -719,7 +805,8 @@ model TicketCategory {
   eventId     String   @db.Uuid
   name        String
   description String?
-  order       Int      @default(0)
+  /// Ordem de exibição (0 = primeiro). Coluna no Postgres: "sortOrder" (ver migração rename).
+  order       Int      @default(0) @map("sortOrder")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -734,6 +821,8 @@ model Ticket {
   id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   eventId      String   @db.Uuid
   categoryId   String?  @db.Uuid
+  /// Ordem de exibição dentro do mesmo evento e mesma categoria (ou entre sem categoria: categoryId null).
+  sortOrder    Int      @default(0)
   name         String
   description  String?
   modality     String // Valor do template selecionado (ex: 'Corrida de rua')
@@ -748,32 +837,41 @@ model Ticket {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  event         Event                @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  category      TicketCategory?      @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  kit           Kit?                 @relation(fields: [kitId], references: [id], onDelete: SetNull)
-  batches       TicketBatch[]
-  products      TicketProduct[]
-  registrations RegistrationTicket[]
+  event           Event                @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  category        TicketCategory?      @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  kit             Kit?                 @relation(fields: [kitId], references: [id], onDelete: SetNull)
+  batches         TicketBatch[]
+  products        TicketProduct[]
+  registrations   RegistrationTicket[]
+  reservedTickets OrderReservedTicket[]
 
   @@index([eventId])
   @@index([categoryId])
   @@index([eventId, isActive])
+  @@index([eventId, categoryId, sortOrder])
 }
 
 model TicketBatch {
-  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  ticketId  String    @db.Uuid
-  quantity  Int
-  price     Int // Preço em centavos
-  startDate DateTime?
-  endDate   DateTime?
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticketId          String    @db.Uuid
+  quantity          Int
+  availableQuantity Int
+  price             Int // Preço em centavos
+  startDate         DateTime?
+  endDate           DateTime?
+  /// Ordem sequencial dentro do ticket (0 = primeiro lote).
+  sortOrder         Int       @default(0)
+  /// BY_TIME → ativa quando startDate é atingida. AFTER_PREVIOUS_SOLD_OUT → ativa quando o lote anterior vender tudo.
+  triggerType       String    @default("BY_TIME")
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
-  ticket         Ticket               @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  registrations  RegistrationTicket[]
+  ticket          Ticket               @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  registrations   RegistrationTicket[]
+  reservedBatches OrderReservedTicket[]
 
   @@index([ticketId])
+  @@index([ticketId, sortOrder])
   @@index([ticketId, startDate, endDate])
 }
 
@@ -782,10 +880,16 @@ model Product {
   eventId            String   @db.Uuid
   name               String
   image              String?
+  images             String[]
+  primaryImageIndex  Int      @default(0)
   isIncludedInTicket Boolean  @default(false)
   basePrice          Int      @default(0) // Preço base em centavos
   isRequired         Boolean  @default(false)
   variationType      String? // Tipo/nome da variação (ex: "Tamanhos", "Cores")
+  /// Comprador pode alterar a variação escolhida após a compra, dentro da janela em dias antes do evento.
+  buyerVariationEditAllowed Boolean @default(false)
+  /// Dias corridos antes da data do evento até quando a alteração de variação é permitida; 0 quando não permitido.
+  variationEditDeadlineDays Int     @default(0)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
@@ -814,16 +918,19 @@ model ProductVariation {
 }
 
 model TicketProduct {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  ticketId  String   @db.Uuid
-  productId String   @db.Uuid
-  createdAt DateTime @default(now())
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticketId   String   @db.Uuid
+  productId  String   @db.Uuid
+  /// Ordem de exibição por ingresso (0 = primeiro). Mesmo produto em tickets diferentes tem ordens independentes.
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
 
   ticket  Ticket  @relation(fields: [ticketId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@unique([ticketId, productId])
   @@index([ticketId])
+  @@index([ticketId, sortOrder])
   @@index([productId])
 }
 
@@ -832,6 +939,8 @@ model RegistrationTicket {
   registrationId String   @db.Uuid
   ticketId       String   @db.Uuid
   batchId        String?  @db.Uuid
+  // Snapshot completo do ingresso no momento da compra (preservado mesmo após edições/deleção)
+  ticketSnapshot Json?
   createdAt      DateTime @default(now())
 
   registration Registration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
@@ -861,4 +970,45 @@ model RegistrationProduct {
   @@index([registrationId])
   @@index([productId])
   @@index([variationId])
+}
+
+// ─── Repasse / Saque ────────────────────────────────────────────────────────
+
+model EventWithdrawal {
+  id            String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId       String           @db.Uuid
+  requestedById String           @db.Uuid
+  /// Valor bruto solicitado pelo organizador (centavos)
+  amount        Int
+  /// Snapshot da taxa Podio no momento do saque (ex: 0.04)
+  feeRate       Float
+  /// Valor da taxa Podio (centavos)
+  feeAmount     Int
+  /// Valor líquido recebido pelo organizador (centavos)
+  netAmount     Int
+  status        WithdrawalStatus @default(PENDING)
+  notes         String?
+  completedAt   DateTime?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  event       Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  requestedBy User  @relation(fields: [requestedById], references: [id], onDelete: Cascade)
+
+  @@index([eventId])
+  @@index([eventId, status])
+  @@index([eventId, createdAt])
+}
+
+model EventAudit {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId           String   @unique @db.Uuid
+  auditedById       String   @db.Uuid
+  /// Valor dos 10% (ou última parcela) liberados pela auditoria (centavos)
+  retentionReleased Int
+  notes             String?
+  createdAt         DateTime @default(now())
+
+  event     Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  auditedBy User  @relation(fields: [auditedById], references: [id], onDelete: Cascade)
 }

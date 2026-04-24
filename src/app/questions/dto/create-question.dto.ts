@@ -7,6 +7,10 @@ export class CreateQuestionDto {
 
   @IsOptional()
   @IsString()
+  description?: string;
+
+  @IsOptional()
+  @IsString()
   type?: string; // text, select, checkbox, radio
 
   @IsOptional()
@@ -22,12 +26,19 @@ export class CreateQuestionDto {
   @Min(0)
   @Type(() => Number)
   order?: number;
+
+  @IsOptional()
+  appliesTo?: string | string[];
 }
 
 export class UpdateQuestionDto {
   @IsOptional()
   @IsString()
   question?: string;
+
+  @IsOptional()
+  @IsString()
+  description?: string;
 
   @IsOptional()
   @IsString()
@@ -46,5 +57,8 @@ export class UpdateQuestionDto {
   @Min(0)
   @Type(() => Number)
   order?: number;
+
+  @IsOptional()
+  appliesTo?: string | string[];
 }
 

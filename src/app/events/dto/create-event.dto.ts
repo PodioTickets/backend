@@ -9,9 +9,12 @@ import {
   Max,
   IsUrl,
   ValidateNested,
+  ValidateIf,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import { EventStatus } from '@prisma/client';
+import { EventKitSelectionDisplayDto } from './kit-selection-display.dto';
 
 export class CreateEventDto {
   @IsString()
@@ -26,7 +29,17 @@ export class CreateEventDto {
   description?: string;
 
   @IsOptional()
+  @IsString()
   bannerUrl?: string;
+
+  @IsOptional()
+  @IsString()
+  logoUrl?: string;
+
+  /** Alias do painel para `logoUrl` (imagem do card / marca do evento). */
+  @IsOptional()
+  @IsString()
+  cardImageUrl?: string;
 
   @IsString()
   location: string;
@@ -80,7 +93,17 @@ export class UpdateEventDto {
   description?: string;
 
   @IsOptional()
+  @IsString()
   bannerUrl?: string;
+
+  @IsOptional()
+  @IsString()
+  logoUrl?: string;
+
+  /** Alias do painel para `logoUrl` (imagem do card / marca do evento). */
+  @IsOptional()
+  @IsString()
+  cardImageUrl?: string;
 
   @IsOptional()
   @IsString()
@@ -134,6 +157,14 @@ export class UpdateEventDto {
   @IsOptional()
   @IsString()
   clientPage?: string;
+
+  /** Exibição de imagens do kit na escolha de ingressos. `null` remove a configuração (cliente usa defaults). */
+  @ApiPropertyOptional({ type: EventKitSelectionDisplayDto, nullable: true })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null && v !== undefined)
+  @ValidateNested()
+  @Type(() => EventKitSelectionDisplayDto)
+  kitSelectionDisplay?: EventKitSelectionDisplayDto | null;
 }
 
 export class FilterEventsDto {
@@ -251,4 +282,36 @@ export class SearchEventsDto {
   @Max(100)
   @Type(() => Number)
   limit?: number = 20;
+
+  @IsOptional()
+  @IsString()
+  modalities?: string; // CSV de códigos de modalidade (ex: "corrida,natacao")
+}
+
+/** Mesmos filtros opcionais de {@link SearchEventsDto}, exceto paginação e filtro por estado/cidade (facetas cobrem todos os pares). */
+export class SearchEventLocationsDto {
+  @IsOptional()
+  @IsString()
+  q?: string;
+
+  @IsOptional()
+  @IsString()
+  country?: string;
+
+  @IsOptional()
+  @IsDateString()
+  startDate?: string;
+
+  @IsOptional()
+  @IsDateString()
+  endDate?: string;
+
+  @IsOptional()
+  @IsEnum(EventStatus)
+  status?: EventStatus;
+
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  includePast?: boolean;
 }

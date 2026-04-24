@@ -1,6 +1,7 @@
 export const ORGANIZER_PERMISSION_KEYS = [
   'dashboard',
   'financial',
+  'create_event',
   'edit_event',
   'view_event',
   'coupons',
@@ -39,6 +40,7 @@ export function mapFromPermissionKeys(keys: string[]): OrganizerPermissionsMap {
   const out: OrganizerPermissionsMap = {
     dashboard: false,
     financial: false,
+    create_event: false,
     edit_event: false,
     view_event: false,
     coupons: false,
@@ -72,6 +74,7 @@ export function grantedPermissionKeys(map: OrganizerPermissionsMap): OrganizerPe
 export const FULL_ORGANIZER_PERMISSIONS: OrganizerPermissionsMap = {
   dashboard: true,
   financial: true,
+  create_event: true,
   edit_event: true,
   view_event: true,
   coupons: true,
@@ -84,6 +87,7 @@ export const DEFAULT_NEW_MEMBER_PERMISSIONS: OrganizerPermissionsMap = {
   dashboard: true,
   view_event: true,
   financial: false,
+  create_event: false,
   edit_event: false,
   coupons: false,
   pixel: false,
@@ -130,5 +134,19 @@ export function effectivePermissionsForMember(params: {
   if (parsed === null) {
     return { ...FULL_ORGANIZER_PERMISSIONS };
   }
+
+  // create_event → acesso equivalente a OWNER em tudo
+  if (parsed.create_event) {
+    return { ...FULL_ORGANIZER_PERMISSIONS };
+  }
+
+  // dashboard → derivado: qualquer outra permissão ativa garante acesso ao dashboard
+  const hasAnyPermission = ORGANIZER_PERMISSION_KEYS
+    .filter((k) => k !== 'dashboard')
+    .some((k) => parsed[k]);
+  if (hasAnyPermission) {
+    parsed.dashboard = true;
+  }
+
   return parsed;
 }

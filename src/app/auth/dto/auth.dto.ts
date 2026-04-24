@@ -139,7 +139,10 @@ export class ForgotPasswordDto {
 }
 
 export class ResetPasswordDto {
-  @ApiProperty({ description: 'Reset token' })
+  @ApiProperty({
+    description:
+      'Token opaco do link (?token=...) ou JWT retornado por verify-reset-code (legado)',
+  })
   @IsString()
   @IsNotEmpty()
   token: string;

@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx jest:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npx prisma:*)",
+      "Bash(grep -l \"TicketBatch\\\\|OrderReserved\" /c/Users/muril/Projects/PodioTickets/server/prisma/migrations/*/migration.sql)",
+      "Bash(claude mcp *)",
+      "mcp__obsidian__list-available-vaults",
+      "mcp__obsidian__read-note",
+      "Skill(update-config)",
+      "Bash(claude skills *)",
+      "Bash(mkdir -p /c/Users/muril/.claude/commands)",
+      "Bash(cp /c/Users/muril/.claude/skills/compress.md /c/Users/muril/.claude/skills/resume.md /c/Users/muril/.claude/skills/preserve.md /c/Users/muril/.claude/skills/daily-note.md /c/Users/muril/.claude/skills/meeting-note.md /c/Users/muril/.claude/skills/inbox-process.md /c/Users/muril/.claude/skills/weekly-review.md /c/Users/muril/.claude/commands/)",
+      "Read(//c/Users/muril/.claude/**)",
+      "mcp__obsidian__*",
+      "Bash(xargs grep *)"
+    ]
+  }
+}

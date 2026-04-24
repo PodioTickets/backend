@@ -78,6 +78,47 @@ export class OrganizersService {
     };
   }
 
+  async findMyOrganizations(userId: string) {
+    const prismaRead = this.prisma.getReadClient();
+
+    const memberships = await prismaRead.organizationMember.findMany({
+      where: { userId },
+      include: {
+        organization: {
+          include: {
+            _count: {
+              select: {
+                members: true,
+                events: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const organizations = memberships.map((m) => ({
+      id: m.organization.id,
+      name: m.organization.name,
+      description: m.organization.description,
+      logoUrl: m.organization.logoUrl,
+      email: m.organization.email,
+      phone: m.organization.phone,
+      city: m.organization.city,
+      state: m.organization.state,
+      role: m.role,
+      joinedAt: m.createdAt,
+      membersCount: m.organization._count.members,
+      eventsCount: m.organization._count.events,
+    }));
+
+    return {
+      message: 'Organizations fetched successfully',
+      data: { organizations },
+    };
+  }
+
   async findOne(userId: string) {
     const prismaRead = this.prisma.getReadClient();
     

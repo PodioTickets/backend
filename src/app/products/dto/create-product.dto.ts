@@ -6,8 +6,11 @@ import {
   IsArray,
   ValidateNested,
   Min,
+  Max,
   MaxLength,
   ArrayMinSize,
+  ArrayMaxSize,
+  IsInt,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -53,10 +56,32 @@ export class CreateProductDto {
   @IsOptional()
   @IsString()
   @ApiPropertyOptional({
-    description: 'Product image URL',
+    description: 'Imagem principal (backward-compat). Equivalente a images[primaryImageIndex].',
     example: '/uploads/images/product.jpg',
   })
-  image?: string;
+  image?: string | null;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(7)
+  @IsString({ each: true })
+  @ApiPropertyOptional({
+    description: 'Array de até 5 fotos (data URL ou URL pública). Omitido quando vazio.',
+    type: [String],
+  })
+  images?: string[];
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(4)
+  @Type(() => Number)
+  @ApiPropertyOptional({
+    description: 'Índice (0-based) da imagem principal dentro de images. Omitido quando há apenas 1 foto.',
+    minimum: 0,
+    maximum: 4,
+  })
+  primaryImageIndex?: number;
 
   @IsOptional()
   @IsBoolean()
@@ -101,6 +126,28 @@ export class CreateProductDto {
     type: [ProductVariationDto],
   })
   variations: ProductVariationDto[];
+
+  @IsOptional()
+  @IsBoolean()
+  @ApiPropertyOptional({
+    description:
+      'If true, the participant may change the chosen variation after purchase within variationEditDeadlineDays before the event.',
+    default: false,
+  })
+  buyerVariationEditAllowed?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(9999)
+  @ApiPropertyOptional({
+    description:
+      'Calendar days before the event until variation change is allowed. Ignored (stored as 0) when buyerVariationEditAllowed is false; default 30 when allowed and omitted.',
+    minimum: 0,
+    maximum: 9999,
+  })
+  @Type(() => Number)
+  variationEditDeadlineDays?: number;
 }
 
 export class UpdateProductDto {
@@ -111,7 +158,20 @@ export class UpdateProductDto {
 
   @IsOptional()
   @IsString()
-  image?: string;
+  image?: string | null;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(7)
+  @IsString({ each: true })
+  images?: string[];
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(4)
+  @Type(() => Number)
+  primaryImageIndex?: number;
 
   @IsOptional()
   @IsBoolean()
@@ -136,6 +196,27 @@ export class UpdateProductDto {
   @ValidateNested({ each: true })
   @Type(() => ProductVariationDto)
   variations?: ProductVariationDto[];
+
+  @IsOptional()
+  @IsBoolean()
+  @ApiPropertyOptional({
+    description:
+      'If true, the participant may change the chosen variation after purchase within variationEditDeadlineDays before the event.',
+  })
+  buyerVariationEditAllowed?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(9999)
+  @ApiPropertyOptional({
+    description:
+      'Calendar days before the event until variation change is allowed. Use 0 when buyerVariationEditAllowed is false.',
+    minimum: 0,
+    maximum: 9999,
+  })
+  @Type(() => Number)
+  variationEditDeadlineDays?: number;
 }
 
 export class FilterProductsDto {

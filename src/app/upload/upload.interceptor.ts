@@ -10,7 +10,7 @@ import { unlink } from 'fs/promises';
 
 @Injectable()
 export class ImageCompressionInterceptor implements NestInterceptor {
-  constructor(private readonly uploadService: UploadService) {}
+  constructor(private readonly uploadService: UploadService) { }
 
   async intercept(
     context: ExecutionContext,

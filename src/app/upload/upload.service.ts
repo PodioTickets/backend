@@ -1,14 +1,15 @@
 import { Injectable } from '@nestjs/common';
-import * as sharp from 'sharp';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { stat } from 'fs/promises';
 import * as ClamScan from 'clamscan';
-
 @Injectable()
 export class UploadService {
   private readonly uploadDir = path.join(process.cwd(), 'uploads', 'images');
   private readonly pdfUploadDir = path.join(process.cwd(), 'uploads', 'pdfs');
+  /** Scanner ClamAV reutilizado entre uploads (evita custo de createScanner a cada arquivo). */
+  private clamScannerPromise: Promise<{ scanFile: (p: string) => Promise<{ isInfected: boolean; viruses?: string[] }> }> | null =
+    null;
 
   constructor() {
     this.ensureUploadDirectory();
@@ -39,28 +40,23 @@ export class UploadService {
         throw new Error('No file uploaded or file buffer missing');
       }
 
-      // Verificar malware antes do processamento
       await this.scanForMalware(
         file.buffer,
         file.originalname || 'uploaded-file',
       );
 
-      const compressedBuffer = await sharp(file.buffer)
-        // Em vez de reduzir qualidade com re-encode + resize,
-        // salva em WebP com perda zero (lossless) para preservar a imagem.
-        .webp({ quality: 100, effort: 6, lossless: true })
-        .toBuffer();
-
-      const filename = `${Date.now()}-${Math.round(Math.random() * 1e9)}.webp`;
+      // Preservar o formato original sem nenhum re-encoding para evitar perda de qualidade
+      const originalExt = path.extname(file.originalname || '').toLowerCase() || '.jpg';
+      const filename = `${Date.now()}-${Math.round(Math.random() * 1e9)}${originalExt}`;
       const filePath = path.join(this.uploadDir, filename);
-      await fs.writeFile(filePath, compressedBuffer);
+      await fs.writeFile(filePath, file.buffer);
 
       console.log(
-        `✅ File processed and saved: ${filename} (${this.formatFileSize(compressedBuffer.length)})`,
+        `✅ File saved: ${filename} (${this.formatFileSize(file.buffer.length)})`,
       );
       return `/uploads/images/${filename}`;
     } catch (error) {
-      console.error('❌ Failed to compress and save image:', error);
+      console.error('❌ Failed to save image:', error);
       throw new Error(`Failed to process image: ${error.message}`);
     }
   }
@@ -103,21 +99,36 @@ export class UploadService {
     }
   }
 
+  private getOrCreateClamScanner(): Promise<{
+    scanFile: (p: string) => Promise<{ isInfected: boolean; viruses?: string[] }>;
+  }> {
+    if (!this.clamScannerPromise) {
+      this.clamScannerPromise = ClamScan.createScanner({
+        removeInfected: false,
+        quarantineInfected: false,
+        scanLog: null,
+        debugMode: false,
+        fileList: null,
+        // Imagens são binário único; arquivos aninhados deixam o scan muito mais lento.
+        scanArchives: false,
+        scanRecursively: false,
+      }).catch((err) => {
+        this.clamScannerPromise = null;
+        throw err;
+      });
+    }
+    return this.clamScannerPromise;
+  }
+
   private async scanForMalware(
     buffer: Buffer,
     filename: string,
   ): Promise<void> {
+    if (process.env.UPLOAD_SKIP_CLAMAV === 'true') {
+      return;
+    }
     try {
-      // Configuração do ClamAV
-      const clamscan = await ClamScan.createScanner({
-        removeInfected: false, // Não remover automaticamente, apenas reportar
-        quarantineInfected: false, // Não quarentena, apenas reportar
-        scanLog: null, // Desabilitar log do scanner
-        debugMode: false,
-        fileList: null,
-        scanArchives: true, // Verificar arquivos dentro de archives
-        scanRecursively: true, // Verificar recursivamente
-      });
+      const clamscan = await this.getOrCreateClamScanner();
 
       // Criar arquivo temporário para scan
       const tempFilename = `temp-scan-${Date.now()}-${Math.round(Math.random() * 1e9)}`;
