@@ -294,24 +294,30 @@ export class RegistrationsService {
     };
   }
 
-  /**
-   * Filtro equivalente ao comportamento anterior de findUserRegistrations (in-memory),
-   * empurrado para o Prisma para permitir paginação no banco.
-   */
-  private buildFindUserRegistrationsWhere(
+  private deriveOrderStatus(orderStatus: string, paymentStatus: string | null): string {
+    if (orderStatus === 'CANCELLED') return 'CANCELLED';
+    switch (paymentStatus) {
+      case 'PAID': return 'CONFIRMED';
+      case 'REFUNDED': return 'CANCELLED';
+      case 'FAILED': return 'PENDING';
+      default: return 'PENDING';
+    }
+  }
+
+  private buildUserOrdersWhere(
     userId: string,
     status?: RegistrationFilterStatus,
     userCpf?: string | null,
-  ): Prisma.RegistrationWhereInput {
-    const orClauses: Prisma.RegistrationWhereInput[] = [
+  ): Prisma.OrderWhereInput {
+    const orClauses: Prisma.OrderWhereInput[] = [
       { userId },
-      { invitedById: userId },
-      { order: { userId } },
+      { registrations: { some: { userId } } },
+      { registrations: { some: { invitedById: userId } } },
     ];
     if (userCpf) {
-      orClauses.push({ user: { documentNumber: userCpf } });
+      orClauses.push({ registrations: { some: { user: { documentNumber: userCpf } } } });
     }
-    const participant: Prisma.RegistrationWhereInput = { OR: orClauses };
+    const participant: Prisma.OrderWhereInput = { OR: orClauses };
     if (!status) {
       return participant;
     }
@@ -323,16 +329,7 @@ export class RegistrationsService {
         return {
           AND: [
             participant,
-            {
-              status: {
-                in: [RegistrationStatus.CONFIRMED, RegistrationStatus.COMPLETED],
-              },
-            },
-            {
-              order: {
-                payment: { status: PaymentStatus.PAID },
-              },
-            },
+            { payment: { status: PaymentStatus.PAID } },
           ],
         };
       case RegistrationFilterStatus.PENDING:
@@ -341,17 +338,9 @@ export class RegistrationsService {
             participant,
             {
               OR: [
-                { status: RegistrationStatus.PENDING },
-                {
-                  order: {
-                    payment: {
-                      status: {
-                        in: [PaymentStatus.PENDING, PaymentStatus.FAILED],
-                      },
-                    },
-                  },
-                },
-                { order: { is: { payment: null } } },
+                { status: 'PENDING' },
+                { payment: { status: { in: [PaymentStatus.PENDING, PaymentStatus.FAILED] } } },
+                { payment: { is: null } },
               ],
             },
           ],
@@ -360,11 +349,7 @@ export class RegistrationsService {
         return {
           AND: [
             participant,
-            {
-              event: {
-                eventDate: { lt: now },
-              },
-            },
+            { event: { eventDate: { lt: now } } },
           ],
         };
       case RegistrationFilterStatus.CANCELLED:
@@ -373,32 +358,10 @@ export class RegistrationsService {
             participant,
             {
               OR: [
-                { status: RegistrationStatus.CANCELLED },
-                {
-                  order: {
-                    payment: { status: PaymentStatus.REFUNDED },
-                  },
-                },
-                {
-                  order: {
-                    payment: {
-                      metadata: {
-                        path: ['refundType'],
-                        equals: 'CHARGEBACK',
-                      },
-                    },
-                  },
-                },
-                {
-                  order: {
-                    payment: {
-                      metadata: {
-                        path: ['refundType'],
-                        equals: 'REFUND',
-                      },
-                    },
-                  },
-                },
+                { status: 'CANCELLED' },
+                { payment: { status: PaymentStatus.REFUNDED } },
+                { payment: { metadata: { path: ['refundType'], equals: 'CHARGEBACK' } } },
+                { payment: { metadata: { path: ['refundType'], equals: 'REFUND' } } },
               ],
             },
           ],
@@ -407,66 +370,6 @@ export class RegistrationsService {
         return participant;
     }
   }
-
-  private readonly findUserRegistrationsInclude = {
-    event: {
-      include: {
-        organization: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            phone: true,
-          },
-        },
-      },
-    },
-    user: {
-      select: {
-        id: true,
-        firstName: true,
-        lastName: true,
-        documentNumber: true,
-        dateOfBirth: true,
-      },
-    },
-    modalities: {
-      include: {
-        modality: true,
-      },
-    },
-    kitItems: {
-      include: {
-        kitItem: true,
-      },
-    },
-    products: {
-      include: {
-        product: {
-          include: {
-            variations: true,
-          },
-        },
-        variation: true,
-      },
-    },
-    order: {
-      include: {
-        payment: true,
-      },
-    },
-    tickets: {
-      include: {
-        ticket: {
-          select: {
-            id: true,
-            name: true,
-            modality: true,
-          },
-        },
-      },
-    },
-  } as const;
 
   async findUserRegistrations(userId: string, filterDto: FilterRegistrationsDto = {}) {
     const prismaRead = this.prisma.getReadClient();
@@ -479,76 +382,52 @@ export class RegistrationsService {
     });
     const userCpf = currentUser?.documentNumber ?? null;
 
-    const where = this.buildFindUserRegistrationsWhere(userId, status, userCpf);
+    const where = this.buildUserOrdersWhere(userId, status, userCpf);
 
-    const [filteredRegistrations, total] = await Promise.all([
-      prismaRead.registration.findMany({
+    const [orders, total] = await Promise.all([
+      prismaRead.order.findMany({
         where,
-        include: this.findUserRegistrationsInclude,
+        select: {
+          id: true,
+          status: true,
+          createdAt: true,
+          payment: { select: { status: true } },
+          event: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              eventDate: true,
+              logoUrl: true,
+              location: true,
+              city: true,
+              state: true,
+            },
+          },
+        },
         orderBy: { createdAt: 'desc' },
         skip,
         take: limit,
       }),
-      prismaRead.registration.count({ where }),
+      prismaRead.order.count({ where }),
     ]);
 
-    // Deduplica por id caso o OR com JOINs retorne a mesma registration mais de uma vez
-    const seenRegIds = new Set<string>();
-    const uniqueRegistrations = filteredRegistrations.filter((reg: any) => {
-      if (seenRegIds.has(reg.id)) return false;
-      seenRegIds.add(reg.id);
-      return true;
-    });
-
-    // Formatar registrations para substituir qrCode pelo link, ingressos (modalidade) e produtos
-    const formattedRegistrations = uniqueRegistrations.map((reg: any) => {
-      const { tickets: regTickets, ...regRest } = reg;
-      const seenProductIds = new Set<string>();
-      return {
-        ...regRest,
-        qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
-        tickets: (regTickets || []).map((rt: any) => ({
-          id: rt.ticket?.id,
-          name: rt.ticket?.name,
-          modality: rt.ticket?.modality,
-        })),
-        products: (reg.products || []).filter((rp: any) => {
-          if (seenProductIds.has(rp.id)) return false;
-          seenProductIds.add(rp.id);
-          return true;
-        }).map((rp: any) => ({
-          id: rp.id,
-          product: {
-            id: rp.product.id,
-            name: rp.product.name,
-            image: rp.product.image,
-            basePrice: rp.product.basePrice,
-            variationType: rp.product.variationType || null,
-          },
-          variation: rp.variation ? {
-            id: rp.variation.id,
-            name: rp.variation.name,
-            price: rp.variation.price,
-          } : null,
-          variationName: rp.variation?.name || null,
-          quantity: rp.quantity,
-          unitPrice: rp.unitPrice,
-          totalPrice: rp.totalPrice,
-        })),
-      };
-    });
-
-    const totalPages = Math.ceil(total / limit);
+    const formattedOrders = orders.map((order: any) => ({
+      id: order.id,
+      status: this.deriveOrderStatus(order.status, order.payment?.status ?? null),
+      createdAt: order.createdAt,
+      event: order.event,
+    }));
 
     return {
-      message: 'Registrations fetched successfully',
+      message: 'Orders fetched successfully',
       data: {
-        registrations: formattedRegistrations,
+        orders: formattedOrders,
         pagination: {
           page,
           limit,
           total,
-          totalPages,
+          totalPages: Math.ceil(total / limit),
         },
       },
     };
@@ -1054,6 +933,135 @@ export class RegistrationsService {
       message: 'Registration details fetched successfully',
       data: { registration: formattedRegistration },
     };
+  }
+
+  async updateProductVariation(
+    registrationId: string,
+    productId: string,
+    variationId: string,
+    userId: string,
+  ) {
+    const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
+
+    const registration = await prismaRead.registration.findUnique({
+      where: { id: registrationId },
+      include: {
+        order: { select: { eventId: true } },
+        tickets: { select: { ticketId: true } },
+        products: {
+          where: { productId },
+          include: {
+            product: {
+              select: {
+                id: true,
+                isIncludedInTicket: true,
+                buyerVariationEditAllowed: true,
+                variationEditDeadlineDays: true,
+                variations: { select: { id: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!registration || registration.userId !== userId) {
+      throw new NotFoundException('Inscrição não encontrada');
+    }
+
+    if (registration.status !== 'CONFIRMED') {
+      throw new BadRequestException('Só é possível alterar variação em inscrições confirmadas');
+    }
+
+    // Produto incluso pode não ter RegistrationProduct criado no pagamento
+    // (caso o frontend não o tenha enviado em pendingProducts)
+    const regProduct = registration.products[0] ?? null;
+
+    // Buscar o produto diretamente se não há RegistrationProduct
+    const product = regProduct?.product ?? await prismaRead.product.findUnique({
+      where: { id: productId },
+      select: {
+        id: true,
+        isIncludedInTicket: true,
+        buyerVariationEditAllowed: true,
+        variationEditDeadlineDays: true,
+        variations: { select: { id: true } },
+      },
+    });
+
+    if (!product) {
+      throw new NotFoundException('Produto não encontrado');
+    }
+
+    // Produto deve ser incluso no ingresso
+    if (!product.isIncludedInTicket) {
+      throw new BadRequestException('Alteração de variação permitida apenas para produtos inclusos no ingresso');
+    }
+
+    // Produto deve ter edição habilitada
+    if (!product.buyerVariationEditAllowed) {
+      throw new BadRequestException('Este produto não permite alteração de variação');
+    }
+
+    // Só pode alterar uma vez (apenas se já existe um RegistrationProduct com variationEdited)
+    if (regProduct?.variationEdited) {
+      throw new BadRequestException('A variação deste produto já foi alterada anteriormente');
+    }
+
+    // Verificar se o produto está vinculado ao ingresso da inscrição
+    const ticketId = registration.tickets[0]?.ticketId;
+    if (ticketId) {
+      const ticketProduct = await prismaRead.ticketProduct.findUnique({
+        where: { ticketId_productId: { ticketId, productId } },
+      });
+      if (!ticketProduct) {
+        throw new BadRequestException('Produto não está vinculado ao ingresso desta inscrição');
+      }
+    }
+
+    // Verificar janela de edição
+    if (product.variationEditDeadlineDays > 0) {
+      const event = await prismaRead.event.findUnique({
+        where: { id: registration.order.eventId },
+        select: { eventDate: true },
+      });
+      if (event) {
+        const deadlineMs = product.variationEditDeadlineDays * 24 * 60 * 60 * 1000;
+        const cutoff = new Date(event.eventDate.getTime() - deadlineMs);
+        if (new Date() >= cutoff) {
+          throw new BadRequestException('Prazo para alteração de variação encerrado');
+        }
+      }
+    }
+
+    // Validar variationId
+    const validVariation = product.variations.find((v) => v.id === variationId);
+    if (!validVariation) {
+      throw new BadRequestException('Variação inválida para este produto');
+    }
+
+    if (regProduct) {
+      await prismaWrite.registrationProduct.update({
+        where: { id: regProduct.id },
+        data: { variationId, variationEdited: true },
+      });
+    } else {
+      // Criar RegistrationProduct para produto incluso que ainda não tem registro
+      await prismaWrite.registrationProduct.create({
+        data: {
+          registrationId,
+          productId,
+          variationId,
+          variationEdited: true,
+          quantity: 1,
+          unitPrice: 0,
+          totalPrice: 0,
+        },
+      });
+    }
+
+    return { message: 'Variação atualizada com sucesso' };
   }
 
   async cancel(id: string, userId: string) {
