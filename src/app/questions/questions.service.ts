@@ -44,7 +44,7 @@ export class QuestionsService {
     const isOrganizer = userId ? await this.isOrganizerOfEvent(userId, eventId, prismaRead) : false;
 
     const questions = await prismaRead.question.findMany({
-      where: { eventId, ...(isOrganizer ? { isActive: true } : {}) },
+      where: { eventId, isActive: true },
       orderBy: { order: 'asc' },
     });
     const transformedQuestions = questions.map((question) => ({

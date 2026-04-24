@@ -560,7 +560,9 @@ export class OrdersService {
                     products: {
                       orderBy: { sortOrder: 'asc' },
                       include: {
-                        product: { include: { variations: true } },
+                        product: {
+                          include: { variations: true },
+                        },
                       },
                     },
                   },
@@ -581,7 +583,7 @@ export class OrdersService {
             },
             products: {
               include: {
-                product: { select: { id: true, name: true, image: true, basePrice: true, variationType: true } },
+                product: { select: { id: true, name: true, image: true, basePrice: true, variationType: true, buyerVariationEditAllowed: true, variationEditDeadlineDays: true } },
                 variation: true,
               },
             },
@@ -617,6 +619,9 @@ export class OrdersService {
     for (const pp of (order.pendingProducts as any[] | null) ?? []) {
       pendingProductsMap.set(pp.productId, { variationId: pp.variationId, quantity: pp.quantity });
     }
+
+    const eventDate = new Date((order as any).event?.eventDate ?? 0);
+    const now = new Date();
 
     return {
       message: 'Order details fetched successfully',
@@ -703,10 +708,40 @@ export class OrdersService {
                   name: reg.tickets[0].ticket.name,
                   category: reg.tickets[0].ticket.category ?? null,
                   includedProducts: (reg.tickets[0].ticket.products ?? []).map((tp: any) => {
-                    const sel = pendingProductsMap.get(tp.product.id);
-                    const selectedVariation = sel?.variationId
-                      ? (tp.product.variations ?? []).find((v: any) => v.id === sel.variationId) ?? null
+                    // Preferência: variação confirmada no RegistrationProduct (pós-pagamento)
+                    const regProduct = (reg.products ?? []).find((rp: any) => rp.productId === tp.product.id);
+                    this.logger.debug(`[getOrderDetails] product=${tp.product.id} regProduct=${JSON.stringify({ id: regProduct?.id, variationId: regProduct?.variationId, variation: regProduct?.variation?.id })} pendingMap=${JSON.stringify(pendingProductsMap.get(tp.product.id))} variationsCount=${tp.product.variations?.length}`);
+                    const variationEdited = regProduct?.variationEdited ?? false;
+
+                    // Prioridade 1: variação já confirmada no RegistrationProduct (via relation include)
+                    // Prioridade 2: buscar por variationId no RegistrationProduct dentro de tp.product.variations
+                    // Prioridade 3: variationId do pendingProducts (estado pré-pagamento)
+                    const resolvedVariationId =
+                      regProduct?.variationId
+                      ?? pendingProductsMap.get(tp.product.id)?.variationId
+                      ?? null;
+
+                    const selectedVariation: any =
+                      regProduct?.variation
+                      ?? (resolvedVariationId
+                        ? (tp.product.variations ?? []).find((v: any) => v.id === resolvedVariationId) ?? null
+                        : null);
+                    this.logger.debug(`[getOrderDetails] product=${tp.product.id} selectedVariation=${JSON.stringify(selectedVariation ? { id: selectedVariation.id, name: selectedVariation.name } : null)}`);
+
+                    const deadlineDays = tp.product.variationEditDeadlineDays ?? 0;
+                    const deadlineMs = deadlineDays * 24 * 60 * 60 * 1000;
+                    const variationEditDeadline = deadlineDays > 0
+                      ? new Date(eventDate.getTime() - deadlineMs)
                       : null;
+                    const editWindowOpen = variationEditDeadline
+                      ? now < variationEditDeadline
+                      : false;
+                    const canEditVariation =
+                      (tp.product.buyerVariationEditAllowed ?? false) &&
+                      !variationEdited &&
+                      editWindowOpen &&
+                      tp.product.isIncludedInTicket === true;
+
                     return {
                       id: tp.product.id,
                       name: tp.product.name,
@@ -715,6 +750,10 @@ export class OrdersService {
                       isIncludedInTicket: tp.product.isIncludedInTicket ?? false,
                       isRequired: tp.product.isRequired ?? false,
                       variationType: tp.product.variationType ?? null,
+                      buyerVariationEditAllowed: tp.product.buyerVariationEditAllowed ?? false,
+                      variationEditDeadline,
+                      variationEdited,
+                      canEditVariation,
                       selectedVariation: selectedVariation
                         ? { id: selectedVariation.id, name: selectedVariation.name, price: selectedVariation.price }
                         : null,

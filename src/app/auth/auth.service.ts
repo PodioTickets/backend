@@ -264,8 +264,8 @@ export class AuthService {
           email,
           accountType: 'USER', // Registro sempre cria conta de usuário normal
           password: hashedPassword,
-          firstName: complete_name.split(' ')[0],
-          lastName: complete_name.split(' ').slice(1).join(' '),
+          firstName: complete_name ? complete_name.split(' ')[0] : '',
+          lastName: complete_name ? complete_name.split(' ').slice(1).join(' ') : '',
           gender,
           phone,
           reservePhone: reserve_phone,

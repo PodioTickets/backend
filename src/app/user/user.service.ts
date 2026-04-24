@@ -10,7 +10,6 @@ import { CreateLinkedUserDto } from './dto/create-linked-user.dto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
-import * as crypto from 'crypto';
 
 @Injectable()
 export class UserService {
@@ -320,13 +319,9 @@ export class UserService {
     };
   }
 
-  /**
-   * Busca todos os usuários vinculados ao usuário principal (incluindo o próprio)
-   */
   async getLinkedUsers(mainUserId: string) {
     const prismaRead = this.prisma.getReadClient();
 
-    // Buscar usuário principal
     const mainUser = await prismaRead.user.findUnique({
       where: { id: mainUserId },
       select: {
@@ -346,292 +341,150 @@ export class UserService {
       throw new NotFoundException('User not found');
     }
 
-    // Buscar usuários vinculados
-    const linkedUsers = await prismaRead.linkedUser.findMany({
+    const linkedProfiles = await prismaRead.linkedUser.findMany({
       where: { mainUserId },
-      include: {
-        linkedUser: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-            documentNumber: true,
-            phone: true,
-            dateOfBirth: true,
-            gender: true,
-            avatarUrl: true,
-          },
-        },
-      },
+      orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
     });
 
-    // Montar lista de usuários
     const users = [
       {
         ...mainUser,
         isMainUser: true,
-        dateOfBirth: mainUser.dateOfBirth
-          ? mainUser.dateOfBirth.toISOString().split('T')[0]
-          : null,
+        gender: this.mapGenderFromEnum(mainUser.gender),
+        dateOfBirth: mainUser.dateOfBirth ? mainUser.dateOfBirth.toISOString().split('T')[0] : null,
       },
-      ...linkedUsers.map((lu) => ({
-        ...lu.linkedUser,
+      ...linkedProfiles.map((lp) => ({
+        id: lp.id,
+        firstName: lp.firstName,
+        lastName: lp.lastName,
+        email: lp.email,
+        documentNumber: lp.documentNumber,
+        phone: lp.phone,
+        dateOfBirth: lp.dateOfBirth ? lp.dateOfBirth.toISOString().split('T')[0] : null,
+        gender: lp.gender,
         isMainUser: false,
-        dateOfBirth: lu.linkedUser.dateOfBirth
-          ? lu.linkedUser.dateOfBirth.toISOString().split('T')[0]
-          : null,
       })),
     ];
 
-    // Ordenar: principal primeiro, depois alfabeticamente
-    users.sort((a, b) => {
-      if (a.isMainUser) return -1;
-      if (b.isMainUser) return 1;
-      const nameA = `${a.firstName} ${a.lastName}`.toLowerCase();
-      const nameB = `${b.firstName} ${b.lastName}`.toLowerCase();
-      return nameA.localeCompare(nameB);
-    });
-
-    return {
-      success: true,
-      data: { users },
-    };
+    return { success: true, data: { users } };
   }
 
-  /**
-   * Cria ou vincula um usuário ao usuário principal
-   */
-  async createOrLinkUser(
-    mainUserId: string,
-    createLinkedUserDto: CreateLinkedUserDto,
-  ) {
+  async createOrLinkUser(mainUserId: string, dto: CreateLinkedUserDto) {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
-    // Validar data de nascimento não é futura
-    const dateOfBirth = new Date(createLinkedUserDto.dateOfBirth);
+    const dateOfBirth = new Date(dto.dateOfBirth);
     if (dateOfBirth > new Date()) {
       throw new BadRequestException('Data de nascimento não pode ser futura');
     }
 
-    const documentNumberClean = this.cleanDocumentNumber(createLinkedUserDto.documentNumber);
-    let existingUser = await prismaRead.user.findUnique({
-      where: { 
-        documentNumberClean_accountType: {
-          documentNumberClean: documentNumberClean,
-          accountType: 'USER',
-        }
-      },
-    });
+    const documentNumberClean = this.cleanDocumentNumber(dto.documentNumber);
 
-    let wasCreated = false;
-    let wasLinked = false;
-
-    const EMAIL_JA_CADASTRADO = 'Já existe um usuário com esse email';
-
-    if (!existingUser) {
-      // Verificar no write para evitar atraso de réplica; se email já existe, tratar aqui
-      const userWithEmail = await prismaWrite.user.findFirst({
-        where: {
-          email: createLinkedUserDto.email,
-          accountType: 'USER',
-        },
+    if (documentNumberClean) {
+      const existing = await prismaRead.linkedUser.findUnique({
+        where: { mainUserId_documentNumberClean: { mainUserId, documentNumberClean } },
       });
 
-      if (userWithEmail) {
-        const onlyNameDiffers = this.onlyNameDiffersFromLinkedDto(
-          userWithEmail,
-          createLinkedUserDto,
-          documentNumberClean,
-          dateOfBirth,
-        );
-        if (onlyNameDiffers) {
-          existingUser = await prismaWrite.user.update({
-            where: { id: userWithEmail.id },
-            data: {
-              firstName: createLinkedUserDto.firstName,
-              lastName: createLinkedUserDto.lastName,
-            },
-          });
-        } else {
-          throw new ConflictException(EMAIL_JA_CADASTRADO);
-        }
-      } else {
-        // Criar novo usuário
-        const randomPassword = crypto.randomBytes(32).toString('hex');
-        const hashedPassword = await bcrypt.hash(randomPassword, 10);
-
-        try {
-          existingUser = await prismaWrite.user.create({
-            data: {
-              firstName: createLinkedUserDto.firstName,
-              lastName: createLinkedUserDto.lastName,
-              email: createLinkedUserDto.email,
-              accountType: 'USER',
-              documentNumber: createLinkedUserDto.documentNumber,
-              documentNumberClean: documentNumberClean,
-              phone: createLinkedUserDto.phone,
-              dateOfBirth: dateOfBirth,
-              gender: this.mapGenderToEnum(createLinkedUserDto.gender),
-              password: hashedPassword,
-              acceptedTerms: false,
-              acceptedPrivacyPolicy: false,
-            },
-          });
-          wasCreated = true;
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          const isUniqueConstraint =
-            (err && typeof err === 'object' && (err as { code?: string }).code === 'P2002') ||
-            msg.includes('Unique constraint failed');
-          if (isUniqueConstraint) {
-            const byEmail = await prismaWrite.user.findFirst({
-              where: {
-                email: createLinkedUserDto.email,
-                accountType: 'USER',
-              },
-            });
-            if (byEmail) {
-              const onlyNameDiffers = this.onlyNameDiffersFromLinkedDto(
-                byEmail,
-                createLinkedUserDto,
-                documentNumberClean,
-                dateOfBirth,
-              );
-              if (onlyNameDiffers) {
-                existingUser = await prismaWrite.user.update({
-                  where: { id: byEmail.id },
-                  data: {
-                    firstName: createLinkedUserDto.firstName,
-                    lastName: createLinkedUserDto.lastName,
-                  },
-                });
-              } else {
-                throw new ConflictException(EMAIL_JA_CADASTRADO);
-              }
-            } else {
-              throw new ConflictException(EMAIL_JA_CADASTRADO);
-            }
-          } else {
-            throw err;
-          }
-        }
-      }
-    } else {
-      // Usuário encontrado por CPF: email deve ser o mesmo
-      if (existingUser.email !== createLinkedUserDto.email) {
-        throw new ConflictException(EMAIL_JA_CADASTRADO);
+      if (existing) {
+        const updated = await prismaWrite.linkedUser.update({
+          where: { id: existing.id },
+          data: {
+            firstName: dto.firstName,
+            lastName: dto.lastName,
+            email: dto.email,
+            phone: dto.phone,
+            dateOfBirth,
+            gender: dto.gender,
+          },
+        });
+        return { success: true, data: this.formatLinkedProfile(updated) };
       }
     }
 
-    // Verificar se já está vinculado
-    const existingLink = await prismaRead.linkedUser.findUnique({
-      where: {
-        mainUserId_linkedUserId: {
-          mainUserId,
-          linkedUserId: existingUser.id,
-        },
+    const created = await prismaWrite.linkedUser.create({
+      data: {
+        mainUserId,
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+        email: dto.email ?? null,
+        documentNumber: dto.documentNumber ?? null,
+        documentNumberClean: documentNumberClean,
+        phone: dto.phone,
+        dateOfBirth,
+        gender: dto.gender ?? null,
+        relationshipType: 'outro',
       },
     });
 
-    if (!existingLink) {
-      // Criar vínculo
-      await prismaWrite.linkedUser.create({
-        data: {
-          mainUserId,
-          linkedUserId: existingUser.id,
-          relationshipType: 'outro',
-        },
-      });
+    return { success: true, data: this.formatLinkedProfile(created) };
+  }
 
-      wasLinked = true;
-    } else {
-      wasLinked = true; // Já estava vinculado
+  async findUserByCpf(cpf: string) {
+    const prismaRead = this.prisma.getReadClient();
+    const documentNumberClean = cpf.replace(/\D/g, '');
+
+    const user = await prismaRead.user.findUnique({
+      where: {
+        documentNumberClean_accountType: { documentNumberClean, accountType: 'USER' },
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        documentNumber: true,
+        phone: true,
+        dateOfBirth: true,
+        gender: true,
+      },
+    });
+
+    if (!user) {
+      throw new NotFoundException('Usuário não encontrado');
     }
 
     return {
       success: true,
       data: {
-        id: existingUser.id,
-        firstName: existingUser.firstName,
-        lastName: existingUser.lastName,
-        email: existingUser.email,
-        documentNumber: existingUser.documentNumber,
-        phone: existingUser.phone,
-        dateOfBirth: existingUser.dateOfBirth
-          ? existingUser.dateOfBirth.toISOString().split('T')[0]
-          : null,
-        gender: this.mapGenderFromEnum(existingUser.gender),
-        wasCreated,
-        wasLinked,
+        ...user,
+        gender: this.mapGenderFromEnum(user.gender),
+        dateOfBirth: user.dateOfBirth ? user.dateOfBirth.toISOString().split('T')[0] : null,
       },
     };
   }
 
-  /**
-   * Verifica se o usuário existente difere do DTO apenas no nome (firstName/lastName).
-   * Se documentNumber, phone, dateOfBirth ou gender forem diferentes, retorna false.
-   */
-  private onlyNameDiffersFromLinkedDto(
-    existingUser: {
-      documentNumberClean: string | null;
-      phone: string | null;
-      dateOfBirth: Date | null;
-      gender: 'MALE' | 'FEMALE' | 'OTHER' | 'PREFER_NOT_TO_SAY' | null;
-    },
-    dto: CreateLinkedUserDto,
-    documentNumberClean: string,
-    dateOfBirth: Date,
-  ): boolean {
-    if ((existingUser.documentNumberClean ?? '') !== documentNumberClean) {
-      return false;
-    }
-    if ((existingUser.phone ?? '') !== (dto.phone ?? '')) {
-      return false;
-    }
-    const existingTime = existingUser.dateOfBirth
-      ? existingUser.dateOfBirth.getTime()
-      : 0;
-    const dtoTime = dateOfBirth.getTime();
-    if (existingTime !== dtoTime) {
-      return false;
-    }
-    const dtoGender = this.mapGenderToEnum(dto.gender);
-    if ((existingUser.gender ?? null) !== (dtoGender ?? null)) {
-      return false;
-    }
-    return true;
-  }
-
-  /**
-   * Mapeia gênero do DTO para enum do Prisma
-   */
-  private mapGenderToEnum(
-    gender: string,
-  ): 'MALE' | 'FEMALE' | 'OTHER' | 'PREFER_NOT_TO_SAY' | null {
-    const mapping = {
-      masculino: 'MALE' as const,
-      feminino: 'FEMALE' as const,
-      outro: 'OTHER' as const,
-      'prefiro-nao-dizer': 'PREFER_NOT_TO_SAY' as const,
+  private formatLinkedProfile(lp: {
+    id: string;
+    firstName: string;
+    lastName: string;
+    email: string | null;
+    documentNumber: string | null;
+    phone: string | null;
+    dateOfBirth: Date | null;
+    gender: string | null;
+  }) {
+    return {
+      id: lp.id,
+      firstName: lp.firstName,
+      lastName: lp.lastName,
+      email: lp.email,
+      documentNumber: lp.documentNumber,
+      phone: lp.phone,
+      dateOfBirth: lp.dateOfBirth ? lp.dateOfBirth.toISOString().split('T')[0] : null,
+      gender: lp.gender,
     };
-    return mapping[gender.toLowerCase()] || null;
   }
 
-  /**
-   * Mapeia enum do Prisma para gênero do DTO
-   */
   private mapGenderFromEnum(
     gender: 'MALE' | 'FEMALE' | 'OTHER' | 'PREFER_NOT_TO_SAY' | null,
-  ): string {
-    const mapping = {
+  ): string | null {
+    const mapping: Record<string, string> = {
       MALE: 'masculino',
       FEMALE: 'feminino',
       OTHER: 'outro',
       PREFER_NOT_TO_SAY: 'prefiro-nao-dizer',
     };
-    return gender ? mapping[gender] : 'prefiro-nao-dizer';
+    return gender ? (mapping[gender] ?? null) : null;
   }
 }
 

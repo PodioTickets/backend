@@ -37,10 +37,10 @@ export class EmailRegisterDto {
   @MinLength(8)
   password: string;
 
-  @ApiProperty({ description: 'Complete name' })
+  @ApiPropertyOptional({ description: 'Complete name' })
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  complete_name: string;
+  complete_name?: string;
 
   @ApiPropertyOptional({ description: 'Gender', enum: Gender })
   @IsOptional()

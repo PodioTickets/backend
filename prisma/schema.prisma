@@ -165,7 +165,6 @@ model User {
   payments                  Payment[]
   invitedRegistrations      Registration[]             @relation("InvitedBy")
   linkedUsersAsMain         LinkedUser[]               @relation("MainUser")
-  linkedUsersAsLinked       LinkedUser[]               @relation("LinkedUser")
   organizationMembers       OrganizationMember[]
   organizationAuditLogs     OrganizationAuditLog[]
   organizerAuditPageDedupes OrganizerAuditPageDedupe[]
@@ -726,19 +725,24 @@ model ContactMessage {
 }
 
 model LinkedUser {
-  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  mainUserId       String   @db.Uuid
-  linkedUserId     String   @db.Uuid
-  relationshipType String? // ex: "dependente", "familiar", "outro"
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  mainUserId          String    @db.Uuid
+  firstName           String
+  lastName            String
+  email               String?
+  documentNumber      String?
+  documentNumberClean String?
+  phone               String?
+  dateOfBirth         DateTime?
+  gender              String?
+  relationshipType    String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
-  mainUser   User @relation("MainUser", fields: [mainUserId], references: [id], onDelete: Cascade)
-  linkedUser User @relation("LinkedUser", fields: [linkedUserId], references: [id], onDelete: Cascade)
+  mainUser User @relation("MainUser", fields: [mainUserId], references: [id], onDelete: Cascade)
 
-  @@unique([mainUserId, linkedUserId])
+  @@unique([mainUserId, documentNumberClean])
   @@index([mainUserId])
-  @@index([linkedUserId])
 }
 
 model Coupon {
@@ -958,6 +962,7 @@ model RegistrationProduct {
   registrationId String   @db.Uuid
   productId      String   @db.Uuid
   variationId    String?  @db.Uuid // Variação escolhida (opcional, se o produto tiver variações)
+  variationEdited Boolean @default(false) // true após o comprador alterar a variação (permitido apenas uma vez)
   quantity       Int      @default(1)
   unitPrice      Int // Preço unitário em centavos no momento da compra
   totalPrice     Int // Preço total em centavos (unitPrice * quantity)
