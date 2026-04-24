@@ -1,0 +1,56 @@
+name: Deploy Homologação
+
+on:
+  push:
+    branches:
+      - homologacao
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.HOMOLOG_SERVER_IP }}
+          username: ${{ secrets.HOMOLOG_SERVER_USER }}
+          key: ${{ secrets.HOMOLOG_SSH_PRIVATE_KEY }}
+          port: 22
+          timeout: 120s
+          command_timeout: 45m
+          script_stop: true
+          script: |
+            set -e
+
+            echo "🚀 Iniciando deploy homologação..."
+            cd /home/podio/backend
+
+            echo "📥 Atualizando código..."
+            git fetch origin
+            git pull origin homologacao
+
+            export DOCKER_BUILDKIT=1
+            export COMPOSE_DOCKER_CLI_BUILD=1
+
+            # Build da nova imagem
+            echo "🔨 Fazendo build..."
+            DOCKER_BUILDKIT=1 docker compose build backend || exit 1
+
+            # Sobe apenas Redis e backend (banco é Cloud SQL externo)
+            echo "🚀 Subindo serviços..."
+            docker compose up -d redis
+            sleep 3
+            docker compose up -d --no-deps backend
+
+            # Aguarda o backend iniciar
+            sleep 5
+
+            echo "📋 Status dos containers:"
+            docker compose ps
+
+            echo "📋 Logs do backend:"
+            docker compose logs backend --tail=20
+
+            echo "✅ Deploy concluído!"
