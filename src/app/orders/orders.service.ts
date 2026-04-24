@@ -861,11 +861,22 @@ export class OrdersService {
           if (!allMatch) continue;
         }
 
-        autoDiscount = coupon.type === 'PERCENTAGE'
-          ? Math.floor(ticketsSubtotal * (coupon.value / 100))
-          : Math.min(coupon.value, ticketsSubtotal);
-        autoCouponId = coupon.id;
-        break;
+        {
+          let autoApplicableTickets = reservedTickets;
+          if (coupon.appliesTo && coupon.appliesTo !== 'all') {
+            let allowedIds: string[] = [];
+            try { allowedIds = JSON.parse(coupon.appliesTo); } catch { allowedIds = [coupon.appliesTo]; }
+            autoApplicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
+          }
+          const autoApplicableSubtotal = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0);
+          const autoApplicableQty = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
+          autoDiscount = coupon.type === 'PERCENTAGE'
+            ? Math.floor(autoApplicableSubtotal * (coupon.value / 100))
+            : autoApplicableQty * coupon.value;
+          autoDiscount = Math.min(autoDiscount, ticketsSubtotal);
+          autoCouponId = coupon.id;
+          break;
+        }
       }
     }
 
@@ -968,6 +979,7 @@ export class OrdersService {
     const r: any = this.prisma.getReadClient();
     const reservedTickets = (order.reservedTickets ?? []) as any[];
     const ticketsSubtotal = reservedTickets.reduce((sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0);
+    const productsSubtotal = Math.max(0, (order.totalAmount as number) - ticketsSubtotal);
 
     let couponId: string | null = null;
     let voucherId: string | null = null;
@@ -985,13 +997,31 @@ export class OrdersService {
 
       if (!coupon) throw new AppUnprocessableException('COUPON_NOT_FOUND', 'Cupom não encontrado ou inválido');
       if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) throw new AppUnprocessableException('COUPON_EXPIRED', 'Cupom expirado');
-      if (coupon.minCartValue && ticketsSubtotal < coupon.minCartValue) {
+      if (coupon.minCartValue && order.totalAmount < coupon.minCartValue) {
         throw new AppUnprocessableException('COUPON_MIN_VALUE', `Valor mínimo do pedido para este cupom: R$ ${(coupon.minCartValue / 100).toFixed(2)}`);
       }
 
-      discount = coupon.type === 'PERCENTAGE'
-        ? Math.floor(ticketsSubtotal * (coupon.value / 100))
-        : Math.min(coupon.value, ticketsSubtotal);
+      // Filtrar apenas os tickets aos quais o cupom se aplica
+      let applicableTickets = reservedTickets;
+      if (coupon.appliesTo && coupon.appliesTo !== 'all') {
+        let allowedIds: string[] = [];
+        try { allowedIds = JSON.parse(coupon.appliesTo); } catch { allowedIds = [coupon.appliesTo]; }
+        applicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
+      }
+
+      const applicableTicketsSubtotal = applicableTickets.reduce((sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0);
+      const applicableQuantity = applicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
+
+      if (coupon.type === 'PERCENTAGE') {
+        // Percentual sobre tickets aplicáveis + produtos proporcionais
+        const applicableRatio = ticketsSubtotal > 0 ? applicableTicketsSubtotal / ticketsSubtotal : 1;
+        const applicableBase = applicableTicketsSubtotal + Math.round(productsSubtotal * applicableRatio);
+        discount = Math.floor(applicableBase * (coupon.value / 100));
+      } else {
+        // FIXED: valor do cupom × quantidade de ingressos aplicáveis
+        discount = applicableQuantity * coupon.value;
+      }
+      discount = Math.min(discount, order.totalAmount as number);
       couponId = coupon.id;
 
     } else if (dto.voucherCode) {

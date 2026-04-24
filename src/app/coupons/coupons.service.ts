@@ -62,6 +62,7 @@ export class CouponsService {
         appliesTo: appliesToValue,
         cpfList: createCouponDto.cpfList ? (createCouponDto.cpfList as any) : null,
         cpfListStatus: createCouponDto.cpfListStatus || 'DISABLED',
+        minCartValue: createCouponDto.minCartValue != null ? createCouponDto.minCartValue : null,
       },
     });
 
