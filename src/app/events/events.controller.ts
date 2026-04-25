@@ -543,6 +543,27 @@ export class EventsController {
     return this.eventsService.getFinancialTransfers(req.user.id, eventId);
   }
 
+  @Get(':eventId/financial/transfers/:withdrawalId')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get transfer by ID',
+    description: 'Retrieves a specific withdrawal request by ID. Only accessible by organizers with financial permission.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiParam({ name: 'withdrawalId', description: 'Withdrawal UUID' })
+  @ApiResponse({ status: 200, description: 'Transfer fetched successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  @ApiResponse({ status: 404, description: 'Transfer not found' })
+  getFinancialTransferById(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Param('withdrawalId') withdrawalId: string,
+  ) {
+    return this.eventsService.getFinancialTransferById(req.user.id, eventId, withdrawalId);
+  }
+
   @Get(':eventId/financial/installments')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()

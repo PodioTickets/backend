@@ -30,6 +30,7 @@ import {
   RegistrationStatus,
   PaymentStatus,
   PaymentMethod,
+  WithdrawalStatus,
   Prisma,
   PrismaClient,
 } from '@prisma/client';
@@ -3329,130 +3330,146 @@ export class EventsService {
     await this.verifyOrganizerAccess(userId, eventId, 'financial');
 
     const prismaRead = this.prisma.getReadClient();
-    const { period = FinancialPeriod.HOJE, page = 1, limit = 20 } = queryDto;
+    const { page = 1, limit = 20 } = queryDto;
 
-    // Calcular range de datas
-    const dateRange = this.calculateFinancialDateRange(period);
+    // Summary é sempre o estado atual do evento inteiro — sem filtro de período
+    const [event, orders, audit, withdrawals, refundedAgg] = await Promise.all([
+      prismaRead.event.findUnique({
+        where: { id: eventId },
+        select: { organizerFeeRate: true, retentionRate: true },
+      }),
+      prismaRead.order.findMany({
+        where: { eventId, payment: { status: PaymentStatus.PAID } },
+        include: { payment: true },
+      }),
+      prismaRead.eventAudit.findUnique({ where: { eventId } }),
+      prismaRead.eventWithdrawal.findMany({
+        where: { eventId, status: { not: WithdrawalStatus.CANCELLED } },
+      }),
+      prismaRead.order.aggregate({
+        where: { eventId, payment: { status: PaymentStatus.REFUNDED } },
+        _sum: { finalAmount: true },
+        _count: { id: true },
+      }),
+    ]);
 
-    // Construir filtro de data
-    const orderDateFilter: any = {};
-    if (dateRange.start) {
-      orderDateFilter.gte = dateRange.start;
-    }
-    if (dateRange.end) {
-      orderDateFilter.lte = dateRange.end;
-    }
+    const completedWithdrawals = withdrawals.filter(
+      (w: any) => w.status === WithdrawalStatus.COMPLETED,
+    );
 
-    // Buscar todas as registrations pagas
-    const registrations = await prismaRead.registration.findMany({
-      where: {
-        eventId,
-        order: {
-          payment: {
-            status: PaymentStatus.PAID,
-          },
-          ...(Object.keys(orderDateFilter).length > 0 && { createdAt: orderDateFilter }),
-        },
-      },
-      include: {
-        order: {
-          include: {
-            payment: true,
-          },
-        },
-        modalities: {
-          include: {
-            modality: true,
-          },
-        },
-      },
-    });
+    const breakdown = this.calcRepasseBreakdown(
+      orders,
+      event?.retentionRate ?? 0.10,
+      !!audit,
+      completedWithdrawals,
+    );
 
-    // Calcular resumo financeiro
-    const grossRevenue = registrations.reduce((sum, r) => sum + this.normalizeToCents(r.order?.totalAmount), 0);
-
-    // Calcular valores aguardando liberação (prazo de retenção: 30 dias)
-    const retentionDays = 30;
-    const now = new Date();
-    const pendingReleaseRegistrations = registrations.filter((r) => {
-      if (!r.order?.payment?.paymentDate) return false;
-      const releaseDate = new Date(r.order.payment.paymentDate);
-      releaseDate.setDate(releaseDate.getDate() + retentionDays);
-      return releaseDate > now;
-    });
-    const awaitingRelease = pendingReleaseRegistrations.reduce((sum, r) => sum + (r.order?.finalAmount || 0), 0);
-
-    // Calcular parcelas a receber (apenas para cartão de crédito parcelado)
-    const installmentPayments = registrations.filter((r) => {
-      const metadata = r.order?.payment?.metadata as any;
-      return metadata?.creditCard?.installments && metadata.creditCard.installments > 1;
-    });
-    const installmentsToReceive = await this.calculateInstallmentsToReceive(installmentPayments);
-
-    // Calcular total já repassado (pagamentos antigos que já passaram do prazo de retenção)
-    const transferredRegistrations = registrations.filter((r) => {
-      if (!r.order?.payment?.paymentDate) return false;
-      const releaseDate = new Date(r.order.payment.paymentDate);
-      releaseDate.setDate(releaseDate.getDate() + retentionDays);
-      return releaseDate <= now;
-    });
-    const totalTransferred = transferredRegistrations.reduce((sum, r) => sum + (r.order?.finalAmount || 0), 0);
-
-    const refunded = registrations
-      .filter((r) => r.order?.payment?.status === PaymentStatus.REFUNDED)
-      .reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
-    const chargebacks = 0; // TODO: Implementar quando houver chargebacks
-    const availableBalance = grossRevenue - totalTransferred - awaitingRelease - refunded;
-
-    // Comparar com semana passada
-    const lastWeekStart = new Date();
-    lastWeekStart.setDate(lastWeekStart.getDate() - 14);
-    const lastWeekEnd = new Date();
-    lastWeekEnd.setDate(lastWeekEnd.getDate() - 7);
-
-    const lastWeekRegistrations = await prismaRead.registration.findMany({
-      where: {
-        eventId,
-        order: {
-          createdAt: {
-            gte: lastWeekStart,
-            lte: lastWeekEnd,
-          },
-          payment: {
-            status: PaymentStatus.PAID,
-          },
-        },
-      },
-      include: {
-        order: {
-          include: {
-            payment: true,
-          },
-        },
-      },
-    });
-
-    const lastWeekRevenue = lastWeekRegistrations.reduce((sum, r) => sum + this.normalizeToCents(r.order?.totalAmount), 0);
-    const revenueChange = lastWeekRevenue > 0 ? ((grossRevenue - lastWeekRevenue) / lastWeekRevenue) * 100 : 0;
-
-    // Todos os tickets do evento (ativos e inativos) no mesmo formato do endpoint de tickets
     const tickets = await this.ticketsService.findAll(eventId, { page, limit });
 
     return {
       message: 'Financial data fetched successfully',
       data: {
         summary: {
-          availableBalance,
-          installmentsToReceive,
-          awaitingRelease,
-          totalTransferred,
-          refunded,
-          chargebacks,
-          grossRevenue,
-          revenueChange,
+          availableBalance: breakdown.availableBalance,
+          pendingRelease: breakdown.pendingRelease,
+          awaitingAudit: breakdown.awaitingAudit,
+          installmentsToReceive: breakdown.installmentsToReceive,
+          grossRevenue: breakdown.grossRevenue,
+          totalWithdrawn: breakdown.totalWithdrawn,
+          totalRefunded: refundedAgg._sum.finalAmount ?? 0,
+          refundedCount: refundedAgg._count.id,
+          totalChargebacks: 0,
+          isAudited: !!audit,
         },
         tickets,
       },
+    };
+  }
+
+  // Prazos de retenção por método de pagamento (em dias)
+  private static readonly RETENTION_DAYS: Record<string, number> = {
+    [PaymentMethod.PIX]: 1,
+    [PaymentMethod.CREDIT_CARD]: 32,
+    [PaymentMethod.BOLETO]: 3,
+    [PaymentMethod.CRYPTO]: 30,
+  };
+
+  private calcRepasseBreakdown(
+    orders: any[],
+    retentionRate: number,
+    isAudited: boolean,
+    completedWithdrawals: any[],
+  ) {
+    let grossRevenue = 0;
+    let pendingRelease = 0;
+    let awaitingAudit = 0;
+    let installmentsToReceive = 0;
+    let releasedAndAvailable = 0;
+
+    const now = new Date();
+
+    for (const order of orders) {
+      const payment = order.payment;
+      if (!payment?.paymentDate) continue;
+
+      const finalAmount: number = order.finalAmount ?? 0;
+      grossRevenue += finalAmount;
+
+      const metadata = payment.metadata as any;
+      const isInstallment = !!(metadata?.creditCard?.installments && metadata.creditCard.installments > 1);
+      const retentionDays = EventsService.RETENTION_DAYS[payment.method as string] ?? 30;
+      const paymentDate = new Date(payment.paymentDate);
+      const releaseDate = new Date(paymentDate);
+      releaseDate.setDate(releaseDate.getDate() + retentionDays);
+      const released = releaseDate <= now;
+
+      if (isInstallment) {
+        const count: number = metadata.creditCard.installments;
+        const installmentValue = Math.round(finalAmount / count);
+        const lastInstallmentValue = finalAmount - installmentValue * (count - 1);
+
+        for (let i = 0; i < count; i++) {
+          const dueDate = new Date(paymentDate);
+          dueDate.setDate(dueDate.getDate() + 32 * (i + 1));
+          const isLast = i === count - 1;
+          const amount = isLast ? lastInstallmentValue : installmentValue;
+
+          if (dueDate > now) {
+            installmentsToReceive += amount;
+          } else if (isLast && !isAudited) {
+            awaitingAudit += amount;
+          } else {
+            releasedAndAvailable += amount;
+          }
+        }
+      } else {
+        if (!released) {
+          pendingRelease += finalAmount;
+        } else if (!isAudited) {
+          const retained = Math.round(finalAmount * retentionRate);
+          awaitingAudit += retained;
+          releasedAndAvailable += finalAmount - retained;
+        } else {
+          releasedAndAvailable += finalAmount;
+        }
+      }
+    }
+
+    const totalWithdrawn = completedWithdrawals.reduce(
+      (s: number, w: any) => s + (w.amount ?? 0),
+      0,
+    );
+
+    const availableBalance = Math.max(0, releasedAndAvailable - totalWithdrawn);
+
+    return {
+      grossRevenue,
+      pendingRelease,
+      awaitingAudit,
+      installmentsToReceive,
+      releasedAndAvailable,
+      totalWithdrawn,
+      availableBalance,
     };
   }
 
@@ -4577,69 +4594,34 @@ export class EventsService {
     await this.verifyOrganizerAccess(userId, eventId, 'financial');
 
     const prismaRead = this.prisma.getReadClient();
-    const retentionDays = 30; // Prazo de retenção padrão
 
-    // Buscar todos os pagamentos pagos do evento
-    const paidRegistrations = await prismaRead.registration.findMany({
-      where: {
-        eventId,
-        order: {
-          payment: {
-            status: PaymentStatus.PAID,
-          },
-        },
-      },
-      include: {
-        order: {
-          include: {
-            payment: true,
-          },
-        },
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
+    const withdrawals = await prismaRead.eventWithdrawal.findMany({
+      where: { eventId },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        amount: true,
+        feeRate: true,
+        feeAmount: true,
+        netAmount: true,
+        status: true,
+        notes: true,
+        createdAt: true,
+        completedAt: true,
       },
     });
 
-    // Filtrar pagamentos que já passaram do prazo de retenção (considerados como "repassados")
-    const transfers: any[] = [];
-    let totalTransferred = 0;
-
-    for (const reg of paidRegistrations) {
-      if (!reg.order?.payment?.paymentDate) continue;
-
-      const paymentDate = new Date(reg.order.payment.paymentDate);
-      const releaseDate = new Date(paymentDate);
-      releaseDate.setDate(releaseDate.getDate() + retentionDays);
-
-      // Se já passou do prazo de retenção, considerar como repassado
-      if (releaseDate <= new Date()) {
-        const metadata = reg.order.payment.metadata as any;
-        transfers.push({
-          id: reg.order.payment.id,
-          amount: this.normalizeToCents(reg.order?.finalAmount),
-          status: 'COMPLETED' as const,
-          requestedAt: paymentDate.toISOString(),
-          completedAt: releaseDate.toISOString(),
-          paymentMethod: reg.order.payment.method,
-          bankAccount: undefined, // Não há informações de conta bancária no modelo atual
-        });
-        totalTransferred += this.normalizeToCents(reg.order?.finalAmount);
-      }
-    }
-
-    // Ordenar por data de conclusão (mais recente primeiro)
-    transfers.sort((a, b) => new Date(b.completedAt || '').getTime() - new Date(a.completedAt || '').getTime());
+    const totalAmount = withdrawals.reduce((s, w) => s + w.amount, 0);
+    const totalCount = withdrawals.length;
 
     return {
       message: 'Transfer history fetched successfully',
       data: {
-        transfers,
-        totalTransferred: totalTransferred, // Já está normalizado em centavos
+        transfers: withdrawals,
+        metrics: {
+          totalAmount,
+          totalCount,
+        },
       },
     };
   }
@@ -4647,111 +4629,111 @@ export class EventsService {
   /**
    * Obtém parcelas a receber (baseado em pagamentos parcelados com cartão de crédito)
    */
-  async getFinancialInstallments(userId: string, eventId: string) {
+  async getFinancialTransferById(userId: string, eventId: string, withdrawalId: string) {
     await this.verifyOrganizerAccess(userId, eventId, 'financial');
 
     const prismaRead = this.prisma.getReadClient();
 
-    // Buscar todos os pagamentos pagos com cartão de crédito parcelado
-    const paidRegistrations = await prismaRead.registration.findMany({
-      where: {
-        eventId,
-        order: {
-          payment: {
-            status: PaymentStatus.PAID,
-            method: PaymentMethod.CREDIT_CARD,
-          },
-        },
-      },
-      include: {
-        order: {
-          include: {
-            payment: true,
-            user: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                email: true,
-                avatarUrl: true,
-              },
-            },
-          },
-        },
+    const withdrawal = await prismaRead.eventWithdrawal.findUnique({
+      where: { id: withdrawalId },
+      select: {
+        id: true,
+        eventId: true,
+        amount: true,
+        feeRate: true,
+        feeAmount: true,
+        netAmount: true,
+        status: true,
+        notes: true,
+        createdAt: true,
+        completedAt: true,
       },
     });
 
+    if (!withdrawal || withdrawal.eventId !== eventId) {
+      throw new NotFoundException('Transfer not found');
+    }
+
+    return {
+      message: 'Transfer fetched successfully',
+      data: { transfer: withdrawal },
+    };
+  }
+
+  async getFinancialInstallments(userId: string, eventId: string) {
+    await this.verifyOrganizerAccess(userId, eventId, 'financial');
+
+    const prismaRead = this.prisma.getReadClient();
+    const now = new Date();
+
+    const [orders, audit] = await Promise.all([
+      prismaRead.order.findMany({
+        where: {
+          eventId,
+          payment: { status: PaymentStatus.PAID, method: PaymentMethod.CREDIT_CARD },
+        },
+        include: {
+          payment: true,
+          user: {
+            select: { id: true, firstName: true, lastName: true, email: true, avatarUrl: true },
+          },
+        },
+      }),
+      prismaRead.eventAudit.findUnique({ where: { eventId } }),
+    ]);
+
+    const isAudited = !!audit;
     const installments: any[] = [];
     let totalPending = 0;
-    let releaseToday = 0;
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-    for (const reg of paidRegistrations) {
-      const metadata = reg.order?.payment?.metadata as any;
-      if (!metadata?.creditCard?.installments || metadata.creditCard.installments <= 1) continue;
+    for (const order of orders) {
+      const payment = order.payment;
+      if (!payment?.paymentDate) continue;
 
-      const installmentsCount = metadata.creditCard.installments;
-      const finalAmountCents = this.normalizeToCents(reg.order?.finalAmount);
-      const installmentValue = metadata.creditCard.installmentValue ? this.normalizeToCents(metadata.creditCard.installmentValue) : finalAmountCents / installmentsCount;
-      const paymentDate = reg.order?.payment?.paymentDate ? new Date(reg.order.payment.paymentDate) : new Date(reg.order?.createdAt || reg.createdAt);
+      const metadata = payment.metadata as any;
+      const count: number = metadata?.creditCard?.installments;
+      if (!count || count <= 1) continue;
 
-      // Calcular todas as parcelas (a primeira já foi recebida no pagamento inicial)
-      // Parcelas futuras começam do mês seguinte
-      for (let i = 1; i < installmentsCount; i++) {
+      const paymentDate = new Date(payment.paymentDate);
+      const installmentValue = Math.round(order.finalAmount / count);
+      const lastInstallmentValue = order.finalAmount - installmentValue * (count - 1);
+
+      for (let i = 0; i < count; i++) {
         const dueDate = new Date(paymentDate);
-        dueDate.setMonth(dueDate.getMonth() + i);
+        dueDate.setDate(dueDate.getDate() + 32 * (i + 1));
 
-        // Verificar se a parcela já venceu (considerar como recebida) ou ainda está pendente
-        const isReceived = dueDate < today;
-        const isDueToday = dueDate.toDateString() === today.toDateString();
+        if (dueDate <= now) continue; // parcela já vencida — fora da lista de "a receber"
 
-        // Incluir apenas parcelas pendentes (futuras) ou que vencem hoje
-        // Parcelas já vencidas não devem aparecer na lista
-        if (!isReceived || isDueToday) {
-          // Gerar ID único para a parcela usando o payment ID e número da parcela
-          // Formato: paymentId-parcela (ex: uuid-2, uuid-3, etc.)
-          const installmentNumber = i + 1; // i começa em 1, então primeira parcela futura é 2
-          const paymentId = reg.order?.payment?.id || reg.id;
+        const isLast = i === count - 1;
+        const amount = isLast ? lastInstallmentValue : installmentValue;
 
-          installments.push({
-            id: `${paymentId}-installment-${installmentNumber}`,
-            installmentNumber: installmentNumber, // Número da parcela (2, 3, 4, etc.)
-            paymentId: paymentId, // ID do pagamento original
-            amount: Math.round(installmentValue), // installmentValue já está normalizado em centavos
-            dueDate: dueDate.toISOString(),
-            status: isDueToday ? ('RECEIVED' as const) : ('PENDING' as const),
-            releaseToday: isDueToday ? installmentValue : undefined,
-            buyer: reg.order?.user ? {
-              id: reg.order.user.id,
-              firstName: reg.order.user.firstName,
-              lastName: reg.order.user.lastName,
-              email: reg.order.user.email,
-              avatarUrl: reg.order.user.avatarUrl,
-            } : null,
-          });
+        installments.push({
+          id: `${payment.id}-installment-${i + 1}`,
+          orderId: order.id,
+          paymentId: payment.id,
+          installmentNumber: i + 1,
+          totalInstallments: count,
+          amount,
+          dueDate: dueDate.toISOString(),
+          isLastInstallment: isLast,
+          retainedUntilAudit: isLast && !isAudited,
+          buyer: order.user,
+        });
 
-          // Contar apenas parcelas realmente pendentes (não as que vencem hoje)
-          if (!isReceived && !isDueToday) {
-            totalPending += installmentValue;
-          }
-          if (isDueToday) {
-            releaseToday += installmentValue;
-          }
-        }
+        totalPending += amount;
       }
     }
 
-    // Ordenar por data de vencimento
     installments.sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
 
     return {
       message: 'Installments fetched successfully',
       data: {
         installments,
-        totalPending: Math.round(totalPending), // Pode ter decimais por divisão, arredondar
-        releaseToday: Math.round(releaseToday), // Pode ter decimais por divisão, arredondar
-        totalTransactions: paidRegistrations.length,
+        metrics: {
+          totalPending,
+          totalCount: installments.length,
+        },
       },
     };
   }
