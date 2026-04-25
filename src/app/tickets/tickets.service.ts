@@ -470,14 +470,15 @@ export class TicketsService {
       throw new BadRequestException('ageLimit must have at least min or max');
     }
 
-    const updateData: any = {
-      ...updateTicketDto,
-      ageLimitMin: updateTicketDto.ageLimit?.min,
-      ageLimitMax: updateTicketDto.ageLimit?.max,
-    };
+    const updateData: any = { ...updateTicketDto };
     delete updateData.batches;
     delete updateData.productIds;
     delete updateData.ageLimit;
+
+    if ('ageLimit' in updateTicketDto) {
+      updateData.ageLimitMin = updateTicketDto.ageLimit?.min ?? null;
+      updateData.ageLimitMax = updateTicketDto.ageLimit?.max ?? null;
+    }
 
     if (updateTicketDto.categoryId !== undefined) {
       if (updateTicketDto.categoryId) {

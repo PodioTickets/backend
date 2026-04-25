@@ -1,6 +1,7 @@
 import {
   Controller,
   Post,
+  Patch,
   Body,
   UseGuards,
   Get,
@@ -28,6 +29,7 @@ import {
   ForgotPasswordDto,
   ResetPasswordDto,
   ChangePasswordDto,
+  ChangeEmailDto,
   VerifyResetCodeDto,
   ResendResetCodeDto,
 } from './dto/auth.dto';
@@ -272,6 +274,19 @@ export class AuthController {
   @ApiResponse({ status: 401, description: 'Não autenticado ou senha atual incorreta' })
   async changePassword(@Request() req, @Body() changePasswordDto: ChangePasswordDto) {
     return this.authService.changePassword(req.user.id, changePasswordDto);
+  }
+
+  @Patch('change-email')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Alterar e-mail da conta (requer senha atual)' })
+  @ApiBody({ type: ChangeEmailDto })
+  @ApiResponse({ status: 200, description: 'E-mail alterado com sucesso' })
+  @ApiResponse({ status: 400, description: 'E-mail já em uso ou senha incorreta' })
+  @ApiResponse({ status: 401, description: 'Não autenticado' })
+  async changeEmail(@Request() req, @Body() dto: ChangeEmailDto) {
+    return this.authService.changeEmail(req.user.id, dto);
   }
 
   @Get('profile')

@@ -11,11 +11,20 @@ import {
   ArrayMinSize,
   ArrayMaxSize,
   IsInt,
+  IsUUID,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class ProductVariationDto {
+  /** UUID da variação existente. Quando enviado, a variação é atualizada no lugar (preserva o ID). Omitir para criar uma nova variação. */
+  @IsOptional()
+  @IsUUID()
+  @ApiPropertyOptional({
+    description: 'UUID of the existing variation. When provided, the variation is updated in place (ID is preserved). Omit to create a new variation.',
+  })
+  id?: string;
+
   @IsString()
   @ApiProperty({
     description: 'Variation name (e.g., "PP", "P", "M", "G")',

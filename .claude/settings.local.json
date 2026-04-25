@@ -14,7 +14,9 @@
       "Bash(cp /c/Users/muril/.claude/skills/compress.md /c/Users/muril/.claude/skills/resume.md /c/Users/muril/.claude/skills/preserve.md /c/Users/muril/.claude/skills/daily-note.md /c/Users/muril/.claude/skills/meeting-note.md /c/Users/muril/.claude/skills/inbox-process.md /c/Users/muril/.claude/skills/weekly-review.md /c/Users/muril/.claude/commands/)",
       "Read(//c/Users/muril/.claude/**)",
       "mcp__obsidian__*",
-      "Bash(xargs grep *)"
+      "Bash(xargs grep *)",
+      "Bash(grep -E \"\\\\.\\(prisma|ts\\)$\")",
+      "Bash(pnpm add *)"
     ]
   }
 }

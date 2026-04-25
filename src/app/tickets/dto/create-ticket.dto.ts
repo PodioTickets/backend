@@ -197,9 +197,10 @@ export class UpdateTicketDto {
   gender?: string;
 
   @IsOptional()
+  @ValidateIf((o) => o.ageLimit !== null)
   @ValidateNested()
   @Type(() => AgeLimitDto)
-  ageLimit?: AgeLimitDto;
+  ageLimit?: AgeLimitDto | null;
 
   @IsOptional()
   @IsArray()

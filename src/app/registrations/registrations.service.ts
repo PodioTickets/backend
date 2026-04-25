@@ -79,22 +79,26 @@ export class RegistrationsService {
       await this.kitsService.checkStock(kitItem.kitItemId, kitItem.size, kitItem.quantity);
     }
 
-    // Determinar o usuário da inscrição (próprio ou convidado) - precisa ser feito antes das validações de cupom/voucher
-    let registrationUserId = userId;
+    // Determinar o usuário da inscrição (próprio ou convidado)
+    let registrationUserId: string | null = userId;
+    let guestSnapshot: { name: string; email: string; cpf: string; cpfClean: string } | null = null;
 
     if (invitedUser) {
-      // Criar usuário convidado (pre-cadastro)
-      const invitedUserData = await prismaWrite.user.create({
-        data: {
-          email: invitedUser.email,
-          firstName: invitedUser.firstName,
-          lastName: invitedUser.lastName,
-          documentNumber: invitedUser.documentNumber,
-          password: '', // Senha será definida depois
-          isActive: false, // Ativo apenas após definir senha
-        },
+      const existingUser = await prismaRead.user.findFirst({
+        where: { email: invitedUser.email },
+        select: { id: true },
       });
-      registrationUserId = invitedUserData.id;
+      if (existingUser) {
+        registrationUserId = existingUser.id;
+      } else {
+        registrationUserId = null;
+        guestSnapshot = {
+          name: `${invitedUser.firstName} ${invitedUser.lastName}`,
+          email: invitedUser.email,
+          cpf: invitedUser.documentNumber,
+          cpfClean: invitedUser.documentNumber.replace(/\D/g, ''),
+        };
+      }
     } else if (invitedUserId) {
       registrationUserId = invitedUserId;
     }
@@ -137,23 +141,6 @@ export class RegistrationsService {
     const serviceFee = amountAfterDiscount * 0.05;
     const finalAmount = amountAfterDiscount + serviceFee;
 
-    if (invitedUser) {
-      // Criar usuário convidado (pre-cadastro)
-      const invitedUserData = await prismaWrite.user.create({
-        data: {
-          email: invitedUser.email,
-          firstName: invitedUser.firstName,
-          lastName: invitedUser.lastName,
-          documentNumber: invitedUser.documentNumber,
-          password: '', // Senha será definida depois
-          isActive: false, // Ativo apenas após definir senha
-        },
-      });
-      registrationUserId = invitedUserData.id;
-    } else if (invitedUserId) {
-      registrationUserId = invitedUserId;
-    }
-
     // Criar inscrição
     const registration = await prismaWrite.$transaction(async (prisma) => {
       // Aplicar cupom ou voucher (marcar como usado)
@@ -195,19 +182,23 @@ export class RegistrationsService {
           eventId,
           orderId: order.id,
           userId: registrationUserId,
-          invitedById: (invitedUser || invitedUserId) ? userId : null,
+          invitedById: (guestSnapshot || invitedUserId) ? userId : null,
           status: RegistrationStatus.PENDING,
           termsAccepted,
           rulesAccepted,
+          ...(guestSnapshot && {
+            participantName: guestSnapshot.name,
+            participantEmail: guestSnapshot.email,
+            participantCpf: guestSnapshot.cpf,
+            participantCpfClean: guestSnapshot.cpfClean,
+          }),
         },
       });
 
-      // Criar QR Code payload (apenas dados, não Data URL)
-      // O QR Code será gerado dinamicamente no frontend/backend usando este payload
       const qrCodePayload = JSON.stringify({
         registrationId: newRegistration.id,
         eventId,
-        userId: registrationUserId,
+        userId: registrationUserId ?? userId,
       });
 
       await prisma.registration.update({
@@ -304,18 +295,91 @@ export class RegistrationsService {
     }
   }
 
+  private async resolveParticipant(reg: any, prismaRead: any): Promise<{
+    id: string | null;
+    firstName: string;
+    lastName: string;
+    fullName: string;
+    email: string | null;
+    documentNumber: string | null;
+    avatarUrl: string | null;
+    dateOfBirth: string | null;
+    gender: string | null;
+    phone: string | null;
+    reservePhone: string | null;
+  }> {
+    if (reg.user) {
+      const u = reg.user;
+      return {
+        id: u.id,
+        firstName: u.firstName,
+        lastName: u.lastName,
+        fullName: `${u.firstName} ${u.lastName}`,
+        email: u.email,
+        documentNumber: u.documentNumber ?? null,
+        avatarUrl: u.avatarUrl ?? null,
+        dateOfBirth: u.dateOfBirth?.toISOString() ?? null,
+        gender: u.gender ?? null,
+        phone: u.phone ?? null,
+        reservePhone: u.reservePhone ?? null,
+      };
+    }
+
+    if (reg.participantCpfClean) {
+      const realUser = await prismaRead.user.findFirst({
+        where: { documentNumberClean: reg.participantCpfClean, accountType: 'USER' },
+        select: {
+          id: true, firstName: true, lastName: true, email: true,
+          documentNumber: true, avatarUrl: true, dateOfBirth: true,
+          gender: true, phone: true, reservePhone: true,
+        },
+      });
+      if (realUser) {
+        return {
+          id: realUser.id,
+          firstName: realUser.firstName,
+          lastName: realUser.lastName,
+          fullName: `${realUser.firstName} ${realUser.lastName}`,
+          email: realUser.email,
+          documentNumber: realUser.documentNumber ?? null,
+          avatarUrl: realUser.avatarUrl ?? null,
+          dateOfBirth: realUser.dateOfBirth?.toISOString() ?? null,
+          gender: realUser.gender ?? null,
+          phone: realUser.phone ?? null,
+          reservePhone: realUser.reservePhone ?? null,
+        };
+      }
+    }
+
+    const nameParts = (reg.participantName ?? '').split(' ');
+    return {
+      id: null,
+      firstName: nameParts[0] ?? '',
+      lastName: nameParts.slice(1).join(' ') ?? '',
+      fullName: reg.participantName ?? '',
+      email: reg.participantEmail ?? null,
+      documentNumber: reg.participantCpf ?? null,
+      avatarUrl: null,
+      dateOfBirth: reg.participantDateOfBirth?.toISOString() ?? null,
+      gender: reg.participantGender ?? null,
+      phone: reg.participantPhone ?? null,
+      reservePhone: null,
+    };
+  }
+
   private buildUserOrdersWhere(
     userId: string,
     status?: RegistrationFilterStatus,
-    userCpf?: string | null,
+    userCpfClean?: string | null,
   ): Prisma.OrderWhereInput {
     const orClauses: Prisma.OrderWhereInput[] = [
       { userId },
       { registrations: { some: { userId } } },
       { registrations: { some: { invitedById: userId } } },
     ];
-    if (userCpf) {
-      orClauses.push({ registrations: { some: { user: { documentNumber: userCpf } } } });
+    if (userCpfClean) {
+      orClauses.push({ registrations: { some: { user: { documentNumberClean: userCpfClean } } } });
+      orClauses.push({ registrations: { some: { participantCpfClean: userCpfClean } } });
     }
     const participant: Prisma.OrderWhereInput = { OR: orClauses };
     if (!status) {
@@ -378,11 +442,11 @@ export class RegistrationsService {
 
     const currentUser = await prismaRead.user.findUnique({
       where: { id: userId },
-      select: { documentNumber: true },
+      select: { documentNumberClean: true },
     });
-    const userCpf = currentUser?.documentNumber ?? null;
+    const userCpfClean = currentUser?.documentNumberClean ?? null;
 
-    const where = this.buildUserOrdersWhere(userId, status, userCpf);
+    const where = this.buildUserOrdersWhere(userId, status, userCpfClean);
 
     const [orders, total] = await Promise.all([
       prismaRead.order.findMany({
@@ -404,6 +468,21 @@ export class RegistrationsService {
               state: true,
             },
           },
+          registrations: {
+            select: {
+              tickets: {
+                select: {
+                  ticket: {
+                    select: {
+                      modality: true,
+                      distance: true,
+                      distanceUnit: true,
+                    },
+                  },
+                },
+              },
+            },
+          },
         },
         orderBy: { createdAt: 'desc' },
         skip,
@@ -412,12 +491,21 @@ export class RegistrationsService {
       prismaRead.order.count({ where }),
     ]);
 
-    const formattedOrders = orders.map((order: any) => ({
-      id: order.id,
-      status: this.deriveOrderStatus(order.status, order.payment?.status ?? null),
-      createdAt: order.createdAt,
-      event: order.event,
-    }));
+    const formattedOrders = orders.map((order: any) => {
+      const modalitySet = new Set<string>();
+      for (const reg of order.registrations ?? []) {
+        for (const rt of reg.tickets ?? []) {
+          if (rt.ticket?.modality) modalitySet.add(rt.ticket.modality);
+        }
+      }
+      return {
+        id: order.id,
+        status: this.deriveOrderStatus(order.status, order.payment?.status ?? null),
+        createdAt: order.createdAt,
+        event: order.event,
+        modalities: Array.from(modalitySet),
+      };
+    });
 
     return {
       message: 'Orders fetched successfully',
@@ -506,6 +594,7 @@ export class RegistrationsService {
               select: {
                 id: true,
                 question: true,
+                description: true,
               },
             },
           },
@@ -547,9 +636,9 @@ export class RegistrationsService {
     if (!registration) {
       throw new NotFoundException('Registration not found');
     }
-    // Formatar a resposta conforme especificação
-    // Usar type assertion para contornar problemas de tipagem do Prisma
+
     const reg = registration as any;
+    const participant = await this.resolveParticipant(reg, prismaRead);
 
     const pendingProductsMap = new Map<string, { variationId?: string; quantity: number }>();
     for (const pp of (reg.order?.pendingProducts as any[] | null) ?? []) {
@@ -559,19 +648,7 @@ export class RegistrationsService {
     const formattedRegistration = {
       id: reg.id,
       qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
-      user: {
-        id: reg.user.id,
-        firstName: reg.user.firstName,
-        lastName: reg.user.lastName,
-        email: reg.user.email,
-        documentNumber: reg.user.documentNumber,
-        avatarUrl: reg.user.avatarUrl,
-        dateOfBirth: reg.user.dateOfBirth?.toISOString() || null,
-        gender: reg.user.gender,
-        phone: reg.user.phone,
-        reservePhone: reg.user.reservePhone,
-        fullName: `${reg.user.firstName} ${reg.user.lastName}`,
-      },
+      user: participant,
       modalities: (reg.modalities || []).map((rm: any) => ({
         id: rm.id,
         modality: {
@@ -621,6 +698,7 @@ export class RegistrationsService {
         question: {
           id: qa.question.id,
           question: qa.question.question,
+          description: qa.question.description ?? null,
         },
         answer: qa.answer as string,
       })),
@@ -729,7 +807,7 @@ export class RegistrationsService {
         questionAnswers: {
           include: {
             question: {
-              select: { id: true, question: true, type: true, isRequired: true },
+              select: { id: true, question: true, description: true, type: true, isRequired: true },
             },
           },
         },
@@ -790,12 +868,21 @@ export class RegistrationsService {
       throw new NotFoundException('Registration not found');
     }
 
+    const currentUser = await prismaRead.user.findUnique({
+      where: { id: userId },
+      select: { documentNumberClean: true },
+    });
     const isBuyer = registration.order?.userId === userId;
-    if (registration.userId !== userId && registration.invitedById !== userId && !isBuyer) {
+    const isParticipant = registration.userId === userId;
+    const isInviter = registration.invitedById === userId;
+    const isCpfMatch = !!(currentUser?.documentNumberClean && (registration as any).participantCpfClean === currentUser.documentNumberClean);
+
+    if (!isParticipant && !isInviter && !isBuyer && !isCpfMatch) {
       throw new BadRequestException('Access denied - You can only view your own registrations');
     }
 
     const reg = registration as any;
+    const participant = await this.resolveParticipant(reg, prismaRead);
 
     const formattedRegistration = {
       id: reg.id,
@@ -803,19 +890,7 @@ export class RegistrationsService {
       qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
       createdAt: reg.createdAt,
       updatedAt: reg.updatedAt,
-      participant: {
-        id: reg.user.id,
-        firstName: reg.user.firstName,
-        lastName: reg.user.lastName,
-        fullName: `${reg.user.firstName} ${reg.user.lastName}`,
-        email: reg.user.email,
-        documentNumber: reg.user.documentNumber,
-        avatarUrl: reg.user.avatarUrl,
-        dateOfBirth: reg.user.dateOfBirth?.toISOString() || null,
-        gender: reg.user.gender,
-        phone: reg.user.phone,
-        reservePhone: reg.user.reservePhone,
-      },
+      participant,
       invitedBy: reg.invitedBy ? {
         id: reg.invitedBy.id,
         fullName: `${reg.invitedBy.firstName} ${reg.invitedBy.lastName}`,
@@ -885,6 +960,7 @@ export class RegistrationsService {
         question: {
           id: qa.question.id,
           question: qa.question.question,
+          description: qa.question.description ?? null,
           type: qa.question.type,
           isRequired: qa.question.isRequired,
         },
@@ -966,7 +1042,11 @@ export class RegistrationsService {
       },
     });
 
-    if (!registration || registration.userId !== userId) {
+    if (!registration) {
+      throw new NotFoundException('Inscrição não encontrada');
+    }
+    const isBuyerUpdate = registration.order?.eventId && (registration as any).invitedById === userId;
+    if (registration.userId !== userId && !isBuyerUpdate) {
       throw new NotFoundException('Inscrição não encontrada');
     }
 
@@ -1089,7 +1169,9 @@ export class RegistrationsService {
     }
 
     const isBuyerCancel = registration.order?.userId === userId;
-    if (registration.userId !== userId && registration.invitedById !== userId && !isBuyerCancel) {
+    const isParticipantCancel = registration.userId === userId;
+    const isInviterCancel = registration.invitedById === userId;
+    if (!isParticipantCancel && !isInviterCancel && !isBuyerCancel) {
       throw new BadRequestException('Access denied');
     }
 

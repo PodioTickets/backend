@@ -1,39 +1,43 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import * as nodemailer from 'nodemailer';
+import type { MailDataRequired } from '@sendgrid/mail';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const sgMail = require('@sendgrid/mail');
 
 @Injectable()
 export class EmailService {
   private readonly logger = new Logger(EmailService.name);
-  private transporter: nodemailer.Transporter;
+  private readonly from: string;
+  private readonly enabled: boolean;
 
   constructor(private configService: ConfigService) {
-    this.initializeTransporter();
-  }
+    const apiKey = this.configService.get<string>('SEND_GRID');
+    this.from = this.configService.get<string>('SMTP_FROM', 'no-reply@podioticket.com.br');
 
-  private initializeTransporter() {
-    const smtpHost = this.configService.get<string>('SMTP_HOST');
-    const smtpPort = this.configService.get<number>('SMTP_PORT', 587);
-    const smtpUser = this.configService.get<string>('SMTP_USER');
-    const smtpPass = this.configService.get<string>('SMTP_PASSWORD');
-    const smtpFrom = this.configService.get<string>('SMTP_FROM', 'noreply@podiogo.com');
-
-    if (!smtpHost || !smtpUser || !smtpPass) {
-      this.logger.warn('SMTP configuration incomplete. Email service will be disabled.');
+    if (!apiKey) {
+      this.logger.warn('SEND_GRID API key not configured. Email service will be disabled.');
+      this.enabled = false;
       return;
     }
 
-    this.transporter = nodemailer.createTransport({
-      host: smtpHost,
-      port: smtpPort,
-      secure: smtpPort === 465,
-      auth: {
-        user: smtpUser,
-        pass: smtpPass,
-      },
-    });
+    sgMail.setApiKey(apiKey);
+    this.enabled = true;
+    this.logger.log('SendGrid email service initialized');
+  }
 
-    this.logger.log('Email transporter initialized');
+  private async send(msg: MailDataRequired): Promise<void> {
+    if (!this.enabled) {
+      this.logger.warn('Email service disabled. Skipping send.');
+      return;
+    }
+    try {
+      const [response] = await sgMail.send(msg);
+      this.logger.log(`SendGrid response: ${response.statusCode} to=${Array.isArray(msg.to) ? msg.to.join(',') : msg.to}`);
+    } catch (error: any) {
+      const detail = error?.response?.body ?? error?.message ?? error;
+      this.logger.error('Failed to send email via SendGrid:', JSON.stringify(detail));
+      throw error;
+    }
   }
 
   async sendContactMessageToOrganizer(data: {
@@ -45,52 +49,39 @@ export class EmailService {
     eventName?: string;
     message: string;
   }) {
-    if (!this.transporter) {
-      this.logger.warn('Email transporter not configured. Skipping email send.');
-      return;
-    }
-
     const subject = `Nova mensagem de contato${data.eventName ? ` - ${data.eventName}` : ''}`;
-    const htmlContent = `
+    const html = `
       <html>
         <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-          <h2>Nova mensagem de contato - PodioGo</h2>
-          <p>Você recebeu uma nova mensagem através da plataforma PodioGo:</p>
-          
+          <h2>Nova mensagem de contato — Podio Ticket</h2>
+          <p>Você recebeu uma nova mensagem através da plataforma Podio Ticket:</p>
           <div style="background-color: #f5f5f5; padding: 20px; border-radius: 5px; margin: 20px 0;">
             <p><strong>De:</strong> ${data.userName}</p>
             <p><strong>Email:</strong> ${data.userEmail}</p>
             ${data.userPhone ? `<p><strong>Telefone:</strong> ${data.userPhone}</p>` : ''}
             ${data.eventName ? `<p><strong>Evento:</strong> ${data.eventName}</p>` : ''}
           </div>
-          
           <div style="background-color: #fff; padding: 20px; border-left: 4px solid #007bff; margin: 20px 0;">
             <p><strong>Mensagem:</strong></p>
             <p>${data.message.replace(/\n/g, '<br>')}</p>
           </div>
-          
           <p style="margin-top: 30px; color: #666; font-size: 12px;">
-            Esta mensagem foi enviada através da plataforma PodioGo.<br>
-            Por favor, responda diretamente ao email do remetente: ${data.userEmail}
+            Esta mensagem foi enviada através da plataforma Podio Ticket.<br>
+            Responda diretamente ao email do remetente: ${data.userEmail}
           </p>
         </body>
       </html>
     `;
 
-    try {
-      await this.transporter.sendMail({
-        from: this.configService.get<string>('SMTP_FROM', 'noreply@podiogo.com'),
-        to: data.organizerEmail,
-        subject,
-        html: htmlContent,
-        replyTo: data.userEmail,
-      });
+    await this.send({
+      from: this.from,
+      to: data.organizerEmail,
+      replyTo: data.userEmail,
+      subject,
+      html,
+    });
 
-      this.logger.log(`Email sent to organizer: ${data.organizerEmail}`);
-    } catch (error) {
-      this.logger.error('Failed to send email:', error);
-      throw error;
-    }
+    this.logger.log(`Contact email sent to organizer: ${data.organizerEmail}`);
   }
 
   async sendInvitationEmail(data: {
@@ -100,26 +91,19 @@ export class EmailService {
     inviterName: string;
     registrationLink: string;
   }) {
-    if (!this.transporter) {
-      this.logger.warn('Email transporter not configured. Skipping email send.');
-      return;
-    }
-
     const subject = `${data.inviterName} inscreveu você no evento ${data.eventName}`;
-    const htmlContent = `
+    const html = `
       <html>
         <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-          <h2>Você foi convidado para participar de um evento!</h2>
+          <h2>Você foi inscrito em um evento!</h2>
           <p>Olá ${data.firstName},</p>
-          <p><strong>${data.inviterName}</strong> inscreveu você no evento <strong>${data.eventName}</strong> através da plataforma PodioGo.</p>
-          
+          <p><strong>${data.inviterName}</strong> inscreveu você no evento <strong>${data.eventName}</strong> através da plataforma Podio Ticket.</p>
           <div style="background-color: #f5f5f5; padding: 20px; border-radius: 5px; margin: 20px 0; text-align: center;">
-            <p>Para completar seu cadastro e definir sua senha, clique no link abaixo:</p>
+            <p>Para visualizar sua inscrição, clique no link abaixo:</p>
             <a href="${data.registrationLink}" style="display: inline-block; background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin-top: 10px;">
-              Completar Cadastro
+              Ver minha inscrição
             </a>
           </div>
-          
           <p style="margin-top: 30px; color: #666; font-size: 12px;">
             Se você não esperava receber este email, pode ignorá-lo.
           </p>
@@ -127,19 +111,8 @@ export class EmailService {
       </html>
     `;
 
-    try {
-      await this.transporter.sendMail({
-        from: this.configService.get<string>('SMTP_FROM', 'noreply@podiogo.com'),
-        to: data.email,
-        subject,
-        html: htmlContent,
-      });
-
-      this.logger.log(`Invitation email sent to: ${data.email}`);
-    } catch (error) {
-      this.logger.error('Failed to send invitation email:', error);
-      throw error;
-    }
+    await this.send({ from: this.from, to: data.email, subject, html });
+    this.logger.log(`Invitation email sent to: ${data.email}`);
   }
 
   async sendPasswordResetLink(data: {
@@ -148,18 +121,12 @@ export class EmailService {
     resetUrl: string;
     accountLabel?: string;
   }) {
-    if (!this.transporter) {
-      this.logger.warn('Email transporter not configured. Skipping password reset email.');
-      return;
-    }
-
     const safeName = this.escapeHtml(data.firstName || 'usuário');
     const label = data.accountLabel
       ? this.escapeHtml(data.accountLabel)
-      : 'sua conta PodioGo';
+      : 'sua conta Podio Ticket';
 
-    const subject = 'Redefinição de senha — PodioGo';
-    const htmlContent = `
+    const html = `
       <html>
         <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
           <h2>Redefinir senha</h2>
@@ -171,27 +138,59 @@ export class EmailService {
               Redefinir senha
             </a>
           </div>
-          <p style="color: #666; font-size: 13px;">O link expira em breve por motivos de segurança. Se o botão não funcionar, copie e cole no navegador:</p>
+          <p style="color: #666; font-size: 13px;">O link expira em breve. Se o botão não funcionar, copie e cole no navegador:</p>
           <p style="color: #666; font-size: 12px; word-break: break-all;">${this.escapeHtml(data.resetUrl)}</p>
           <p style="margin-top: 30px; color: #666; font-size: 12px;">
-            PodioGo — este é um e-mail automático, não responda.
+            Podio Ticket — este é um e-mail automático, não responda.
           </p>
         </body>
       </html>
     `;
 
-    try {
-      await this.transporter.sendMail({
-        from: this.configService.get<string>('SMTP_FROM', 'noreply@podiogo.com'),
-        to: data.email,
-        subject,
-        html: htmlContent,
-      });
-      this.logger.log(`Password reset email sent to: ${data.email}`);
-    } catch (error) {
-      this.logger.error('Failed to send password reset email:', error);
-      throw error;
-    }
+    await this.send({ from: this.from, to: data.email, subject: 'Redefinição de senha — Podio Ticket', html });
+    this.logger.log(`Password reset email sent to: ${data.email}`);
+  }
+
+  async sendPasswordChangedNotification(data: { email: string; firstName: string }) {
+    const safeName = this.escapeHtml(data.firstName || 'usuário');
+    const html = `
+      <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+          <h2>Sua senha foi alterada</h2>
+          <p>Olá ${safeName},</p>
+          <p>A senha da sua conta Podio Ticket foi alterada com sucesso.</p>
+          <p>Se você não realizou esta alteração, entre em contato com o suporte imediatamente.</p>
+          <p style="margin-top: 30px; color: #666; font-size: 12px;">
+            Podio Ticket — este é um e-mail automático, não responda.
+          </p>
+        </body>
+      </html>
+    `;
+    await this.send({ from: this.from, to: data.email, subject: 'Sua senha foi alterada — Podio Ticket', html });
+    this.logger.log(`Password changed notification sent to: ${data.email}`);
+  }
+
+  async sendEmailChangedNotification(data: { oldEmail: string; newEmail: string; firstName: string }) {
+    const safeName = this.escapeHtml(data.firstName || 'usuário');
+    const html = `
+      <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+          <h2>E-mail da conta alterado</h2>
+          <p>Olá ${safeName},</p>
+          <p>O e-mail da sua conta Podio Ticket foi alterado para <strong>${this.escapeHtml(data.newEmail)}</strong>.</p>
+          <p>Se você não realizou esta alteração, entre em contato com o suporte imediatamente.</p>
+          <p style="margin-top: 30px; color: #666; font-size: 12px;">
+            Podio Ticket — este é um e-mail automático, não responda.
+          </p>
+        </body>
+      </html>
+    `;
+    // Notifica o email antigo (segurança) e o novo (confirmação)
+    await Promise.all([
+      this.send({ from: this.from, to: data.oldEmail, subject: 'E-mail da conta alterado — Podio Ticket', html }),
+      this.send({ from: this.from, to: data.newEmail, subject: 'Bem-vindo ao novo e-mail — Podio Ticket', html }),
+    ]);
+    this.logger.log(`Email changed notification sent: ${data.oldEmail} → ${data.newEmail}`);
   }
 
   private escapeHtml(text: string): string {
@@ -202,4 +201,3 @@ export class EmailService {
       .replace(/"/g, '&quot;');
   }
 }
-

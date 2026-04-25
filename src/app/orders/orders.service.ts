@@ -596,6 +596,22 @@ export class OrdersService {
       throw new NotFoundException('Pedido não encontrado');
     }
 
+    // Batch-fetch variations that are no longer reachable via the FK relation
+    // (happens when organizer deletes+recreates variations — old IDs become orphans)
+    const orphanVariationIds = new Set<string>();
+    for (const reg of order.registrations as any[]) {
+      for (const rp of reg.products ?? []) {
+        if (!rp.variation && rp.variationId) orphanVariationIds.add(rp.variationId);
+      }
+    }
+    const orphanVariationMap = new Map<string, any>();
+    if (orphanVariationIds.size > 0) {
+      const found = await r.productVariation.findMany({
+        where: { id: { in: [...orphanVariationIds] } },
+      });
+      for (const v of found) orphanVariationMap.set(v.id, v);
+    }
+
     const payment = order.payment as any;
     const metadata = (payment?.metadata as any) ?? {};
 
@@ -689,18 +705,31 @@ export class OrdersService {
             reg.emergencyContactName || reg.emergencyContactPhone
               ? { name: reg.emergencyContactName ?? null, phone: reg.emergencyContactPhone ?? null }
               : null,
-          participant: {
-            id: reg.user?.id ?? null,
-            fullName: reg.user ? `${reg.user.firstName} ${reg.user.lastName}` : null,
-            firstName: reg.user?.firstName ?? null,
-            lastName: reg.user?.lastName ?? null,
-            email: reg.user?.email ?? null,
-            documentNumber: reg.user?.documentNumber ?? null,
-            phone: reg.user?.phone ?? null,
-            dateOfBirth: reg.user?.dateOfBirth ?? null,
-            gender: reg.user?.gender ?? null,
-            avatarUrl: reg.user?.avatarUrl ?? null,
-          },
+          participant: reg.user
+            ? {
+                id: reg.user.id,
+                fullName: `${reg.user.firstName} ${reg.user.lastName}`,
+                firstName: reg.user.firstName,
+                lastName: reg.user.lastName,
+                email: reg.user.email,
+                documentNumber: reg.user.documentNumber ?? null,
+                phone: reg.user.phone ?? null,
+                dateOfBirth: reg.user.dateOfBirth ?? null,
+                gender: reg.user.gender ?? null,
+                avatarUrl: reg.user.avatarUrl ?? null,
+              }
+            : {
+                id: null,
+                fullName: reg.participantName ?? null,
+                firstName: (reg.participantName ?? '').split(' ')[0] || null,
+                lastName: (reg.participantName ?? '').split(' ').slice(1).join(' ') || null,
+                email: reg.participantEmail ?? null,
+                documentNumber: reg.participantCpf ?? null,
+                phone: reg.participantPhone ?? null,
+                dateOfBirth: reg.participantDateOfBirth ?? null,
+                gender: reg.participantGender ?? null,
+                avatarUrl: null,
+              },
           ticket:
             reg.tickets?.length > 0
               ? {
@@ -713,9 +742,10 @@ export class OrdersService {
                     this.logger.debug(`[getOrderDetails] product=${tp.product.id} regProduct=${JSON.stringify({ id: regProduct?.id, variationId: regProduct?.variationId, variation: regProduct?.variation?.id })} pendingMap=${JSON.stringify(pendingProductsMap.get(tp.product.id))} variationsCount=${tp.product.variations?.length}`);
                     const variationEdited = regProduct?.variationEdited ?? false;
 
-                    // Prioridade 1: variação já confirmada no RegistrationProduct (via relation include)
-                    // Prioridade 2: buscar por variationId no RegistrationProduct dentro de tp.product.variations
-                    // Prioridade 3: variationId do pendingProducts (estado pré-pagamento)
+                    // Prioridade 1: variação confirmada no RegistrationProduct (FK direto)
+                    // Prioridade 2: variação órfã (organizer deletou+recriou variações — ID antigo ainda existe no DB)
+                    // Prioridade 3: variação encontrada nas variações atuais do produto pelo ID
+                    // Prioridade 4: variationId do pendingProducts (estado pré-pagamento, mesmo fallback acima)
                     const resolvedVariationId =
                       regProduct?.variationId
                       ?? pendingProductsMap.get(tp.product.id)?.variationId
@@ -723,6 +753,7 @@ export class OrdersService {
 
                     const selectedVariation: any =
                       regProduct?.variation
+                      ?? (resolvedVariationId ? orphanVariationMap.get(resolvedVariationId) ?? null : null)
                       ?? (resolvedVariationId
                         ? (tp.product.variations ?? []).find((v: any) => v.id === resolvedVariationId) ?? null
                         : null);
@@ -1562,47 +1593,58 @@ export class OrdersService {
           const pData = participants[pIdx];
           if (!pData) break;
 
-          // Resolve or create participant user
-          let participantUserId = userId;
+          // Resolve participant — nunca cria User fantasma
+          let participantUserId: string | null = userId;
+          let guestSnapshot: { name: string; email: string; cpf: string; cpfClean: string; phone: string; dateOfBirth: Date | null; gender: string | null } | null = null;
+
           if (pData.email?.toLowerCase() !== buyerUser?.email?.toLowerCase()) {
-            let invitedUser = await tx.user.findFirst({
-              where: { email: pData.email },
-            });
-            if (!invitedUser) {
-              const clean = (pData.cpf ?? '').replace(/\D/g, '');
-              invitedUser = await tx.user.create({
-                data: {
-                  email: pData.email,
-                  firstName: pData.name.split(' ')[0],
-                  lastName: pData.name.split(' ').slice(1).join(' ') || '',
-                  documentNumber: pData.cpf ?? '',
-                  documentNumberClean: clean,
-                  password: '',
-                  isActive: false,
-                },
-              });
+            const existingUser = await tx.user.findFirst({ where: { email: pData.email } });
+            if (existingUser) {
+              participantUserId = existingUser.id;
+            } else {
+              participantUserId = null;
+              guestSnapshot = {
+                name: pData.name ?? '',
+                email: pData.email ?? '',
+                cpf: pData.cpf ?? '',
+                cpfClean: (pData.cpf ?? '').replace(/\D/g, ''),
+                phone: pData.phone ?? '',
+                dateOfBirth: pData.birthDate ? new Date(pData.birthDate) : null,
+                gender: pData.gender ?? null,
+              };
             }
-            participantUserId = invitedUser.id;
           }
+
+          const isGuest = participantUserId === null;
+          const isDifferentUser = participantUserId !== null && participantUserId !== userId;
 
           const reg = await tx.registration.create({
             data: {
               eventId: order.eventId,
               orderId,
               userId: participantUserId,
-              invitedById: participantUserId !== userId ? userId : null,
+              invitedById: (isDifferentUser || isGuest) ? userId : null,
               status: RegistrationStatus.CONFIRMED,
               termsAccepted: true,
               rulesAccepted: true,
               emergencyContactName: pData.emergencyContactName?.trim() || null,
               emergencyContactPhone: pData.emergencyPhone?.trim() || null,
+              ...(guestSnapshot && {
+                participantName: guestSnapshot.name,
+                participantEmail: guestSnapshot.email,
+                participantCpf: guestSnapshot.cpf,
+                participantCpfClean: guestSnapshot.cpfClean,
+                participantPhone: guestSnapshot.phone,
+                participantDateOfBirth: guestSnapshot.dateOfBirth,
+                participantGender: guestSnapshot.gender,
+              }),
             },
           });
 
           const qrPayload = JSON.stringify({
             registrationId: reg.id,
             eventId: order.eventId,
-            userId: participantUserId,
+            userId: participantUserId ?? userId,
           });
           const updatedReg = await tx.registration.update({
             where: { id: reg.id },

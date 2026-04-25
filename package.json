@@ -32,6 +32,7 @@
     "docker:restart": "docker-compose -f docker-compose.yml restart"
   },
   "dependencies": {
+    "@google-cloud/storage": "^7.19.0",
     "@nestjs/axios": "^4.0.1",
     "@nestjs/cache-manager": "^3.0.1",
     "@nestjs/common": "^11.1.6",
@@ -48,6 +49,7 @@
     "@nestjs/throttler": "^6.4.0",
     "@nestjs/websockets": "^11.1.6",
     "@prisma/client": "^6.16.1",
+    "@sendgrid/mail": "^8.1.6",
     "@sentry/nestjs": "^10.22.0",
     "@sentry/node": "^10.22.0",
     "@types/express-session": "^1.18.2",

@@ -168,6 +168,18 @@ export class ChangePasswordDto {
   newPassword: string;
 }
 
+export class ChangeEmailDto {
+  @ApiProperty({ description: 'New email address' })
+  @IsEmail()
+  @IsNotEmpty()
+  newEmail: string;
+
+  @ApiProperty({ description: 'Current password (required for security confirmation)' })
+  @IsString()
+  @IsNotEmpty()
+  currentPassword: string;
+}
+
 export class VerifyResetCodeDto {
   @ApiProperty({ description: 'User email' })
   @IsEmail()

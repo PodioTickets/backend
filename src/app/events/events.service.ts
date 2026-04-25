@@ -2606,6 +2606,36 @@ export class EventsService {
   }
 
   /**
+   * Normaliza uma resposta de questionário para agrupamento consistente.
+   * Retorna um array de valores (checkbox pode ter múltiplas seleções).
+   */
+  private normalizeQuestionAnswer(raw: unknown, type: string): string[] {
+    const str = (raw ?? '').toString().trim();
+    if (str === '') return ['(vazio)'];
+
+    // Tentar parsear JSON array (respostas de checkbox ou select armazenadas como array)
+    if (str.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(str);
+        if (Array.isArray(parsed)) {
+          const items = parsed.map((v: unknown) => String(v).trim()).filter(Boolean);
+          return items.length > 0 ? items : ['(vazio)'];
+        }
+      } catch {
+        // não é JSON válido, tratar como string normal
+      }
+    }
+
+    // Normalizar booleanos para true_false
+    if (type === 'true_false') {
+      if (str === 'true' || str === '1') return ['Verdadeiro'];
+      if (str === 'false' || str === '0') return ['Falso'];
+    }
+
+    return [str];
+  }
+
+  /**
    * Perguntas mais respondidas do evento, com ranking de respostas, % por opção e tipo.
    */
   private async buildMostAnsweredQuestions(
@@ -2654,9 +2684,10 @@ export class EventsService {
       }
       const entry = byQuestion.get(key)!;
       entry.participantCount += 1;
-      const ans = (a.answer ?? '').trim();
-      const val = ans === '' ? '(vazio)' : ans;
-      entry.answersByValue.set(val, (entry.answersByValue.get(val) ?? 0) + 1);
+      const normalized = this.normalizeQuestionAnswer(a.answer, entry.type);
+      for (const val of normalized) {
+        entry.answersByValue.set(val, (entry.answersByValue.get(val) ?? 0) + 1);
+      }
     }
 
     const result = Array.from(byQuestion.values()).map((entry) => {
@@ -3094,8 +3125,24 @@ export class EventsService {
       include: {
         ticket: { select: { id: true, name: true } },
       },
-      orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }],
+      orderBy: [{ ticketId: 'asc' }, { sortOrder: 'asc' }],
     });
+
+    // Mapa: ticketId → lote ativo (primeiro com availableQuantity > 0, por sortOrder)
+    const activeBatchByTicket = new Map<string, { id: string; number: number }>();
+    const batchesByTicket = new Map<string, typeof allBatches>();
+    for (const b of allBatches) {
+      const list = batchesByTicket.get(b.ticketId) ?? [];
+      list.push(b);
+      batchesByTicket.set(b.ticketId, list);
+    }
+    for (const [ticketId, tBatches] of batchesByTicket) {
+      const active = tBatches.find((b) => b.availableQuantity > 0);
+      if (active) {
+        const number = tBatches.indexOf(active) + 1;
+        activeBatchByTicket.set(ticketId, { id: active.id, number });
+      }
+    }
 
     const batches = allBatches.filter((b) => {
       if (b.startDate && new Date(b.startDate) > now) return false;
@@ -3173,50 +3220,76 @@ export class EventsService {
       }
     }
 
-    const lots = batches.map((batch) => {
-      const total = batch.quantity;
-      const soldRaw = effectiveSold.get(batch.id) ?? 0;
-      const sold = Math.min(soldRaw, total);
-      const remaining = Math.max(0, total - sold);
-      const percentageSold =
-        total > 0 ? Math.round((sold / total) * 10000) / 100 : 0;
-
+    const resolveStatus = (remaining: number, percentageSold: number): 'Normal' | 'Atenção' | 'Crítico' => {
       const isLowStock = remaining > 0 && remaining <= 25;
-      let status: 'Normal' | 'Atenção' | 'Crítico';
-      if (
-        percentageSold >= 90 ||
-        remaining === 0 ||
-        (isLowStock && percentageSold >= 50)
-      ) {
-        status = 'Crítico';
-      } else if (percentageSold >= 75 || (isLowStock && percentageSold >= 25)) {
-        status = 'Atenção';
-      } else {
-        status = 'Normal';
-      }
+      if (percentageSold >= 90 || remaining === 0 || (isLowStock && percentageSold >= 50)) return 'Crítico';
+      if (percentageSold >= 75 || (isLowStock && percentageSold >= 25)) return 'Atenção';
+      return 'Normal';
+    };
 
-      return {
-        lotId: batch.id,
+    // Agrupar por ticket
+    const tickets = new Map<string, {
+      ticketId: string;
+      ticketName: string;
+      total: number;
+      sold: number;
+      batches: Array<{ id: string; name: string; total: number; sold: number; remaining: number; percentageSold: number; status: string }>;
+    }>();
+
+    for (const batch of batches) {
+      const soldRaw = effectiveSold.get(batch.id) ?? 0;
+      const batchSold = Math.min(soldRaw, batch.quantity);
+      const batchRemaining = Math.max(0, batch.quantity - batchSold);
+      const batchPct = batch.quantity > 0 ? Math.round((batchSold / batch.quantity) * 10000) / 100 : 0;
+
+      const entry = tickets.get(batch.ticketId) ?? {
         ticketId: batch.ticket.id,
         ticketName: batch.ticket.name,
-        name: `${batch.ticket.name} - Lote ${batch.id.slice(0, 8)}`,
-        status,
-        sold,
-        total,
+        total: 0,
+        sold: 0,
+        batches: [],
+      };
+
+      entry.total += batch.quantity;
+      entry.sold += batchSold;
+      entry.batches.push({
+        id: batch.id,
+        name: `Lote ${(batch.sortOrder ?? entry.batches.length) + 1}`,
+        total: batch.quantity,
+        sold: batchSold,
+        remaining: batchRemaining,
+        percentageSold: batchPct,
+        status: resolveStatus(batchRemaining, batchPct),
+      });
+
+      tickets.set(batch.ticketId, entry);
+    }
+
+    const result = Array.from(tickets.values()).map((t) => {
+      const remaining = Math.max(0, t.total - t.sold);
+      const percentageSold = t.total > 0 ? Math.round((t.sold / t.total) * 10000) / 100 : 0;
+      const active = activeBatchByTicket.get(t.ticketId) ?? null;
+      return {
+        ticketId: t.ticketId,
+        ticketName: t.ticketName,
+        status: resolveStatus(remaining, percentageSold),
+        sold: t.sold,
+        total: t.total,
         remaining,
         percentageSold,
+        activeBatch: active
+          ? { id: active.id, number: active.number, label: `Lote ${active.number}` }
+          : null,
+        batches: t.batches,
       };
     });
 
-    lots.sort((a, b) => {
+    result.sort((a, b) => {
       if (a.remaining !== b.remaining) return a.remaining - b.remaining;
-      if (b.percentageSold !== a.percentageSold) {
-        return b.percentageSold - a.percentageSold;
-      }
-      return a.lotId.localeCompare(b.lotId);
+      return b.percentageSold - a.percentageSold;
     });
 
-    return lots;
+    return result;
   }
 
   /**
@@ -3912,7 +3985,7 @@ export class EventsService {
       };
     }
 
-    // Busca por texto (nome, CPF, email, ID)
+    // Busca por texto (nome, CPF, email, ID) — cobre tanto usuários reais quanto participantes convidados
     if (search) {
       where.OR = [
         { id: { contains: search, mode: 'insensitive' } },
@@ -3926,6 +3999,9 @@ export class EventsService {
             ],
           },
         },
+        { participantName: { contains: search, mode: 'insensitive' } },
+        { participantEmail: { contains: search, mode: 'insensitive' } },
+        { participantCpf: { contains: search, mode: 'insensitive' } },
       ];
     }
 
@@ -4136,7 +4212,18 @@ export class EventsService {
     // Formatar registrations
     // Cada registration representa um participante do pedido
     // O pedido (order) agrupa múltiplas inscrições e tem o pagamento
-    const formattedRegistrations = registrations.map((reg) => ({
+    const formattedRegistrations = registrations.map((reg: any) => {
+      const u = reg.user;
+      const participantData = u ? u : {
+        id: null,
+        firstName: (reg.participantName ?? '').split(' ')[0] ?? '',
+        lastName: (reg.participantName ?? '').split(' ').slice(1).join(' ') ?? '',
+        email: reg.participantEmail ?? null,
+        phone: reg.participantPhone ?? null,
+        documentNumber: reg.participantCpf ?? null,
+        avatarUrl: null,
+      };
+      return ({
       id: reg.id,
       userId: reg.userId,
       eventId: reg.eventId,
@@ -4145,8 +4232,7 @@ export class EventsService {
       qrCode: reg.qrCode,
       createdAt: reg.createdAt.toISOString(),
       updatedAt: reg.updatedAt.toISOString(),
-      // Dados do participante (usuário da inscrição)
-      user: reg.user,
+      user: participantData,
       // Dados do pedido (compartilhado entre participantes)
       order: reg.order ? {
         id: reg.order.id,
@@ -4286,7 +4372,8 @@ export class EventsService {
         },
         answer: qa.answer,
       })),
-    }));
+    });
+    });
 
     return {
       message: 'Registrations fetched successfully',

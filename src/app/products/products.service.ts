@@ -458,25 +458,70 @@ export class ProductsService {
         throw new BadRequestException('Product must have at least one variation');
       }
 
-      // Produto obrigatório pode ter uma única variação (ex.: um SKU fixo).
-
       newVariationsSnapshot = variations.map((v) => ({
         name: v.name,
         price: Math.round(v.price ?? 0),
         stock: v.stock ?? 0,
       }));
 
-      await prismaWrite.productVariation.deleteMany({
-        where: { productId },
+      // IDs de variações referenciadas por compras — nunca podem ser deletadas
+      const referencedRows = await prismaWrite.registrationProduct.findMany({
+        where: { productId, variationId: { not: null } },
+        select: { variationId: true },
+        distinct: ['variationId'],
       });
+      const referencedVariationIds = new Set(referencedRows.map((r) => r.variationId as string));
 
-      updateData.variations = {
-        create: variations.map((v) => ({
-          name: v.name,
-          price: Math.round(v.price ?? 0),
-          stock: v.stock ?? 0,
-        })),
-      };
+      // Upsert: atualiza variações existentes no lugar (por id ou por nome como fallback)
+      // e cria as novas. Nunca recria com novo ID — preserva FKs em RegistrationProduct.
+      const incomingIds = new Set(variations.map((v) => v.id).filter(Boolean) as string[]);
+      for (const v of variations) {
+        const price = Math.round(v.price ?? 0);
+        const stock = v.stock ?? 0;
+
+        if (v.id) {
+          // Atualizar pelo ID explícito
+          const exists = product.variations.find((pv) => pv.id === v.id);
+          if (exists) {
+            await prismaWrite.productVariation.update({
+              where: { id: v.id },
+              data: { name: v.name, price, stock },
+            });
+          } else {
+            // ID enviado mas não existe — criar como nova
+            await prismaWrite.productVariation.create({
+              data: { productId, name: v.name, price, stock },
+            });
+          }
+        } else {
+          // Sem ID: tenta match por nome (backwards-compat) antes de criar
+          const byName = product.variations.find((pv) => pv.name === v.name);
+          if (byName) {
+            await prismaWrite.productVariation.update({
+              where: { id: byName.id },
+              data: { price, stock },
+            });
+            incomingIds.add(byName.id);
+          } else {
+            await prismaWrite.productVariation.create({
+              data: { productId, name: v.name, price, stock },
+            });
+          }
+        }
+      }
+
+      // Remover variações que saíram da lista e não têm compras vinculadas
+      const toDelete = product.variations.filter(
+        (pv) => !incomingIds.has(pv.id) && !referencedVariationIds.has(pv.id),
+      );
+      if (toDelete.length > 0) {
+        await prismaWrite.productVariation.deleteMany({
+          where: { id: { in: toDelete.map((v) => v.id) } },
+        });
+      }
+
+      // Não usa o campo `variations` no updateData — as operações acima já aplicaram tudo
+      delete updateData.variations;
     }
 
     const { labels: auditLabels, changes: auditChanges } =
