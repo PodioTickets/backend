@@ -29,7 +29,6 @@ jobs:
 
             echo "📥 Atualizando código..."
             git fetch origin
-            git reset --hard origin/homologacao
             git pull origin homologacao
 
             export DOCKER_BUILDKIT=1
