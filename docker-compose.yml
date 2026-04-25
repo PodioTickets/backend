@@ -79,6 +79,7 @@ services:
     volumes:
       # Persistir uploads (banner/logo dos eventos, avatares, PDFs) entre deploys/restarts
       - uploads_data:/usr/src/app/uploads
+      - ./podio-storage-homolog-key.json:/usr/src/app/podio-storage-homolog-key.json:ro
     networks:
       - podiogo-network
     restart: unless-stopped
