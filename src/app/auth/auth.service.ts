@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Logger,
   UnauthorizedException,
   BadRequestException,
   ConflictException,
@@ -33,6 +34,8 @@ type PasswordResetLinkPayload = {
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
@@ -264,8 +267,8 @@ export class AuthService {
           email,
           accountType: 'USER', // Registro sempre cria conta de usuário normal
           password: hashedPassword,
-          firstName: complete_name.split(' ')[0],
-          lastName: complete_name.split(' ').slice(1).join(' '),
+          firstName: complete_name ? complete_name.split(' ')[0] : '',
+          lastName: complete_name ? complete_name.split(' ').slice(1).join(' ') : '',
           gender,
           phone,
           reservePhone: reserve_phone,
@@ -765,13 +768,12 @@ export class AuthService {
     const accountLabel =
       accountType === 'ORGANIZER' ? 'conta de organizador' : 'sua conta PodioGo';
 
-    // TODO: habilitar quando email estiver configurado
-    // await this.emailService.sendPasswordResetLink({
-    //   email: user.email,
-    //   firstName: user.firstName,
-    //   resetUrl,
-    //   accountLabel,
-    // });
+    await this.emailService.sendPasswordResetLink({
+      email: user.email,
+      firstName: user.firstName,
+      resetUrl,
+      accountLabel,
+    });
 
     const prevToken = await this.cacheManager.get<string>(
       `password_reset_active:${user.id}`,
@@ -834,9 +836,11 @@ export class AuthService {
     }
 
     const hashedPassword = await bcrypt.hash(newPassword, 12);
-    await prismaWrite.user.update({
+
+    const updatedUser = await prismaWrite.user.update({
       where: { id: userId },
       data: { password: hashedPassword },
+      select: { firstName: true, email: true },
     });
 
     await this.invalidatePasswordResetArtifactsForUser(
@@ -845,10 +849,60 @@ export class AuthService {
       user.accountType as 'USER' | 'ORGANIZER',
     );
 
+    this.emailService.sendPasswordChangedNotification({
+      email: updatedUser.email,
+      firstName: updatedUser.firstName,
+    }).catch((err) => this.logger.warn('Failed to send password changed email:', err));
+
     return {
       success: true,
       message: 'Senha alterada com sucesso',
     };
+  }
+
+  async changeEmail(userId: string, dto: { newEmail: string; currentPassword: string }) {
+    const { newEmail, currentPassword } = dto;
+
+    const prismaRead = this.prisma.getReadClient();
+    const prismaWrite = this.prisma.getWriteClient();
+
+    const user = await prismaRead.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true, firstName: true, password: true, accountType: true },
+    });
+    if (!user) throw new BadRequestException('Usuário não encontrado');
+
+    if (!user.password || String(user.password).trim().length === 0) {
+      throw new BadRequestException('Conta sem senha local — use a autenticação Google para gerenciar o e-mail');
+    }
+
+    const isPasswordValid = await bcrypt.compare(currentPassword, user.password);
+    if (!isPasswordValid) throw new UnauthorizedException('Senha incorreta');
+
+    const normalizedEmail = newEmail.toLowerCase().trim();
+
+    if (normalizedEmail === user.email.toLowerCase()) {
+      throw new BadRequestException('O novo e-mail deve ser diferente do atual');
+    }
+
+    const existing = await prismaRead.user.findFirst({
+      where: { email: { equals: normalizedEmail, mode: 'insensitive' } },
+      select: { id: true },
+    });
+    if (existing) throw new BadRequestException('Este e-mail já está em uso');
+
+    await prismaWrite.user.update({
+      where: { id: userId },
+      data: { email: normalizedEmail },
+    });
+
+    this.emailService.sendEmailChangedNotification({
+      oldEmail: user.email,
+      newEmail: normalizedEmail,
+      firstName: user.firstName,
+    }).catch((err) => this.logger.warn('Failed to send email changed notification:', err));
+
+    return { success: true, message: 'E-mail alterado com sucesso' };
   }
 
   private async createRefreshToken(userId: string): Promise<string> {

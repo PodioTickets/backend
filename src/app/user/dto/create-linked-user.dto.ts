@@ -1,10 +1,11 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsString,
   IsEmail,
   IsDateString,
   IsEnum,
   IsNotEmpty,
+  IsOptional,
   Matches,
   MinLength,
 } from 'class-validator';
@@ -33,13 +34,13 @@ export class CreateLinkedUserDto {
   @IsNotEmpty()
   lastName: string;
 
-  @ApiProperty({
+  @ApiPropertyOptional({
     description: 'Email do usuário',
     example: 'maria@example.com',
   })
+  @IsOptional()
   @IsEmail()
-  @IsNotEmpty()
-  email: string;
+  email?: string;
 
   @ApiProperty({
     description: 'CPF do usuário (apenas números, sem formatação)',

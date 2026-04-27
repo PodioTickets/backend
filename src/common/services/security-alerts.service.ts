@@ -1,8 +1,9 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
-import * as nodemailer from 'nodemailer';
 import axios from 'axios';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const sgMail = require('@sendgrid/mail');
 
 interface AlertChannel {
   id: string;
@@ -36,7 +37,7 @@ interface AlertMessage {
 export class SecurityAlertsService implements OnModuleInit {
   private readonly logger = new Logger(SecurityAlertsService.name);
   private readonly channels: AlertChannel[] = [];
-  private emailTransporter: nodemailer.Transporter;
+  private emailEnabled = false;
 
   constructor(
     private configService: ConfigService,
@@ -122,23 +123,14 @@ export class SecurityAlertsService implements OnModuleInit {
     this.logger.log(`✅ Initialized ${this.channels.length} alert channels`);
   }
 
-  private async initializeEmailTransporter() {
-    const smtpConfig = {
-      host: this.configService.get<string>('SMTP_HOST', 'smtp.gmail.com'),
-      port: this.configService.get<number>('SMTP_PORT', 587),
-      secure: this.configService.get<boolean>('SMTP_SECURE', false),
-      auth: {
-        user: this.configService.get<string>('SMTP_USER'),
-        pass: this.configService.get<string>('SMTP_PASS'),
-      },
-    };
-
-    // Só inicializar se as credenciais estiverem configuradas
-    if (smtpConfig.auth.user && smtpConfig.auth.pass) {
-      this.emailTransporter = nodemailer.createTransport(smtpConfig);
-      this.logger.log('✅ Email transporter initialized');
+  private initializeEmailTransporter() {
+    const apiKey = this.configService.get<string>('SEND_GRID');
+    if (apiKey) {
+      sgMail.setApiKey(apiKey);
+      this.emailEnabled = true;
+      this.logger.log('✅ SendGrid email alerts initialized');
     } else {
-      this.logger.warn('⚠️ Email transporter not configured - email alerts disabled');
+      this.logger.warn('⚠️ SEND_GRID not configured - email alerts disabled');
     }
   }
 
@@ -256,27 +248,20 @@ export class SecurityAlertsService implements OnModuleInit {
   }
 
   private async sendEmailAlert(channel: AlertChannel, alert: AlertMessage) {
-    if (!this.emailTransporter) {
-      this.logger.warn('⚠️ Email transporter not configured');
+    if (!this.emailEnabled) {
+      this.logger.warn('⚠️ Email alerts disabled (SEND_GRID not configured)');
       return;
     }
 
     const recipients = channel.config.recipients;
     const subject = `${this.getSeverityEmoji(alert.severity)} ${channel.config.subject} - ${alert.title}`;
-
-    const htmlContent = this.generateEmailContent(alert);
+    const from = this.configService.get<string>('SMTP_FROM', 'no-reply@podioticket.com.br');
 
     try {
-      await this.emailTransporter.sendMail({
-        from: this.configService.get<string>('SMTP_FROM', 'alerts@loot4fun.com'),
-        to: recipients,
-        subject,
-        html: htmlContent,
-      });
-
+      await sgMail.send({ from, to: recipients, subject, html: this.generateEmailContent(alert) });
       this.logger.log(`📧 Email alert sent to ${recipients.join(', ')}`);
     } catch (error) {
-      this.logger.error('❌ Failed to send email alert:', error);
+      this.logger.error('❌ Failed to send email alert:', error?.response?.body ?? error);
       throw error;
     }
   }

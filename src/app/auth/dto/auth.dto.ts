@@ -37,10 +37,10 @@ export class EmailRegisterDto {
   @MinLength(8)
   password: string;
 
-  @ApiProperty({ description: 'Complete name' })
+  @ApiPropertyOptional({ description: 'Complete name' })
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  complete_name: string;
+  complete_name?: string;
 
   @ApiPropertyOptional({ description: 'Gender', enum: Gender })
   @IsOptional()
@@ -166,6 +166,18 @@ export class ChangePasswordDto {
   @IsNotEmpty()
   @MinLength(8)
   newPassword: string;
+}
+
+export class ChangeEmailDto {
+  @ApiProperty({ description: 'New email address' })
+  @IsEmail()
+  @IsNotEmpty()
+  newEmail: string;
+
+  @ApiProperty({ description: 'Current password (required for security confirmation)' })
+  @IsString()
+  @IsNotEmpty()
+  currentPassword: string;
 }
 
 export class VerifyResetCodeDto {

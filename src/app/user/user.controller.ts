@@ -153,6 +153,20 @@ export class UserController {
     return this.userService.createOrLinkUser(req.user.id, createLinkedUserDto);
   }
 
+  @Get('by-cpf/:cpf')
+  @NoCache()
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Buscar usuário real por CPF',
+    description: 'Retorna os dados de um usuário cadastrado pelo CPF, para pré-preenchimento do formulário de participante.',
+  })
+  @ApiResponse({ status: 200, description: 'Usuário encontrado' })
+  @ApiResponse({ status: 404, description: 'Usuário não encontrado' })
+  async findByCpf(@Param('cpf') cpf: string) {
+    return this.userService.findUserByCpf(cpf);
+  }
+
   @Get(':id')
   @NoCache()
   @UseGuards(JwtAuthGuard, AdminGuard)

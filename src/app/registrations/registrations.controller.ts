@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Param, Delete, UseGuards, Request, Query } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Delete, Patch, UseGuards, Request, Query } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
@@ -62,6 +62,29 @@ export class RegistrationsController {
   @ApiResponse({ status: 404, description: 'Registration not found' })
   findMyRegistration(@Request() req, @Param('id') id: string) {
     return this.registrationsService.findMyRegistration(id, req.user.id);
+  }
+
+  @Patch(':registrationId/products/:productId/variation')
+  @NoCache()
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Alterar variação de produto incluso no ingresso',
+    description: 'Permite ao comprador alterar a variação de um produto incluso no ingresso uma única vez, dentro do prazo configurado pelo organizador.',
+  })
+  @ApiParam({ name: 'registrationId', description: 'UUID da inscrição' })
+  @ApiParam({ name: 'productId', description: 'UUID do produto' })
+  @ApiBody({ schema: { type: 'object', properties: { variationId: { type: 'string', format: 'uuid' } }, required: ['variationId'] } })
+  @ApiResponse({ status: 200, description: 'Variação atualizada com sucesso' })
+  @ApiResponse({ status: 400, description: 'Alteração não permitida' })
+  @ApiResponse({ status: 404, description: 'Inscrição ou produto não encontrado' })
+  updateProductVariation(
+    @Request() req,
+    @Param('registrationId') registrationId: string,
+    @Param('productId') productId: string,
+    @Body('variationId') variationId: string,
+  ) {
+    return this.registrationsService.updateProductVariation(registrationId, productId, variationId, req.user.id);
   }
 
   @Get(':id')

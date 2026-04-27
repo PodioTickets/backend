@@ -1443,29 +1443,29 @@ export class CheckoutService {
       for (let i = 0; i < ticketItem.quantity; i++) {
         const participantData = dto.participants[participantIndex];
 
-        // Resolver ou criar usuário participante (usando cache pré-carregado)
-        let participantUserId = userId;
-        if (participantData.email.toLowerCase() !== buyerUser?.email?.toLowerCase()) {
-          let invitedUser = emailToUser.get(participantData.email.toLowerCase()) ?? null;
+        // Resolver usuário participante — nunca cria User fantasma
+        let participantUserId: string | null = userId;
+        let participantSnapshot: {
+          name: string; email: string; cpf: string; cpfClean: string;
+          phone: string; dateOfBirth: Date | null; gender: string | null;
+        } | null = null;
 
-          if (!invitedUser) {
-            // Criar usuário convidado e adicionar ao cache
-            const documentNumberClean = participantData.cpf.replace(/\D/g, '');
-            invitedUser = await prisma.user.create({
-              data: {
-                email: participantData.email,
-                firstName: participantData.name.split(' ')[0],
-                lastName:
-                  participantData.name.split(' ').slice(1).join(' ') || '',
-                documentNumber: participantData.cpf,
-                documentNumberClean,
-                password: '',
-                isActive: false,
-              },
-            });
-            emailToUser.set(participantData.email.toLowerCase(), invitedUser);
+        if (participantData.email.toLowerCase() !== buyerUser?.email?.toLowerCase()) {
+          const existingUser = emailToUser.get(participantData.email.toLowerCase()) ?? null;
+          if (existingUser) {
+            participantUserId = existingUser.id;
+          } else {
+            participantUserId = null;
+            participantSnapshot = {
+              name: participantData.name,
+              email: participantData.email,
+              cpf: participantData.cpf,
+              cpfClean: participantData.cpf.replace(/\D/g, ''),
+              phone: participantData.phone ?? '',
+              dateOfBirth: participantData.birthDate ? new Date(participantData.birthDate) : null,
+              gender: participantData.gender ?? null,
+            };
           }
-          participantUserId = invitedUser.id;
         }
 
         // Criar Registration para este participante
@@ -1476,25 +1476,36 @@ export class CheckoutService {
             ? RegistrationStatus.CANCELLED
             : RegistrationStatus.PENDING;
 
+        const isGuest = participantUserId === null;
+        const isDifferentUser = participantUserId !== null && participantUserId !== userId;
+
         const registration = await prisma.registration.create({
           data: {
             eventId: dto.eventId,
             orderId: order.id,
             userId: participantUserId,
-            invitedById: participantUserId !== userId ? userId : null,
+            invitedById: (isDifferentUser || isGuest) ? userId : null,
             status: registrationStatus,
             termsAccepted: true,
             rulesAccepted: true,
             emergencyContactName: participantData.emergencyContactName?.trim() || null,
             emergencyContactPhone: participantData.emergencyPhone?.trim() || null,
+            ...(participantSnapshot && {
+              participantName: participantSnapshot.name,
+              participantEmail: participantSnapshot.email,
+              participantCpf: participantSnapshot.cpf,
+              participantCpfClean: participantSnapshot.cpfClean,
+              participantPhone: participantSnapshot.phone,
+              participantDateOfBirth: participantSnapshot.dateOfBirth,
+              participantGender: participantSnapshot.gender,
+            }),
           },
         });
 
-        // Criar QR Code payload (apenas dados, não Data URL)
         const qrCodePayload = JSON.stringify({
           registrationId: registration.id,
           eventId: dto.eventId,
-          userId: participantUserId,
+          userId: participantUserId ?? userId,
         });
         const updatedRegistration = await prisma.registration.update({
           where: { id: registration.id },

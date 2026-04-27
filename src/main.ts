@@ -38,13 +38,13 @@ async function bootstrap() {
   });
   app.use(
     express.json({
-      limit: '10mb',
+      limit: '200mb',
       verify: (req: RequestWithRawBody, _res, buf) => {
         req.rawBody = buf;
       },
     }),
   );
-  app.use(express.urlencoded({ limit: '10mb', extended: true }));
+  app.use(express.urlencoded({ limit: '200mb', extended: true }));
 
   const configService = app.get(ConfigService);
   const httpAdapterHost = app.get(HttpAdapterHost);
@@ -247,7 +247,7 @@ async function bootstrap() {
     SwaggerModule.setup('api', app, document, swaggerOptions);
   }
 
-  app.use('/api/v1/upload', bodyParser.raw({ limit: '10mb' }));
+  app.use('/api/v1/upload', bodyParser.raw({ limit: '200mb' }));
   app.use(
     new ConcurrencyLimiterMiddleware().use.bind(
       new ConcurrencyLimiterMiddleware(),

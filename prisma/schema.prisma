@@ -165,7 +165,6 @@ model User {
   payments                  Payment[]
   invitedRegistrations      Registration[]             @relation("InvitedBy")
   linkedUsersAsMain         LinkedUser[]               @relation("MainUser")
-  linkedUsersAsLinked       LinkedUser[]               @relation("LinkedUser")
   organizationMembers       OrganizationMember[]
   organizationAuditLogs     OrganizationAuditLog[]
   organizerAuditPageDedupes OrganizerAuditPageDedupe[]
@@ -515,20 +514,28 @@ model KitItem {
 model Registration {
   id            String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   eventId       String             @db.Uuid
-  orderId       String             @db.Uuid // Pedido ao qual esta inscrição pertence (obrigatório)
-  userId        String             @db.Uuid // Usuário participante (pode ser diferente do comprador do pedido)
+  orderId       String             @db.Uuid
+  userId        String?            @db.Uuid // null quando participante não tem conta
   status                RegistrationStatus @default(PENDING)
-  qrCode                String? // Código/payload do QR (UUID ou código curto de 36-64 chars) - QR é gerado dinamicamente no frontend/backend
+  qrCode                String?
   termsAccepted         Boolean            @default(false)
   rulesAccepted         Boolean            @default(false)
-  emergencyContactName  String? // Nome do contato de emergência informado no momento da compra
-  emergencyContactPhone String? // Telefone do contato de emergência informado no momento da compra
+  emergencyContactName  String?
+  emergencyContactPhone String?
+  // Snapshot do participante convidado (preenchido quando userId = null)
+  participantName       String?
+  participantEmail      String?
+  participantCpf        String?
+  participantCpfClean   String?
+  participantPhone      String?
+  participantDateOfBirth DateTime?
+  participantGender     String?
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
 
   event           Event                  @relation(fields: [eventId], references: [id], onDelete: Cascade)
   order           Order                  @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  user            User                   @relation("Participant", fields: [userId], references: [id], onDelete: Cascade)
+  user            User?                  @relation("Participant", fields: [userId], references: [id], onDelete: SetNull)
   invitedBy       User?                  @relation("InvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
   invitedById     String?                @db.Uuid
   modalities      RegistrationModality[]
@@ -541,12 +548,12 @@ model Registration {
   @@index([orderId])
   @@index([userId])
   @@index([invitedById])
-  // qrCode não pode ter índice devido ao tamanho (Data URL)
-  @@index([eventId, status]) // Para filtrar inscrições por evento e status
-  @@index([userId, createdAt]) // Para histórico ordenado do usuário
-  @@index([invitedById, createdAt]) // Lista de convidados ordenada (OR com userId)
-  @@index([orderId, createdAt]) // Para ordenar inscrições por pedido
-  @@index([status, createdAt]) // Para relatórios
+  @@index([participantCpfClean])
+  @@index([eventId, status])
+  @@index([userId, createdAt])
+  @@index([invitedById, createdAt])
+  @@index([orderId, createdAt])
+  @@index([status, createdAt])
 }
 
 model RegistrationModality {
@@ -726,19 +733,24 @@ model ContactMessage {
 }
 
 model LinkedUser {
-  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  mainUserId       String   @db.Uuid
-  linkedUserId     String   @db.Uuid
-  relationshipType String? // ex: "dependente", "familiar", "outro"
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  mainUserId          String    @db.Uuid
+  firstName           String
+  lastName            String
+  email               String?
+  documentNumber      String?
+  documentNumberClean String?
+  phone               String?
+  dateOfBirth         DateTime?
+  gender              String?
+  relationshipType    String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
-  mainUser   User @relation("MainUser", fields: [mainUserId], references: [id], onDelete: Cascade)
-  linkedUser User @relation("LinkedUser", fields: [linkedUserId], references: [id], onDelete: Cascade)
+  mainUser User @relation("MainUser", fields: [mainUserId], references: [id], onDelete: Cascade)
 
-  @@unique([mainUserId, linkedUserId])
+  @@unique([mainUserId, documentNumberClean])
   @@index([mainUserId])
-  @@index([linkedUserId])
 }
 
 model Coupon {
@@ -958,6 +970,7 @@ model RegistrationProduct {
   registrationId String   @db.Uuid
   productId      String   @db.Uuid
   variationId    String?  @db.Uuid // Variação escolhida (opcional, se o produto tiver variações)
+  variationEdited Boolean @default(false) // true após o comprador alterar a variação (permitido apenas uma vez)
   quantity       Int      @default(1)
   unitPrice      Int // Preço unitário em centavos no momento da compra
   totalPrice     Int // Preço total em centavos (unitPrice * quantity)

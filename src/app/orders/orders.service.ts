@@ -560,7 +560,9 @@ export class OrdersService {
                     products: {
                       orderBy: { sortOrder: 'asc' },
                       include: {
-                        product: { include: { variations: true } },
+                        product: {
+                          include: { variations: true },
+                        },
                       },
                     },
                   },
@@ -581,7 +583,7 @@ export class OrdersService {
             },
             products: {
               include: {
-                product: { select: { id: true, name: true, image: true, basePrice: true, variationType: true } },
+                product: { select: { id: true, name: true, image: true, basePrice: true, variationType: true, buyerVariationEditAllowed: true, variationEditDeadlineDays: true } },
                 variation: true,
               },
             },
@@ -592,6 +594,22 @@ export class OrdersService {
 
     if (!order || order.userId !== userId) {
       throw new NotFoundException('Pedido não encontrado');
+    }
+
+    // Batch-fetch variations that are no longer reachable via the FK relation
+    // (happens when organizer deletes+recreates variations — old IDs become orphans)
+    const orphanVariationIds = new Set<string>();
+    for (const reg of order.registrations as any[]) {
+      for (const rp of reg.products ?? []) {
+        if (!rp.variation && rp.variationId) orphanVariationIds.add(rp.variationId);
+      }
+    }
+    const orphanVariationMap = new Map<string, any>();
+    if (orphanVariationIds.size > 0) {
+      const found = await r.productVariation.findMany({
+        where: { id: { in: [...orphanVariationIds] } },
+      });
+      for (const v of found) orphanVariationMap.set(v.id, v);
     }
 
     const payment = order.payment as any;
@@ -617,6 +635,9 @@ export class OrdersService {
     for (const pp of (order.pendingProducts as any[] | null) ?? []) {
       pendingProductsMap.set(pp.productId, { variationId: pp.variationId, quantity: pp.quantity });
     }
+
+    const eventDate = new Date((order as any).event?.eventDate ?? 0);
+    const now = new Date();
 
     return {
       message: 'Order details fetched successfully',
@@ -684,18 +705,31 @@ export class OrdersService {
             reg.emergencyContactName || reg.emergencyContactPhone
               ? { name: reg.emergencyContactName ?? null, phone: reg.emergencyContactPhone ?? null }
               : null,
-          participant: {
-            id: reg.user?.id ?? null,
-            fullName: reg.user ? `${reg.user.firstName} ${reg.user.lastName}` : null,
-            firstName: reg.user?.firstName ?? null,
-            lastName: reg.user?.lastName ?? null,
-            email: reg.user?.email ?? null,
-            documentNumber: reg.user?.documentNumber ?? null,
-            phone: reg.user?.phone ?? null,
-            dateOfBirth: reg.user?.dateOfBirth ?? null,
-            gender: reg.user?.gender ?? null,
-            avatarUrl: reg.user?.avatarUrl ?? null,
-          },
+          participant: reg.user
+            ? {
+                id: reg.user.id,
+                fullName: `${reg.user.firstName} ${reg.user.lastName}`,
+                firstName: reg.user.firstName,
+                lastName: reg.user.lastName,
+                email: reg.user.email,
+                documentNumber: reg.user.documentNumber ?? null,
+                phone: reg.user.phone ?? null,
+                dateOfBirth: reg.user.dateOfBirth ?? null,
+                gender: reg.user.gender ?? null,
+                avatarUrl: reg.user.avatarUrl ?? null,
+              }
+            : {
+                id: null,
+                fullName: reg.participantName ?? null,
+                firstName: (reg.participantName ?? '').split(' ')[0] || null,
+                lastName: (reg.participantName ?? '').split(' ').slice(1).join(' ') || null,
+                email: reg.participantEmail ?? null,
+                documentNumber: reg.participantCpf ?? null,
+                phone: reg.participantPhone ?? null,
+                dateOfBirth: reg.participantDateOfBirth ?? null,
+                gender: reg.participantGender ?? null,
+                avatarUrl: null,
+              },
           ticket:
             reg.tickets?.length > 0
               ? {
@@ -703,10 +737,42 @@ export class OrdersService {
                   name: reg.tickets[0].ticket.name,
                   category: reg.tickets[0].ticket.category ?? null,
                   includedProducts: (reg.tickets[0].ticket.products ?? []).map((tp: any) => {
-                    const sel = pendingProductsMap.get(tp.product.id);
-                    const selectedVariation = sel?.variationId
-                      ? (tp.product.variations ?? []).find((v: any) => v.id === sel.variationId) ?? null
+                    // Preferência: variação confirmada no RegistrationProduct (pós-pagamento)
+                    const regProduct = (reg.products ?? []).find((rp: any) => rp.productId === tp.product.id);
+                    this.logger.debug(`[getOrderDetails] product=${tp.product.id} regProduct=${JSON.stringify({ id: regProduct?.id, variationId: regProduct?.variationId, variation: regProduct?.variation?.id })} pendingMap=${JSON.stringify(pendingProductsMap.get(tp.product.id))} variationsCount=${tp.product.variations?.length}`);
+                    const variationEdited = regProduct?.variationEdited ?? false;
+
+                    // Prioridade 1: variação confirmada no RegistrationProduct (FK direto)
+                    // Prioridade 2: variação órfã (organizer deletou+recriou variações — ID antigo ainda existe no DB)
+                    // Prioridade 3: variação encontrada nas variações atuais do produto pelo ID
+                    // Prioridade 4: variationId do pendingProducts (estado pré-pagamento, mesmo fallback acima)
+                    const resolvedVariationId =
+                      regProduct?.variationId
+                      ?? pendingProductsMap.get(tp.product.id)?.variationId
+                      ?? null;
+
+                    const selectedVariation: any =
+                      regProduct?.variation
+                      ?? (resolvedVariationId ? orphanVariationMap.get(resolvedVariationId) ?? null : null)
+                      ?? (resolvedVariationId
+                        ? (tp.product.variations ?? []).find((v: any) => v.id === resolvedVariationId) ?? null
+                        : null);
+                    this.logger.debug(`[getOrderDetails] product=${tp.product.id} selectedVariation=${JSON.stringify(selectedVariation ? { id: selectedVariation.id, name: selectedVariation.name } : null)}`);
+
+                    const deadlineDays = tp.product.variationEditDeadlineDays ?? 0;
+                    const deadlineMs = deadlineDays * 24 * 60 * 60 * 1000;
+                    const variationEditDeadline = deadlineDays > 0
+                      ? new Date(eventDate.getTime() - deadlineMs)
                       : null;
+                    const editWindowOpen = variationEditDeadline
+                      ? now < variationEditDeadline
+                      : false;
+                    const canEditVariation =
+                      (tp.product.buyerVariationEditAllowed ?? false) &&
+                      !variationEdited &&
+                      editWindowOpen &&
+                      tp.product.isIncludedInTicket === true;
+
                     return {
                       id: tp.product.id,
                       name: tp.product.name,
@@ -715,6 +781,10 @@ export class OrdersService {
                       isIncludedInTicket: tp.product.isIncludedInTicket ?? false,
                       isRequired: tp.product.isRequired ?? false,
                       variationType: tp.product.variationType ?? null,
+                      buyerVariationEditAllowed: tp.product.buyerVariationEditAllowed ?? false,
+                      variationEditDeadline,
+                      variationEdited,
+                      canEditVariation,
                       selectedVariation: selectedVariation
                         ? { id: selectedVariation.id, name: selectedVariation.name, price: selectedVariation.price }
                         : null,
@@ -822,11 +892,22 @@ export class OrdersService {
           if (!allMatch) continue;
         }
 
-        autoDiscount = coupon.type === 'PERCENTAGE'
-          ? Math.floor(ticketsSubtotal * (coupon.value / 100))
-          : Math.min(coupon.value, ticketsSubtotal);
-        autoCouponId = coupon.id;
-        break;
+        {
+          let autoApplicableTickets = reservedTickets;
+          if (coupon.appliesTo && coupon.appliesTo !== 'all') {
+            let allowedIds: string[] = [];
+            try { allowedIds = JSON.parse(coupon.appliesTo); } catch { allowedIds = [coupon.appliesTo]; }
+            autoApplicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
+          }
+          const autoApplicableSubtotal = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0);
+          const autoApplicableQty = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
+          autoDiscount = coupon.type === 'PERCENTAGE'
+            ? Math.floor(autoApplicableSubtotal * (coupon.value / 100))
+            : autoApplicableQty * coupon.value;
+          autoDiscount = Math.min(autoDiscount, ticketsSubtotal);
+          autoCouponId = coupon.id;
+          break;
+        }
       }
     }
 
@@ -929,6 +1010,7 @@ export class OrdersService {
     const r: any = this.prisma.getReadClient();
     const reservedTickets = (order.reservedTickets ?? []) as any[];
     const ticketsSubtotal = reservedTickets.reduce((sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0);
+    const productsSubtotal = Math.max(0, (order.totalAmount as number) - ticketsSubtotal);
 
     let couponId: string | null = null;
     let voucherId: string | null = null;
@@ -946,13 +1028,31 @@ export class OrdersService {
 
       if (!coupon) throw new AppUnprocessableException('COUPON_NOT_FOUND', 'Cupom não encontrado ou inválido');
       if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) throw new AppUnprocessableException('COUPON_EXPIRED', 'Cupom expirado');
-      if (coupon.minCartValue && ticketsSubtotal < coupon.minCartValue) {
+      if (coupon.minCartValue && order.totalAmount < coupon.minCartValue) {
         throw new AppUnprocessableException('COUPON_MIN_VALUE', `Valor mínimo do pedido para este cupom: R$ ${(coupon.minCartValue / 100).toFixed(2)}`);
       }
 
-      discount = coupon.type === 'PERCENTAGE'
-        ? Math.floor(ticketsSubtotal * (coupon.value / 100))
-        : Math.min(coupon.value, ticketsSubtotal);
+      // Filtrar apenas os tickets aos quais o cupom se aplica
+      let applicableTickets = reservedTickets;
+      if (coupon.appliesTo && coupon.appliesTo !== 'all') {
+        let allowedIds: string[] = [];
+        try { allowedIds = JSON.parse(coupon.appliesTo); } catch { allowedIds = [coupon.appliesTo]; }
+        applicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
+      }
+
+      const applicableTicketsSubtotal = applicableTickets.reduce((sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0);
+      const applicableQuantity = applicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
+
+      if (coupon.type === 'PERCENTAGE') {
+        // Percentual sobre tickets aplicáveis + produtos proporcionais
+        const applicableRatio = ticketsSubtotal > 0 ? applicableTicketsSubtotal / ticketsSubtotal : 1;
+        const applicableBase = applicableTicketsSubtotal + Math.round(productsSubtotal * applicableRatio);
+        discount = Math.floor(applicableBase * (coupon.value / 100));
+      } else {
+        // FIXED: valor do cupom × quantidade de ingressos aplicáveis
+        discount = applicableQuantity * coupon.value;
+      }
+      discount = Math.min(discount, order.totalAmount as number);
       couponId = coupon.id;
 
     } else if (dto.voucherCode) {
@@ -1493,47 +1593,58 @@ export class OrdersService {
           const pData = participants[pIdx];
           if (!pData) break;
 
-          // Resolve or create participant user
-          let participantUserId = userId;
+          // Resolve participant — nunca cria User fantasma
+          let participantUserId: string | null = userId;
+          let guestSnapshot: { name: string; email: string; cpf: string; cpfClean: string; phone: string; dateOfBirth: Date | null; gender: string | null } | null = null;
+
           if (pData.email?.toLowerCase() !== buyerUser?.email?.toLowerCase()) {
-            let invitedUser = await tx.user.findFirst({
-              where: { email: pData.email },
-            });
-            if (!invitedUser) {
-              const clean = (pData.cpf ?? '').replace(/\D/g, '');
-              invitedUser = await tx.user.create({
-                data: {
-                  email: pData.email,
-                  firstName: pData.name.split(' ')[0],
-                  lastName: pData.name.split(' ').slice(1).join(' ') || '',
-                  documentNumber: pData.cpf ?? '',
-                  documentNumberClean: clean,
-                  password: '',
-                  isActive: false,
-                },
-              });
+            const existingUser = await tx.user.findFirst({ where: { email: pData.email } });
+            if (existingUser) {
+              participantUserId = existingUser.id;
+            } else {
+              participantUserId = null;
+              guestSnapshot = {
+                name: pData.name ?? '',
+                email: pData.email ?? '',
+                cpf: pData.cpf ?? '',
+                cpfClean: (pData.cpf ?? '').replace(/\D/g, ''),
+                phone: pData.phone ?? '',
+                dateOfBirth: pData.birthDate ? new Date(pData.birthDate) : null,
+                gender: pData.gender ?? null,
+              };
             }
-            participantUserId = invitedUser.id;
           }
+
+          const isGuest = participantUserId === null;
+          const isDifferentUser = participantUserId !== null && participantUserId !== userId;
 
           const reg = await tx.registration.create({
             data: {
               eventId: order.eventId,
               orderId,
               userId: participantUserId,
-              invitedById: participantUserId !== userId ? userId : null,
+              invitedById: (isDifferentUser || isGuest) ? userId : null,
               status: RegistrationStatus.CONFIRMED,
               termsAccepted: true,
               rulesAccepted: true,
               emergencyContactName: pData.emergencyContactName?.trim() || null,
               emergencyContactPhone: pData.emergencyPhone?.trim() || null,
+              ...(guestSnapshot && {
+                participantName: guestSnapshot.name,
+                participantEmail: guestSnapshot.email,
+                participantCpf: guestSnapshot.cpf,
+                participantCpfClean: guestSnapshot.cpfClean,
+                participantPhone: guestSnapshot.phone,
+                participantDateOfBirth: guestSnapshot.dateOfBirth,
+                participantGender: guestSnapshot.gender,
+              }),
             },
           });
 
           const qrPayload = JSON.stringify({
             registrationId: reg.id,
             eventId: order.eventId,
-            userId: participantUserId,
+            userId: participantUserId ?? userId,
           });
           const updatedReg = await tx.registration.update({
             where: { id: reg.id },

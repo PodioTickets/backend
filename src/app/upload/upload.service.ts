@@ -1,181 +1,75 @@
 import { Injectable } from '@nestjs/common';
-import * as fs from 'fs/promises';
+import * as os from 'os';
 import * as path from 'path';
-import { stat } from 'fs/promises';
-import * as ClamScan from 'clamscan';
+import * as fs from 'fs/promises';
+import { Storage, Bucket } from '@google-cloud/storage';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const ClamScan = require('clamscan');
+
 @Injectable()
 export class UploadService {
-  private readonly uploadDir = path.join(process.cwd(), 'uploads', 'images');
-  private readonly pdfUploadDir = path.join(process.cwd(), 'uploads', 'pdfs');
+  private readonly bucket: Bucket;
+  private readonly cdnUrl: string;
+  private readonly cdnEnabled: boolean;
+
   /** Scanner ClamAV reutilizado entre uploads (evita custo de createScanner a cada arquivo). */
   private clamScannerPromise: Promise<{ scanFile: (p: string) => Promise<{ isInfected: boolean; viruses?: string[] }> }> | null =
     null;
 
   constructor() {
-    this.ensureUploadDirectory();
-    this.ensurePdfUploadDirectory();
+    this.cdnEnabled = process.env.CDN_ENABLED === 'true';
+    this.cdnUrl = (process.env.CDN_URL ?? '').replace(/\/$/, '');
+
+    const storageOptions: ConstructorParameters<typeof Storage>[0] = {};
+    if (process.env.GCP_PROJECT_ID) storageOptions.projectId = process.env.GCP_PROJECT_ID;
+    if (process.env.GCS_KEY_FILE) storageOptions.keyFilename = process.env.GCS_KEY_FILE;
+
+    const storage = new Storage(storageOptions);
+    const bucketName = process.env.GCS_BUCKET ?? process.env.BUCKET_NAME ?? '';
+    this.bucket = storage.bucket(bucketName);
   }
 
-  private async ensureUploadDirectory() {
+  async compressImage(file: any): Promise<string> {
     try {
-      await fs.access(this.uploadDir);
-    } catch {
-      await fs.mkdir(this.uploadDir, { recursive: true });
-      console.log('📁 Upload directory created:', this.uploadDir);
-    }
-  }
+      if (!file || !file.buffer) throw new Error('No file uploaded or file buffer missing');
 
-  private async ensurePdfUploadDirectory() {
-    try {
-      await fs.access(this.pdfUploadDir);
-    } catch {
-      await fs.mkdir(this.pdfUploadDir, { recursive: true });
-      console.log('📁 PDF upload directory created:', this.pdfUploadDir);
-    }
-  }
+      await this.scanForMalware(file.buffer, file.originalname || 'uploaded-file');
 
-  async compressImage(file: any) {
-    try {
-      if (!file || !file.buffer) {
-        throw new Error('No file uploaded or file buffer missing');
-      }
-
-      await this.scanForMalware(
-        file.buffer,
-        file.originalname || 'uploaded-file',
-      );
-
-      // Preservar o formato original sem nenhum re-encoding para evitar perda de qualidade
       const originalExt = path.extname(file.originalname || '').toLowerCase() || '.jpg';
-      const filename = `${Date.now()}-${Math.round(Math.random() * 1e9)}${originalExt}`;
-      const filePath = path.join(this.uploadDir, filename);
-      await fs.writeFile(filePath, file.buffer);
+      const objectName = `images/${Date.now()}-${Math.round(Math.random() * 1e9)}${originalExt}`;
 
-      console.log(
-        `✅ File saved: ${filename} (${this.formatFileSize(file.buffer.length)})`,
-      );
-      return `/uploads/images/${filename}`;
+      await this.uploadToGcs(objectName, file.buffer, file.mimetype || 'image/jpeg');
+
+      console.log(`✅ Image uploaded to GCS: ${objectName} (${this.formatFileSize(file.buffer.length)})`);
+      return this.buildUrl(objectName);
     } catch (error) {
-      console.error('❌ Failed to save image:', error);
+      console.error('❌ Failed to upload image:', error);
       throw new Error(`Failed to process image: ${error.message}`);
     }
   }
 
-  async uploadPdf(file: any) {
+  async uploadPdf(file: any): Promise<string> {
     try {
-      if (!file || !file.buffer) {
-        throw new Error('No file uploaded or file buffer missing');
-      }
+      if (!file || !file.buffer) throw new Error('No file uploaded or file buffer missing');
 
-      // Verificar se é PDF
       const fileExtension = path.extname(file.originalname || '').toLowerCase();
-      if (fileExtension !== '.pdf') {
-        throw new Error('File must be a PDF');
-      }
+      if (fileExtension !== '.pdf') throw new Error('File must be a PDF');
 
-      // Verificar malware antes do processamento
-      await this.scanForMalware(
-        file.buffer,
-        file.originalname || 'uploaded-file',
-      );
+      await this.scanForMalware(file.buffer, file.originalname || 'uploaded-file');
 
-      // Limitar tamanho do PDF (ex: 10MB)
-      const maxSize = 10 * 1024 * 1024; // 10MB
+      const maxSize = 10 * 1024 * 1024;
       if (file.buffer.length > maxSize) {
         throw new Error(`PDF file size exceeds maximum allowed size of ${this.formatFileSize(maxSize)}`);
       }
 
-      const filename = `${Date.now()}-${Math.round(Math.random() * 1e9)}.pdf`;
-      const filePath = path.join(this.pdfUploadDir, filename);
-      await fs.writeFile(filePath, file.buffer);
+      const objectName = `pdfs/${Date.now()}-${Math.round(Math.random() * 1e9)}.pdf`;
+      await this.uploadToGcs(objectName, file.buffer, 'application/pdf');
 
-      console.log(
-        `✅ PDF uploaded and saved: ${filename} (${this.formatFileSize(file.buffer.length)})`,
-      );
-      return `/uploads/pdfs/${filename}`;
+      console.log(`✅ PDF uploaded to GCS: ${objectName} (${this.formatFileSize(file.buffer.length)})`);
+      return this.buildUrl(objectName);
     } catch (error) {
       console.error('❌ Failed to upload PDF:', error);
       throw new Error(`Failed to upload PDF: ${error.message}`);
-    }
-  }
-
-  private getOrCreateClamScanner(): Promise<{
-    scanFile: (p: string) => Promise<{ isInfected: boolean; viruses?: string[] }>;
-  }> {
-    if (!this.clamScannerPromise) {
-      this.clamScannerPromise = ClamScan.createScanner({
-        removeInfected: false,
-        quarantineInfected: false,
-        scanLog: null,
-        debugMode: false,
-        fileList: null,
-        // Imagens são binário único; arquivos aninhados deixam o scan muito mais lento.
-        scanArchives: false,
-        scanRecursively: false,
-      }).catch((err) => {
-        this.clamScannerPromise = null;
-        throw err;
-      });
-    }
-    return this.clamScannerPromise;
-  }
-
-  private async scanForMalware(
-    buffer: Buffer,
-    filename: string,
-  ): Promise<void> {
-    if (process.env.UPLOAD_SKIP_CLAMAV === 'true') {
-      return;
-    }
-    try {
-      const clamscan = await this.getOrCreateClamScanner();
-
-      // Criar arquivo temporário para scan
-      const tempFilename = `temp-scan-${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-      const tempFilePath = path.join(this.uploadDir, tempFilename);
-
-      try {
-        // Escrever buffer no arquivo temporário
-        await fs.writeFile(tempFilePath, buffer);
-
-        // Executar scan
-        const scanResult = await clamscan.scanFile(tempFilePath);
-
-        if (scanResult.isInfected) {
-          console.error(`🚨 Malware detected in file: ${filename}`, {
-            viruses: scanResult.viruses,
-            file: tempFilePath,
-          });
-
-          throw new Error(
-            `Malware detected in uploaded file. File rejected for security reasons.`,
-          );
-        }
-
-        console.log(`✅ Malware scan passed for: ${filename}`);
-      } finally {
-        // Sempre remover arquivo temporário
-        try {
-          await fs.unlink(tempFilePath);
-        } catch (cleanupError) {
-          console.warn(
-            `⚠️ Failed to cleanup temp file: ${tempFilePath}`,
-            cleanupError,
-          );
-        }
-      }
-    } catch (error) {
-      if (error.message.includes('Malware detected')) {
-        throw error; // Re-throw malware error
-      }
-
-      // Se ClamAV não estiver disponível, logar warning mas permitir upload
-      console.warn(
-        `⚠️ Malware scan unavailable: ${error.message}. Upload allowed but logged.`,
-      );
-      console.warn(
-        `📝 Consider installing ClamAV for enhanced security: https://www.clamav.net/`,
-      );
     }
   }
 
@@ -186,69 +80,40 @@ export class UploadService {
     sortOrder?: 'asc' | 'desc';
   }) {
     try {
-      const {
-        page = 1,
-        limit = 50,
-        sortBy = 'date',
-        sortOrder = 'desc',
-      } = params || {};
+      const { page = 1, limit = 50, sortBy = 'date', sortOrder = 'desc' } = params || {};
 
-      // Garante que o diretório existe
-      await this.ensureUploadDirectory();
+      const [gcsFiles] = await this.bucket.getFiles({ prefix: 'images/' });
 
-      // Lê todos os arquivos do diretório
-      const files = await fs.readdir(this.uploadDir);
-
-      // Filtra apenas arquivos de imagem
-      const imageFiles = files.filter(
-        (file) =>
-          file.endsWith('.webp') ||
-          file.endsWith('.jpg') ||
-          file.endsWith('.jpeg') ||
-          file.endsWith('.png'),
-      );
-
-      // Obtém informações detalhadas de cada arquivo
-      const filesWithInfo = await Promise.all(
-        imageFiles.map(async (filename) => {
-          const filePath = path.join(this.uploadDir, filename);
-          const stats = await stat(filePath);
-          const fileSize = stats.size;
-          const createdAt = stats.birthtime;
-          const modifiedAt = stats.mtime;
-
+      const imageExtensions = ['.webp', '.jpg', '.jpeg', '.png'];
+      const filesWithInfo = gcsFiles
+        .filter((f) => imageExtensions.includes(path.extname(f.name).toLowerCase()))
+        .map((f) => {
+          const meta = f.metadata;
+          const size = Number(meta.size ?? 0);
+          const createdAt = meta.timeCreated ? new Date(meta.timeCreated) : new Date(0);
+          const modifiedAt = meta.updated ? new Date(meta.updated) : createdAt;
+          const filename = path.basename(f.name);
           return {
             filename,
-            url: `/uploads/images/${filename}`,
-            size: fileSize,
-            sizeFormatted: this.formatFileSize(fileSize),
+            url: this.buildUrl(f.name),
+            size,
+            sizeFormatted: this.formatFileSize(size),
             createdAt,
             modifiedAt,
             extension: path.extname(filename).toLowerCase(),
           };
-        }),
-      );
+        });
 
-      // Ordena os arquivos
       filesWithInfo.sort((a, b) => {
-        let comparison = 0;
-
-        if (sortBy === 'name') {
-          comparison = a.filename.localeCompare(b.filename);
-        } else if (sortBy === 'date') {
-          comparison =
-            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-        }
-
-        return sortOrder === 'desc' ? -comparison : comparison;
+        let cmp = 0;
+        if (sortBy === 'name') cmp = a.filename.localeCompare(b.filename);
+        else cmp = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+        return sortOrder === 'desc' ? -cmp : cmp;
       });
 
-      // Implementa paginação
       const totalFiles = filesWithInfo.length;
       const totalPages = Math.ceil(totalFiles / limit);
-      const startIndex = (page - 1) * limit;
-      const endIndex = startIndex + limit;
-      const paginatedFiles = filesWithInfo.slice(startIndex, endIndex);
+      const paginatedFiles = filesWithInfo.slice((page - 1) * limit, page * limit);
 
       return {
         success: true,
@@ -273,22 +138,22 @@ export class UploadService {
 
   async getUploadStats() {
     try {
-      // Garante que o diretório existe
-      await this.ensureUploadDirectory();
+      const [gcsFiles] = await this.bucket.getFiles({ prefix: 'images/' });
 
-      // Lê todos os arquivos do diretório
-      const files = await fs.readdir(this.uploadDir);
+      const imageExtensions = ['.webp', '.jpg', '.jpeg', '.png'];
+      const filesWithInfo = gcsFiles
+        .filter((f) => imageExtensions.includes(path.extname(f.name).toLowerCase()))
+        .map((f) => {
+          const meta = f.metadata;
+          return {
+            filename: path.basename(f.name),
+            size: Number(meta.size ?? 0),
+            createdAt: meta.timeCreated ? new Date(meta.timeCreated) : new Date(0),
+            extension: path.extname(f.name).toLowerCase(),
+          };
+        });
 
-      // Filtra apenas arquivos de imagem
-      const imageFiles = files.filter(
-        (file) =>
-          file.endsWith('.webp') ||
-          file.endsWith('.jpg') ||
-          file.endsWith('.jpeg') ||
-          file.endsWith('.png'),
-      );
-
-      if (imageFiles.length === 0) {
+      if (filesWithInfo.length === 0) {
         return {
           success: true,
           data: {
@@ -304,51 +169,22 @@ export class UploadService {
         };
       }
 
-      // Obtém informações detalhadas de cada arquivo
-      const filesWithInfo = await Promise.all(
-        imageFiles.map(async (filename) => {
-          const filePath = path.join(this.uploadDir, filename);
-          const stats = await stat(filePath);
-
-          return {
-            filename,
-            size: stats.size,
-            createdAt: stats.birthtime,
-            extension: path.extname(filename).toLowerCase(),
-          };
-        }),
-      );
-
-      // Calcula estatísticas
       const totalFiles = filesWithInfo.length;
-      const totalSize = filesWithInfo.reduce((sum, file) => sum + file.size, 0);
+      const totalSize = filesWithInfo.reduce((sum, f) => sum + f.size, 0);
       const averageFileSize = totalSize / totalFiles;
 
-      // Estatísticas por extensão
-      const extensions = {};
-      filesWithInfo.forEach((file) => {
-        const ext = file.extension;
-        if (!extensions[ext]) {
-          extensions[ext] = { count: 0, totalSize: 0 };
-        }
-        extensions[ext].count++;
-        extensions[ext].totalSize += file.size;
+      const extensions: Record<string, { count: number; totalSize: number; totalSizeFormatted?: string; percentage?: string }> = {};
+      filesWithInfo.forEach((f) => {
+        if (!extensions[f.extension]) extensions[f.extension] = { count: 0, totalSize: 0 };
+        extensions[f.extension].count++;
+        extensions[f.extension].totalSize += f.size;
       });
-
-      // Formata estatísticas de extensão
       Object.keys(extensions).forEach((ext) => {
-        extensions[ext].totalSizeFormatted = this.formatFileSize(
-          extensions[ext].totalSize,
-        );
-        extensions[ext].percentage =
-          ((extensions[ext].count / totalFiles) * 100).toFixed(1) + '%';
+        extensions[ext].totalSizeFormatted = this.formatFileSize(extensions[ext].totalSize);
+        extensions[ext].percentage = ((extensions[ext].count / totalFiles) * 100).toFixed(1) + '%';
       });
 
-      // Encontra intervalo de datas
-      const dates = filesWithInfo.map((file) => new Date(file.createdAt));
-      const earliestDate = new Date(Math.min(...dates.map((d) => d.getTime())));
-      const latestDate = new Date(Math.max(...dates.map((d) => d.getTime())));
-
+      const dates = filesWithInfo.map((f) => f.createdAt.getTime());
       return {
         success: true,
         data: {
@@ -359,8 +195,8 @@ export class UploadService {
           averageFileSizeFormatted: this.formatFileSize(averageFileSize),
           extensions,
           dateRange: {
-            earliest: earliestDate,
-            latest: latestDate,
+            earliest: new Date(Math.min(...dates)),
+            latest: new Date(Math.max(...dates)),
           },
         },
         message: `Statistics calculated for ${totalFiles} uploaded files`,
@@ -373,52 +209,34 @@ export class UploadService {
 
   async deleteUpload(filename: string) {
     try {
-      // Valida o nome do arquivo para prevenir ataques de path traversal
-      if (!filename || typeof filename !== 'string') {
-        throw new Error('Nome do arquivo inválido');
-      }
+      if (!filename || typeof filename !== 'string') throw new Error('Nome do arquivo inválido');
 
-      // Remove caracteres perigosos do nome do arquivo
-      const sanitizedFilename = filename.replace(/[^a-zA-Z0-9\-_\.]/g, '');
-
-      // Verifica se é uma extensão permitida
+      const sanitizedFilename = filename.replace(/[^a-zA-Z0-9\-_.]/g, '');
       const allowedExtensions = ['.webp', '.jpg', '.jpeg', '.png'];
       const extension = path.extname(sanitizedFilename).toLowerCase();
+      if (!allowedExtensions.includes(extension)) throw new Error('Tipo de arquivo não permitido para exclusão');
 
-      if (!allowedExtensions.includes(extension)) {
-        throw new Error('Tipo de arquivo não permitido para exclusão');
-      }
+      const objectName = `images/${sanitizedFilename}`;
+      const gcsFile = this.bucket.file(objectName);
 
-      const filePath = path.join(this.uploadDir, sanitizedFilename);
+      const [exists] = await gcsFile.exists();
+      if (!exists) throw new Error('Arquivo não encontrado');
 
-      // Verifica se o arquivo existe
-      try {
-        await fs.access(filePath);
-      } catch {
-        throw new Error('Arquivo não encontrado');
-      }
+      const [meta] = await gcsFile.getMetadata();
+      const size = Number(meta.size ?? 0);
 
-      // Obtém informações do arquivo antes de deletar (para logging)
-      const stats = await stat(filePath);
-      const fileInfo = {
-        filename: sanitizedFilename,
-        size: stats.size,
-        sizeFormatted: this.formatFileSize(stats.size),
-        createdAt: stats.birthtime,
-        extension,
-      };
+      await gcsFile.delete();
 
-      // Remove o arquivo
-      await fs.unlink(filePath);
-
-      console.log(
-        `🗑️ File deleted: ${sanitizedFilename} (${fileInfo.sizeFormatted})`,
-      );
-
+      console.log(`🗑️ File deleted from GCS: ${objectName} (${this.formatFileSize(size)})`);
       return {
         success: true,
         data: {
-          deletedFile: fileInfo,
+          deletedFile: {
+            filename: sanitizedFilename,
+            size,
+            sizeFormatted: this.formatFileSize(size),
+            extension,
+          },
         },
         message: `Arquivo ${sanitizedFilename} removido com sucesso`,
       };
@@ -430,26 +248,18 @@ export class UploadService {
 
   async deleteMultipleUploads(filenames: string[]) {
     try {
-      if (!Array.isArray(filenames) || filenames.length === 0) {
-        throw new Error('Lista de arquivos inválida');
-      }
+      if (!Array.isArray(filenames) || filenames.length === 0) throw new Error('Lista de arquivos inválida');
+      if (filenames.length > 50) throw new Error('Não é possível deletar mais de 50 arquivos por vez');
 
-      if (filenames.length > 50) {
-        throw new Error('Não é possível deletar mais de 50 arquivos por vez');
-      }
-
-      const results = [];
-      const errors = [];
+      const results: any[] = [];
+      const errors: Array<{ filename: string; error: string }> = [];
 
       for (const filename of filenames) {
         try {
           const result = await this.deleteUpload(filename);
           results.push(result.data.deletedFile);
         } catch (error) {
-          errors.push({
-            filename,
-            error: error.message,
-          });
+          errors.push({ filename, error: error.message });
         }
       }
 
@@ -478,80 +288,111 @@ export class UploadService {
     errors: Array<{ index: number; filename: string; error: string }>;
   }> {
     try {
-      if (!Array.isArray(files) || files.length === 0) {
-        throw new Error('Nenhum arquivo enviado');
-      }
-
-      if (files.length > 20) {
-        throw new Error('Não é possível fazer upload de mais de 20 arquivos por vez');
-      }
+      if (!Array.isArray(files) || files.length === 0) throw new Error('Nenhum arquivo enviado');
+      if (files.length > 20) throw new Error('Não é possível fazer upload de mais de 20 arquivos por vez');
 
       console.log(`📦 Iniciando upload em batch de ${files.length} arquivos...`);
 
-      const results: string[] = [];
+      const urls: string[] = [];
       const errors: Array<{ index: number; filename: string; error: string }> = [];
       let successCount = 0;
       let failedCount = 0;
 
-      // Processar arquivos em paralelo, mas com limite de concorrência
-      const batchSize = 5; // Processar no máximo 5 arquivos simultaneamente
+      const batchSize = 5;
       for (let i = 0; i < files.length; i += batchSize) {
         const batch = files.slice(i, i + batchSize);
-        const batchPromises = batch.map(async (file, batchIndex) => {
-          const globalIndex = i + batchIndex;
-          try {
-            console.log(`📤 Processando arquivo ${globalIndex + 1}/${files.length}: ${file.originalname || 'arquivo-sem-nome'}`);
-
-            const imageUrl = await this.compressImage(file);
-            results.push(imageUrl);
-            successCount++;
-
-            console.log(`✅ Arquivo ${globalIndex + 1}/${files.length} processado com sucesso`);
-            return { success: true, index: globalIndex };
-          } catch (error) {
-            failedCount++;
-            const filename = file.originalname || `arquivo-${globalIndex + 1}`;
-            const errorMessage = error.message || 'Erro desconhecido';
-
-            errors.push({
-              index: globalIndex,
-              filename,
-              error: errorMessage,
-            });
-
-            console.error(`❌ Falha no arquivo ${globalIndex + 1}/${files.length} (${filename}): ${errorMessage}`);
-            return { success: false, index: globalIndex, error: errorMessage };
-          }
-        });
-
-        // Aguardar conclusão do lote atual antes de processar o próximo
-        await Promise.all(batchPromises);
-
-        console.log(`📊 Lote ${Math.floor(i / batchSize) + 1}/${Math.ceil(files.length / batchSize)} concluído: ${successCount} sucesso, ${failedCount} falhas`);
+        await Promise.all(
+          batch.map(async (file, batchIndex) => {
+            const globalIndex = i + batchIndex;
+            try {
+              const url = await this.compressImage(file);
+              urls.push(url);
+              successCount++;
+            } catch (error) {
+              failedCount++;
+              errors.push({
+                index: globalIndex,
+                filename: file.originalname || `arquivo-${globalIndex + 1}`,
+                error: error.message || 'Erro desconhecido',
+              });
+            }
+          }),
+        );
       }
 
       console.log(`🎉 Upload em batch concluído: ${successCount} sucesso, ${failedCount} falhas`);
-
-      return {
-        total: files.length,
-        success: successCount,
-        failed: failedCount,
-        urls: results,
-        errors,
-      };
+      return { total: files.length, success: successCount, failed: failedCount, urls, errors };
     } catch (error) {
       console.error('❌ Erro no upload em batch:', error);
       throw new Error(`Falha no upload em batch: ${error.message}`);
     }
   }
 
+  // ── Private helpers ──────────────────────────────────────────────────────────
+
+  private async uploadToGcs(objectName: string, buffer: Buffer, contentType: string): Promise<void> {
+    const gcsFile = this.bucket.file(objectName);
+    await gcsFile.save(buffer, {
+      metadata: { contentType },
+      resumable: false,
+    });
+  }
+
+  private buildUrl(objectName: string): string {
+    if (this.cdnEnabled && this.cdnUrl) {
+      return `${this.cdnUrl}/${objectName}`;
+    }
+    const bucketName = this.bucket.name;
+    return `https://storage.googleapis.com/${bucketName}/${objectName}`;
+  }
+
+  private getOrCreateClamScanner(): Promise<{
+    scanFile: (p: string) => Promise<{ isInfected: boolean; viruses?: string[] }>;
+  }> {
+    if (!this.clamScannerPromise) {
+      this.clamScannerPromise = ClamScan.createScanner({
+        removeInfected: false,
+        quarantineInfected: false,
+        scanLog: null,
+        debugMode: false,
+        fileList: null,
+        scanArchives: false,
+        scanRecursively: false,
+      }).catch((err) => {
+        this.clamScannerPromise = null;
+        throw err;
+      });
+    }
+    return this.clamScannerPromise;
+  }
+
+  private async scanForMalware(buffer: Buffer, filename: string): Promise<void> {
+    if (process.env.UPLOAD_SKIP_CLAMAV === 'true') return;
+    try {
+      const clamscan = await this.getOrCreateClamScanner();
+      const tempFilePath = path.join(os.tmpdir(), `scan-${Date.now()}-${Math.round(Math.random() * 1e9)}`);
+      try {
+        await fs.writeFile(tempFilePath, buffer);
+        const scanResult = await clamscan.scanFile(tempFilePath);
+        if (scanResult.isInfected) {
+          console.error(`🚨 Malware detected in file: ${filename}`, { viruses: scanResult.viruses });
+          throw new Error('Malware detected in uploaded file. File rejected for security reasons.');
+        }
+        console.log(`✅ Malware scan passed for: ${filename}`);
+      } finally {
+        try { await fs.unlink(tempFilePath); } catch { /* ignore */ }
+      }
+    } catch (error) {
+      if (error.message.includes('Malware detected')) throw error;
+      console.warn(`⚠️ Malware scan unavailable: ${error.message}. Upload allowed but logged.`);
+    }
+  }
+
   private formatFileSize(bytes: number): string {
     if (bytes === 0) return '0 Bytes';
-
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 }
