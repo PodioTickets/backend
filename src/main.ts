@@ -56,6 +56,7 @@ async function bootstrap() {
   const allowedOrigins = [
     'http://localhost:3000',
     'http://app.localhost:3000',
+    'https://podioticket.com.br',
     'https://www.podioticket.com.br',
     'https://app.podioticket.com.br',
   ];

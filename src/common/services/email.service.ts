@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { MailDataRequired } from '@sendgrid/mail';
@@ -38,6 +40,15 @@ export class EmailService {
       this.logger.error('Failed to send email via SendGrid:', JSON.stringify(detail));
       throw error;
     }
+  }
+
+  private loadTemplate(templateName: string, vars: Record<string, string>): string {
+    const filePath = path.join(__dirname, '..', 'templates', 'emails', templateName);
+    let html = fs.readFileSync(filePath, 'utf8');
+    for (const [key, value] of Object.entries(vars)) {
+      html = html.replaceAll(`{{${key}}}`, value);
+    }
+    return html;
   }
 
   async sendContactMessageToOrganizer(data: {
@@ -113,6 +124,112 @@ export class EmailService {
 
     await this.send({ from: this.from, to: data.email, subject, html });
     this.logger.log(`Invitation email sent to: ${data.email}`);
+  }
+
+  async sendPasswordResetCode(data: {
+    email: string;
+    firstName: string;
+    code: string;
+  }) {
+    const html = this.loadTemplate('recuperar-senha.html', {
+      firstName: this.escapeHtml(data.firstName),
+      code: this.escapeHtml(data.code),
+    });
+
+    await this.send({ from: this.from, to: data.email, subject: 'Recupere sua senha — PódioTicket', html });
+    this.logger.log(`Password reset code sent to: ${data.email}`);
+  }
+
+  async sendEmailChangeVerification(data: {
+    email: string;
+    firstName: string;
+    newEmail: string;
+    code: string;
+    requestDate: string;
+    location: string;
+    device: string;
+  }) {
+    const html = this.loadTemplate('troca-de-email.html', {
+      firstName: this.escapeHtml(data.firstName),
+      newEmail: this.escapeHtml(data.newEmail),
+      code: this.escapeHtml(data.code),
+      requestDate: this.escapeHtml(data.requestDate),
+      location: this.escapeHtml(data.location),
+      device: this.escapeHtml(data.device),
+    });
+
+    await this.send({ from: this.from, to: data.email, subject: 'Solicitação de troca de e-mail — PódioTicket', html });
+    this.logger.log(`Email change verification sent to: ${data.email}`);
+  }
+
+  async sendRegistrationConfirmed(data: {
+    email: string;
+    firstName: string;
+    eventName: string;
+    eventLocation: string;
+    eventBannerUrl: string;
+  }) {
+    const html = this.loadTemplate('inscricao-confirmada.html', {
+      firstName: this.escapeHtml(data.firstName),
+      eventName: this.escapeHtml(data.eventName),
+      eventLocation: this.escapeHtml(data.eventLocation),
+      eventBannerUrl: data.eventBannerUrl,
+    });
+
+    await this.send({ from: this.from, to: data.email, subject: `Inscrição confirmada — ${data.eventName}`, html });
+    this.logger.log(`Registration confirmed email sent to: ${data.email}`);
+  }
+
+  async sendTransferRequested(data: {
+    email: string;
+    eventName: string;
+    amount: string;
+    transferId: string;
+    orgName: string;
+    bankAccount: string;
+    pixKey: string;
+    requestDate: string;
+    sentDate: string;
+  }) {
+    const html = this.loadTemplate('repasse-solicitado.html', {
+      eventName: this.escapeHtml(data.eventName),
+      amount: this.escapeHtml(data.amount),
+      transferId: this.escapeHtml(data.transferId),
+      orgName: this.escapeHtml(data.orgName),
+      bankAccount: this.escapeHtml(data.bankAccount),
+      pixKey: this.escapeHtml(data.pixKey),
+      requestDate: this.escapeHtml(data.requestDate),
+      sentDate: this.escapeHtml(data.sentDate),
+    });
+
+    await this.send({ from: this.from, to: data.email, subject: 'Solicitação de repasse recebida — PódioTicket', html });
+    this.logger.log(`Transfer requested email sent to: ${data.email}`);
+  }
+
+  async sendTransferConfirmed(data: {
+    email: string;
+    amount: string;
+    transferId: string;
+    orgName: string;
+    bankAccount: string;
+    pixKey: string;
+    requestDate: string;
+    sentDate: string;
+    approvedDate: string;
+  }) {
+    const html = this.loadTemplate('repasse-confirmado.html', {
+      amount: this.escapeHtml(data.amount),
+      transferId: this.escapeHtml(data.transferId),
+      orgName: this.escapeHtml(data.orgName),
+      bankAccount: this.escapeHtml(data.bankAccount),
+      pixKey: this.escapeHtml(data.pixKey),
+      requestDate: this.escapeHtml(data.requestDate),
+      sentDate: this.escapeHtml(data.sentDate),
+      approvedDate: this.escapeHtml(data.approvedDate),
+    });
+
+    await this.send({ from: this.from, to: data.email, subject: 'Repasse concluído — PódioTicket', html });
+    this.logger.log(`Transfer confirmed email sent to: ${data.email}`);
   }
 
   async sendPasswordResetLink(data: {

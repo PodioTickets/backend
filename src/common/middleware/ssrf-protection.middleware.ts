@@ -13,7 +13,6 @@ export class SSRFProtectionMiddleware implements NestMiddleware {
   // Lista de domínios permitidos para requests externos
   private readonly allowedDomains = [
     'api.loot4.fun',
-    'loot-for-fun.vercel.app',
     'loot4.fun',
 
     // IPs privados e localhost (apenas para desenvolvimento)
