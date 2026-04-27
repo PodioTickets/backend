@@ -20,6 +20,7 @@ export interface CieloPaymentResult {
   proofOfSale?: string;
   returnCode?: string;
   returnMessage?: string;
+  cardBrand?: string;
 }
 
 export interface CieloPaymentResponse {
@@ -462,6 +463,7 @@ export class CieloService {
         proofOfSale: payment.ProofOfSale,
         returnCode: payment.ReturnCode?.toString(),
         returnMessage: payment.ReturnMessage,
+        cardBrand: payment.CreditCard?.Brand ?? undefined,
       } as any;
 
       // Se houver erro, adicionar informações de erro com mensagens amigáveis

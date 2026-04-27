@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import { Storage, Bucket } from '@google-cloud/storage';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const ClamScan = require('clamscan');
@@ -12,7 +13,7 @@ export class UploadService {
   private readonly cdnUrl: string;
   private readonly cdnEnabled: boolean;
 
-  /** Scanner ClamAV reutilizado entre uploads (evita custo de createScanner a cada arquivo). */
+  /** ClamAV scanner instance reused across uploads to avoid recreating it on every file. */
   private clamScannerPromise: Promise<{ scanFile: (p: string) => Promise<{ isInfected: boolean; viruses?: string[] }> }> | null =
     null;
 
@@ -22,7 +23,16 @@ export class UploadService {
 
     const storageOptions: ConstructorParameters<typeof Storage>[0] = {};
     if (process.env.GCP_PROJECT_ID) storageOptions.projectId = process.env.GCP_PROJECT_ID;
-    if (process.env.GCS_KEY_FILE) storageOptions.keyFilename = process.env.GCS_KEY_FILE;
+
+    if (process.env.GCS_KEY_FILE) {
+      // Read manually to strip UTF-8 BOM before parsing — google-auth-library's
+      // internal JSON.parse chokes on BOM, silently leaving private_key undefined.
+      const raw = fsSync.readFileSync(process.env.GCS_KEY_FILE, 'utf-8').replace(/^﻿/, '');
+      storageOptions.credentials = JSON.parse(raw);
+    } else if (process.env.GCS_KEY_JSON) {
+      const raw = process.env.GCS_KEY_JSON.replace(/^﻿/, '');
+      storageOptions.credentials = JSON.parse(raw);
+    }
 
     const storage = new Storage(storageOptions);
     const bucketName = process.env.GCS_BUCKET ?? process.env.BUCKET_NAME ?? '';

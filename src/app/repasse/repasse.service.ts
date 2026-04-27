@@ -2,16 +2,15 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
-  ForbiddenException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { OrganizerMemberAccessService } from '../organizations/organizer-member-access.service';
 import { PaymentMethod, PaymentStatus, WithdrawalStatus } from '@prisma/client';
 
-// Dias de retenção antes de liberar o saldo para saque
+// Prazo (dias) até que os 90% sejam liberados para saldo disponível
 const RETENTION_DAYS: Record<string, number> = {
   [PaymentMethod.PIX]: 1,
-  [PaymentMethod.CREDIT_CARD]: 30,
+  [PaymentMethod.CREDIT_CARD]: 31,
   [PaymentMethod.BOLETO]: 3,
   [PaymentMethod.CRYPTO]: 30,
 };
@@ -23,8 +22,7 @@ function addDays(date: Date, days: number): Date {
 }
 
 function getReleaseDate(paymentDate: Date, method: string): Date {
-  const days = RETENTION_DAYS[method] ?? 30;
-  return addDays(paymentDate, days);
+  return addDays(paymentDate, RETENTION_DAYS[method] ?? 31);
 }
 
 function isInstallment(metadata: any): boolean {
@@ -45,7 +43,6 @@ export class RepasseService {
   }
 
   private async assertAdminOrOwner(userId: string, eventId: string) {
-    // Reutiliza a verificação de financial — em produção pode adicionar role ADMIN
     await this.organizerMemberAccess.assertCanAccessEvent(userId, eventId, 'financial');
   }
 
@@ -85,6 +82,16 @@ export class RepasseService {
     });
   }
 
+  private async loadRefundedOrders(eventId: string, prisma: any) {
+    return prisma.order.findMany({
+      where: {
+        eventId,
+        payment: { status: PaymentStatus.REFUNDED },
+      },
+      include: { payment: true },
+    });
+  }
+
   private async loadAudit(eventId: string, prisma: any) {
     return prisma.eventAudit.findUnique({ where: { eventId } });
   }
@@ -95,88 +102,152 @@ export class RepasseService {
     });
   }
 
+  // ─── Breakdown ───────────────────────────────────────────────────────────
+
   /**
-   * Calcula o breakdown financeiro completo de um evento.
-   * Retorna os valores em centavos separados por categoria.
+   * Calcula o breakdown financeiro do evento conforme repasse-v2.
+   *
+   * Buckets:
+   *   aguardandoLiberacao — pedidos à vista ainda dentro do prazo de retenção (100%)
+   *   valorRetido         — 10% de pedidos à vista fora do prazo, aguardando auditoria
+   *   parceladosAReceber  — parcelas futuras (90%/N) + 10% retido de parcelados (aguarda auditoria)
+   *   saldoDisponivel     — montante já liberado; pode ser negativo em caso de estorno
+   *
+   * Prioridade de dedução por estorno (non-installment):
+   *   1. 10% sai de aguardandoLiberacao + valorRetido
+   *   2. 90% (+ deficit do 10%) sai de saldoDisponivel
+   *   3. Se saldo insuficiente, recupera o deficit do aguardando restante
+   *   4. Se ainda insuficiente, saldoDisponivel fica negativo
+   *
+   * Prioridade de dedução por estorno (installment):
+   *   1. Deduz de parceladosAReceber primeiro
+   *   2. Remainder vai de saldoDisponivel (pode ficar negativo)
+   *
+   * @param committedWithdrawals — COMPLETED + PENDING withdrawals (both reduce saldoParaSaque)
    */
   private calcBreakdown(
-    orders: any[],
+    paidOrders: any[],
+    refundedOrders: any[],
     retentionRate: number,
     isAudited: boolean,
-    completedWithdrawals: any[],
+    committedWithdrawals: any[],
   ) {
-    let grossRevenue = 0;
-    let pendingRelease = 0;   // dentro do prazo de retenção (24h/30d) — ainda não liberado
-    let awaitingAudit = 0;    // 10% retido aguardando auditoria
-    let installmentsToReceive = 0; // parcelas futuras não vencidas
-    let lastInstallmentRetained = 0; // última parcela retida até auditoria
-    let releasedAndAvailable = 0; // pronto para saque
-
     const now = new Date();
 
-    for (const order of orders) {
+    let aguardandoLiberacao = 0;
+    let valorRetido = 0;
+    let parceladosAReceber = 0;
+    let saldoDisponivel = 0;
+    let grossRevenue = 0;
+
+    // ── Contribuições positivas ─────────────────────────────────────────────
+    for (const order of paidOrders) {
       const payment = order.payment;
       if (!payment?.paymentDate) continue;
 
-      const finalAmount: number = order.finalAmount ?? 0;
-      grossRevenue += finalAmount;
-
-      const metadata = payment.metadata as any;
-      const method: string = payment.method;
+      const orgNet: number = order.finalAmount ?? 0;
+      grossRevenue += orgNet;
       const paymentDate = new Date(payment.paymentDate);
-      const releaseDate = getReleaseDate(paymentDate, method);
-      const released = releaseDate <= now;
+      const metadata = payment.metadata as any;
 
       if (isInstallment(metadata)) {
-        // ── Parcelado ──────────────────────────────────────────────────────
-        const installmentsCount: number = metadata.creditCard.installments;
-        const installmentValue = Math.round(finalAmount / installmentsCount);
-        const lastInstallmentValue = finalAmount - installmentValue * (installmentsCount - 1);
+        // 10% retido separado; 90% dividido em N parcelas de 31 dias cada
+        const count: number = metadata.creditCard.installments;
+        const retained = Math.round(orgNet * retentionRate);
+        const distributable = orgNet - retained;
+        const baseInstallment = Math.floor(distributable / count);
+        const lastExtra = distributable - baseInstallment * count;
 
-        for (let i = 0; i < installmentsCount; i++) {
-          const dueDate = addDays(paymentDate, 30 * (i + 1));
-          const isLast = i === installmentsCount - 1;
-          const amount = isLast ? lastInstallmentValue : installmentValue;
-
+        for (let i = 0; i < count; i++) {
+          const dueDate = addDays(paymentDate, 31 * (i + 1));
+          const amount = baseInstallment + (i === count - 1 ? lastExtra : 0);
           if (dueDate > now) {
-            installmentsToReceive += amount;
-          } else if (isLast && !isAudited) {
-            lastInstallmentRetained += amount;
-            awaitingAudit += amount;
+            parceladosAReceber += amount;
           } else {
-            releasedAndAvailable += amount;
+            saldoDisponivel += amount;
           }
         }
-      } else {
-        // ── À vista (PIX / cartão) ─────────────────────────────────────────
-        if (!released) {
-          pendingRelease += finalAmount;
-        } else if (!isAudited) {
-          const retained = Math.round(finalAmount * retentionRate);
-          awaitingAudit += retained;
-          releasedAndAvailable += finalAmount - retained;
+
+        if (isAudited) {
+          saldoDisponivel += retained;
         } else {
-          releasedAndAvailable += finalAmount;
+          parceladosAReceber += retained;
+        }
+      } else {
+        const releaseDate = getReleaseDate(paymentDate, payment.method);
+        if (releaseDate > now) {
+          aguardandoLiberacao += orgNet;
+        } else if (!isAudited) {
+          const retained = Math.round(orgNet * retentionRate);
+          valorRetido += retained;
+          saldoDisponivel += orgNet - retained;
+        } else {
+          saldoDisponivel += orgNet;
         }
       }
     }
 
-    const totalWithdrawn = completedWithdrawals.reduce(
-      (s, w) => s + (w.amount ?? 0),
-      0,
-    );
+    // ── Deduções por estorno ────────────────────────────────────────────────
+    for (const order of refundedOrders) {
+      const payment = order.payment;
+      if (!payment) continue;
 
-    // O que sobra para sacar agora
-    const availableBalance = Math.max(0, releasedAndAvailable - totalWithdrawn);
+      const orgNet: number = order.finalAmount ?? 0;
+      const metadata = payment.metadata as any;
+
+      if (isInstallment(metadata)) {
+        // Parcelado: deduz de parceladosAReceber primeiro, depois de saldo
+        const fromParcelados = Math.min(orgNet, Math.max(0, parceladosAReceber));
+        parceladosAReceber -= fromParcelados;
+        saldoDisponivel -= orgNet - fromParcelados;
+      } else {
+        const retained = Math.round(orgNet * retentionRate); // 10%
+        const toRelease = orgNet - retained;                  // 90%
+
+        // 10% sai de aguardandoLiberacao (prioridade) ou valorRetido
+        const aguardandoDisp = Math.max(0, aguardandoLiberacao) + Math.max(0, valorRetido);
+        const fromAguardando = Math.min(retained, aguardandoDisp);
+        const deficit10 = retained - fromAguardando;
+
+        const fromAL = Math.min(fromAguardando, Math.max(0, aguardandoLiberacao));
+        aguardandoLiberacao -= fromAL;
+        valorRetido -= fromAguardando - fromAL;
+
+        // 90% + deficit do 10% sai de saldo (pode ficar negativo)
+        saldoDisponivel -= toRelease + deficit10;
+
+        // Se saldo ficou negativo, recupera do aguardando restante
+        if (saldoDisponivel < 0) {
+          const remainingAg = Math.max(0, aguardandoLiberacao) + Math.max(0, valorRetido);
+          const recovery = Math.min(Math.abs(saldoDisponivel), remainingAg);
+          saldoDisponivel += recovery;
+          const recFromAL = Math.min(recovery, Math.max(0, aguardandoLiberacao));
+          aguardandoLiberacao -= recFromAL;
+          valorRetido -= recovery - recFromAL;
+          // saldo permanece negativo se recovery < deficit (conforme spec)
+        }
+      }
+    }
+
+    // Fix 1: inclui PENDING + COMPLETED para evitar double-spend
+    const totalWithdrawn = committedWithdrawals.reduce((s, w) => s + (w.amount ?? 0), 0);
+    const saldoParaSaque = saldoDisponivel - totalWithdrawn;
+
+    // Fix 2: expõe a composição interna do aguardandoLiberacao (10% retido + 90% em liberação)
+    const aguardandoFinal = Math.max(0, aguardandoLiberacao);
+    const aguardandoRetido = Math.round(aguardandoFinal * retentionRate);
+    const aguardandoEmLiberacao = aguardandoFinal - aguardandoRetido;
 
     return {
       grossRevenue,
-      pendingRelease,
-      awaitingAudit,
-      installmentsToReceive,
-      releasedAndAvailable,
+      aguardandoLiberacao: aguardandoFinal,
+      aguardandoLiberacaoRetido: aguardandoRetido,
+      aguardandoLiberacaoEmLiberacao: aguardandoEmLiberacao,
+      valorRetido: Math.max(0, valorRetido),
+      parceladosAReceber: Math.max(0, parceladosAReceber),
+      saldoDisponivel,
       totalWithdrawn,
-      availableBalance,
+      saldoParaSaque,
     };
   }
 
@@ -186,35 +257,37 @@ export class RepasseService {
     await this.assertAccess(userId, eventId);
 
     const prismaRead = this.prisma.getReadClient();
-    const [event, orders, audit, withdrawals] = await Promise.all([
+    const [event, paidOrders, refundedOrders, audit, withdrawals] = await Promise.all([
       this.loadEventConfig(eventId, prismaRead),
       this.loadPaidOrders(eventId, prismaRead),
+      this.loadRefundedOrders(eventId, prismaRead),
       this.loadAudit(eventId, prismaRead),
       this.loadWithdrawals(eventId, prismaRead),
     ]);
 
-    const completedWithdrawals = withdrawals.filter(
-      (w: any) => w.status === WithdrawalStatus.COMPLETED,
+    // PENDING + COMPLETED both reduce saldoParaSaque to prevent double-spend
+    const committedWithdrawals = withdrawals.filter(
+      (w: any) => w.status === WithdrawalStatus.COMPLETED || w.status === WithdrawalStatus.PENDING,
     );
+    const pendingWithdrawalsAmount = withdrawals
+      .filter((w: any) => w.status === WithdrawalStatus.PENDING)
+      .reduce((s: number, w: any) => s + (w.amount ?? 0), 0);
 
     const breakdown = this.calcBreakdown(
-      orders,
+      paidOrders,
+      refundedOrders,
       event.retentionRate,
       !!audit,
-      completedWithdrawals,
+      committedWithdrawals,
     );
-
-    // Estornos
-    const refundedOrders = await prismaRead.order.count({
-      where: { eventId, payment: { status: PaymentStatus.REFUNDED } },
-    });
 
     return {
       message: 'Repasse summary fetched successfully',
       data: {
         summary: {
           ...breakdown,
-          refundedOrders,
+          pendingWithdrawalsAmount,
+          refundedOrders: refundedOrders.length,
           isAudited: !!audit,
           auditedAt: audit?.createdAt ?? null,
           retentionReleased: audit?.retentionReleased ?? 0,
@@ -243,18 +316,20 @@ export class RepasseService {
       const payment = order.payment;
       if (!payment?.paymentDate) continue;
 
+      const metadata = payment.metadata as any;
+      // Pedidos parcelados ficam em getInstallments; aqui só à vista
+      if (isInstallment(metadata)) continue;
+
       const paymentDate = new Date(payment.paymentDate);
       const releaseDate = getReleaseDate(paymentDate, payment.method);
       const released = releaseDate <= now;
-      const metadata = payment.metadata as any;
 
       if (!released) {
-        // Aguardando prazo (24h pix / 30d cartão)
         items.push({
           orderId: order.id,
           paymentId: payment.id,
           transactionId: payment.transactionId,
-          type: 'AWAITING_RELEASE',
+          type: 'AGUARDANDO_LIBERACAO',
           amount: order.finalAmount,
           retainedAmount: null,
           paymentMethod: payment.method,
@@ -265,21 +340,12 @@ export class RepasseService {
           buyer: order.user,
         });
       } else if (!isAudited) {
-        // Já liberado mas 10% retido aguardando auditoria (ou última parcela)
-        let retainedAmount: number;
-        if (isInstallment(metadata)) {
-          const count = metadata.creditCard.installments;
-          const installmentValue = Math.round(order.finalAmount / count);
-          retainedAmount = order.finalAmount - installmentValue * (count - 1); // última parcela
-        } else {
-          retainedAmount = Math.round(order.finalAmount * event.retentionRate);
-        }
-
+        const retainedAmount = Math.round(order.finalAmount * event.retentionRate);
         items.push({
           orderId: order.id,
           paymentId: payment.id,
           transactionId: payment.transactionId,
-          type: 'AWAITING_AUDIT',
+          type: 'VALOR_RETIDO',
           amount: order.finalAmount,
           retainedAmount,
           paymentMethod: payment.method,
@@ -293,11 +359,11 @@ export class RepasseService {
     }
 
     const total = items.length;
-    const totalRetained = items
-      .filter((i) => i.type === 'AWAITING_AUDIT')
+    const totalValorRetido = items
+      .filter((i) => i.type === 'VALOR_RETIDO')
       .reduce((s, i) => s + (i.retainedAmount ?? 0), 0);
-    const totalPendingRelease = items
-      .filter((i) => i.type === 'AWAITING_RELEASE')
+    const totalAguardandoLiberacao = items
+      .filter((i) => i.type === 'AGUARDANDO_LIBERACAO')
       .reduce((s, i) => s + i.amount, 0);
 
     const skip = (page - 1) * limit;
@@ -305,8 +371,8 @@ export class RepasseService {
       message: 'Pending releases fetched successfully',
       data: {
         items: items.slice(skip, skip + limit),
-        totalRetained,
-        totalPendingRelease,
+        totalValorRetido,
+        totalAguardandoLiberacao,
         pagination: {
           page,
           limit,
@@ -321,7 +387,8 @@ export class RepasseService {
     await this.assertAccess(userId, eventId);
 
     const prismaRead = this.prisma.getReadClient();
-    const [audit, orders] = await Promise.all([
+    const [event, audit, orders] = await Promise.all([
+      this.loadEventConfig(eventId, prismaRead),
       this.loadAudit(eventId, prismaRead),
       this.loadPaidOrders(eventId, prismaRead),
     ]);
@@ -339,16 +406,20 @@ export class RepasseService {
 
       const count: number = metadata.creditCard.installments;
       const paymentDate = new Date(payment.paymentDate);
-      const installmentValue = Math.round(order.finalAmount / count);
-      const lastInstallmentValue = order.finalAmount - installmentValue * (count - 1);
+
+      // 10% retido separado; 90% dividido em N parcelas de 31 dias cada
+      const retained = Math.round(order.finalAmount * event.retentionRate);
+      const distributable = order.finalAmount - retained;
+      const baseInstallment = Math.floor(distributable / count);
+      const lastExtra = distributable - baseInstallment * count;
 
       for (let i = 0; i < count; i++) {
-        const dueDate = addDays(paymentDate, 30 * (i + 1));
+        const dueDate = addDays(paymentDate, 31 * (i + 1));
         const isLast = i === count - 1;
-        const amount = isLast ? lastInstallmentValue : installmentValue;
+        const amount = baseInstallment + (isLast ? lastExtra : 0);
 
         if (dueDate > now) {
-          const item: any = {
+          items.push({
             id: `${payment.id}-installment-${i + 1}`,
             orderId: order.id,
             paymentId: payment.id,
@@ -356,17 +427,35 @@ export class RepasseService {
             totalInstallments: count,
             amount,
             dueDate,
-            isLastInstallment: isLast,
-            retainedUntilAudit: isLast && !isAudited,
+            isRetention: false,
             buyer: order.user,
-          };
-          items.push(item);
+          });
           totalPending += amount;
         }
       }
+
+      // 10% retido: fica em parceladosAReceber até a auditoria
+      if (!isAudited) {
+        items.push({
+          id: `${payment.id}-retention`,
+          orderId: order.id,
+          paymentId: payment.id,
+          installmentNumber: null,
+          totalInstallments: count,
+          amount: retained,
+          dueDate: null, // liberado na auditoria
+          isRetention: true,
+          buyer: order.user,
+        });
+        totalPending += retained;
+      }
     }
 
-    items.sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
+    items.sort((a, b) => {
+      if (a.dueDate === null) return 1;
+      if (b.dueDate === null) return -1;
+      return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
+    });
 
     const total = items.length;
     const skip = (page - 1) * limit;
@@ -407,15 +496,17 @@ export class RepasseService {
       prismaRead.eventWithdrawal.count({ where: { eventId } }),
     ]);
 
+    // Aggregate both gross and net so callers can reconcile against saldoParaSaque (deducted at gross)
     const totalCompleted = await prismaRead.eventWithdrawal.aggregate({
       where: { eventId, status: WithdrawalStatus.COMPLETED },
-      _sum: { netAmount: true },
+      _sum: { amount: true, netAmount: true },
     });
 
     return {
       message: 'Withdrawals fetched successfully',
       data: {
         withdrawals,
+        totalGrossWithdrawn: totalCompleted._sum.amount ?? 0,
         totalNetWithdrawn: totalCompleted._sum.netAmount ?? 0,
         pagination: {
           page,
@@ -437,27 +528,30 @@ export class RepasseService {
     const prismaRead = this.prisma.getReadClient();
     const prismaWrite = this.prisma.getWriteClient();
 
-    const [event, orders, audit, withdrawals] = await Promise.all([
+    const [event, paidOrders, refundedOrders, audit, withdrawals] = await Promise.all([
       this.loadEventConfig(eventId, prismaRead),
       this.loadPaidOrders(eventId, prismaRead),
+      this.loadRefundedOrders(eventId, prismaRead),
       this.loadAudit(eventId, prismaRead),
       this.loadWithdrawals(eventId, prismaRead),
     ]);
 
-    const completedWithdrawals = withdrawals.filter(
-      (w: any) => w.status === WithdrawalStatus.COMPLETED,
+    // PENDING + COMPLETED both reduce saldoParaSaque to prevent double-spend
+    const committedWithdrawals = withdrawals.filter(
+      (w: any) => w.status === WithdrawalStatus.COMPLETED || w.status === WithdrawalStatus.PENDING,
     );
 
-    const { availableBalance } = this.calcBreakdown(
-      orders,
+    const { saldoParaSaque } = this.calcBreakdown(
+      paidOrders,
+      refundedOrders,
       event.retentionRate,
       !!audit,
-      completedWithdrawals,
+      committedWithdrawals,
     );
 
-    if (amount > availableBalance) {
+    if (amount > saldoParaSaque) {
       throw new BadRequestException(
-        `Insufficient available balance. Available: ${availableBalance} cents, requested: ${amount} cents`,
+        `Insufficient available balance. Available: ${saldoParaSaque} cents, requested: ${amount} cents`,
       );
     }
 
@@ -604,28 +698,30 @@ export class RepasseService {
     const existing = await this.loadAudit(eventId, prismaRead);
     if (existing) throw new BadRequestException('Event has already been audited');
 
-    const [event, orders, withdrawals] = await Promise.all([
+    const [event, paidOrders, refundedOrders, withdrawals] = await Promise.all([
       this.loadEventConfig(eventId, prismaRead),
       this.loadPaidOrders(eventId, prismaRead),
+      this.loadRefundedOrders(eventId, prismaRead),
       this.loadWithdrawals(eventId, prismaRead),
     ]);
 
-    const completedWithdrawals = withdrawals.filter(
-      (w: any) => w.status === WithdrawalStatus.COMPLETED,
+    const committedWithdrawals = withdrawals.filter(
+      (w: any) => w.status === WithdrawalStatus.COMPLETED || w.status === WithdrawalStatus.PENDING,
     );
 
-    const { awaitingAudit } = this.calcBreakdown(
-      orders,
+    const { valorRetido } = this.calcBreakdown(
+      paidOrders,
+      refundedOrders,
       event.retentionRate,
       false,
-      completedWithdrawals,
+      committedWithdrawals,
     );
 
     const audit = await prismaWrite.eventAudit.create({
       data: {
         eventId,
         auditedById: adminUserId,
-        retentionReleased: awaitingAudit,
+        retentionReleased: valorRetido,
         notes: notes ?? null,
       },
     });

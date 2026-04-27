@@ -306,9 +306,10 @@ export class ProductsService {
     const limit = filterDto.limit || 20;
     const skip = (page - 1) * limit;
 
+    const activeWhere = { eventId, deletedAt: null };
     const [products, total] = await Promise.all([
       prismaRead.product.findMany({
-        where: { eventId },
+        where: activeWhere,
         skip,
         take: limit,
         include: {
@@ -316,10 +317,9 @@ export class ProductsService {
             orderBy: { name: 'asc' },
           },
         },
-        // Ordem estável para integração/UI: nome, depois id (desempate).
         orderBy: [{ name: 'asc' }, { id: 'asc' }],
       }),
-      prismaRead.product.count({ where: { eventId } }),
+      prismaRead.product.count({ where: activeWhere }),
     ]);
 
     const totalPages = Math.ceil(total / limit);
@@ -632,7 +632,10 @@ export class ProductsService {
       });
     }
 
+    const hasPurchases = await prismaRead.registrationProduct.count({ where: { productId } }) > 0;
+
     await prismaWrite.$transaction(async (tx) => {
+      // Remove associação com ingressos e kits independente do tipo de delete
       await tx.ticketProduct.deleteMany({ where: { productId } });
       await tx.kitItem.updateMany({
         where: { productId },
@@ -656,7 +659,15 @@ export class ProductsService {
         }
       }
 
-      await tx.product.delete({ where: { id: productId } });
+      if (hasPurchases) {
+        // Soft delete: preserva o registro para manter histórico de compras
+        await tx.product.update({
+          where: { id: productId },
+          data: { deletedAt: new Date() },
+        });
+      } else {
+        await tx.product.delete({ where: { id: productId } });
+      }
     });
 
     return {

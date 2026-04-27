@@ -1429,7 +1429,7 @@ export class CheckoutService {
     const allProductsById = new Map<string, any>();
     if (allProductIds.length > 0) {
       const products = await prisma.product.findMany({
-        where: { id: { in: allProductIds } },
+        where: { id: { in: allProductIds }, deletedAt: null },
         include: { variations: true },
       });
       for (const prod of products) {
@@ -1574,6 +1574,22 @@ export class CheckoutService {
             if (product) {
               const ticketIncluded = ticketIdToIncludedProductIds.get(ticketItem.ticketId) ?? new Set<string>();
               const unitPrice = this.resolveProductPrice(product, productItem.variationId, ticketIncluded);
+              const selectedVariation = productItem.variationId
+                ? (product.variations ?? []).find((v: any) => v.id === productItem.variationId)
+                : null;
+              const productSnapshot = {
+                id: product.id,
+                name: product.name,
+                images: product.images ?? [],
+                primaryImageIndex: product.primaryImageIndex ?? 0,
+                basePrice: product.basePrice,
+                isIncludedInTicket: product.isIncludedInTicket,
+                isRequired: product.isRequired,
+                variationType: product.variationType ?? null,
+                selectedVariation: selectedVariation
+                  ? { id: selectedVariation.id, name: selectedVariation.name, price: selectedVariation.price }
+                  : null,
+              };
 
               await prisma.registrationProduct.create({
                 data: {
@@ -1583,6 +1599,7 @@ export class CheckoutService {
                   quantity: productItem.quantity,
                   unitPrice: unitPrice,
                   totalPrice: unitPrice * productItem.quantity,
+                  productSnapshot,
                 },
               });
             }
@@ -1921,7 +1938,7 @@ export class CheckoutService {
     >();
     if (additionalProductIds.size > 0) {
       const loaded = await prisma.product.findMany({
-        where: { id: { in: [...additionalProductIds] } },
+        where: { id: { in: [...additionalProductIds] }, deletedAt: null },
         include: { variations: true },
       });
       for (const prod of loaded) {

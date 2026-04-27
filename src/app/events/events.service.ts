@@ -294,6 +294,7 @@ export class EventsService {
     const event = await prismaWrite.event.create({
       data: {
         ...createEventRest,
+        state: EventsService.normalizeState(createEventRest.state),
         logoUrl: createEventDto.logoUrl ?? cardImageUrl,
         slug: null, // Será gerado depois com o ID
         organizationId: member.organizationId,
@@ -441,6 +442,31 @@ export class EventsService {
     await prismaWrite.eventTopic.create({
       data: topicData as Prisma.EventTopicUncheckedCreateInput,
     });
+  }
+
+  private static readonly BRAZIL_UF_NAMES: Record<string, string> = {
+    AC: 'Acre', AL: 'Alagoas', AP: 'Amapá', AM: 'Amazonas', BA: 'Bahia',
+    CE: 'Ceará', DF: 'Distrito Federal', ES: 'Espírito Santo', GO: 'Goiás',
+    MA: 'Maranhão', MT: 'Mato Grosso', MS: 'Mato Grosso do Sul', MG: 'Minas Gerais',
+    PA: 'Pará', PB: 'Paraíba', PR: 'Paraná', PE: 'Pernambuco', PI: 'Piauí',
+    RJ: 'Rio de Janeiro', RN: 'Rio Grande do Norte', RS: 'Rio Grande do Sul',
+    RO: 'Rondônia', RR: 'Roraima', SC: 'Santa Catarina', SP: 'São Paulo',
+    SE: 'Sergipe', TO: 'Tocantins',
+  };
+
+  private static readonly BRAZIL_NAME_TO_UF: Record<string, string> = Object.fromEntries(
+    Object.entries(EventsService.BRAZIL_UF_NAMES).map(([uf, name]) => [name.toLowerCase(), uf]),
+  );
+
+  /** Normaliza o campo state para sigla UF canônica (ex: "São Paulo" → "SP"). */
+  private static normalizeState(raw: string | undefined | null): string | undefined {
+    if (!raw) return raw ?? undefined;
+    const t = raw.trim();
+    if (t.length === 2) {
+      const uf = t.toUpperCase();
+      return EventsService.BRAZIL_UF_NAMES[uf] ? uf : t;
+    }
+    return EventsService.BRAZIL_NAME_TO_UF[t.toLowerCase()] ?? t;
   }
 
   /** Mapeamento de código de modalidade -> label armazenado em Ticket.modality */
@@ -1544,6 +1570,9 @@ export class EventsService {
       if (updateData[k] === undefined) {
         delete updateData[k];
       }
+    }
+    if (updateData.state !== undefined) {
+      updateData.state = EventsService.normalizeState(updateData.state as string);
     }
     if (
       cardImageUrl !== undefined &&
@@ -4002,10 +4031,19 @@ export class EventsService {
       };
     }
 
-    // Busca por texto (nome, CPF, email, ID) — cobre tanto usuários reais quanto participantes convidados
+    // Busca por texto (nome, CPF, email, ID da inscrição, ID do pedido)
+    // IDs são UUID — não suportam `contains` no Prisma; buscamos via cast para texto
     if (search) {
+      const uuidMatches = await prismaRead.$queryRaw<{ id: string }[]>`
+        SELECT r.id FROM "Registration" r
+        JOIN "Order" o ON o.id = r."orderId"
+        WHERE r."eventId" = ${eventId}::uuid
+          AND (r.id::text ILIKE ${'%' + search + '%'} OR o.id::text ILIKE ${'%' + search + '%'})
+      `;
+      const uuidMatchIds = uuidMatches.map((row) => row.id);
+
       where.OR = [
-        { id: { contains: search, mode: 'insensitive' } },
+        ...(uuidMatchIds.length > 0 ? [{ id: { in: uuidMatchIds } }] : []),
         {
           user: {
             OR: [

@@ -530,6 +530,8 @@ model Registration {
   participantPhone      String?
   participantDateOfBirth DateTime?
   participantGender     String?
+  // Snapshot completo da compra no momento do pagamento — recibo imutável
+  receiptSnapshot Json?
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
 
@@ -607,11 +609,13 @@ model Question {
 }
 
 model QuestionAnswer {
-  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  registrationId String   @db.Uuid
-  questionId     String   @db.Uuid
-  answer         String
-  createdAt      DateTime @default(now())
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  registrationId   String   @db.Uuid
+  questionId       String   @db.Uuid
+  answer           String
+  // Snapshot da pergunta no momento da resposta (texto, tipo, opções)
+  questionSnapshot Json?
+  createdAt        DateTime @default(now())
 
   registration Registration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
   question     Question     @relation(fields: [questionId], references: [id], onDelete: Cascade)
@@ -888,22 +892,23 @@ model TicketBatch {
 }
 
 model Product {
-  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  eventId            String   @db.Uuid
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId            String    @db.Uuid
   name               String
   image              String?
   images             String[]
-  primaryImageIndex  Int      @default(0)
-  isIncludedInTicket Boolean  @default(false)
-  basePrice          Int      @default(0) // Preço base em centavos
-  isRequired         Boolean  @default(false)
+  primaryImageIndex  Int       @default(0)
+  isIncludedInTicket Boolean   @default(false)
+  basePrice          Int       @default(0) // Preço base em centavos
+  isRequired         Boolean   @default(false)
   variationType      String? // Tipo/nome da variação (ex: "Tamanhos", "Cores")
   /// Comprador pode alterar a variação escolhida após a compra, dentro da janela em dias antes do evento.
   buyerVariationEditAllowed Boolean @default(false)
   /// Dias corridos antes da data do evento até quando a alteração de variação é permitida; 0 quando não permitido.
   variationEditDeadlineDays Int     @default(0)
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  deletedAt          DateTime? // Soft delete — produto removido pelo organizador
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
   event         Event                 @relation(fields: [eventId], references: [id], onDelete: Cascade)
   variations    ProductVariation[]
@@ -966,15 +971,17 @@ model RegistrationTicket {
 }
 
 model RegistrationProduct {
-  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  registrationId String   @db.Uuid
-  productId      String   @db.Uuid
-  variationId    String?  @db.Uuid // Variação escolhida (opcional, se o produto tiver variações)
-  variationEdited Boolean @default(false) // true após o comprador alterar a variação (permitido apenas uma vez)
-  quantity       Int      @default(1)
-  unitPrice      Int // Preço unitário em centavos no momento da compra
-  totalPrice     Int // Preço total em centavos (unitPrice * quantity)
-  createdAt      DateTime @default(now())
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  registrationId  String   @db.Uuid
+  productId       String   @db.Uuid
+  variationId     String?  @db.Uuid // Variação escolhida (opcional, se o produto tiver variações)
+  variationEdited Boolean  @default(false) // true após o comprador alterar a variação (permitido apenas uma vez)
+  quantity        Int      @default(1)
+  unitPrice       Int // Preço unitário em centavos no momento da compra
+  totalPrice      Int // Preço total em centavos (unitPrice * quantity)
+  // Snapshot do produto no momento da compra — preservado mesmo após edições ou soft delete
+  productSnapshot Json?
+  createdAt       DateTime @default(now())
 
   registration Registration      @relation(fields: [registrationId], references: [id], onDelete: Cascade)
   product      Product           @relation(fields: [productId], references: [id], onDelete: Cascade)

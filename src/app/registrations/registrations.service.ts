@@ -56,6 +56,32 @@ export class RegistrationsService {
       throw new BadRequestException(`Missing required questions: ${missingQuestions.map((q) => q.question).join(', ')}`);
     }
 
+    // Validar respostas contra as opções válidas da pergunta
+    const questionMap = new Map(event.questions.map((q) => [q.id, q]));
+    for (const qa of questionAnswers) {
+      const question = questionMap.get(qa.questionId);
+      if (!question) continue;
+
+      if (['select', 'radio', 'checkbox'].includes(question.type)) {
+        const validOptions = (question.options as string[] | null) ?? [];
+
+        let selectedValues: string[];
+        try {
+          const parsed = JSON.parse(qa.answer);
+          selectedValues = Array.isArray(parsed) ? parsed : [String(parsed)];
+        } catch {
+          selectedValues = [qa.answer];
+        }
+
+        const invalid = selectedValues.filter((v) => !validOptions.includes(v));
+        if (invalid.length > 0) {
+          throw new BadRequestException(
+            `Resposta inválida para "${question.question}": ${invalid.join(', ')}. Opções válidas: ${validOptions.join(', ')}`,
+          );
+        }
+      }
+    }
+
     // Verificar modalidades e calcular preço
     let totalAmount = 0;
     for (const modalitySelection of modalities) {
@@ -240,13 +266,23 @@ export class RegistrationsService {
         await this.kitsService.updateStock(kitItem.kitItemId, kitItem.size, kitItem.quantity);
       }
 
-      // Adicionar respostas das perguntas
+      // Adicionar respostas das perguntas com snapshot da pergunta no momento da resposta
       for (const answer of questionAnswers) {
+        const questionData = questionMap.get(answer.questionId);
+        const questionSnapshot = questionData ? {
+          id: questionData.id,
+          question: (questionData as any).question,
+          description: (questionData as any).description ?? null,
+          type: (questionData as any).type,
+          options: (questionData as any).options ?? null,
+          isRequired: (questionData as any).isRequired,
+        } : null;
         await prisma.questionAnswer.create({
           data: {
             registrationId: newRegistration.id,
             questionId: answer.questionId,
             answer: answer.answer,
+            questionSnapshot,
           },
         });
       }
@@ -595,6 +631,8 @@ export class RegistrationsService {
                 id: true,
                 question: true,
                 description: true,
+                type: true,
+                isRequired: true,
               },
             },
           },
@@ -693,15 +731,19 @@ export class RegistrationsService {
           };
         }),
       } : null,
-      questionAnswers: (reg.questionAnswers || []).map((qa: any) => ({
-        id: qa.id,
-        question: {
-          id: qa.question.id,
-          question: qa.question.question,
-          description: qa.question.description ?? null,
-        },
-        answer: qa.answer as string,
-      })),
+      questionAnswers: (reg.questionAnswers || []).map((qa: any) => {
+        const qSnap = qa.questionSnapshot as Record<string, any> | null;
+        const qData = qSnap ?? qa.question ?? {};
+        return {
+          id: qa.id,
+          question: {
+            id: qData.id,
+            question: qData.question,
+            description: qData.description ?? null,
+          },
+          answer: qa.answer as string,
+        };
+      }),
       kitItems: (reg.kitItems || []).map((ki: any) => ({
         id: ki.id,
         kitItem: {
@@ -713,27 +755,30 @@ export class RegistrationsService {
         selectedSize: ki.selectedSize,
         quantity: ki.quantity,
       })),
-      products: (reg.products || []).map((rp: any) => ({
-        id: rp.id,
-        product: {
-          id: rp.product.id,
-          name: rp.product.name,
-          image: rp.product.image,
-          basePrice: rp.product.basePrice,
-          isIncludedInTicket: rp.product.isIncludedInTicket ?? false,
-          isRequired: rp.product.isRequired ?? false,
-          variationType: rp.product.variationType || null,
-        },
-        variation: rp.variation ? {
-          id: rp.variation.id,
-          name: rp.variation.name,
-          price: rp.variation.price,
-        } : null,
-        variationName: rp.variation?.name || null,
-        quantity: rp.quantity,
-        unitPrice: rp.unitPrice,
-        totalPrice: rp.totalPrice,
-      })),
+      products: (reg.products || []).map((rp: any) => {
+        const snap = rp.productSnapshot as Record<string, any> | null;
+        const productData = snap ?? rp.product ?? {};
+        const variationData = snap?.selectedVariation ?? (rp.variation ? {
+          id: rp.variation.id, name: rp.variation.name, price: rp.variation.price,
+        } : null);
+        return {
+          id: rp.id,
+          product: {
+            id: productData.id,
+            name: productData.name,
+            image: productData.images?.[productData.primaryImageIndex ?? 0] ?? productData.image ?? null,
+            basePrice: productData.basePrice,
+            isIncludedInTicket: productData.isIncludedInTicket ?? false,
+            isRequired: productData.isRequired ?? false,
+            variationType: productData.variationType ?? null,
+          },
+          variation: variationData,
+          variationName: variationData?.name ?? null,
+          quantity: rp.quantity,
+          unitPrice: rp.unitPrice,
+          totalPrice: rp.totalPrice,
+        };
+      }),
       emergencyContact: {
         name: reg.emergencyContactName ?? null,
         phone: reg.emergencyContactPhone ?? null,
@@ -935,37 +980,47 @@ export class RegistrationsService {
           name: reg.tickets[0].ticket.kit.name,
         } : null,
       } : null,
-      products: (reg.products || []).map((rp: any) => ({
-        id: rp.id,
-        product: {
-          id: rp.product.id,
-          name: rp.product.name,
-          image: rp.product.image ?? null,
-          basePrice: rp.product.basePrice,
-          isIncludedInTicket: rp.product.isIncludedInTicket ?? false,
-          isRequired: rp.product.isRequired ?? false,
-          variationType: rp.product.variationType || null,
-        },
-        variation: rp.variation ? {
+      products: (reg.products || []).map((rp: any) => {
+        // Usa snapshot se disponível (produto pode ter sido deletado ou editado após a compra)
+        const snap = rp.productSnapshot as Record<string, any> | null;
+        const productData = snap ?? rp.product ?? {};
+        const variationData = snap?.selectedVariation ?? (rp.variation ? {
           id: rp.variation.id,
           name: rp.variation.name,
           price: rp.variation.price,
-        } : null,
-        quantity: rp.quantity,
-        unitPrice: rp.unitPrice,
-        totalPrice: rp.totalPrice,
-      })),
-      questionAnswers: (reg.questionAnswers || []).map((qa: any) => ({
-        id: qa.id,
-        question: {
-          id: qa.question.id,
-          question: qa.question.question,
-          description: qa.question.description ?? null,
-          type: qa.question.type,
-          isRequired: qa.question.isRequired,
-        },
-        answer: qa.answer as string,
-      })),
+        } : null);
+        return {
+          id: rp.id,
+          product: {
+            id: productData.id,
+            name: productData.name,
+            image: productData.images?.[productData.primaryImageIndex ?? 0] ?? productData.image ?? null,
+            basePrice: productData.basePrice,
+            isIncludedInTicket: productData.isIncludedInTicket ?? false,
+            isRequired: productData.isRequired ?? false,
+            variationType: productData.variationType ?? null,
+          },
+          variation: variationData,
+          quantity: rp.quantity,
+          unitPrice: rp.unitPrice,
+          totalPrice: rp.totalPrice,
+        };
+      }),
+      questionAnswers: (reg.questionAnswers || []).map((qa: any) => {
+        const qSnap = qa.questionSnapshot as Record<string, any> | null;
+        const qData = qSnap ?? qa.question ?? {};
+        return {
+          id: qa.id,
+          question: {
+            id: qData.id,
+            question: qData.question,
+            description: qData.description ?? null,
+            type: qData.type,
+            isRequired: qData.isRequired,
+          },
+          answer: qa.answer as string,
+        };
+      }),
       order: reg.order ? {
         id: reg.order.id,
         totalAmount: reg.order.totalAmount,

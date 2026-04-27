@@ -16,7 +16,8 @@
       "mcp__obsidian__*",
       "Bash(xargs grep *)",
       "Bash(grep -E \"\\\\.\\(prisma|ts\\)$\")",
-      "Bash(pnpm add *)"
+      "Bash(pnpm add *)",
+      "Bash(node *)"
     ]
   }
 }

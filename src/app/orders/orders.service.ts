@@ -509,90 +509,104 @@ export class OrdersService {
   async getOrderDetails(userId: string, orderId: string): Promise<Record<string, any>> {
     const r: any = this.prisma.getReadClient();
 
-    const order = await r.order.findUnique({
-      where: { id: orderId },
-      include: {
-        reservedTickets: true,
-        payment: true,
-        coupon: {
-          select: { id: true, code: true, type: true, value: true, couponType: true },
-        },
-        voucher: {
-          select: { id: true, code: true, name: true, status: true },
-        },
-        event: {
-          select: {
-            id: true,
-            name: true,
-            slug: true,
-            eventDate: true,
-            bannerUrl: true,
-            logoUrl: true,
-            location: true,
-            city: true,
-            state: true,
-            organization: {
-              select: { id: true, name: true, logoUrl: true, email: true, phone: true },
-            },
+    const [order, currentUser] = await Promise.all([
+      r.order.findUnique({
+        where: { id: orderId },
+        include: {
+          reservedTickets: true,
+          payment: true,
+          coupon: {
+            select: { id: true, code: true, type: true, value: true, couponType: true },
           },
-        },
-        registrations: {
-          where: { status: { not: RegistrationStatus.PENDING } },
-          include: {
-            user: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                email: true,
-                documentNumber: true,
-                phone: true,
-                dateOfBirth: true,
-                gender: true,
-                avatarUrl: true,
+          voucher: {
+            select: { id: true, code: true, name: true, status: true },
+          },
+          event: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              eventDate: true,
+              bannerUrl: true,
+              logoUrl: true,
+              location: true,
+              city: true,
+              state: true,
+              organization: {
+                select: { id: true, name: true, logoUrl: true, email: true, phone: true },
               },
             },
-            tickets: {
-              include: {
-                ticket: {
-                  include: {
-                    category: { select: { id: true, name: true } },
-                    products: {
-                      orderBy: { sortOrder: 'asc' },
-                      include: {
-                        product: {
-                          include: { variations: true },
+          },
+          registrations: {
+            where: { status: { not: RegistrationStatus.PENDING } },
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  firstName: true,
+                  lastName: true,
+                  email: true,
+                  documentNumber: true,
+                  phone: true,
+                  dateOfBirth: true,
+                  gender: true,
+                  avatarUrl: true,
+                },
+              },
+              tickets: {
+                include: {
+                  ticket: {
+                    include: {
+                      category: { select: { id: true, name: true } },
+                      products: {
+                        orderBy: { sortOrder: 'asc' },
+                        include: {
+                          product: {
+                            include: { variations: true },
+                          },
                         },
                       },
                     },
                   },
                 },
               },
-            },
-            modalities: {
-              include: {
-                modality: {
-                  select: { id: true, name: true, group: { select: { id: true, name: true } } },
+              modalities: {
+                include: {
+                  modality: {
+                    select: { id: true, name: true, group: { select: { id: true, name: true } } },
+                  },
                 },
               },
-            },
-            questionAnswers: {
-              include: {
-                question: { select: { id: true, question: true, type: true } },
+              questionAnswers: {
+                include: {
+                  question: { select: { id: true, question: true, type: true } },
+                },
               },
-            },
-            products: {
-              include: {
-                product: { select: { id: true, name: true, image: true, basePrice: true, variationType: true, buyerVariationEditAllowed: true, variationEditDeadlineDays: true } },
-                variation: true,
+              products: {
+                include: {
+                  product: { select: { id: true, name: true, image: true, basePrice: true, variationType: true, buyerVariationEditAllowed: true, variationEditDeadlineDays: true } },
+                  variation: true,
+                },
               },
             },
           },
         },
-      },
-    });
+      }),
+      r.user.findUnique({
+        where: { id: userId },
+        select: { documentNumber: true },
+      }),
+    ]);
 
-    if (!order || order.userId !== userId) {
+    const isOwner = order.userId === userId;
+    const userCpf = currentUser?.documentNumber ?? null;
+    const isParticipant = (order.registrations as any[]).some(
+      (reg: any) =>
+        reg.userId === userId ||
+        (userCpf && reg.user?.documentNumber === userCpf),
+    );
+
+    if (!order || (!isOwner && !isParticipant)) {
       throw new NotFoundException('Pedido não encontrado');
     }
 
@@ -696,16 +710,25 @@ export class OrdersService {
                   : null,
             }
           : null,
-        registrations: (order.registrations as any[]).map((reg: any) => ({
-          id: reg.id,
-          status: reg.status,
-          qrCode: reg.qrCode ?? null,
-          createdAt: reg.createdAt,
-          emergencyContact:
-            reg.emergencyContactName || reg.emergencyContactPhone
-              ? { name: reg.emergencyContactName ?? null, phone: reg.emergencyContactPhone ?? null }
-              : null,
-          participant: reg.user
+        registrations: (order.registrations as any[]).map((reg: any) => {
+          const receipt = reg.receiptSnapshot as any;
+
+          // Participant: snapshot tem prioridade sobre dados em tempo real
+          const snapP = receipt?.participant;
+          const participant = snapP
+            ? {
+                id: reg.userId,
+                fullName: snapP.name ?? null,
+                firstName: snapP.name?.split(' ')[0] ?? null,
+                lastName: snapP.name?.split(' ').slice(1).join(' ') ?? null,
+                email: snapP.email ?? null,
+                documentNumber: snapP.cpf ?? null,
+                phone: snapP.phone ?? null,
+                dateOfBirth: snapP.birthDate ?? null,
+                gender: snapP.gender ?? null,
+                avatarUrl: null,
+              }
+            : reg.user
             ? {
                 id: reg.user.id,
                 fullName: `${reg.user.firstName} ${reg.user.lastName}`,
@@ -729,106 +752,130 @@ export class OrdersService {
                 dateOfBirth: reg.participantDateOfBirth ?? null,
                 gender: reg.participantGender ?? null,
                 avatarUrl: null,
-              },
-          ticket:
-            reg.tickets?.length > 0
-              ? {
-                  id: reg.tickets[0].ticket.id,
-                  name: reg.tickets[0].ticket.name,
-                  category: reg.tickets[0].ticket.category ?? null,
-                  includedProducts: (reg.tickets[0].ticket.products ?? []).map((tp: any) => {
-                    // Preferência: variação confirmada no RegistrationProduct (pós-pagamento)
-                    const regProduct = (reg.products ?? []).find((rp: any) => rp.productId === tp.product.id);
-                    this.logger.debug(`[getOrderDetails] product=${tp.product.id} regProduct=${JSON.stringify({ id: regProduct?.id, variationId: regProduct?.variationId, variation: regProduct?.variation?.id })} pendingMap=${JSON.stringify(pendingProductsMap.get(tp.product.id))} variationsCount=${tp.product.variations?.length}`);
-                    const variationEdited = regProduct?.variationEdited ?? false;
+              };
 
-                    // Prioridade 1: variação confirmada no RegistrationProduct (FK direto)
-                    // Prioridade 2: variação órfã (organizer deletou+recriou variações — ID antigo ainda existe no DB)
-                    // Prioridade 3: variação encontrada nas variações atuais do produto pelo ID
-                    // Prioridade 4: variationId do pendingProducts (estado pré-pagamento, mesmo fallback acima)
-                    const resolvedVariationId =
-                      regProduct?.variationId
-                      ?? pendingProductsMap.get(tp.product.id)?.variationId
-                      ?? null;
+          // Ticket: nome/categoria do snapshot; includedProducts em tempo real (lógica de edição)
+          const regTicket = reg.tickets?.[0];
+          const ticketSnap = (regTicket?.ticketSnapshot ?? receipt?.ticket) as any;
+          const liveTicket = regTicket?.ticket;
 
-                    const selectedVariation: any =
-                      regProduct?.variation
-                      ?? (resolvedVariationId ? orphanVariationMap.get(resolvedVariationId) ?? null : null)
-                      ?? (resolvedVariationId
-                        ? (tp.product.variations ?? []).find((v: any) => v.id === resolvedVariationId) ?? null
-                        : null);
-                    this.logger.debug(`[getOrderDetails] product=${tp.product.id} selectedVariation=${JSON.stringify(selectedVariation ? { id: selectedVariation.id, name: selectedVariation.name } : null)}`);
+          const ticket = regTicket
+            ? {
+                id: ticketSnap?.id ?? liveTicket?.id,
+                name: ticketSnap?.name ?? liveTicket?.name,
+                category: ticketSnap?.category ?? liveTicket?.category ?? null,
+                includedProducts: (liveTicket?.products ?? []).map((tp: any) => {
+                  const regProduct = (reg.products ?? []).find((rp: any) => rp.productId === tp.product.id);
+                  const variationEdited = regProduct?.variationEdited ?? false;
 
-                    const deadlineDays = tp.product.variationEditDeadlineDays ?? 0;
-                    const deadlineMs = deadlineDays * 24 * 60 * 60 * 1000;
-                    const variationEditDeadline = deadlineDays > 0
-                      ? new Date(eventDate.getTime() - deadlineMs)
-                      : null;
-                    const editWindowOpen = variationEditDeadline
-                      ? now < variationEditDeadline
-                      : false;
-                    const canEditVariation =
-                      (tp.product.buyerVariationEditAllowed ?? false) &&
-                      !variationEdited &&
-                      editWindowOpen &&
-                      tp.product.isIncludedInTicket === true;
+                  const resolvedVariationId =
+                    regProduct?.variationId
+                    ?? pendingProductsMap.get(tp.product.id)?.variationId
+                    ?? null;
 
-                    return {
-                      id: tp.product.id,
-                      name: tp.product.name,
-                      image: tp.product.image ?? null,
-                      basePrice: tp.product.basePrice,
-                      isIncludedInTicket: tp.product.isIncludedInTicket ?? false,
-                      isRequired: tp.product.isRequired ?? false,
-                      variationType: tp.product.variationType ?? null,
-                      buyerVariationEditAllowed: tp.product.buyerVariationEditAllowed ?? false,
-                      variationEditDeadline,
-                      variationEdited,
-                      canEditVariation,
-                      selectedVariation: selectedVariation
-                        ? { id: selectedVariation.id, name: selectedVariation.name, price: selectedVariation.price }
-                        : null,
-                      variations: (tp.product.variations ?? []).map((v: any) => ({
-                        id: v.id,
-                        name: v.name,
-                        price: v.price,
-                        stock: v.stock,
-                      })),
-                    };
-                  }),
-                }
-              : null,
-          modality:
-            reg.modalities?.length > 0
-              ? {
-                  id: reg.modalities[0].modality.id,
-                  name: reg.modalities[0].modality.name,
-                  group: reg.modalities[0].modality.group ?? null,
-                }
-              : null,
-          questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => ({
-            question: qa.question.question,
-            type: qa.question.type,
-            answer: qa.answer,
-          })),
-          products: (reg.products ?? []).map((rp: any) => ({
-            id: rp.id,
-            product: {
-              id: rp.product.id,
-              name: rp.product.name,
-              image: rp.product.image ?? null,
-              basePrice: rp.product.basePrice,
-              variationType: rp.product.variationType ?? null,
-            },
-            variation: rp.variation
+                  const selectedVariation: any =
+                    regProduct?.variation
+                    ?? (resolvedVariationId ? orphanVariationMap.get(resolvedVariationId) ?? null : null)
+                    ?? (resolvedVariationId
+                      ? (tp.product.variations ?? []).find((v: any) => v.id === resolvedVariationId) ?? null
+                      : null);
+
+                  const deadlineDays = tp.product.variationEditDeadlineDays ?? 0;
+                  const deadlineMs = deadlineDays * 24 * 60 * 60 * 1000;
+                  const variationEditDeadline = deadlineDays > 0
+                    ? new Date(eventDate.getTime() - deadlineMs)
+                    : null;
+                  const editWindowOpen = variationEditDeadline ? now < variationEditDeadline : false;
+                  const canEditVariation =
+                    (tp.product.buyerVariationEditAllowed ?? false) &&
+                    !variationEdited &&
+                    editWindowOpen &&
+                    tp.product.isIncludedInTicket === true;
+
+                  return {
+                    id: tp.product.id,
+                    name: tp.product.name,
+                    image: tp.product.image ?? null,
+                    basePrice: tp.product.basePrice,
+                    isIncludedInTicket: tp.product.isIncludedInTicket ?? false,
+                    isRequired: tp.product.isRequired ?? false,
+                    variationType: tp.product.variationType ?? null,
+                    buyerVariationEditAllowed: tp.product.buyerVariationEditAllowed ?? false,
+                    variationEditDeadline,
+                    variationEdited,
+                    canEditVariation,
+                    selectedVariation: selectedVariation
+                      ? { id: selectedVariation.id, name: selectedVariation.name, price: selectedVariation.price }
+                      : null,
+                    variations: (tp.product.variations ?? []).map((v: any) => ({
+                      id: v.id,
+                      name: v.name,
+                      price: v.price,
+                      stock: v.stock,
+                    })),
+                  };
+                }),
+              }
+            : null;
+
+          // Question answers: questionSnapshot tem prioridade
+          const questionAnswers = (reg.questionAnswers ?? []).map((qa: any) => {
+            const qSnap = (qa.questionSnapshot ?? null) as any;
+            return {
+              question: qSnap?.question ?? qa.question?.question ?? null,
+              type: qSnap?.type ?? qa.question?.type ?? null,
+              answer: qa.answer,
+            };
+          });
+
+          // Products: productSnapshot tem prioridade
+          const products = (reg.products ?? []).map((rp: any) => {
+            const pSnap = (rp.productSnapshot ?? null) as any;
+            const selectedVar = pSnap?.selectedVariation ?? (rp.variation
               ? { id: rp.variation.id, name: rp.variation.name, price: rp.variation.price }
-              : null,
-            variationName: rp.variation?.name ?? null,
-            quantity: rp.quantity,
-            unitPrice: rp.unitPrice,
-            totalPrice: rp.totalPrice,
-          })),
-        })),
+              : null);
+            return {
+              id: rp.id,
+              product: {
+                id: rp.productId ?? pSnap?.id ?? rp.product?.id,
+                name: pSnap?.name ?? rp.product?.name ?? null,
+                image: pSnap
+                  ? (pSnap.images?.[pSnap.primaryImageIndex ?? 0] ?? pSnap.image ?? null)
+                  : (rp.product?.image ?? null),
+                basePrice: pSnap?.basePrice ?? rp.product?.basePrice ?? rp.unitPrice,
+                variationType: pSnap?.variationType ?? rp.product?.variationType ?? null,
+              },
+              variation: selectedVar,
+              variationName: selectedVar?.name ?? null,
+              quantity: rp.quantity,
+              unitPrice: rp.unitPrice,
+              totalPrice: rp.totalPrice,
+            };
+          });
+
+          return {
+            id: reg.id,
+            status: reg.status,
+            qrCode: reg.qrCode ?? null,
+            createdAt: reg.createdAt,
+            emergencyContact:
+              reg.emergencyContactName || reg.emergencyContactPhone
+                ? { name: reg.emergencyContactName ?? null, phone: reg.emergencyContactPhone ?? null }
+                : null,
+            participant,
+            ticket,
+            modality:
+              reg.modalities?.length > 0
+                ? {
+                    id: reg.modalities[0].modality.id,
+                    name: reg.modalities[0].modality.name,
+                    group: reg.modalities[0].modality.group ?? null,
+                  }
+                : null,
+            questionAnswers,
+            products,
+          };
+        }),
         serverTime: new Date(),
       },
     };
@@ -1148,13 +1195,15 @@ export class OrdersService {
       0,
     );
     const totalAmount = ticketsSubtotal + productsSubtotal;
+    const existingDiscount = (order as any).discount ?? 0;
+    const finalAmount = Math.max(0, totalAmount - existingDiscount);
 
     const updated = await w.order.update({
       where: { id: orderId },
       data: {
         pendingProducts: dto.products,
         totalAmount,
-        finalAmount: totalAmount,
+        finalAmount,
         updatedAt: new Date(),
       },
       include: ORDER_INCLUDE,
@@ -1513,7 +1562,33 @@ export class OrdersService {
       throw new HttpException(errBody, 402);
     }
 
-    // 6.13 Finalize: mark PAID, create Payment, create Registrations
+    // 6.13 Pré-carregar dados para receipt snapshot (fora da tx para não bloquear locks)
+    const ticketIds = reservedTickets.map((rt: any) => rt.ticketId);
+    const [snapshotTickets, snapshotEvent, snapshotQuestions] = await Promise.all([
+      r.ticket.findMany({
+        where: { id: { in: ticketIds } },
+        include: {
+          category: { select: { id: true, name: true } },
+          batches: { select: { id: true, price: true, sortOrder: true } },
+        },
+      }),
+      r.event.findUnique({
+        where: { id: order.eventId },
+        select: {
+          id: true, name: true, slug: true,
+          eventDate: true, registrationStartDate: true, registrationEndDate: true,
+          location: true, city: true, state: true, country: true, zipCode: true, neighborhood: true,
+        },
+      }),
+      r.question.findMany({
+        where: { eventId: order.eventId, isActive: true },
+        select: { id: true, question: true, description: true, type: true, options: true, isRequired: true },
+      }),
+    ]);
+    const snapshotTicketById = new Map(snapshotTickets.map((t: any) => [t.id, t]));
+    const snapshotQuestionById = new Map<any, any>(snapshotQuestions.map((q: any) => [q.id, q]));
+
+    // 6.14 Finalize: mark PAID, create Payment, create Registrations
     const registrations: any[] = await w.$transaction(async (tx: any) => {
       // Atomic guard — only proceed if order is still PENDING
       const guardRows: any[] = await tx.$queryRaw`
@@ -1556,6 +1631,14 @@ export class OrdersService {
             authorizationCode: cieloResult.authorizationCode,
             proofOfSale: cieloResult.proofOfSale,
             cieloStatus: cieloResult.cieloStatus,
+            ...(dto.card && {
+              creditCard: {
+                brand: cieloResult.cardBrand ?? null,
+                last4Digits: dto.card.number.replace(/\s/g, '').slice(-4),
+                holder: dto.card.name,
+                installments: dto.card.installments ?? 1,
+              },
+            }),
           },
         },
       });
@@ -1652,11 +1735,28 @@ export class OrdersService {
             select: { id: true, qrCode: true, status: true },
           });
 
+          const ticketData = snapshotTicketById.get(rt.ticketId) as any;
+          const batchData = ticketData?.batches?.find((b: any) => b.id === rt.batchId) ?? null;
+          const ticketSnapshot = ticketData ? {
+            id: ticketData.id,
+            name: ticketData.name,
+            description: ticketData.description ?? null,
+            modality: ticketData.modality ?? null,
+            distance: ticketData.distance ?? null,
+            distanceUnit: ticketData.distanceUnit ?? null,
+            gender: ticketData.gender ?? null,
+            ageLimitMin: ticketData.ageLimitMin ?? null,
+            ageLimitMax: ticketData.ageLimitMax ?? null,
+            category: ticketData.category ?? null,
+            batch: batchData ? { id: batchData.id, name: batchData.name, price: batchData.price } : null,
+          } : null;
+
           await tx.registrationTicket.create({
             data: {
               registrationId: reg.id,
               ticketId: rt.ticketId,
               batchId: rt.batchId,
+              ticketSnapshot,
             },
           });
 
@@ -1664,18 +1764,36 @@ export class OrdersService {
           const participantProducts = (pendingProducts ?? []).filter(
             (item: any) => item.participantEmail?.toLowerCase() === pData.email?.toLowerCase(),
           );
+          const participantProductMap = new Map<string, any>();
           if (participantProducts.length > 0) {
             for (const item of participantProducts) {
               const product = await r.product.findUnique({
                 where: { id: item.productId },
                 include: { variations: true },
               });
+              if (product) participantProductMap.set(product.id, product);
               if (!product) continue;
               let unitPrice: number = product.basePrice;
               if (item.variationId) {
                 const variation = product.variations.find((v: any) => v.id === item.variationId);
                 if (variation) unitPrice = variation.name === 'Sem interesse' ? 0 : variation.price;
               }
+              const selectedVariation = item.variationId
+                ? (product.variations ?? []).find((v: any) => v.id === item.variationId)
+                : null;
+              const productSnapshot = {
+                id: product.id,
+                name: product.name,
+                images: (product as any).images ?? [],
+                primaryImageIndex: (product as any).primaryImageIndex ?? 0,
+                basePrice: product.basePrice,
+                isIncludedInTicket: (product as any).isIncludedInTicket,
+                isRequired: (product as any).isRequired,
+                variationType: (product as any).variationType ?? null,
+                selectedVariation: selectedVariation
+                  ? { id: selectedVariation.id, name: selectedVariation.name, price: (selectedVariation as any).price }
+                  : null,
+              };
               await tx.registrationProduct.create({
                 data: {
                   registrationId: reg.id,
@@ -1684,23 +1802,120 @@ export class OrdersService {
                   quantity: item.quantity ?? 1,
                   unitPrice,
                   totalPrice: unitPrice * (item.quantity ?? 1),
+                  productSnapshot,
                 },
               });
             }
           }
 
-          // Question answers
+          // Question answers com snapshot da pergunta
+          const snapshotedAnswers: any[] = [];
           if (pData.questionAnswers?.length) {
             for (const qa of pData.questionAnswers) {
+              const questionData = snapshotQuestionById.get(qa.questionId);
+              const questionSnapshot = questionData ? {
+                id: questionData.id,
+                question: questionData.question,
+                description: questionData.description ?? null,
+                type: questionData.type,
+                options: questionData.options ?? null,
+                isRequired: questionData.isRequired,
+              } : null;
               await tx.questionAnswer.create({
                 data: {
                   registrationId: reg.id,
                   questionId: qa.questionId,
                   answer: String(qa.answer),
+                  questionSnapshot,
                 },
+              });
+              snapshotedAnswers.push({
+                question: questionSnapshot ?? { id: qa.questionId },
+                answer: String(qa.answer),
               });
             }
           }
+
+          // Construir receipt snapshot completo
+          const participantProductSnapshots = (participantProducts ?? []).map((item: any) => {
+            const prod = participantProductMap?.get(item.productId) as any;
+            return prod ? {
+              id: prod.id,
+              name: prod.name,
+              images: prod.images ?? [],
+              primaryImageIndex: prod.primaryImageIndex ?? 0,
+              basePrice: prod.basePrice,
+              variationType: prod.variationType ?? null,
+              quantity: item.quantity ?? 1,
+              unitPrice: prod.basePrice,
+              selectedVariation: item.variationId
+                ? (prod.variations ?? []).find((v: any) => v.id === item.variationId) ?? null
+                : null,
+            } : { id: item.productId, quantity: item.quantity ?? 1 };
+          });
+
+          const receiptSnapshot = {
+            event: snapshotEvent ? {
+              id: snapshotEvent.id,
+              name: snapshotEvent.name,
+              slug: snapshotEvent.slug,
+              startDate: snapshotEvent.startDate,
+              endDate: snapshotEvent.endDate,
+              location: {
+                street: snapshotEvent.street ?? null,
+                number: snapshotEvent.number ?? null,
+                city: snapshotEvent.city ?? null,
+                state: snapshotEvent.state ?? null,
+                country: snapshotEvent.country ?? null,
+                zipCode: snapshotEvent.zipCode ?? null,
+              },
+            } : null,
+            ticket: ticketSnapshot,
+            products: participantProductSnapshots,
+            questionAnswers: snapshotedAnswers,
+            participant: {
+              name: pData.name ?? null,
+              email: pData.email ?? null,
+              cpf: pData.cpf ?? null,
+              phone: pData.phone ?? null,
+              birthDate: pData.birthDate ?? null,
+              gender: pData.gender ?? null,
+            },
+            billing: {
+              postalCode: order.billingPostalCode ?? null,
+              street: order.billingStreet ?? null,
+              number: order.billingNumber ?? null,
+              complement: order.billingComplement ?? null,
+              neighborhood: order.billingNeighborhood ?? null,
+              city: order.billingCity ?? null,
+              state: order.billingState ?? null,
+              country: order.billingCountry ?? null,
+            },
+            pricing: {
+              ticketsSubtotal,
+              productsSubtotal,
+              discount: couponDiscount + voucherDiscount,
+              pixDiscount,
+              finalTotal,
+              coupon: order.coupon ? {
+                id: order.coupon.id,
+                code: order.coupon.code,
+                type: order.coupon.type,
+                value: order.coupon.value,
+              } : null,
+              voucher: order.voucher ? {
+                id: order.voucher.id,
+                code: order.voucher.code,
+                name: order.voucher.name,
+              } : null,
+            },
+            paidAt: new Date().toISOString(),
+          };
+
+          await tx.registration.update({
+            where: { id: reg.id },
+            data: { receiptSnapshot },
+          });
 
           createdRegs.push(updatedReg);
           pIdx++;
