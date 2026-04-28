@@ -91,12 +91,14 @@ export class EmailService {
       </html>
     `;
 
+    const text = `Nova mensagem de contato${data.eventName ? ` — ${data.eventName}` : ''}\n\nDe: ${data.userName} (${data.userEmail})${data.userPhone ? `\nTelefone: ${data.userPhone}` : ''}\n\nMensagem:\n${data.message}\n\nResponda diretamente para: ${data.userEmail}`;
     await this.send({
       from: this.from,
       to: data.organizerEmail,
       replyTo: data.userEmail,
       subject,
       html,
+      text,
     });
 
     this.logger.log(`Contact email sent to organizer: ${data.organizerEmail}`);
@@ -129,7 +131,8 @@ export class EmailService {
       </html>
     `;
 
-    await this.send({ from: this.from, to: data.email, subject, html });
+    const text = `Olá ${data.firstName},\n\n${data.inviterName} inscreveu você no evento ${data.eventName}.\n\nAcesse sua inscrição: ${data.registrationLink}\n\nPodioTicket — podioticket.com.br`;
+    await this.send({ from: this.from, to: data.email, subject, html, text });
     this.logger.log(`Invitation email sent to: ${data.email}`);
   }
 
@@ -277,7 +280,8 @@ export class EmailService {
       </html>
     `;
 
-    await this.send({ from: this.from, to: data.email, subject: 'Redefinição de senha — Podio Ticket', html });
+    const text = `Olá ${data.firstName || 'usuário'},\n\nClique no link abaixo para redefinir sua senha:\n${data.resetUrl}\n\nSe você não solicitou isso, ignore este email.\n\nPodioTicket — podioticket.com.br`;
+    await this.send({ from: this.from, to: data.email, subject: 'Redefinição de senha — Podio Ticket', html, text });
     this.logger.log(`Password reset email sent to: ${data.email}`);
   }
 
@@ -296,7 +300,8 @@ export class EmailService {
         </body>
       </html>
     `;
-    await this.send({ from: this.from, to: data.email, subject: 'Sua senha foi alterada — Podio Ticket', html });
+    const text = `Olá ${data.firstName || 'usuário'},\n\nA senha da sua conta PodioTicket foi alterada com sucesso.\n\nSe você não realizou esta alteração, entre em contato com o suporte imediatamente.\n\nPodioTicket — podioticket.com.br`;
+    await this.send({ from: this.from, to: data.email, subject: 'Sua senha foi alterada — Podio Ticket', html, text });
     this.logger.log(`Password changed notification sent to: ${data.email}`);
   }
 
@@ -315,10 +320,11 @@ export class EmailService {
         </body>
       </html>
     `;
+    const text = `Olá ${data.firstName || 'usuário'},\n\nO e-mail da sua conta PodioTicket foi alterado para ${data.newEmail}.\n\nSe você não realizou esta alteração, entre em contato com o suporte imediatamente.\n\nPodioTicket — podioticket.com.br`;
     // Notifica o email antigo (segurança) e o novo (confirmação)
     await Promise.all([
-      this.send({ from: this.from, to: data.oldEmail, subject: 'E-mail da conta alterado — Podio Ticket', html }),
-      this.send({ from: this.from, to: data.newEmail, subject: 'Bem-vindo ao novo e-mail — Podio Ticket', html }),
+      this.send({ from: this.from, to: data.oldEmail, subject: 'E-mail da conta alterado — Podio Ticket', html, text }),
+      this.send({ from: this.from, to: data.newEmail, subject: 'Bem-vindo ao novo e-mail — Podio Ticket', html, text }),
     ]);
     this.logger.log(`Email changed notification sent: ${data.oldEmail} → ${data.newEmail}`);
   }

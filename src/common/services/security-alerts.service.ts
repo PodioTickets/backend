@@ -257,8 +257,21 @@ export class SecurityAlertsService implements OnModuleInit {
     const subject = `${this.getSeverityEmoji(alert.severity)} ${channel.config.subject} - ${alert.title}`;
     const from = this.configService.get<string>('SMTP_FROM', 'no-reply@podioticket.com.br');
 
+    const html = this.generateEmailContent(alert);
+    const text = `${alert.title}\n\n${alert.description}\n\nSeveridade: ${alert.severity}\nTimestamp: ${new Date().toISOString()}\n\nPodioTicket Security Alerts`;
+
     try {
-      await sgMail.send({ from, to: recipients, subject, html: this.generateEmailContent(alert) });
+      await sgMail.send({
+        from,
+        to: recipients,
+        subject,
+        html,
+        text,
+        headers: {
+          'List-Unsubscribe': '<mailto:contato@podioticket.com.br?subject=unsubscribe>',
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        },
+      });
       this.logger.log(`📧 Email alert sent to ${recipients.join(', ')}`);
     } catch (error) {
       this.logger.error('❌ Failed to send email alert:', error?.response?.body ?? error);

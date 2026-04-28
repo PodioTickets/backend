@@ -35,7 +35,7 @@ FROM dependencies AS build
 ARG NODE_MAX_OLD_SPACE_SIZE=768
 ENV NODE_OPTIONS=--max-old-space-size=${NODE_MAX_OLD_SPACE_SIZE}
 
-COPY tsconfig.json tsconfig.build.json nest-cli.json ./
+COPY tsconfig.json tsconfig.build.json tsconfig.node.json nest-cli.json ./
 COPY prisma ./prisma
 COPY src ./src
 
@@ -70,7 +70,7 @@ RUN find node_modules -name "*engine-linux-musl*" -type f -exec chmod +x {} \; 2
     chown -R nestjs:nodejs /usr/src/app/node_modules
 
 # Copia arquivos de configuração
-COPY package.json docker-entrypoint.sh ./
+COPY package.json docker-entrypoint.sh tsconfig.json tsconfig.node.json ./
 
 # Configura script de entrada (entrypoint roda como root para chown do volume uploads)
 RUN dos2unix docker-entrypoint.sh && \
