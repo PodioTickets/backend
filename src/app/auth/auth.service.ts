@@ -11,6 +11,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
+import * as geoip from 'geoip-lite';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Inject } from '@nestjs/common';
 import { Cache } from 'cache-manager';
@@ -761,6 +762,21 @@ export class AuthService {
     return `${d} às ${t}`;
   }
 
+  private parseLocation(ip: string): string {
+    if (!ip || ip === '—') return '—';
+    const cleanIp = ip.replace(/^::ffff:/, '');
+    try {
+      const geo = geoip.lookup(cleanIp);
+      if (!geo) return '—';
+      if (geo.city && geo.region) return `${geo.city}, ${geo.region}`;
+      if (geo.city) return geo.city;
+      if (geo.country) return geo.country;
+      return '—';
+    } catch {
+      return '—';
+    }
+  }
+
   private parseDevice(userAgent?: string): string {
     if (!userAgent) return 'Dispositivo desconhecido';
     const ua = userAgent;
@@ -972,7 +988,7 @@ export class AuthService {
       newEmail: normalizedEmail,
       code: display,
       requestDate: this.formatDateTimePtBR(new Date()),
-      location: ip || '—',
+      location: this.parseLocation(ip || ''),
       device: this.parseDevice(userAgent),
     }).catch((err) => this.logger.warn('Failed to send email change verification:', err));
 
@@ -1000,13 +1016,6 @@ export class AuthService {
     });
 
     await this.cacheManager.del(cacheKey);
-
-    // Notificar e-mail antigo por segurança
-    this.emailService.sendEmailChangedNotification({
-      oldEmail: cached.oldEmail,
-      newEmail: cached.newEmail,
-      firstName: cached.firstName,
-    }).catch((err) => this.logger.warn('Failed to send email changed notification:', err));
 
     return { success: true, message: 'E-mail alterado com sucesso.' };
   }
