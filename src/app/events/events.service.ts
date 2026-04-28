@@ -4080,33 +4080,41 @@ export class EventsService {
       };
     }
 
-    // Busca por texto (nome, CPF, email, ID da inscrição, ID do pedido)
-    // IDs são UUID — não suportam `contains` no Prisma; buscamos via cast para texto
+    // Search by text (name, CPF, email, registration ID, order ID)
+    // Prefix search with '#' to filter by ID only (e.g. "#abc123")
+    // IDs are UUIDs — Prisma doesn't support `contains` on them; use raw SQL cast
     if (search) {
+      const isIdSearch = search.startsWith('#');
+      const searchTerm = isIdSearch ? search.slice(1) : search;
+
       const uuidMatches = await prismaRead.$queryRaw<{ id: string }[]>`
         SELECT r.id FROM "Registration" r
         JOIN "Order" o ON o.id = r."orderId"
         WHERE r."eventId" = ${eventId}::uuid
-          AND (r.id::text ILIKE ${'%' + search + '%'} OR o.id::text ILIKE ${'%' + search + '%'})
+          AND (r.id::text ILIKE ${'%' + searchTerm + '%'} OR o.id::text ILIKE ${'%' + searchTerm + '%'})
       `;
       const uuidMatchIds = uuidMatches.map((row) => row.id);
 
-      where.OR = [
-        ...(uuidMatchIds.length > 0 ? [{ id: { in: uuidMatchIds } }] : []),
-        {
-          user: {
-            OR: [
-              { firstName: { contains: search, mode: 'insensitive' } },
-              { lastName: { contains: search, mode: 'insensitive' } },
-              { email: { contains: search, mode: 'insensitive' } },
-              { documentNumber: { contains: search, mode: 'insensitive' } },
-            ],
+      if (isIdSearch) {
+        where.OR = uuidMatchIds.length > 0 ? [{ id: { in: uuidMatchIds } }] : [{ id: 'no-match' }];
+      } else {
+        where.OR = [
+          ...(uuidMatchIds.length > 0 ? [{ id: { in: uuidMatchIds } }] : []),
+          {
+            user: {
+              OR: [
+                { firstName: { contains: searchTerm, mode: 'insensitive' } },
+                { lastName: { contains: searchTerm, mode: 'insensitive' } },
+                { email: { contains: searchTerm, mode: 'insensitive' } },
+                { documentNumber: { contains: searchTerm, mode: 'insensitive' } },
+              ],
+            },
           },
-        },
-        { participantName: { contains: search, mode: 'insensitive' } },
-        { participantEmail: { contains: search, mode: 'insensitive' } },
-        { participantCpf: { contains: search, mode: 'insensitive' } },
-      ];
+          { participantName: { contains: searchTerm, mode: 'insensitive' } },
+          { participantEmail: { contains: searchTerm, mode: 'insensitive' } },
+          { participantCpf: { contains: searchTerm, mode: 'insensitive' } },
+        ];
+      }
     }
 
     // Ordenação
@@ -4733,8 +4741,32 @@ export class EventsService {
         netAmount: true,
         status: true,
         notes: true,
+        receiptUrl: true,
         createdAt: true,
         completedAt: true,
+        event: {
+          select: {
+            organization: {
+              select: {
+                id: true,
+                name: true,
+                tradeName: true,
+                document: true,
+                email: true,
+                phone: true,
+                ownerName: true,
+                pix: true,
+                bankName: true,
+                bankCode: true,
+                agency: true,
+                account: true,
+                accountType: true,
+                accountHolderName: true,
+                accountHolderDocument: true,
+              },
+            },
+          },
+        },
       },
     });
 
@@ -4742,9 +4774,14 @@ export class EventsService {
       throw new NotFoundException('Transfer not found');
     }
 
+    const { event, ...transferData } = withdrawal;
+
     return {
       message: 'Transfer fetched successfully',
-      data: { transfer: withdrawal },
+      data: {
+        transfer: transferData,
+        organization: event.organization,
+      },
     };
   }
 

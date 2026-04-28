@@ -6,9 +6,10 @@ import { AdminEventsService } from './admin-events.service';
 import { AdminEventsController } from './admin-events.controller';
 import { AdminGuard } from '../auth/guards/admin.guard';
 import { PrismaModule } from '../../prisma/prisma.module';
+import { UploadModule } from '../upload/upload.module';
 
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, UploadModule],
   controllers: [AdminRepasseController, AdminAuthController, AdminEventsController],
   providers: [AdminRepasseService, AdminEventsService, AdminGuard],
 })

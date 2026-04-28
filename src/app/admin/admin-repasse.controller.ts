@@ -1,14 +1,18 @@
 import {
-  Controller, Get, Post, Body, Param, Query, UseGuards,
-  DefaultValuePipe, ParseIntPipe,
+  Controller, Get, Post, Patch, Body, Param, Query, UseGuards,
+  DefaultValuePipe, ParseIntPipe, UseInterceptors, UploadedFile,
+  BadRequestException,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import {
   ApiTags, ApiOperation, ApiBearerAuth,
-  ApiQuery, ApiResponse, ApiParam, ApiBody,
+  ApiQuery, ApiResponse, ApiParam, ApiBody, ApiConsumes,
 } from '@nestjs/swagger';
 import { IsEnum, IsNumberString, IsOptional, IsString, IsUUID } from 'class-validator';
 import { WithdrawalStatus } from '@prisma/client';
 import { AdminRepasseService } from './admin-repasse.service';
+import { UploadService } from '../upload/upload.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AdminGuard } from '../auth/guards/admin.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
@@ -35,12 +39,17 @@ class WithdrawalsQueryDto {
   search?: string;
 }
 
+const RECEIPT_MIME_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
+
 @ApiTags('Admin — Repasses')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, AdminGuard)
 @Controller('api/v1/admin')
 export class AdminRepasseController {
-  constructor(private readonly adminRepasseService: AdminRepasseService) { }
+  constructor(
+    private readonly adminRepasseService: AdminRepasseService,
+    private readonly uploadService: UploadService,
+  ) { }
 
   @Get('withdrawals')
   @NoCache()
@@ -106,6 +115,48 @@ export class AdminRepasseController {
   @ApiResponse({ status: 404, description: 'Not found' })
   getWithdrawal(@Param('id') id: string) {
     return this.adminRepasseService.getWithdrawal(id);
+  }
+
+  @Patch('withdrawals/:id/receipt')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => {
+        if (!RECEIPT_MIME_TYPES.includes(file.mimetype)) {
+          return cb(new BadRequestException('Only PDF or image files are allowed'), false);
+        }
+        cb(null, true);
+      },
+    }),
+  )
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({ summary: '[Admin] Fazer upload do extrato/comprovante de um repasse' })
+  @ApiParam({ name: 'id', type: String, description: 'Withdrawal UUID' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['file'],
+      properties: {
+        file: { type: 'string', format: 'binary', description: 'PDF ou imagem do extrato (máx 10 MB)' },
+      },
+    },
+  })
+  @ApiResponse({ status: 200, description: 'Receipt uploaded and linked' })
+  @ApiResponse({ status: 400, description: 'Invalid file' })
+  @ApiResponse({ status: 404, description: 'Withdrawal not found' })
+  async attachReceipt(
+    @Param('id') id: string,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file) throw new BadRequestException('File is required');
+
+    const isPdf = file.mimetype === 'application/pdf';
+    const receiptUrl = isPdf
+      ? await this.uploadService.uploadPdf(file)
+      : await this.uploadService.compressImage(file);
+
+    return this.adminRepasseService.attachWithdrawalReceipt(id, receiptUrl);
   }
 
   @Post('withdrawals/:id/approve')

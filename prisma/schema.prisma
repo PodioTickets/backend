@@ -1008,6 +1008,8 @@ model EventWithdrawal {
   netAmount     Int
   status        WithdrawalStatus @default(PENDING)
   notes         String?
+  /// URL do documento de extrato/comprovante vinculado pelo admin
+  receiptUrl    String?
   completedAt   DateTime?
   createdAt     DateTime         @default(now())
   updatedAt     DateTime         @updatedAt

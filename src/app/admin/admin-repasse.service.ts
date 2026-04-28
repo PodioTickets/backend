@@ -186,6 +186,26 @@ export class AdminRepasseService {
     return { message: 'Withdrawal approved successfully', data: { withdrawal: updated } };
   }
 
+  async attachWithdrawalReceipt(id: string, receiptUrl: string) {
+    const withdrawal = await this.prisma.eventWithdrawal.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+
+    if (!withdrawal) throw new NotFoundException('Withdrawal not found');
+
+    const updated = await this.prisma.eventWithdrawal.update({
+      where: { id },
+      data: { receiptUrl },
+      include: {
+        event: { select: this.WITHDRAWAL_EVENT_SELECT_SUMMARY },
+        requestedBy: { select: this.WITHDRAWAL_REQUESTER_SELECT },
+      },
+    });
+
+    return { message: 'Receipt attached successfully', data: { withdrawal: updated } };
+  }
+
   async rejectWithdrawal(id: string, notes?: string) {
     const withdrawal = await this.prisma.eventWithdrawal.findUnique({
       where: { id },

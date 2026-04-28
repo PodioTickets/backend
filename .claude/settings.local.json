@@ -17,7 +17,8 @@
       "Bash(xargs grep *)",
       "Bash(grep -E \"\\\\.\\(prisma|ts\\)$\")",
       "Bash(pnpm add *)",
-      "Bash(node *)"
+      "Bash(node *)",
+      "Bash(grep -E \"\\\\.ts$\")"
     ]
   }
 }
