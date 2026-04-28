@@ -762,19 +762,39 @@ export class AuthService {
     return `${d} às ${t}`;
   }
 
-  private parseLocation(ip: string): string {
+  private async parseLocation(ip: string): Promise<string> {
     if (!ip || ip === '—') return '—';
     const cleanIp = ip.replace(/^::ffff:/, '');
+
+    try {
+      const resp = await firstValueFrom(
+        this.httpService.get(
+          `http://ip-api.com/json/${cleanIp}?fields=status,city,region,country`,
+          { timeout: 3000 } as any,
+        ),
+      );
+      const d = resp.data;
+      if (d?.status === 'success') {
+        if (d.city && d.region) return `${d.city}, ${d.region}`;
+        if (d.city) return d.city;
+        if (d.country) return d.country;
+      }
+    } catch {
+      // fallback
+    }
+
     try {
       const geo = geoip.lookup(cleanIp);
-      if (!geo) return '—';
-      if (geo.city && geo.region) return `${geo.city}, ${geo.region}`;
-      if (geo.city) return geo.city;
-      if (geo.country) return geo.country;
-      return '—';
+      if (geo) {
+        if (geo.city && geo.region) return `${geo.city}, ${geo.region}`;
+        if (geo.city) return geo.city;
+        if (geo.country) return geo.country;
+      }
     } catch {
-      return '—';
+      // ignore
     }
+
+    return '—';
   }
 
   private parseDevice(userAgent?: string): string {
@@ -983,15 +1003,17 @@ export class AuthService {
       ttl,
     );
 
-    this.emailService.sendEmailChangeVerification({
-      email: user.email,
-      firstName: user.firstName,
-      newEmail: normalizedEmail,
-      code: display,
-      requestDate: this.formatDateTimePtBR(new Date()),
-      location: this.parseLocation(ip || ''),
-      device: this.parseDevice(userAgent),
-    }).catch((err) => this.logger.warn('Failed to send email change verification:', err));
+    this.parseLocation(ip || '').then((location) =>
+      this.emailService.sendEmailChangeVerification({
+        email: user.email,
+        firstName: user.firstName,
+        newEmail: normalizedEmail,
+        code: display,
+        requestDate: this.formatDateTimePtBR(new Date()),
+        location,
+        device: this.parseDevice(userAgent),
+      }),
+    ).catch((err) => this.logger.warn('Failed to send email change verification:', err));
 
     return { success: true, message: 'Código de verificação enviado para o seu e-mail atual. Confirme para concluir a troca.' };
   }
