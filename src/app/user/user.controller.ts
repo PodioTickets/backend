@@ -13,6 +13,7 @@ import {
   UploadedFile,
   Request,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { UserService } from './user.service';
@@ -186,7 +187,18 @@ export class UserController {
   }
 
   @Patch(':id')
-  update(@Param('id') id: string, @Body() updateUserDto: UpdateUserDto) {
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Atualizar perfil do usuário (próprio ou admin)' })
+  @ApiResponse({ status: 200, description: 'Perfil atualizado' })
+  @ApiResponse({ status: 403, description: 'Sem permissão para atualizar este usuário' })
+  update(@Param('id') id: string, @Body() updateUserDto: UpdateUserDto, @Request() req) {
+    const caller = req.user;
+    const isSelf = caller.id === id;
+    const isAdmin = caller.role === 'ADMIN' || caller.role === 'PODIOGO_STAFF';
+    if (!isSelf && !isAdmin) {
+      throw new ForbiddenException('Sem permissão para atualizar este usuário');
+    }
     return this.userService.update(id, updateUserDto);
   }
 
