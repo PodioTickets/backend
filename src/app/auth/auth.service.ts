@@ -485,21 +485,17 @@ export class AuthService {
     await this.cacheManager.set(rateKey, count + 1, 2 * 60 * 60 * 1000);
 
     try {
-      await this.issuePasswordResetLinkForUser(
+      await this.issuePasswordResetCodeForUser(
         { id: user.id, email: user.email, firstName: user.firstName },
         accountType,
       );
     } catch (err) {
-      console.error('[AUTH] Falha ao enviar e-mail de redefinição de senha:', err);
+      this.logger.error('[AUTH] Falha ao enviar e-mail de recuperação de senha:', err);
     }
 
     return generic;
   }
 
-  /**
-   * Fluxo legado por código de 6 dígitos (se ainda existir entrada em cache).
-   * O fluxo principal de recuperação é o link enviado por e-mail.
-   */
   async verifyResetCode(email: string, code: string, accountType: 'USER' | 'ORGANIZER' = 'USER') {
     const cacheKey = `reset_code:${email}:${accountType}`;
     const cached = await this.cacheManager.get<any>(cacheKey);
@@ -580,17 +576,17 @@ export class AuthService {
     await this.cacheManager.set(rateLimitKey, true, 60 * 1000);
 
     try {
-      await this.issuePasswordResetLinkForUser(
+      await this.issuePasswordResetCodeForUser(
         { id: user.id, email: user.email, firstName: user.firstName },
         accountType,
       );
     } catch (err) {
-      console.error('[AUTH] Falha ao reenviar e-mail de redefinição de senha:', err);
+      this.logger.error('[AUTH] Falha ao reenviar e-mail de recuperação de senha:', err);
     }
 
     return {
       success: true,
-      message: 'Se o e-mail estiver cadastrado, você receberá um novo link em instantes.',
+      message: 'Se o e-mail estiver cadastrado, você receberá um novo código em instantes.',
     };
   }
 
@@ -755,6 +751,66 @@ export class AuthService {
     }
   }
 
+  // ─── Email / device helpers ─────────────────────────────────────────────
+
+  private generateCode(): { raw: string; display: string } {
+    const raw = Math.floor(100000 + Math.random() * 900000).toString();
+    return { raw, display: `${raw.slice(0, 3)}-${raw.slice(3)}` };
+  }
+
+  private formatDateTimePtBR(date: Date): string {
+    const d = date.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
+    const t = date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    return `${d} às ${t}`;
+  }
+
+  private parseDevice(userAgent?: string): string {
+    if (!userAgent) return 'Dispositivo desconhecido';
+    const ua = userAgent;
+    let browser = 'Navegador';
+    if (ua.includes('Edg/')) browser = 'Edge';
+    else if (ua.includes('Chrome/')) browser = 'Chrome';
+    else if (ua.includes('Firefox/')) browser = 'Firefox';
+    else if (ua.includes('Safari/') && !ua.includes('Chrome')) browser = 'Safari';
+    let os = '';
+    if (ua.includes('Windows')) os = 'Windows';
+    else if (ua.includes('Mac OS X')) os = 'macOS';
+    else if (ua.includes('Android')) os = 'Android';
+    else if (ua.includes('iPhone') || ua.includes('iPad')) os = 'iOS';
+    else if (ua.includes('Linux')) os = 'Linux';
+    return os ? `${browser} no ${os}` : browser;
+  }
+
+  private getClientIp(req: any): string {
+    const forwarded = req?.headers?.['x-forwarded-for'];
+    if (forwarded) return String(forwarded).split(',')[0].trim();
+    return req?.ip || '—';
+  }
+
+  private async issuePasswordResetCodeForUser(
+    user: { id: string; email: string; firstName: string },
+    accountType: 'USER' | 'ORGANIZER',
+  ): Promise<void> {
+    const { raw, display } = this.generateCode();
+    const ttl = 15 * 60 * 1000;
+    await this.cacheManager.set(
+      `reset_code:${user.email}:${accountType}`,
+      {
+        code: raw,
+        userId: user.id,
+        used: false,
+        attempts: 0,
+        expiresAt: new Date(Date.now() + ttl).toISOString(),
+      },
+      ttl,
+    );
+    await this.emailService.sendPasswordResetCode({
+      email: user.email,
+      firstName: user.firstName,
+      code: display,
+    });
+  }
+
   private async issuePasswordResetLinkForUser(
     user: { id: string; email: string; firstName: string },
     accountType: 'USER' | 'ORGANIZER',
@@ -863,11 +919,15 @@ export class AuthService {
     };
   }
 
-  async changeEmail(userId: string, dto: { newEmail: string; currentPassword: string }) {
+  async changeEmail(
+    userId: string,
+    dto: { newEmail: string; currentPassword: string },
+    userAgent?: string,
+    ip?: string,
+  ) {
     const { newEmail, currentPassword } = dto;
 
     const prismaRead = this.prisma.getReadClient();
-    const prismaWrite = this.prisma.getWriteClient();
 
     const user = await prismaRead.user.findUnique({
       where: { id: userId },
@@ -894,18 +954,64 @@ export class AuthService {
     });
     if (existing) throw new BadRequestException('Este e-mail já está em uso');
 
+    // Gerar código e cachear — e-mail ainda NÃO é alterado aqui
+    const { raw, display } = this.generateCode();
+    const ttl = 15 * 60 * 1000;
+    await this.cacheManager.set(
+      `email_change:${userId}`,
+      {
+        newEmail: normalizedEmail,
+        oldEmail: user.email,
+        firstName: user.firstName,
+        code: raw,
+        expiresAt: new Date(Date.now() + ttl).toISOString(),
+      },
+      ttl,
+    );
+
+    this.emailService.sendEmailChangeVerification({
+      email: normalizedEmail,
+      firstName: user.firstName,
+      newEmail: normalizedEmail,
+      code: display,
+      requestDate: this.formatDateTimePtBR(new Date()),
+      location: ip || '—',
+      device: this.parseDevice(userAgent),
+    }).catch((err) => this.logger.warn('Failed to send email change verification:', err));
+
+    return { success: true, message: 'Código de verificação enviado para o novo e-mail. Confirme para concluir a troca.' };
+  }
+
+  async verifyEmailChange(userId: string, code: string) {
+    const cacheKey = `email_change:${userId}`;
+    const cached = await this.cacheManager.get<{
+      newEmail: string;
+      oldEmail: string;
+      firstName: string;
+      code: string;
+      expiresAt: string;
+    }>(cacheKey);
+
+    if (!cached) throw new BadRequestException('Código inválido ou expirado');
+    if (new Date(cached.expiresAt) < new Date()) throw new BadRequestException('Código expirado');
+    if (cached.code !== code) throw new BadRequestException('Código inválido');
+
+    const prismaWrite = this.prisma.getWriteClient();
     await prismaWrite.user.update({
       where: { id: userId },
-      data: { email: normalizedEmail },
+      data: { email: cached.newEmail },
     });
 
+    await this.cacheManager.del(cacheKey);
+
+    // Notificar e-mail antigo por segurança
     this.emailService.sendEmailChangedNotification({
-      oldEmail: user.email,
-      newEmail: normalizedEmail,
-      firstName: user.firstName,
+      oldEmail: cached.oldEmail,
+      newEmail: cached.newEmail,
+      firstName: cached.firstName,
     }).catch((err) => this.logger.warn('Failed to send email changed notification:', err));
 
-    return { success: true, message: 'E-mail alterado com sucesso' };
+    return { success: true, message: 'E-mail alterado com sucesso.' };
   }
 
   private async createRefreshToken(userId: string): Promise<string> {

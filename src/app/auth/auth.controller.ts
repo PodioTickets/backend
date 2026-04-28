@@ -32,6 +32,7 @@ import {
   ChangeEmailDto,
   VerifyResetCodeDto,
   ResendResetCodeDto,
+  VerifyEmailChangeDto,
 } from './dto/auth.dto';
 import { Response } from 'express';
 import { LocalAuthGuard } from './guards/local-auth.guard';
@@ -286,7 +287,24 @@ export class AuthController {
   @ApiResponse({ status: 400, description: 'E-mail já em uso ou senha incorreta' })
   @ApiResponse({ status: 401, description: 'Não autenticado' })
   async changeEmail(@Request() req, @Body() dto: ChangeEmailDto) {
-    return this.authService.changeEmail(req.user.id, dto);
+    return this.authService.changeEmail(
+      req.user.id,
+      dto,
+      req.headers?.['user-agent'],
+      req.headers?.['x-forwarded-for']?.split(',')[0]?.trim() || req.ip,
+    );
+  }
+
+  @Post('verify-email-change')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Confirmar troca de e-mail com código enviado ao novo e-mail' })
+  @ApiBody({ type: VerifyEmailChangeDto })
+  @ApiResponse({ status: 200, description: 'E-mail alterado com sucesso' })
+  @ApiResponse({ status: 400, description: 'Código inválido ou expirado' })
+  async verifyEmailChange(@Request() req, @Body() dto: VerifyEmailChangeDto) {
+    return this.authService.verifyEmailChange(req.user.id, dto.code);
   }
 
   @Get('profile')

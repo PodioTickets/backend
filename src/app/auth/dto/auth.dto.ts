@@ -221,3 +221,10 @@ export class VerifyEmailDto {
   @IsNotEmpty()
   token: string;
 }
+
+export class VerifyEmailChangeDto {
+  @ApiProperty({ description: 'Código de verificação enviado ao novo e-mail (6 dígitos)' })
+  @IsString()
+  @IsNotEmpty()
+  code: string;
+}
