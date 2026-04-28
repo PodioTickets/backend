@@ -687,7 +687,7 @@ export class RepasseService {
         bankAccount: org.bankName && org.account ? `${org.bankName} ••• ${org.account.slice(-4)}` : '—',
         pixKey: org.pix ?? '—',
         requestDate: this.formatDateBR(withdrawal.createdAt),
-        sentDate: this.formatDateTimeBR(withdrawal.createdAt),
+        sentDate: this.formatDateTimeBR(updated.completedAt ?? new Date()),
         approvedDate: this.formatDateTimeBR(updated.completedAt ?? new Date()),
       });
     }).catch((err) => this.logger.warn('Failed to send transfer confirmed email:', err));

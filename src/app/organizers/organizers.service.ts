@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateOrganizerDto, UpdateOrganizerDto } from './dto/create-organizer.dto';
 import { EmailService } from '../../common/services/email.service';
@@ -6,6 +6,8 @@ import { WhatsAppService } from '../../common/services/whatsapp.service';
 
 @Injectable()
 export class OrganizersService {
+  private readonly logger = new Logger(OrganizersService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly emailService: EmailService,
@@ -71,7 +73,7 @@ export class OrganizersService {
 
     this.emailService
       .sendWelcomeOrganizer({ email: result.member.user.email, firstName: result.member.user.firstName })
-      .catch(() => {});
+      .catch((err) => this.logger.warn('Failed to send welcome organizer email:', err));
 
     return {
       message: 'Organizer created successfully',
