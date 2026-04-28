@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from './cielo.service';
-import { PaymentStatus } from '@prisma/client';
+import { PaymentStatus, Prisma } from '@prisma/client';
 
 interface CieloWebhookEvent {
   PaymentId: string;
@@ -19,6 +19,68 @@ export class PaymentsWebhookService {
     private readonly prisma: PrismaService,
     private readonly cieloService: CieloService,
   ) {}
+
+  /**
+   * Fills in ticketSnapshot for RegistrationTicket rows that have none.
+   * Called when a reservation-flow PIX/Boleto order is confirmed via webhook:
+   * those registrations were created as PENDING placeholders without a snapshot.
+   */
+  private async backfillTicketSnapshots(prisma: any, orderId: string): Promise<void> {
+    const regTickets = await prisma.registrationTicket.findMany({
+      where: {
+        registration: { orderId },
+        ticketSnapshot: { equals: Prisma.JsonNull },
+      },
+      select: {
+        id: true,
+        ticketId: true,
+        batchId: true,
+      },
+    });
+
+    if (regTickets.length === 0) return;
+
+    const ticketIds = [...new Set(regTickets.map((rt: any) => rt.ticketId as string))];
+    const tickets = await prisma.ticket.findMany({
+      where: { id: { in: ticketIds } },
+      include: {
+        category: { select: { id: true, name: true } },
+        batches: { select: { id: true, price: true, sortOrder: true } },
+      },
+    });
+    const ticketById = new Map<string, any>(tickets.map((t: any) => [t.id, t]));
+
+    for (const rt of regTickets) {
+      const t = ticketById.get(rt.ticketId);
+      if (!t) continue;
+
+      const batch = rt.batchId
+        ? t.batches.find((b: any) => b.id === rt.batchId) ?? null
+        : null;
+
+      const ticketSnapshot = {
+        id: t.id,
+        name: t.name,
+        description: t.description ?? null,
+        modality: t.modality ?? null,
+        distance: t.distance ?? null,
+        distanceUnit: t.distanceUnit ?? null,
+        gender: t.gender ?? null,
+        ageLimitMin: t.ageLimitMin ?? null,
+        ageLimitMax: t.ageLimitMax ?? null,
+        category: t.category ?? null,
+        batch: batch ? { id: batch.id, price: batch.price } : null,
+        products: [],
+      };
+
+      await prisma.registrationTicket.update({
+        where: { id: rt.id },
+        data: { ticketSnapshot },
+      });
+    }
+
+    this.logger.log(`Backfilled ticketSnapshot for ${regTickets.length} RegistrationTicket(s) on order ${orderId}`);
+  }
 
   async handleWebhook(event: CieloWebhookEvent) {
     this.logger.log(`Processing Cielo webhook: PaymentId ${event.PaymentId}, Status ${event.Status}`);
@@ -71,6 +133,8 @@ export class PaymentsWebhookService {
           where: { orderId: fresh.orderId },
           data: { status: 'CONFIRMED' },
         });
+
+        await this.backfillTicketSnapshots(prisma, fresh.orderId);
       }
 
       this.logger.log(`Payment ${fresh.id} updated via webhook to status ${paymentStatus}`);

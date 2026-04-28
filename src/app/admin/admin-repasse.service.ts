@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { WithdrawalStatus } from '@prisma/client';
 
@@ -42,8 +42,16 @@ export class AdminRepasseService {
               id: true,
               name: true,
               slug: true,
+              logoUrl: true,
               organizationId: true,
-              organization: { select: { id: true, name: true } },
+              organization: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                  logoUrl: true,
+                },
+              },
             },
           },
           requestedBy: {
@@ -71,6 +79,139 @@ export class AdminRepasseService {
         },
       },
     };
+  }
+
+  private readonly WITHDRAWAL_EVENT_SELECT_SUMMARY = {
+    id: true,
+    name: true,
+    slug: true,
+    logoUrl: true,
+    organizationId: true,
+    organization: {
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        logoUrl: true,
+      },
+    },
+  };
+
+  private readonly WITHDRAWAL_EVENT_SELECT_FULL = {
+    id: true,
+    name: true,
+    slug: true,
+    logoUrl: true,
+    organizationId: true,
+    organization: {
+      select: {
+        id: true,
+        name: true,
+        tradeName: true,
+        document: true,
+        logoUrl: true,
+        email: true,
+        phone: true,
+        whatsapp: true,
+        siteUrl: true,
+        instagram: true,
+        description: true,
+        zipCode: true,
+        street: true,
+        number: true,
+        neighborhood: true,
+        city: true,
+        state: true,
+        ownerName: true,
+        pix: true,
+        bankName: true,
+        bankCode: true,
+        agency: true,
+        account: true,
+        accountType: true,
+        accountHolderName: true,
+        accountHolderDocument: true,
+      },
+    },
+  };
+
+  private readonly WITHDRAWAL_REQUESTER_SELECT = {
+    id: true,
+    firstName: true,
+    lastName: true,
+    email: true,
+  };
+
+  async getWithdrawal(id: string) {
+    const prismaRead = this.prisma.getReadClient();
+
+    const withdrawal = await prismaRead.eventWithdrawal.findUnique({
+      where: { id },
+      include: {
+        event: { select: this.WITHDRAWAL_EVENT_SELECT_FULL },
+        requestedBy: { select: this.WITHDRAWAL_REQUESTER_SELECT },
+      },
+    });
+
+    if (!withdrawal) throw new NotFoundException('Withdrawal not found');
+
+    return { message: 'Withdrawal fetched successfully', data: { withdrawal } };
+  }
+
+  async approveWithdrawal(id: string) {
+    const withdrawal = await this.prisma.eventWithdrawal.findUnique({
+      where: { id },
+      select: { id: true, status: true },
+    });
+
+    if (!withdrawal) throw new NotFoundException('Withdrawal not found');
+    if (withdrawal.status !== WithdrawalStatus.PENDING) {
+      throw new BadRequestException(
+        `Cannot approve a withdrawal with status ${withdrawal.status}`,
+      );
+    }
+
+    const updated = await this.prisma.eventWithdrawal.update({
+      where: { id },
+      data: {
+        status: WithdrawalStatus.COMPLETED,
+        completedAt: new Date(),
+      },
+      include: {
+        event: { select: this.WITHDRAWAL_EVENT_SELECT_SUMMARY },
+        requestedBy: { select: this.WITHDRAWAL_REQUESTER_SELECT },
+      },
+    });
+
+    return { message: 'Withdrawal approved successfully', data: { withdrawal: updated } };
+  }
+
+  async rejectWithdrawal(id: string, notes?: string) {
+    const withdrawal = await this.prisma.eventWithdrawal.findUnique({
+      where: { id },
+      select: { id: true, status: true },
+    });
+
+    if (!withdrawal) throw new NotFoundException('Withdrawal not found');
+    if (withdrawal.status !== WithdrawalStatus.PENDING) {
+      throw new BadRequestException(
+        `Cannot reject a withdrawal with status ${withdrawal.status}`,
+      );
+    }
+
+    const updated = await this.prisma.eventWithdrawal.update({
+      where: { id },
+      data: {
+        status: WithdrawalStatus.CANCELLED,
+        notes: notes ?? null,
+      },
+      include: {
+        event: { select: this.WITHDRAWAL_EVENT_SELECT_SUMMARY },
+        requestedBy: { select: this.WITHDRAWAL_REQUESTER_SELECT },
+      },
+    });
+
+    return { message: 'Withdrawal rejected successfully', data: { withdrawal: updated } };
   }
 
   async getStats() {

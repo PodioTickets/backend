@@ -2358,13 +2358,21 @@ export class EventsService {
     const cancelledRegistrations = registrations.filter((r) => r.status === RegistrationStatus.CANCELLED);
     const refundedRegistrations = registrations.filter((r) => r.order?.payment?.status === PaymentStatus.REFUNDED);
 
-    const netRevenue = paidRegistrations.reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
-    const totalRegistrations = registrations.length;
+    // Deduplicate by order to avoid counting the same order's finalAmount once per registration
+    const uniquePaidOrderAmounts = new Map<string, number>();
+    for (const r of paidRegistrations) {
+      if (r.order?.id && !uniquePaidOrderAmounts.has(r.order.id)) {
+        uniquePaidOrderAmounts.set(r.order.id, this.normalizeToCents(r.order.finalAmount));
+      }
+    }
+    const netRevenue = Array.from(uniquePaidOrderAmounts.values()).reduce((sum, v) => sum + v, 0);
+
+    const totalRegistrations = paidRegistrations.length; // confirmed + paid only
     const cancellations = cancelledRegistrations.length;
     const refunds = refundedRegistrations.length;
 
     // Calcular ticket médio (valores já estão em centavos)
-    const averageTicket = paidRegistrations.length > 0 ? netRevenue / paidRegistrations.length : 0;
+    const averageTicket = uniquePaidOrderAmounts.size > 0 ? netRevenue / uniquePaidOrderAmounts.size : 0;
 
     // Comparar com o período anterior equivalente (ex.: 15d atuais vs 15d imediatamente antes)
     const { prevStart, prevEndExclusive } = this.getDashboardComparisonBounds(dateRange, now);
@@ -2401,13 +2409,16 @@ export class EventsService {
         r.order.payment.status === PaymentStatus.PAID &&
         r.status === RegistrationStatus.CONFIRMED,
     );
-    const previousNetRevenue = previousPaid.reduce(
-      (sum, r) => sum + this.normalizeToCents(r.order?.finalAmount),
-      0,
-    );
-    const previousTotalRegistrations = previousRegistrations.length;
+    const previousUniquePaidOrders = new Map<string, number>();
+    for (const r of previousPaid) {
+      if (r.order?.id && !previousUniquePaidOrders.has(r.order.id)) {
+        previousUniquePaidOrders.set(r.order.id, this.normalizeToCents(r.order.finalAmount));
+      }
+    }
+    const previousNetRevenue = Array.from(previousUniquePaidOrders.values()).reduce((sum, v) => sum + v, 0);
+    const previousTotalRegistrations = previousPaid.length; // confirmed + paid only
     const previousAverageTicket =
-      previousPaid.length > 0 ? previousNetRevenue / previousPaid.length : 0;
+      previousUniquePaidOrders.size > 0 ? previousNetRevenue / previousUniquePaidOrders.size : 0;
 
     const netRevenueChange = this.percentChangeVsPrevious(netRevenue, previousNetRevenue);
     const totalRegistrationsChange = this.percentChangeVsPrevious(
@@ -2418,9 +2429,10 @@ export class EventsService {
       averageTicket,
       previousAverageTicket,
     );
-    const cancellationRate = totalRegistrations > 0 ? (cancellations / totalRegistrations) * 100 : 0;
+    const totalFinalized = totalRegistrations + cancellations;
+    const cancellationRate = totalFinalized > 0 ? (cancellations / totalFinalized) * 100 : 0;
     const cancellationsStatus = cancellationRate > 10 ? 'Crítico' : cancellationRate > 5 ? 'Atenção' : 'Normal';
-    const refundRate = totalRegistrations > 0 ? (refunds / totalRegistrations) * 100 : 0;
+    const refundRate = totalFinalized > 0 ? (refunds / totalFinalized) * 100 : 0;
     const refundsStatus = refundRate > 5 ? 'Crítico' : refundRate > 2 ? 'Atenção' : 'Normal';
     const chartData = this.buildChartData(registrations, dateRange, period);
     const ticketRanking = this.buildTicketRanking(registrations, page, limit);
@@ -3016,76 +3028,71 @@ export class EventsService {
   private buildTicketRanking(registrations: any[], page: number, limit: number) {
     const ticketMap = new Map<string, { ticketId: string; name: string; category: string; quantity: number; total: number }>();
 
-    registrations.forEach((reg) => {
-      if (reg.order?.payment?.status === PaymentStatus.PAID && reg.status === RegistrationStatus.CONFIRMED) {
-        // Obter o valor total do pedido em centavos
-        const orderTotal = this.normalizeToCents(reg.order?.finalAmount);
+    // Group confirmed+paid registrations by order to compute the correct per-ticket value.
+    // finalAmount is order-level: dividing it by only one registration's tickets double-counts
+    // when an order contains multiple registrations.
+    const orderGroups = new Map<string, { finalAmount: number; regs: any[] }>();
+    for (const reg of registrations) {
+      if (reg.order?.payment?.status !== PaymentStatus.PAID || reg.status !== RegistrationStatus.CONFIRMED) continue;
+      const orderId = reg.order.id;
+      if (!orderGroups.has(orderId)) {
+        orderGroups.set(orderId, { finalAmount: this.normalizeToCents(reg.order.finalAmount), regs: [] });
+      }
+      orderGroups.get(orderId)!.regs.push(reg);
+    }
 
-        // Usar tickets se disponível, senão usar modalities
+    for (const { finalAmount, regs } of orderGroups.values()) {
+      // Count total items across all registrations in this order to split revenue evenly
+      const totalItems = regs.reduce((sum, reg) => {
+        if (reg.tickets?.length > 0) return sum + reg.tickets.length;
+        if (reg.modalities?.length > 0) return sum + reg.modalities.length;
+        return sum + 1;
+      }, 0);
+      const valuePerItem = totalItems > 0 ? finalAmount / totalItems : 0;
+
+      for (const reg of regs) {
         if (reg.tickets && reg.tickets.length > 0) {
-          // Dividir o valor do pedido pelo número de tickets no pedido
-          const ticketsInOrder = reg.tickets.length;
-          const valuePerTicket = ticketsInOrder > 0 ? orderTotal / ticketsInOrder : 0;
-
           reg.tickets.forEach((rt: any) => {
             const ticket = rt.ticket;
             const ticketId = ticket.id;
-            const ticketName = ticket.name;
-            const categoryName = ticket.category?.name || 'Sem categoria';
-
             if (!ticketMap.has(ticketId)) {
               ticketMap.set(ticketId, {
                 ticketId,
-                name: ticketName,
-                category: categoryName,
+                name: ticket.name,
+                category: ticket.category?.name || 'Sem categoria',
                 quantity: 0,
                 total: 0,
               });
             }
-
-            const ticketEntry = ticketMap.get(ticketId)!;
-            ticketEntry.quantity += 1;
-            ticketEntry.total += valuePerTicket;
+            const entry = ticketMap.get(ticketId)!;
+            entry.quantity += 1;
+            entry.total += valuePerItem;
           });
         } else if (reg.modalities && reg.modalities.length > 0) {
-          // Fallback para modalities se não houver tickets
-          // Dividir o valor do pedido pelo número de modalities
-          const modalitiesInOrder = reg.modalities.length;
-          const valuePerModality = modalitiesInOrder > 0 ? orderTotal / modalitiesInOrder : 0;
-
           reg.modalities.forEach((rm: any) => {
             const modality = rm.modality;
-            const ticketId = modality.id;
-            const ticketName = modality.name;
-            const categoryName = 'Sem categoria';
-
-            if (!ticketMap.has(ticketId)) {
-              ticketMap.set(ticketId, {
-                ticketId,
-                name: ticketName,
-                category: categoryName,
+            const modalityId = modality.id;
+            if (!ticketMap.has(modalityId)) {
+              ticketMap.set(modalityId, {
+                ticketId: modalityId,
+                name: modality.name,
+                category: 'Sem categoria',
                 quantity: 0,
                 total: 0,
               });
             }
-
-            const ticket = ticketMap.get(ticketId)!;
-            ticket.quantity += 1;
-            ticket.total += valuePerModality;
+            const entry = ticketMap.get(modalityId)!;
+            entry.quantity += 1;
+            entry.total += valuePerItem;
           });
         }
       }
-    });
+    }
 
-    const ranking = Array.from(ticketMap.values())
-      .map(ticket => ({
-        ...ticket,
-        total: Math.round(ticket.total), // Garantir que seja inteiro (centavos)
-      }))
+    return Array.from(ticketMap.values())
+      .map(ticket => ({ ...ticket, total: Math.round(ticket.total) }))
       .sort((a, b) => b.total - a.total)
       .slice((page - 1) * limit, page * limit);
-
-    return ranking;
   }
 
   /**
@@ -3382,15 +3389,16 @@ export class EventsService {
       }),
     ]);
 
-    const completedWithdrawals = withdrawals.filter(
-      (w: any) => w.status === WithdrawalStatus.COMPLETED,
+    // Match requestWithdrawal validation: both COMPLETED and PENDING reduce spendable balance
+    const committedWithdrawals = withdrawals.filter(
+      (w: any) => w.status === WithdrawalStatus.COMPLETED || w.status === WithdrawalStatus.PENDING,
     );
 
     const breakdown = this.calcRepasseBreakdown(
       orders,
       event?.retentionRate ?? 0.10,
       !!audit,
-      completedWithdrawals,
+      committedWithdrawals,
     );
 
     const tickets = await this.ticketsService.findAll(eventId, { page, limit });
@@ -3805,6 +3813,9 @@ export class EventsService {
           ? Prisma.sql`AND o."createdAt" <= ${orderCreatedBetween.lte}`
           : Prisma.empty;
 
+    // collected must be summed per unique order, not per registration.
+    // Using a CTE with DISTINCT (orderId, finalAmount) prevents double-counting
+    // when multiple confirmed registrations belong to the same order.
     const rows = orderCreatedBetween
       ? await prismaRead.$queryRaw<
           {
@@ -3814,20 +3825,27 @@ export class EventsService {
             collected: bigint;
           }[]
         >(Prisma.sql`
+          WITH paid_orders AS (
+            SELECT DISTINCT r."orderId", o."finalAmount"
+            FROM "Registration" r
+            INNER JOIN "Order" o ON o.id = r."orderId"
+            INNER JOIN "Payment" p ON p."orderId" = o.id
+            WHERE r."eventId" = ${eventId}::uuid
+              AND r.status::text IN ('CONFIRMED', 'COMPLETED')
+              AND p.status::text = 'PAID'
+              AND o."createdAt" >= ${orderCreatedBetween.gte}
+              ${upperBoundSql}
+          )
           SELECT
-            COUNT(r.id)::bigint AS total,
+            COUNT(*) FILTER (
+              WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
+            )::bigint AS total,
             COUNT(*) FILTER (
               WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
                 AND p.status::text = 'PAID'
             )::bigint AS paid,
             COUNT(*) FILTER (WHERE r.status::text = 'CANCELLED')::bigint AS cancelled,
-            COALESCE(
-              SUM(o."finalAmount") FILTER (
-                WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
-                  AND p.status::text = 'PAID'
-              ),
-              0
-            )::bigint AS collected
+            COALESCE((SELECT SUM("finalAmount") FROM paid_orders), 0)::bigint AS collected
           FROM "Registration" r
           INNER JOIN "Order" o ON o.id = r."orderId"
           LEFT JOIN "Payment" p ON p."orderId" = o.id
@@ -3844,20 +3862,25 @@ export class EventsService {
             collected: bigint;
           }[]
         >(Prisma.sql`
+          WITH paid_orders AS (
+            SELECT DISTINCT r."orderId", o."finalAmount"
+            FROM "Registration" r
+            INNER JOIN "Order" o ON o.id = r."orderId"
+            INNER JOIN "Payment" p ON p."orderId" = o.id
+            WHERE r."eventId" = ${eventId}::uuid
+              AND r.status::text IN ('CONFIRMED', 'COMPLETED')
+              AND p.status::text = 'PAID'
+          )
           SELECT
-            COUNT(r.id)::bigint AS total,
+            COUNT(*) FILTER (
+              WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
+            )::bigint AS total,
             COUNT(*) FILTER (
               WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
                 AND p.status::text = 'PAID'
             )::bigint AS paid,
             COUNT(*) FILTER (WHERE r.status::text = 'CANCELLED')::bigint AS cancelled,
-            COALESCE(
-              SUM(o."finalAmount") FILTER (
-                WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
-                  AND p.status::text = 'PAID'
-              ),
-              0
-            )::bigint AS collected
+            COALESCE((SELECT SUM("finalAmount") FROM paid_orders), 0)::bigint AS collected
           FROM "Registration" r
           INNER JOIN "Order" o ON o.id = r."orderId"
           LEFT JOIN "Payment" p ON p."orderId" = o.id

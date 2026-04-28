@@ -25,6 +25,19 @@ function getReleaseDate(paymentDate: Date, method: string): Date {
   return addDays(paymentDate, RETENTION_DAYS[method] ?? 31);
 }
 
+/**
+ * Returns the reference "now" used for all retention/release date comparisons.
+ * Set REPASSE_TIME_OFFSET_DAYS (integer) to simulate time passing without
+ * waiting real days. Only honoured when NODE_ENV !== 'production'.
+ * Example: REPASSE_TIME_OFFSET_DAYS=35 makes every payment appear 35 days older.
+ */
+function getNow(): Date {
+  if (process.env.NODE_ENV === 'production') return new Date();
+  const offset = parseInt(process.env.REPASSE_TIME_OFFSET_DAYS ?? '0', 10);
+  if (!offset || isNaN(offset)) return new Date();
+  return addDays(new Date(), offset);
+}
+
 function isInstallment(metadata: any): boolean {
   return !!(metadata?.creditCard?.installments && metadata.creditCard.installments > 1);
 }
@@ -132,7 +145,7 @@ export class RepasseService {
     isAudited: boolean,
     committedWithdrawals: any[],
   ) {
-    const now = new Date();
+    const now = getNow();
 
     let aguardandoLiberacao = 0;
     let valorRetido = 0;
@@ -308,7 +321,7 @@ export class RepasseService {
       this.loadAudit(eventId, prismaRead),
     ]);
 
-    const now = new Date();
+    const now = getNow();
     const isAudited = !!audit;
     const items: any[] = [];
 
@@ -393,7 +406,7 @@ export class RepasseService {
       this.loadPaidOrders(eventId, prismaRead),
     ]);
 
-    const now = new Date();
+    const now = getNow();
     const isAudited = !!audit;
     const items: any[] = [];
     let totalPending = 0;

@@ -440,6 +440,23 @@ export class PaymentsService {
         where: { orderId: identifier },
         include: PAYMENT_DETAILS_STANDARD_INCLUDE,
       });
+
+      // Fallback: caller may have accidentally passed a paymentId through the order route
+      if (!payment) {
+        payment = await prismaRead.payment.findUnique({
+          where: { id: identifier },
+          include: PAYMENT_DETAILS_STANDARD_INCLUDE,
+        });
+      }
+
+      if (!payment) {
+        const orderExists = await prismaRead.order.findUnique({
+          where: { id: identifier },
+          select: { id: true },
+        });
+        if (!orderExists) throw new NotFoundException('Order not found');
+        throw new NotFoundException('No payment has been processed for this order yet');
+      }
     } else if (identifierType === 'payment') {
       payment = await prismaRead.payment.findUnique({
         where: { id: identifier },
@@ -733,14 +750,19 @@ export class PaymentsService {
               id: reg.id,
               name: reg.user ? `${reg.user.firstName} ${reg.user.lastName}` : null,
               email: reg.user?.email || null,
-              ticket: reg.tickets && reg.tickets.length > 0 ? {
-                id: reg.tickets[0].ticket.id,
-                name: reg.tickets[0].ticket.name,
-              } : null,
-              ticketCategory: reg.tickets && reg.tickets.length > 0 && reg.tickets[0].ticket.category ? {
-                id: reg.tickets[0].ticket.category.id,
-                name: reg.tickets[0].ticket.category.name,
-              } : null,
+              ticket: reg.tickets && reg.tickets.length > 0 ? (() => {
+                const rt = reg.tickets[0];
+                const snap = rt.ticketSnapshot as Record<string, any> | null;
+                return { id: snap?.id ?? rt.ticket.id, name: snap?.name ?? rt.ticket.name };
+              })() : null,
+              ticketCategory: reg.tickets && reg.tickets.length > 0 ? (() => {
+                const rt = reg.tickets[0];
+                const snap = rt.ticketSnapshot as Record<string, any> | null;
+                const snapCat = snap?.category as Record<string, any> | null | undefined;
+                if (snapCat) return snapCat;
+                const cat = rt.ticket.category;
+                return cat ? { id: cat.id, name: cat.name } : null;
+              })() : null,
               emergencyContact: emergencyName || emergencyPhone ? {
                 name: emergencyName,
                 phone: emergencyPhone,

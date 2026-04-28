@@ -46,7 +46,7 @@ export class EmailService {
     const filePath = path.join(__dirname, '..', 'templates', 'emails', templateName);
     let html = fs.readFileSync(filePath, 'utf8');
     for (const [key, value] of Object.entries(vars)) {
-      html = html.replaceAll(`{{${key}}}`, value);
+      html = html.split(`{{${key}}}`).join(value);
     }
     return html;
   }

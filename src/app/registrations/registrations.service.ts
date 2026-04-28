@@ -602,6 +602,7 @@ export class RegistrationsService {
         },
         tickets: {
           include: {
+            batch: { select: { id: true, price: true } },
             ticket: {
               include: {
                 category: {
@@ -696,41 +697,42 @@ export class RegistrationsService {
           category: null, // Modality não tem category no schema
         },
       })),
-      ticket: reg.tickets && reg.tickets.length > 0 ? {
-        id: reg.tickets[0].ticket.id,
-        name: reg.tickets[0].ticket.name,
-        distance: reg.tickets[0].ticket.distance ?
-          (reg.tickets[0].ticket.distanceUnit ?
-            `${reg.tickets[0].ticket.distance} ${reg.tickets[0].ticket.distanceUnit}` :
-            reg.tickets[0].ticket.distance) :
-          null,
-        category: reg.tickets[0].ticket.category ? {
-          id: reg.tickets[0].ticket.category.id,
-          name: reg.tickets[0].ticket.category.name,
-        } : null,
-        includedProducts: (reg.tickets[0].ticket.products || []).map((tp: any) => {
-          const sel = pendingProductsMap.get(tp.product.id);
-          const selectedVariation = sel?.variationId
-            ? (tp.product.variations || []).find((v: any) => v.id === sel.variationId) ?? null
-            : null;
-          return {
-            id: tp.product.id,
-            name: tp.product.name,
-            image: tp.product.image,
-            basePrice: tp.product.basePrice ? Math.round(tp.product.basePrice * 100) : 0,
-            variationType: tp.product.variationType || null,
-            selectedVariation: selectedVariation
-              ? { id: selectedVariation.id, name: selectedVariation.name, price: selectedVariation.price }
-              : null,
-            variations: (tp.product.variations || []).map((v: any) => ({
-              id: v.id,
-              name: v.name,
-              price: Math.round(v.price * 100),
-              stock: v.stock,
-            })),
-          };
-        }),
-      } : null,
+      ticket: reg.tickets && reg.tickets.length > 0 ? (() => {
+        const rt = reg.tickets[0];
+        const snap = rt.ticketSnapshot as Record<string, any> | null;
+        const t = rt.ticket;
+        const dist = snap?.distance ?? t.distance;
+        const distUnit = snap?.distanceUnit ?? t.distanceUnit;
+        const snapCat = snap?.category as Record<string, any> | null | undefined;
+        return {
+          id: snap?.id ?? t.id,
+          name: snap?.name ?? t.name,
+          distance: dist ? (distUnit ? `${dist} ${distUnit}` : dist) : null,
+          category: snapCat ?? (t.category ? { id: t.category.id, name: t.category.name } : null),
+          includedProducts: (t.products || []).map((tp: any) => {
+            const sel = pendingProductsMap.get(tp.product.id);
+            const selectedVariation = sel?.variationId
+              ? (tp.product.variations || []).find((v: any) => v.id === sel.variationId) ?? null
+              : null;
+            return {
+              id: tp.product.id,
+              name: tp.product.name,
+              image: tp.product.image,
+              basePrice: tp.product.basePrice ? Math.round(tp.product.basePrice * 100) : 0,
+              variationType: tp.product.variationType || null,
+              selectedVariation: selectedVariation
+                ? { id: selectedVariation.id, name: selectedVariation.name, price: selectedVariation.price }
+                : null,
+              variations: (tp.product.variations || []).map((v: any) => ({
+                id: v.id,
+                name: v.name,
+                price: Math.round(v.price * 100),
+                stock: v.stock,
+              })),
+            };
+          }),
+        };
+      })() : null,
       questionAnswers: (reg.questionAnswers || []).map((qa: any) => {
         const qSnap = qa.questionSnapshot as Record<string, any> | null;
         const qData = qSnap ?? qa.question ?? {};
@@ -960,26 +962,26 @@ export class RegistrationsService {
         organization: reg.event.organization ?? null,
         regulationTopic: reg.event.topics?.[0] ?? null,
       },
-      ticket: reg.tickets?.[0] ? {
-        id: reg.tickets[0].ticket.id,
-        name: reg.tickets[0].ticket.name,
-        description: reg.tickets[0].ticket.description ?? null,
-        modality: reg.tickets[0].ticket.modality ?? null,
-        distance: reg.tickets[0].ticket.distance ?? null,
-        distanceUnit: reg.tickets[0].ticket.distanceUnit ?? null,
-        gender: reg.tickets[0].ticket.gender ?? null,
-        ageLimitMin: reg.tickets[0].ticket.ageLimitMin ?? null,
-        ageLimitMax: reg.tickets[0].ticket.ageLimitMax ?? null,
-        hasKit: reg.tickets[0].ticket.hasKit,
-        category: reg.tickets[0].ticket.category ? {
-          id: reg.tickets[0].ticket.category.id,
-          name: reg.tickets[0].ticket.category.name,
-        } : null,
-        kit: reg.tickets[0].ticket.kit ? {
-          id: reg.tickets[0].ticket.kit.id,
-          name: reg.tickets[0].ticket.kit.name,
-        } : null,
-      } : null,
+      ticket: reg.tickets?.[0] ? (() => {
+        const rt = reg.tickets[0];
+        const snap = rt.ticketSnapshot as Record<string, any> | null;
+        const t = rt.ticket;
+        const snapCat = snap?.category as Record<string, any> | null | undefined;
+        return {
+          id: snap?.id ?? t.id,
+          name: snap?.name ?? t.name,
+          description: snap?.description ?? t.description ?? null,
+          modality: snap?.modality ?? t.modality ?? null,
+          distance: snap?.distance ?? t.distance ?? null,
+          distanceUnit: snap?.distanceUnit ?? t.distanceUnit ?? null,
+          gender: snap?.gender ?? t.gender ?? null,
+          ageLimitMin: snap?.ageLimitMin ?? t.ageLimitMin ?? null,
+          ageLimitMax: snap?.ageLimitMax ?? t.ageLimitMax ?? null,
+          hasKit: snap?.hasKit ?? t.hasKit,
+          category: snapCat ?? (t.category ? { id: t.category.id, name: t.category.name } : null),
+          kit: t.kit ? { id: t.kit.id, name: t.kit.name } : null,
+        };
+      })() : null,
       products: (reg.products || []).map((rp: any) => {
         // Usa snapshot se disponível (produto pode ter sido deletado ou editado após a compra)
         const snap = rp.productSnapshot as Record<string, any> | null;
