@@ -977,6 +977,7 @@ export class AuthService {
         oldEmail: user.email,
         firstName: user.firstName,
         code: raw,
+        attempts: 0,
         expiresAt: new Date(Date.now() + ttl).toISOString(),
       },
       ttl,
@@ -1002,11 +1003,20 @@ export class AuthService {
       oldEmail: string;
       firstName: string;
       code: string;
+      attempts: number;
       expiresAt: string;
     }>(cacheKey);
 
     if (!cached) throw new BadRequestException('Código inválido ou expirado');
     if (new Date(cached.expiresAt) < new Date()) throw new BadRequestException('Código expirado');
+
+    if ((cached.attempts ?? 0) >= 5) {
+      throw new BadRequestException('Muitas tentativas inválidas. Solicite um novo código');
+    }
+
+    cached.attempts = (cached.attempts ?? 0) + 1;
+    await this.cacheManager.set(cacheKey, cached, 15 * 60 * 1000);
+
     if (cached.code !== code) throw new BadRequestException('Código inválido');
 
     const prismaWrite = this.prisma.getWriteClient();
