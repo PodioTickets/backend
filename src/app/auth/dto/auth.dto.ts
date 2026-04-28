@@ -37,35 +37,33 @@ export class EmailRegisterDto {
   @MinLength(8)
   password: string;
 
-  @ApiPropertyOptional({ description: 'Complete name' })
-  @IsOptional()
+  @ApiProperty({ description: 'Complete name (first and last)' })
   @IsString()
-  complete_name?: string;
+  @IsNotEmpty()
+  complete_name: string;
 
-  @ApiPropertyOptional({ description: 'Gender', enum: Gender })
-  @IsOptional()
+  @ApiProperty({ description: 'Gender', enum: Gender })
   @IsEnum(Gender)
-  gender?: Gender;
+  gender: Gender;
 
-  @ApiPropertyOptional({ description: 'Phone number' })
-  @IsOptional()
+  @ApiProperty({ description: 'Phone number' })
   @IsString()
-  phone?: string;
+  @IsNotEmpty()
+  phone: string;
 
-  @ApiPropertyOptional({ description: 'Phone number' })
+  @ApiPropertyOptional({ description: 'Emergency/reserve phone number' })
   @IsOptional()
   @IsString()
   reserve_phone?: string;
 
-  @ApiPropertyOptional({ description: 'Date of birth', format: 'date' })
-  @IsOptional()
+  @ApiProperty({ description: 'Date of birth', format: 'date' })
   @IsDateString()
-  dateOfBirth?: string;
+  dateOfBirth: string;
 
-  @ApiPropertyOptional({ description: 'Country' })
-  @IsOptional()
+  @ApiProperty({ description: 'Country' })
   @IsString()
-  country?: string;
+  @IsNotEmpty()
+  country: string;
 
   @ApiPropertyOptional({ description: 'State' })
   @IsOptional()
@@ -77,15 +75,14 @@ export class EmailRegisterDto {
   @IsString()
   city?: string;
 
-  @ApiPropertyOptional({ description: 'Document type', enum: DocumentType })
-  @IsOptional()
+  @ApiProperty({ description: 'Document type', enum: DocumentType })
   @IsEnum(DocumentType)
-  documentType?: DocumentType;
+  documentType: DocumentType;
 
-  @ApiPropertyOptional({ description: 'Document number (CPF or Passport)' })
-  @IsOptional()
+  @ApiProperty({ description: 'Document number (CPF or Passport)' })
   @IsString()
-  documentNumber?: string;
+  @IsNotEmpty()
+  documentNumber: string;
 
   @ApiPropertyOptional({ description: 'Sex' })
   @IsOptional()
