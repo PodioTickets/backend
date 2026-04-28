@@ -11,6 +11,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
+import * as geoip from 'geoip-lite';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Inject } from '@nestjs/common';
 import { Cache } from 'cache-manager';
@@ -301,10 +302,7 @@ export class AuthService {
       this.emailService.sendWelcomeUser({ email: user.email, firstName: user.firstName })
         .catch((err) => this.logger.warn('Failed to send welcome email:', err));
 
-      return {
-        message: 'User registered successfully',
-        data: { user },
-      };
+      return this.login({ ...user, accountType: 'USER' });
     } catch (error) {
       if (
         error instanceof ConflictException ||
@@ -759,9 +757,45 @@ export class AuthService {
   }
 
   private formatDateTimePtBR(date: Date): string {
-    const d = date.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
-    const t = date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const tz = 'America/Sao_Paulo';
+    const d = date.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric', timeZone: tz });
+    const t = date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: tz });
     return `${d} às ${t}`;
+  }
+
+  private async parseLocation(ip: string): Promise<string> {
+    if (!ip || ip === '—') return '—';
+    const cleanIp = ip.replace(/^::ffff:/, '');
+
+    try {
+      const resp = await firstValueFrom(
+        this.httpService.get(
+          `http://ip-api.com/json/${cleanIp}?fields=status,city,region,country`,
+          { timeout: 3000 } as any,
+        ),
+      );
+      const d = resp.data;
+      if (d?.status === 'success') {
+        if (d.city && d.region) return `${d.city}, ${d.region}`;
+        if (d.city) return d.city;
+        if (d.country) return d.country;
+      }
+    } catch {
+      // fallback
+    }
+
+    try {
+      const geo = geoip.lookup(cleanIp);
+      if (geo) {
+        if (geo.city && geo.region) return `${geo.city}, ${geo.region}`;
+        if (geo.city) return geo.city;
+        if (geo.country) return geo.country;
+      }
+    } catch {
+      // ignore
+    }
+
+    return '—';
   }
 
   private parseDevice(userAgent?: string): string {
@@ -964,22 +998,25 @@ export class AuthService {
         oldEmail: user.email,
         firstName: user.firstName,
         code: raw,
+        attempts: 0,
         expiresAt: new Date(Date.now() + ttl).toISOString(),
       },
       ttl,
     );
 
-    this.emailService.sendEmailChangeVerification({
-      email: normalizedEmail,
-      firstName: user.firstName,
-      newEmail: normalizedEmail,
-      code: display,
-      requestDate: this.formatDateTimePtBR(new Date()),
-      location: ip || '—',
-      device: this.parseDevice(userAgent),
-    }).catch((err) => this.logger.warn('Failed to send email change verification:', err));
+    this.parseLocation(ip || '').then((location) =>
+      this.emailService.sendEmailChangeVerification({
+        email: user.email,
+        firstName: user.firstName,
+        newEmail: normalizedEmail,
+        code: display,
+        requestDate: this.formatDateTimePtBR(new Date()),
+        location,
+        device: this.parseDevice(userAgent),
+      }),
+    ).catch((err) => this.logger.warn('Failed to send email change verification:', err));
 
-    return { success: true, message: 'Código de verificação enviado para o novo e-mail. Confirme para concluir a troca.' };
+    return { success: true, message: 'Código de verificação enviado para o seu e-mail atual. Confirme para concluir a troca.' };
   }
 
   async verifyEmailChange(userId: string, code: string) {
@@ -989,11 +1026,20 @@ export class AuthService {
       oldEmail: string;
       firstName: string;
       code: string;
+      attempts: number;
       expiresAt: string;
     }>(cacheKey);
 
     if (!cached) throw new BadRequestException('Código inválido ou expirado');
     if (new Date(cached.expiresAt) < new Date()) throw new BadRequestException('Código expirado');
+
+    if ((cached.attempts ?? 0) >= 5) {
+      throw new BadRequestException('Muitas tentativas inválidas. Solicite um novo código');
+    }
+
+    cached.attempts = (cached.attempts ?? 0) + 1;
+    await this.cacheManager.set(cacheKey, cached, 15 * 60 * 1000);
+
     if (cached.code !== code) throw new BadRequestException('Código inválido');
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -1003,13 +1049,6 @@ export class AuthService {
     });
 
     await this.cacheManager.del(cacheKey);
-
-    // Notificar e-mail antigo por segurança
-    this.emailService.sendEmailChangedNotification({
-      oldEmail: cached.oldEmail,
-      newEmail: cached.newEmail,
-      firstName: cached.firstName,
-    }).catch((err) => this.logger.warn('Failed to send email changed notification:', err));
 
     return { success: true, message: 'E-mail alterado com sucesso.' };
   }

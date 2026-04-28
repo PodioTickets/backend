@@ -2,7 +2,6 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
 import { UploadModule } from './app/upload/upload.module';
 import { UserModule } from './app/user/user.module';
-import { UserService } from './app/user/user.service';
 import { HttpCacheInterceptor } from './common/interceptors/http-cache.interceptor';
 import { ConcurrencyLimiterMiddleware } from './common/middleware/concurrency-limiter.middleware';
 import { PerformanceMonitoringMiddleware } from './common/middleware/performance-monitoring.middleware';
@@ -73,7 +72,6 @@ import { AdminModule } from './app/admin/admin.module';
   ],
   controllers: [],
   providers: [
-    UserService,
     ConcurrencyLimiterMiddleware,
     PerformanceMonitoringMiddleware,
     ResponseCompressionInterceptor,

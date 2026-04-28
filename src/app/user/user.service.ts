@@ -3,17 +3,24 @@ import {
   BadRequestException,
   NotFoundException,
   ConflictException,
+  Logger,
 } from '@nestjs/common';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { CreateLinkedUserDto } from './dto/create-linked-user.dto';
 import { PrismaService } from '../../prisma/prisma.service';
+import { EmailService } from '../../common/services/email.service';
 import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 
 @Injectable()
 export class UserService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(UserService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly emailService: EmailService,
+  ) {}
 
   /**
    * Limpa o documentNumber removendo formatação (pontos, traços, barras, espaços)
@@ -244,6 +251,20 @@ export class UserService {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
+    // Detect first-time profile completion for Google OAuth users.
+    // Google OAuth creates accounts with no phone; when phone is first set the
+    // profile is considered complete and the welcome email should be sent.
+    let isFirstProfileCompletion = false;
+    if (updateUserDto.phone) {
+      const existing = await prismaRead.user.findUnique({
+        where: { id },
+        select: { phone: true, googleId: true },
+      });
+      if (existing && !existing.phone && existing.googleId) {
+        isFirstProfileCompletion = true;
+      }
+    }
+
     const updateData: any = { ...updateUserDto };
 
     // Mesma regra do registro (auth): unicidade por (documentNumberClean, accountType)
@@ -302,6 +323,12 @@ export class UserService {
         isActive: true,
       },
     });
+
+    if (isFirstProfileCompletion && user.email && user.firstName) {
+      this.emailService.sendWelcomeUser({ email: user.email, firstName: user.firstName })
+        .catch((err) => this.logger.warn('Failed to send welcome email after profile completion:', err));
+    }
+
     return {
       message: 'User updated successfully',
       data: { user },
