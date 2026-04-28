@@ -40,6 +40,11 @@ export class EmailService {
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
           ...((msg as any).headers ?? {}),
         },
+        trackingSettings: {
+          clickTracking: { enable: false, enableText: false },
+          openTracking: { enable: false },
+          subscriptionTracking: { enable: false },
+        },
       });
       this.logger.log(`SendGrid response: ${response.statusCode} to=${Array.isArray(msg.to) ? msg.to.join(',') : msg.to}`);
     } catch (error: any) {
@@ -68,28 +73,31 @@ export class EmailService {
     message: string;
   }) {
     const subject = `Nova mensagem de contato${data.eventName ? ` - ${data.eventName}` : ''}`;
-    const html = `
-      <html>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-          <h2>Nova mensagem de contato — Podio Ticket</h2>
-          <p>Você recebeu uma nova mensagem através da plataforma Podio Ticket:</p>
-          <div style="background-color: #f5f5f5; padding: 20px; border-radius: 5px; margin: 20px 0;">
-            <p><strong>De:</strong> ${data.userName}</p>
-            <p><strong>Email:</strong> ${data.userEmail}</p>
-            ${data.userPhone ? `<p><strong>Telefone:</strong> ${data.userPhone}</p>` : ''}
-            ${data.eventName ? `<p><strong>Evento:</strong> ${data.eventName}</p>` : ''}
-          </div>
-          <div style="background-color: #fff; padding: 20px; border-left: 4px solid #007bff; margin: 20px 0;">
-            <p><strong>Mensagem:</strong></p>
-            <p>${data.message.replace(/\n/g, '<br>')}</p>
-          </div>
-          <p style="margin-top: 30px; color: #666; font-size: 12px;">
-            Esta mensagem foi enviada através da plataforma Podio Ticket.<br>
-            Responda diretamente ao email do remetente: ${data.userEmail}
-          </p>
-        </body>
-      </html>
-    `;
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:20px;font-family:Arial,sans-serif;line-height:1.6;color:#333;background-color:#f0f0f0;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center">
+  <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;background-color:#fff;border-radius:8px;padding:32px;">
+    <tr><td>
+      <h2 style="margin:0 0 16px 0;color:#202020;">Nova mensagem de contato — Podio Ticket</h2>
+      <p style="margin:0 0 16px 0;">Você recebeu uma nova mensagem através da plataforma Podio Ticket:</p>
+      <div style="background-color:#f5f5f5;padding:20px;border-radius:5px;margin:0 0 16px 0;">
+        <p style="margin:0 0 8px 0;"><strong>De:</strong> ${this.escapeHtml(data.userName)}</p>
+        <p style="margin:0 0 8px 0;"><strong>Email:</strong> ${this.escapeHtml(data.userEmail)}</p>
+        ${data.userPhone ? `<p style="margin:0 0 8px 0;"><strong>Telefone:</strong> ${this.escapeHtml(data.userPhone)}</p>` : ''}
+        ${data.eventName ? `<p style="margin:0;"><strong>Evento:</strong> ${this.escapeHtml(data.eventName)}</p>` : ''}
+      </div>
+      <div style="background-color:#fff;padding:20px;border-left:4px solid #007bff;margin:0 0 16px 0;">
+        <p style="margin:0 0 8px 0;"><strong>Mensagem:</strong></p>
+        <p style="margin:0;">${data.message.replace(/\n/g, '<br>')}</p>
+      </div>
+      <p style="margin:0;color:#666;font-size:12px;">Esta mensagem foi enviada através da plataforma Podio Ticket.<br>Responda diretamente ao email do remetente: ${this.escapeHtml(data.userEmail)}</p>
+    </td></tr>
+  </table>
+  </td></tr></table>
+</body>
+</html>`;
 
     const text = `Nova mensagem de contato${data.eventName ? ` — ${data.eventName}` : ''}\n\nDe: ${data.userName} (${data.userEmail})${data.userPhone ? `\nTelefone: ${data.userPhone}` : ''}\n\nMensagem:\n${data.message}\n\nResponda diretamente para: ${data.userEmail}`;
     await this.send({
@@ -112,24 +120,26 @@ export class EmailService {
     registrationLink: string;
   }) {
     const subject = `${data.inviterName} inscreveu você no evento ${data.eventName}`;
-    const html = `
-      <html>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-          <h2>Você foi inscrito em um evento!</h2>
-          <p>Olá ${data.firstName},</p>
-          <p><strong>${data.inviterName}</strong> inscreveu você no evento <strong>${data.eventName}</strong> através da plataforma Podio Ticket.</p>
-          <div style="background-color: #f5f5f5; padding: 20px; border-radius: 5px; margin: 20px 0; text-align: center;">
-            <p>Para visualizar sua inscrição, clique no link abaixo:</p>
-            <a href="${data.registrationLink}" style="display: inline-block; background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin-top: 10px;">
-              Ver minha inscrição
-            </a>
-          </div>
-          <p style="margin-top: 30px; color: #666; font-size: 12px;">
-            Se você não esperava receber este email, pode ignorá-lo.
-          </p>
-        </body>
-      </html>
-    `;
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:20px;font-family:Arial,sans-serif;line-height:1.6;color:#333;background-color:#f0f0f0;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center">
+  <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;background-color:#fff;border-radius:8px;padding:32px;">
+    <tr><td>
+      <h2 style="margin:0 0 16px 0;color:#202020;">Você foi inscrito em um evento!</h2>
+      <p style="margin:0 0 16px 0;">Olá ${this.escapeHtml(data.firstName)},</p>
+      <p style="margin:0 0 24px 0;"><strong>${this.escapeHtml(data.inviterName)}</strong> inscreveu você no evento <strong>${this.escapeHtml(data.eventName)}</strong> através da plataforma Podio Ticket.</p>
+      <div style="background-color:#f5f5f5;padding:20px;border-radius:5px;margin:0 0 24px 0;text-align:center;">
+        <p style="margin:0 0 16px 0;">Para visualizar sua inscrição, clique no link abaixo:</p>
+        <a href="${data.registrationLink}" style="display:inline-block;background-color:#007bff;color:#fff;padding:12px 24px;text-decoration:none;border-radius:5px;">Ver minha inscrição</a>
+      </div>
+      <p style="margin:0;color:#666;font-size:12px;">Se você não esperava receber este email, pode ignorá-lo.</p>
+    </td></tr>
+  </table>
+  </td></tr></table>
+</body>
+</html>`;
 
     const text = `Olá ${data.firstName},\n\n${data.inviterName} inscreveu você no evento ${data.eventName}.\n\nAcesse sua inscrição: ${data.registrationLink}\n\nPodioTicket — podioticket.com.br`;
     await this.send({ from: this.from, to: data.email, subject, html, text });
@@ -259,26 +269,28 @@ export class EmailService {
       ? this.escapeHtml(data.accountLabel)
       : 'sua conta Podio Ticket';
 
-    const html = `
-      <html>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-          <h2>Redefinir senha</h2>
-          <p>Olá ${safeName},</p>
-          <p>Recebemos um pedido para redefinir a senha de <strong>${label}</strong>.</p>
-          <p>Se você não fez este pedido, ignore este e-mail — sua senha permanece a mesma.</p>
-          <div style="background-color: #f5f5f5; padding: 20px; border-radius: 5px; margin: 20px 0; text-align: center;">
-            <a href="${data.resetUrl}" style="display: inline-block; background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px;">
-              Redefinir senha
-            </a>
-          </div>
-          <p style="color: #666; font-size: 13px;">O link expira em breve. Se o botão não funcionar, copie e cole no navegador:</p>
-          <p style="color: #666; font-size: 12px; word-break: break-all;">${this.escapeHtml(data.resetUrl)}</p>
-          <p style="margin-top: 30px; color: #666; font-size: 12px;">
-            Podio Ticket — este é um e-mail automático, não responda.
-          </p>
-        </body>
-      </html>
-    `;
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:20px;font-family:Arial,sans-serif;line-height:1.6;color:#333;background-color:#f0f0f0;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center">
+  <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;background-color:#fff;border-radius:8px;padding:32px;">
+    <tr><td>
+      <h2 style="margin:0 0 16px 0;color:#202020;">Redefinir senha</h2>
+      <p style="margin:0 0 16px 0;">Olá ${safeName},</p>
+      <p style="margin:0 0 16px 0;">Recebemos um pedido para redefinir a senha de <strong>${label}</strong>.</p>
+      <p style="margin:0 0 24px 0;">Se você não fez este pedido, ignore este e-mail — sua senha permanece a mesma.</p>
+      <div style="background-color:#f5f5f5;padding:20px;border-radius:5px;margin:0 0 24px 0;text-align:center;">
+        <a href="${data.resetUrl}" style="display:inline-block;background-color:#007bff;color:#fff;padding:12px 24px;text-decoration:none;border-radius:5px;">Redefinir senha</a>
+      </div>
+      <p style="margin:0 0 8px 0;color:#666;font-size:13px;">O link expira em breve. Se o botão não funcionar, copie e cole no navegador:</p>
+      <p style="margin:0 0 24px 0;color:#666;font-size:12px;word-break:break-all;">${this.escapeHtml(data.resetUrl)}</p>
+      <p style="margin:0;color:#666;font-size:12px;">Podio Ticket — este é um e-mail automático, não responda.</p>
+    </td></tr>
+  </table>
+  </td></tr></table>
+</body>
+</html>`;
 
     const text = `Olá ${data.firstName || 'usuário'},\n\nClique no link abaixo para redefinir sua senha:\n${data.resetUrl}\n\nSe você não solicitou isso, ignore este email.\n\nPodioTicket — podioticket.com.br`;
     await this.send({ from: this.from, to: data.email, subject: 'Redefinição de senha — Podio Ticket', html, text });
@@ -287,19 +299,23 @@ export class EmailService {
 
   async sendPasswordChangedNotification(data: { email: string; firstName: string }) {
     const safeName = this.escapeHtml(data.firstName || 'usuário');
-    const html = `
-      <html>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-          <h2>Sua senha foi alterada</h2>
-          <p>Olá ${safeName},</p>
-          <p>A senha da sua conta Podio Ticket foi alterada com sucesso.</p>
-          <p>Se você não realizou esta alteração, entre em contato com o suporte imediatamente.</p>
-          <p style="margin-top: 30px; color: #666; font-size: 12px;">
-            Podio Ticket — este é um e-mail automático, não responda.
-          </p>
-        </body>
-      </html>
-    `;
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:20px;font-family:Arial,sans-serif;line-height:1.6;color:#333;background-color:#f0f0f0;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center">
+  <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;background-color:#fff;border-radius:8px;padding:32px;">
+    <tr><td>
+      <h2 style="margin:0 0 16px 0;color:#202020;">Sua senha foi alterada</h2>
+      <p style="margin:0 0 16px 0;">Olá ${safeName},</p>
+      <p style="margin:0 0 16px 0;">A senha da sua conta Podio Ticket foi alterada com sucesso.</p>
+      <p style="margin:0 0 24px 0;">Se você não realizou esta alteração, entre em contato com o suporte imediatamente.</p>
+      <p style="margin:0;color:#666;font-size:12px;">Podio Ticket — este é um e-mail automático, não responda.</p>
+    </td></tr>
+  </table>
+  </td></tr></table>
+</body>
+</html>`;
     const text = `Olá ${data.firstName || 'usuário'},\n\nA senha da sua conta PodioTicket foi alterada com sucesso.\n\nSe você não realizou esta alteração, entre em contato com o suporte imediatamente.\n\nPodioTicket — podioticket.com.br`;
     await this.send({ from: this.from, to: data.email, subject: 'Sua senha foi alterada — Podio Ticket', html, text });
     this.logger.log(`Password changed notification sent to: ${data.email}`);
@@ -307,19 +323,23 @@ export class EmailService {
 
   async sendEmailChangedNotification(data: { oldEmail: string; newEmail: string; firstName: string }) {
     const safeName = this.escapeHtml(data.firstName || 'usuário');
-    const html = `
-      <html>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-          <h2>E-mail da conta alterado</h2>
-          <p>Olá ${safeName},</p>
-          <p>O e-mail da sua conta Podio Ticket foi alterado para <strong>${this.escapeHtml(data.newEmail)}</strong>.</p>
-          <p>Se você não realizou esta alteração, entre em contato com o suporte imediatamente.</p>
-          <p style="margin-top: 30px; color: #666; font-size: 12px;">
-            Podio Ticket — este é um e-mail automático, não responda.
-          </p>
-        </body>
-      </html>
-    `;
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:20px;font-family:Arial,sans-serif;line-height:1.6;color:#333;background-color:#f0f0f0;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center">
+  <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;background-color:#fff;border-radius:8px;padding:32px;">
+    <tr><td>
+      <h2 style="margin:0 0 16px 0;color:#202020;">E-mail da conta alterado</h2>
+      <p style="margin:0 0 16px 0;">Olá ${safeName},</p>
+      <p style="margin:0 0 16px 0;">O e-mail da sua conta Podio Ticket foi alterado para <strong>${this.escapeHtml(data.newEmail)}</strong>.</p>
+      <p style="margin:0 0 24px 0;">Se você não realizou esta alteração, entre em contato com o suporte imediatamente.</p>
+      <p style="margin:0;color:#666;font-size:12px;">Podio Ticket — este é um e-mail automático, não responda.</p>
+    </td></tr>
+  </table>
+  </td></tr></table>
+</body>
+</html>`;
     const text = `Olá ${data.firstName || 'usuário'},\n\nO e-mail da sua conta PodioTicket foi alterado para ${data.newEmail}.\n\nSe você não realizou esta alteração, entre em contato com o suporte imediatamente.\n\nPodioTicket — podioticket.com.br`;
     // Notifica o email antigo (segurança) e o novo (confirmação)
     await Promise.all([
