@@ -33,7 +33,14 @@ export class EmailService {
       return;
     }
     try {
-      const [response] = await sgMail.send(msg);
+      const [response] = await sgMail.send({
+        ...msg,
+        headers: {
+          'List-Unsubscribe': '<mailto:contato@podioticket.com.br?subject=unsubscribe>',
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+          ...((msg as any).headers ?? {}),
+        },
+      });
       this.logger.log(`SendGrid response: ${response.statusCode} to=${Array.isArray(msg.to) ? msg.to.join(',') : msg.to}`);
     } catch (error: any) {
       const detail = error?.response?.body ?? error?.message ?? error;
@@ -136,7 +143,8 @@ export class EmailService {
       code: this.escapeHtml(data.code),
     });
 
-    await this.send({ from: this.from, to: data.email, subject: 'Recupere sua senha — PódioTicket', html });
+    const text = `Olá ${data.firstName},\n\nSeu código de recuperação de senha é: ${data.code}\n\nSe você não solicitou isso, ignore este email.\n\nPodioTicket — podioticket.com.br`;
+    await this.send({ from: this.from, to: data.email, subject: 'Recupere sua senha — PódioTicket', html, text });
     this.logger.log(`Password reset code sent to: ${data.email}`);
   }
 
@@ -158,7 +166,8 @@ export class EmailService {
       device: this.escapeHtml(data.device),
     });
 
-    await this.send({ from: this.from, to: data.email, subject: 'Solicitação de troca de e-mail — PódioTicket', html });
+    const text = `Olá ${data.firstName},\n\nSeu código de verificação para troca de e-mail é: ${data.code}\n\nNovo e-mail: ${data.newEmail}\nSolicitado em: ${data.requestDate}\n\nSe você não solicitou isso, entre em contato com o suporte.\n\nPodioTicket — podioticket.com.br`;
+    await this.send({ from: this.from, to: data.email, subject: 'Solicitação de troca de e-mail — PódioTicket', html, text });
     this.logger.log(`Email change verification sent to: ${data.email}`);
   }
 
@@ -176,7 +185,9 @@ export class EmailService {
       eventBannerUrl: data.eventBannerUrl,
     });
 
-    await this.send({ from: this.from, to: data.email, subject: `Inscrição confirmada — ${data.eventName}`, html });
+    const text = `Olá ${data.firstName},\n\nSua inscrição na ${data.eventName} foi confirmada! Sua vaga está garantida.\n\nEvento: ${data.eventName}\nLocal: ${data.eventLocation}\n\nPodioTicket — podioticket.com.br`;
+
+    await this.send({ from: this.from, to: data.email, subject: `Inscrição confirmada — ${data.eventName}`, html, text });
     this.logger.log(`Registration confirmed email sent to: ${data.email}`);
   }
 
@@ -202,7 +213,8 @@ export class EmailService {
       sentDate: this.escapeHtml(data.sentDate),
     });
 
-    await this.send({ from: this.from, to: data.email, subject: 'Solicitação de repasse recebida — PódioTicket', html });
+    const text = `Solicitação de repasse recebida\n\nEvento: ${data.eventName}\nOrganização: ${data.orgName}\nValor: ${data.amount}\nID: ${data.transferId}\nSolicitado em: ${data.requestDate}\n\nPodioTicket — podioticket.com.br`;
+    await this.send({ from: this.from, to: data.email, subject: 'Solicitação de repasse recebida — PódioTicket', html, text });
     this.logger.log(`Transfer requested email sent to: ${data.email}`);
   }
 
@@ -228,7 +240,8 @@ export class EmailService {
       approvedDate: this.escapeHtml(data.approvedDate),
     });
 
-    await this.send({ from: this.from, to: data.email, subject: 'Repasse concluído — PódioTicket', html });
+    const text = `Repasse concluído\n\nOrganização: ${data.orgName}\nValor: ${data.amount}\nID: ${data.transferId}\nAprovado em: ${data.approvedDate}\n\nPodioTicket — podioticket.com.br`;
+    await this.send({ from: this.from, to: data.email, subject: 'Repasse concluído — PódioTicket', html, text });
     this.logger.log(`Transfer confirmed email sent to: ${data.email}`);
   }
 
