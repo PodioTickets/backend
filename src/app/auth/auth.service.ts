@@ -757,8 +757,9 @@ export class AuthService {
   }
 
   private formatDateTimePtBR(date: Date): string {
-    const d = date.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
-    const t = date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const tz = 'America/Sao_Paulo';
+    const d = date.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric', timeZone: tz });
+    const t = date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: tz });
     return `${d} às ${t}`;
   }
 
