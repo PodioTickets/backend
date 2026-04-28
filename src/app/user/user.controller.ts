@@ -153,6 +153,17 @@ export class UserController {
     return this.userService.createOrLinkUser(req.user.id, createLinkedUserDto);
   }
 
+  @Delete('linked-users/:id')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Delete linked user', description: 'Remove um usuário vinculado do perfil do usuário autenticado' })
+  @ApiResponse({ status: 200, description: 'Usuário vinculado removido com sucesso' })
+  @ApiResponse({ status: 404, description: 'Usuário vinculado não encontrado' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  async deleteLinkedUser(@Request() req, @Param('id') id: string) {
+    return this.userService.deleteLinkedUser(req.user.id, id);
+  }
+
   @Get('by-cpf/:cpf')
   @NoCache()
   @UseGuards(JwtAuthGuard)

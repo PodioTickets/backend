@@ -3411,7 +3411,7 @@ export class EventsService {
       event?.organizerFeeRate ?? 0.04,
     );
 
-    const tickets = await this.ticketsService.findAll(eventId, { page, limit });
+    const tickets = await this.ticketsService.findAll(eventId, { page, limit, includeInactive: true });
 
     return {
       message: 'Financial data fetched successfully',

@@ -213,7 +213,10 @@ export class TicketsService {
     const skip = (page - 1) * limit;
 
     const isOrganizer = userId ? await this.isOrganizerOfEvent(userId, eventId, db) : false;
-    const where: any = { eventId, isActive: true };
+    const where: any = { eventId };
+    if (!filterDto.includeInactive) {
+      where.isActive = true;
+    }
     if (filterDto.categoryId) {
       where.categoryId = filterDto.categoryId;
     }

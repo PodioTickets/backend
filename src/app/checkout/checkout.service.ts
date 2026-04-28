@@ -1636,7 +1636,7 @@ export class CheckoutService {
       await prisma.coupon.update({
         where: { id: couponResult.couponId },
         data: {
-          usageCount: { increment: 1 },
+          usageCount: { increment: registrations.length },
         },
       });
     }

@@ -13,7 +13,7 @@ import {
   ArrayUnique,
   IsIn,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Type, Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsDateString } from 'class-validator';
 
@@ -274,4 +274,9 @@ export class FilterTicketsDto {
   @Min(1)
   @Type(() => Number)
   limit?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  @Transform(({ value }) => value === true || value === 'true')
+  includeInactive?: boolean;
 }

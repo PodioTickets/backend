@@ -1662,9 +1662,10 @@ export class OrdersService {
 
       // Apply coupon usage
       if (couponId) {
+        const ticketCount = reservedTickets.reduce((sum: number, rt: any) => sum + (rt.quantity ?? 1), 0);
         await tx.coupon.update({
           where: { id: couponId },
-          data: { usageCount: { increment: 1 } },
+          data: { usageCount: { increment: ticketCount } },
         });
       }
       // Mark voucher as used

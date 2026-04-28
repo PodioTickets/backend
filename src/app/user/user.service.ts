@@ -419,6 +419,24 @@ export class UserService {
     return { success: true, data: this.formatLinkedProfile(created) };
   }
 
+  async deleteLinkedUser(mainUserId: string, linkedUserId: string) {
+    const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
+
+    const linked = await prismaRead.linkedUser.findUnique({
+      where: { id: linkedUserId },
+      select: { id: true, mainUserId: true },
+    });
+
+    if (!linked || linked.mainUserId !== mainUserId) {
+      throw new NotFoundException('Linked user not found');
+    }
+
+    await prismaWrite.linkedUser.delete({ where: { id: linkedUserId } });
+
+    return { success: true };
+  }
+
   async findUserByCpf(cpf: string) {
     const prismaRead = this.prisma.getReadClient();
     const documentNumberClean = cpf.replace(/\D/g, '');
