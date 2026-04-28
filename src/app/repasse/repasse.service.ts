@@ -2,9 +2,11 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { OrganizerMemberAccessService } from '../organizations/organizer-member-access.service';
+import { EmailService } from '../../common/services/email.service';
 import { PaymentMethod, PaymentStatus, WithdrawalStatus } from '@prisma/client';
 
 // Prazo (dias) até que os 90% sejam liberados para saldo disponível
@@ -44,10 +46,47 @@ function isInstallment(metadata: any): boolean {
 
 @Injectable()
 export class RepasseService {
+  private readonly logger = new Logger(RepasseService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly organizerMemberAccess: OrganizerMemberAccessService,
+    private readonly emailService: EmailService,
   ) {}
+
+  // ─── Email helpers ───────────────────────────────────────────────────────
+
+  private formatBRL(cents: number): string {
+    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cents / 100);
+  }
+
+  private formatDateBR(date: Date): string {
+    return date.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' });
+  }
+
+  private formatDateTimeBR(date: Date): string {
+    const d = date.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' });
+    const t = date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    return `${d} às ${t}`;
+  }
+
+  private async loadEventWithOrg(eventId: string, prisma: any) {
+    return prisma.event.findUnique({
+      where: { id: eventId },
+      select: {
+        name: true,
+        organization: {
+          select: {
+            name: true,
+            email: true,
+            pix: true,
+            bankName: true,
+            account: true,
+          },
+        },
+      },
+    });
+  }
 
   // ─── Acesso ──────────────────────────────────────────────────────────────
 
@@ -592,6 +631,24 @@ export class RepasseService {
       },
     });
 
+    // Fire-and-forget: send transfer requested email to organizer
+    this.loadEventWithOrg(eventId, prismaRead).then((evtOrg) => {
+      if (!evtOrg?.organization?.email) return;
+      const org = evtOrg.organization;
+      const now = new Date();
+      return this.emailService.sendTransferRequested({
+        email: org.email,
+        eventName: evtOrg.name,
+        amount: this.formatBRL(withdrawal.netAmount),
+        transferId: `REP-${withdrawal.id.split('-')[0].toUpperCase()}`,
+        orgName: org.name ?? org.email,
+        bankAccount: org.bankName && org.account ? `${org.bankName} ••• ${org.account.slice(-4)}` : '—',
+        pixKey: org.pix ?? '—',
+        requestDate: this.formatDateBR(now),
+        sentDate: this.formatDateTimeBR(now),
+      });
+    }).catch((err) => this.logger.warn('Failed to send transfer requested email:', err));
+
     return {
       message: 'Withdrawal requested successfully',
       data: { withdrawal },
@@ -617,6 +674,23 @@ export class RepasseService {
       where: { id: withdrawalId },
       data: { status: WithdrawalStatus.COMPLETED, completedAt: new Date() },
     });
+
+    // Fire-and-forget: send transfer confirmed email to organizer
+    this.loadEventWithOrg(eventId, prismaWrite).then((evtOrg) => {
+      if (!evtOrg?.organization?.email) return;
+      const org = evtOrg.organization;
+      return this.emailService.sendTransferConfirmed({
+        email: org.email,
+        amount: this.formatBRL(updated.netAmount),
+        transferId: `REP-${updated.id.split('-')[0].toUpperCase()}`,
+        orgName: org.name ?? org.email,
+        bankAccount: org.bankName && org.account ? `${org.bankName} ••• ${org.account.slice(-4)}` : '—',
+        pixKey: org.pix ?? '—',
+        requestDate: this.formatDateBR(withdrawal.createdAt),
+        sentDate: this.formatDateTimeBR(withdrawal.createdAt),
+        approvedDate: this.formatDateTimeBR(updated.completedAt ?? new Date()),
+      });
+    }).catch((err) => this.logger.warn('Failed to send transfer confirmed email:', err));
 
     return { message: 'Withdrawal completed successfully', data: { withdrawal: updated } };
   }

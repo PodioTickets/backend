@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from './cielo.service';
+import { EmailService } from '../../common/services/email.service';
 import { PaymentStatus, Prisma } from '@prisma/client';
 
 interface CieloWebhookEvent {
@@ -18,6 +19,7 @@ export class PaymentsWebhookService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cieloService: CieloService,
+    private readonly emailService: EmailService,
   ) {}
 
   /**
@@ -135,6 +137,27 @@ export class PaymentsWebhookService {
         });
 
         await this.backfillTicketSnapshots(prisma, fresh.orderId);
+
+        // Fire-and-forget: send registration confirmed email to each registrant
+        prisma.registration.findMany({
+          where: { orderId: fresh.orderId },
+          select: {
+            user: { select: { email: true, firstName: true } },
+            event: { select: { name: true, location: true, bannerUrl: true } },
+          },
+        }).then((registrations: any[]) => {
+          const sends = registrations.map((reg: any) => {
+            if (!reg.user?.email || !reg.event) return Promise.resolve();
+            return this.emailService.sendRegistrationConfirmed({
+              email: reg.user.email,
+              firstName: reg.user.firstName ?? '',
+              eventName: reg.event.name,
+              eventLocation: reg.event.location ?? '',
+              eventBannerUrl: reg.event.bannerUrl ?? 'https://placehold.co/308x232',
+            });
+          });
+          return Promise.all(sends);
+        }).catch((err: any) => this.logger.warn('Failed to send registration confirmed emails:', err));
       }
 
       this.logger.log(`Payment ${fresh.id} updated via webhook to status ${paymentStatus}`);

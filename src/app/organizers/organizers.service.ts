@@ -69,6 +69,10 @@ export class OrganizersService {
       return { organization, member };
     });
 
+    this.emailService
+      .sendWelcomeOrganizer({ email: result.member.user.email, firstName: result.member.user.firstName })
+      .catch(() => {});
+
     return {
       message: 'Organizer created successfully',
       data: {

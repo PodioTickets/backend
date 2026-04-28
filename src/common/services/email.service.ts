@@ -258,6 +258,24 @@ export class EmailService {
     this.logger.log(`Transfer confirmed email sent to: ${data.email}`);
   }
 
+  async sendWelcomeUser(data: { email: string; firstName: string }) {
+    const html = this.loadTemplate('bem-vindo.html', {
+      firstName: this.escapeHtml(data.firstName),
+    });
+    const text = `Olá ${data.firstName},\n\nBem-vindo à PodioTicket! Sua plataforma pra encontrar provas, garantir vagas e acompanhar tudo num só lugar.\n\nPodioTicket — podioticket.com.br`;
+    await this.send({ from: this.from, to: data.email, subject: 'Bem-vindo à PódioTicket', html, text });
+    this.logger.log(`Welcome email sent to: ${data.email}`);
+  }
+
+  async sendWelcomeOrganizer(data: { email: string; firstName: string }) {
+    const html = this.loadTemplate('bem-vindo-organizador.html', {
+      firstName: this.escapeHtml(data.firstName),
+    });
+    const text = `Olá ${data.firstName},\n\nSua conta de organizador foi ativada na PodioTicket! Crie seu primeiro evento e configure seus dados de repasse.\n\nPodioTicket — podioticket.com.br`;
+    await this.send({ from: this.from, to: data.email, subject: 'Bem-vindo à PódioTicket — Organizador', html, text });
+    this.logger.log(`Welcome organizer email sent to: ${data.email}`);
+  }
+
   async sendPasswordResetLink(data: {
     email: string;
     firstName: string;

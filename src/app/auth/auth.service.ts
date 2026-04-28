@@ -298,6 +298,9 @@ export class AuthService {
         },
       });
 
+      this.emailService.sendWelcomeUser({ email: user.email, firstName: user.firstName })
+        .catch((err) => this.logger.warn('Failed to send welcome email:', err));
+
       return {
         message: 'User registered successfully',
         data: { user },
