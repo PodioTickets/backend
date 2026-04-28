@@ -530,6 +530,7 @@ export class EventsController {
 
   @Get(':eventId/financial/transfers')
   @UseGuards(JwtAuthGuard)
+  @NoCache()
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get transfer history',
@@ -545,6 +546,7 @@ export class EventsController {
 
   @Get(':eventId/financial/transfers/:withdrawalId')
   @UseGuards(JwtAuthGuard)
+  @NoCache()
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get transfer by ID',
@@ -566,6 +568,7 @@ export class EventsController {
 
   @Get(':eventId/financial/installments')
   @UseGuards(JwtAuthGuard)
+  @NoCache()
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get installments to receive',
@@ -581,6 +584,7 @@ export class EventsController {
 
   @Get(':eventId/financial/pending')
   @UseGuards(JwtAuthGuard)
+  @NoCache()
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get pending releases',
@@ -603,6 +607,7 @@ export class EventsController {
 
   @Get(':eventId/financial/refunded')
   @UseGuards(JwtAuthGuard)
+  @NoCache()
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get refunded payments',
@@ -625,6 +630,7 @@ export class EventsController {
 
   @Get(':eventId/financial/chargebacks')
   @UseGuards(JwtAuthGuard)
+  @NoCache()
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get chargebacks',
@@ -648,6 +654,7 @@ export class EventsController {
   // ========== ORDERS (organizador) ==========
   @Get(':eventId/orders/:orderId')
   @UseGuards(JwtAuthGuard)
+  @NoCache()
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Obter pedido por ID',
@@ -711,6 +718,7 @@ export class EventsController {
 
   @Get(':eventId/registrations/stats')
   @UseGuards(JwtAuthGuard)
+  @NoCache()
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get registration statistics',

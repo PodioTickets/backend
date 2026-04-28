@@ -3369,13 +3369,17 @@ export class EventsService {
     const { page = 1, limit = 20 } = queryDto;
 
     // Summary é sempre o estado atual do evento inteiro — sem filtro de período
-    const [event, orders, audit, withdrawals, refundedAgg] = await Promise.all([
+    const [event, orders, refundedOrders, audit, withdrawals, refundedAgg] = await Promise.all([
       prismaRead.event.findUnique({
         where: { id: eventId },
         select: { organizerFeeRate: true, retentionRate: true },
       }),
       prismaRead.order.findMany({
         where: { eventId, payment: { status: PaymentStatus.PAID } },
+        include: { payment: true },
+      }),
+      prismaRead.order.findMany({
+        where: { eventId, payment: { status: PaymentStatus.REFUNDED } },
         include: { payment: true },
       }),
       prismaRead.eventAudit.findUnique({ where: { eventId } }),
@@ -3389,16 +3393,22 @@ export class EventsService {
       }),
     ]);
 
-    // Match requestWithdrawal validation: both COMPLETED and PENDING reduce spendable balance
+    // Both COMPLETED and PENDING reduce availableBalance to prevent double-spend
     const committedWithdrawals = withdrawals.filter(
       (w: any) => w.status === WithdrawalStatus.COMPLETED || w.status === WithdrawalStatus.PENDING,
     );
+    // Only COMPLETED represents money actually paid out to the organizer
+    const completedWithdrawalsTotal = withdrawals
+      .filter((w: any) => w.status === WithdrawalStatus.COMPLETED)
+      .reduce((s: number, w: any) => s + (w.netAmount ?? w.amount ?? 0), 0);
 
     const breakdown = this.calcRepasseBreakdown(
       orders,
+      refundedOrders,
       event?.retentionRate ?? 0.10,
       !!audit,
       committedWithdrawals,
+      event?.organizerFeeRate ?? 0.04,
     );
 
     const tickets = await this.ticketsService.findAll(eventId, { page, limit });
@@ -3412,7 +3422,7 @@ export class EventsService {
           awaitingAudit: breakdown.awaitingAudit,
           installmentsToReceive: breakdown.installmentsToReceive,
           grossRevenue: breakdown.grossRevenue,
-          totalWithdrawn: breakdown.totalWithdrawn,
+          totalWithdrawn: completedWithdrawalsTotal,
           totalRefunded: refundedAgg._sum.finalAmount ?? 0,
           refundedCount: refundedAgg._count.id,
           totalChargebacks: 0,
@@ -3426,16 +3436,18 @@ export class EventsService {
   // Prazos de retenção por método de pagamento (em dias)
   private static readonly RETENTION_DAYS: Record<string, number> = {
     [PaymentMethod.PIX]: 1,
-    [PaymentMethod.CREDIT_CARD]: 32,
+    [PaymentMethod.CREDIT_CARD]: 31,
     [PaymentMethod.BOLETO]: 3,
     [PaymentMethod.CRYPTO]: 30,
   };
 
   private calcRepasseBreakdown(
     orders: any[],
+    refundedOrders: any[],
     retentionRate: number,
     isAudited: boolean,
     completedWithdrawals: any[],
+    organizerFeeRate: number,
   ) {
     let grossRevenue = 0;
     let pendingRelease = 0;
@@ -3449,12 +3461,14 @@ export class EventsService {
       const payment = order.payment;
       if (!payment?.paymentDate) continue;
 
-      const finalAmount: number = order.finalAmount ?? 0;
-      grossRevenue += finalAmount;
+      const gross: number = order.finalAmount ?? 0;
+      grossRevenue += gross;
+      // Deduct organizer fee upfront before distributing (spec step 3)
+      const finalAmount = Math.round(gross * (1 - organizerFeeRate));
 
       const metadata = payment.metadata as any;
       const isInstallment = !!(metadata?.creditCard?.installments && metadata.creditCard.installments > 1);
-      const retentionDays = EventsService.RETENTION_DAYS[payment.method as string] ?? 30;
+      const retentionDays = EventsService.RETENTION_DAYS[payment.method as string] ?? 31;
       const paymentDate = new Date(payment.paymentDate);
       const releaseDate = new Date(paymentDate);
       releaseDate.setDate(releaseDate.getDate() + retentionDays);
@@ -3462,22 +3476,28 @@ export class EventsService {
 
       if (isInstallment) {
         const count: number = metadata.creditCard.installments;
-        const installmentValue = Math.round(finalAmount / count);
-        const lastInstallmentValue = finalAmount - installmentValue * (count - 1);
+        const retained = Math.round(finalAmount * retentionRate);
+        const distributable = finalAmount - retained;
+        const baseInstallment = Math.floor(distributable / count);
+        const lastExtra = distributable - baseInstallment * count;
 
         for (let i = 0; i < count; i++) {
           const dueDate = new Date(paymentDate);
-          dueDate.setDate(dueDate.getDate() + 32 * (i + 1));
-          const isLast = i === count - 1;
-          const amount = isLast ? lastInstallmentValue : installmentValue;
+          dueDate.setDate(dueDate.getDate() + 31 * (i + 1));
+          const amount = baseInstallment + (i === count - 1 ? lastExtra : 0);
 
           if (dueDate > now) {
             installmentsToReceive += amount;
-          } else if (isLast && !isAudited) {
-            awaitingAudit += amount;
           } else {
             releasedAndAvailable += amount;
           }
+        }
+
+        // 10% retained stays in awaitingAudit until audited
+        if (isAudited) {
+          releasedAndAvailable += retained;
+        } else {
+          awaitingAudit += retained;
         }
       } else {
         if (!released) {
@@ -3492,8 +3512,14 @@ export class EventsService {
       }
     }
 
+    // Deduct net refund amount from releasedAndAvailable (may go negative per spec)
+    for (const order of refundedOrders) {
+      const orgNet = Math.round((order.finalAmount ?? 0) * (1 - organizerFeeRate));
+      releasedAndAvailable -= orgNet;
+    }
+
     const totalWithdrawn = completedWithdrawals.reduce(
-      (s: number, w: any) => s + (w.amount ?? 0),
+      (s: number, w: any) => s + (w.netAmount ?? w.amount ?? 0),
       0,
     );
 
@@ -4672,15 +4698,16 @@ export class EventsService {
       },
     });
 
-    const totalAmount = withdrawals.reduce((s, w) => s + w.amount, 0);
-    const totalCount = withdrawals.length;
+    const completedWithdrawals = withdrawals.filter((w) => w.status === WithdrawalStatus.COMPLETED);
+    const totalNetAmount = completedWithdrawals.reduce((s, w) => s + (w.netAmount ?? w.amount), 0);
+    const totalCount = completedWithdrawals.length;
 
     return {
       message: 'Transfer history fetched successfully',
       data: {
         transfers: withdrawals,
         metrics: {
-          totalAmount,
+          totalAmount: totalNetAmount,
           totalCount,
         },
       },

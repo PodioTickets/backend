@@ -948,10 +948,18 @@ export class OrdersService {
           }
           const autoApplicableSubtotal = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0);
           const autoApplicableQty = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
-          autoDiscount = coupon.type === 'PERCENTAGE'
-            ? Math.floor(autoApplicableSubtotal * (coupon.value / 100))
-            : autoApplicableQty * coupon.value;
-          autoDiscount = Math.min(autoDiscount, ticketsSubtotal);
+          const existingProductsSubtotal = ((order.pendingProducts as any[] | null) ?? []).reduce(
+            (sum: number, p: any) => sum + (p.unitPrice ?? 0) * (p.quantity ?? 1),
+            0,
+          );
+          if (coupon.type === 'PERCENTAGE') {
+            const applicableRatio = ticketsSubtotal > 0 ? autoApplicableSubtotal / ticketsSubtotal : 1;
+            const applicableBase = autoApplicableSubtotal + Math.round(existingProductsSubtotal * applicableRatio);
+            autoDiscount = Math.floor(applicableBase * (coupon.value / 100));
+          } else {
+            autoDiscount = autoApplicableQty * coupon.value;
+          }
+          autoDiscount = Math.min(autoDiscount, ticketsSubtotal + existingProductsSubtotal);
           autoCouponId = coupon.id;
           break;
         }
@@ -1195,14 +1203,23 @@ export class OrdersService {
       0,
     );
     const totalAmount = ticketsSubtotal + productsSubtotal;
-    const existingDiscount = (order as any).discount ?? 0;
-    const finalAmount = Math.max(0, totalAmount - existingDiscount);
+
+    // Recalculate discount when products change: PERCENTAGE coupons apply to the full order
+    let newDiscount = (order as any).discount ?? 0;
+    const activeCoupon = (order as any).coupon;
+    if (activeCoupon && activeCoupon.type === 'PERCENTAGE' && !(order as any).voucherId) {
+      newDiscount = Math.floor(totalAmount * (activeCoupon.value / 100));
+      newDiscount = Math.min(newDiscount, totalAmount);
+    }
+
+    const finalAmount = Math.max(0, totalAmount - newDiscount);
 
     const updated = await w.order.update({
       where: { id: orderId },
       data: {
         pendingProducts: dto.products,
         totalAmount,
+        discount: newDiscount,
         finalAmount,
         updatedAt: new Date(),
       },

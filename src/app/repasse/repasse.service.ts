@@ -144,6 +144,7 @@ export class RepasseService {
     retentionRate: number,
     isAudited: boolean,
     committedWithdrawals: any[],
+    organizerFeeRate: number,
   ) {
     const now = getNow();
 
@@ -158,8 +159,10 @@ export class RepasseService {
       const payment = order.payment;
       if (!payment?.paymentDate) continue;
 
-      const orgNet: number = order.finalAmount ?? 0;
-      grossRevenue += orgNet;
+      const gross: number = order.finalAmount ?? 0;
+      grossRevenue += gross;
+      // Deduct organizer fee upfront before distributing into buckets (spec step 3)
+      const orgNet = Math.round(gross * (1 - organizerFeeRate));
       const paymentDate = new Date(payment.paymentDate);
       const metadata = payment.metadata as any;
 
@@ -205,7 +208,8 @@ export class RepasseService {
       const payment = order.payment;
       if (!payment) continue;
 
-      const orgNet: number = order.finalAmount ?? 0;
+      // Same fee deduction as positive side — spec: "pegamos o valor que o organizador iria receber"
+      const orgNet = Math.round((order.finalAmount ?? 0) * (1 - organizerFeeRate));
       const metadata = payment.metadata as any;
 
       if (isInstallment(metadata)) {
@@ -242,8 +246,9 @@ export class RepasseService {
       }
     }
 
-    // Fix 1: inclui PENDING + COMPLETED para evitar double-spend
-    const totalWithdrawn = committedWithdrawals.reduce((s, w) => s + (w.amount ?? 0), 0);
+    // Use netAmount so both old records (amount=gross, netAmount=net) and new records
+    // (amount=netAmount, feeAmount=0) are subtracted correctly from the net saldoDisponivel
+    const totalWithdrawn = committedWithdrawals.reduce((s, w) => s + (w.netAmount ?? w.amount ?? 0), 0);
     const saldoParaSaque = saldoDisponivel - totalWithdrawn;
 
     // Fix 2: expõe a composição interna do aguardandoLiberacao (10% retido + 90% em liberação)
@@ -284,7 +289,7 @@ export class RepasseService {
     );
     const pendingWithdrawalsAmount = withdrawals
       .filter((w: any) => w.status === WithdrawalStatus.PENDING)
-      .reduce((s: number, w: any) => s + (w.amount ?? 0), 0);
+      .reduce((s: number, w: any) => s + (w.netAmount ?? w.amount ?? 0), 0);
 
     const breakdown = this.calcBreakdown(
       paidOrders,
@@ -292,6 +297,7 @@ export class RepasseService {
       event.retentionRate,
       !!audit,
       committedWithdrawals,
+      event.organizerFeeRate,
     );
 
     return {
@@ -337,13 +343,15 @@ export class RepasseService {
       const releaseDate = getReleaseDate(paymentDate, payment.method);
       const released = releaseDate <= now;
 
+      const netAmount = Math.round(order.finalAmount * (1 - event.organizerFeeRate));
+
       if (!released) {
         items.push({
           orderId: order.id,
           paymentId: payment.id,
           transactionId: payment.transactionId,
           type: 'AGUARDANDO_LIBERACAO',
-          amount: order.finalAmount,
+          amount: netAmount,
           retainedAmount: null,
           paymentMethod: payment.method,
           purchaseDate: order.createdAt,
@@ -353,13 +361,13 @@ export class RepasseService {
           buyer: order.user,
         });
       } else if (!isAudited) {
-        const retainedAmount = Math.round(order.finalAmount * event.retentionRate);
+        const retainedAmount = Math.round(netAmount * event.retentionRate);
         items.push({
           orderId: order.id,
           paymentId: payment.id,
           transactionId: payment.transactionId,
           type: 'VALOR_RETIDO',
-          amount: order.finalAmount,
+          amount: netAmount,
           retainedAmount,
           paymentMethod: payment.method,
           purchaseDate: order.createdAt,
@@ -420,9 +428,10 @@ export class RepasseService {
       const count: number = metadata.creditCard.installments;
       const paymentDate = new Date(payment.paymentDate);
 
-      // 10% retido separado; 90% dividido em N parcelas de 31 dias cada
-      const retained = Math.round(order.finalAmount * event.retentionRate);
-      const distributable = order.finalAmount - retained;
+      // Deduct organizer fee first, then split 10%/90%
+      const netAmount = Math.round(order.finalAmount * (1 - event.organizerFeeRate));
+      const retained = Math.round(netAmount * event.retentionRate);
+      const distributable = netAmount - retained;
       const baseInstallment = Math.floor(distributable / count);
       const lastExtra = distributable - baseInstallment * count;
 
@@ -560,6 +569,7 @@ export class RepasseService {
       event.retentionRate,
       !!audit,
       committedWithdrawals,
+      event.organizerFeeRate,
     );
 
     if (amount > saldoParaSaque) {
@@ -568,17 +578,16 @@ export class RepasseService {
       );
     }
 
-    const feeAmount = Math.round(amount * event.organizerFeeRate);
-    const netAmount = amount - feeAmount;
-
+    // Fee was already deducted upfront when distributing into buckets (spec step 3).
+    // saldoParaSaque is already the net amount — no additional deduction at withdrawal.
     const withdrawal = await prismaWrite.eventWithdrawal.create({
       data: {
         eventId,
         requestedById: userId,
         amount,
         feeRate: event.organizerFeeRate,
-        feeAmount,
-        netAmount,
+        feeAmount: 0,
+        netAmount: amount,
         status: WithdrawalStatus.PENDING,
       },
     });
@@ -728,6 +737,7 @@ export class RepasseService {
       event.retentionRate,
       false,
       committedWithdrawals,
+      event.organizerFeeRate,
     );
 
     const audit = await prismaWrite.eventAudit.create({
