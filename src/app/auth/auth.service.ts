@@ -967,7 +967,7 @@ export class AuthService {
     );
 
     this.emailService.sendEmailChangeVerification({
-      email: normalizedEmail,
+      email: user.email,
       firstName: user.firstName,
       newEmail: normalizedEmail,
       code: display,
@@ -976,7 +976,7 @@ export class AuthService {
       device: this.parseDevice(userAgent),
     }).catch((err) => this.logger.warn('Failed to send email change verification:', err));
 
-    return { success: true, message: 'Código de verificação enviado para o novo e-mail. Confirme para concluir a troca.' };
+    return { success: true, message: 'Código de verificação enviado para o seu e-mail atual. Confirme para concluir a troca.' };
   }
 
   async verifyEmailChange(userId: string, code: string) {
