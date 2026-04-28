@@ -258,9 +258,9 @@ export class UserService {
     if (updateUserDto.phone) {
       const existing = await prismaRead.user.findUnique({
         where: { id },
-        select: { phone: true },
+        select: { phone: true, googleId: true },
       });
-      if (existing && !existing.phone) {
+      if (existing && !existing.phone && existing.googleId) {
         isFirstProfileCompletion = true;
       }
     }
