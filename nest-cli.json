@@ -12,6 +12,10 @@
       {
         "include": "prisma/**/*",
         "outDir": "dist"
+      },
+      {
+        "include": "common/templates/**/*",
+        "outDir": "dist"
       }
     ]
   }
