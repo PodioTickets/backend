@@ -7,11 +7,12 @@ import { PaymentsWebhookService } from './payments-webhook.service';
 import { ConfigModule } from '@nestjs/config';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
+import { ReceiptPdfService } from '../../common/services/receipt-pdf.service';
 
 @Module({
   imports: [PrismaModule, ConfigModule],
   controllers: [PaymentsController],
-  providers: [PaymentsService, CieloService, PaymentsWebhookService, EmailService, TicketPdfService],
+  providers: [PaymentsService, CieloService, PaymentsWebhookService, EmailService, TicketPdfService, ReceiptPdfService],
   exports: [PaymentsService, CieloService],
 })
 export class PaymentsModule {}

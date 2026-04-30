@@ -191,6 +191,7 @@ export class EmailService {
     eventLocation: string;
     eventBannerUrl: string;
     ticketPdf?: Buffer;
+    receiptPdf?: Buffer;
   }) {
     const html = this.loadTemplate('inscricao-confirmada.html', {
       firstName: this.escapeHtml(data.firstName),
@@ -209,20 +210,30 @@ export class EmailService {
       text,
     };
 
+    const safeName = data.eventName.replace(/[^a-zA-Z0-9À-ÿ _-]/g, '').trim().replace(/\s+/g, '_');
+    const attachments: any[] = [];
+
     if (data.ticketPdf) {
-      const safeName = data.eventName.replace(/[^a-zA-Z0-9À-ÿ _-]/g, '').trim().replace(/\s+/g, '_');
-      msg.attachments = [
-        {
-          content: data.ticketPdf.toString('base64'),
-          filename: `ingresso_${safeName}.pdf`,
-          type: 'application/pdf',
-          disposition: 'attachment',
-        },
-      ];
+      attachments.push({
+        content: data.ticketPdf.toString('base64'),
+        filename: `ingresso_${safeName}.pdf`,
+        type: 'application/pdf',
+        disposition: 'attachment',
+      });
     }
+    if (data.receiptPdf) {
+      attachments.push({
+        content: data.receiptPdf.toString('base64'),
+        filename: `recibo_${safeName}.pdf`,
+        type: 'application/pdf',
+        disposition: 'attachment',
+      });
+    }
+    if (attachments.length > 0) msg.attachments = attachments;
 
     await this.send(msg);
-    this.logger.log(`Registration confirmed email sent to: ${data.email}${data.ticketPdf ? ' (with ticket PDF)' : ''}`);
+    const attachInfo = [data.ticketPdf ? 'ticket' : '', data.receiptPdf ? 'receipt' : ''].filter(Boolean).join('+');
+    this.logger.log(`Registration confirmed email sent to: ${data.email}${attachInfo ? ` (${attachInfo} PDF)` : ''}`);
   }
 
   async sendTransferRequested(data: {
