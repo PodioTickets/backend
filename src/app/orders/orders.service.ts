@@ -1785,7 +1785,7 @@ export class OrdersService {
           id: true, name: true, slug: true,
           eventDate: true, registrationStartDate: true, registrationEndDate: true,
           location: true, city: true, state: true, country: true, zipCode: true, neighborhood: true,
-          bannerUrl: true,
+          bannerUrl: true, logoUrl: true,
         },
       }),
       r.question.findMany({
@@ -2201,7 +2201,7 @@ export class OrdersService {
           firstName: buyer.firstName || 'Participante',
           eventName: snapshotEvent.name,
           eventLocation: locationParts.join(', ') || '—',
-          eventBannerUrl: (snapshotEvent as any).bannerUrl || '',
+          eventBannerUrl: (snapshotEvent as any).logoUrl || (snapshotEvent as any).bannerUrl || '',
         });
       }).catch((err: any) => this.logger.warn('Failed to send registration confirmation email:', err));
     }
