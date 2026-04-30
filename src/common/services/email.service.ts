@@ -190,6 +190,7 @@ export class EmailService {
     eventName: string;
     eventLocation: string;
     eventBannerUrl: string;
+    ticketPdf?: Buffer;
   }) {
     const html = this.loadTemplate('inscricao-confirmada.html', {
       firstName: this.escapeHtml(data.firstName),
@@ -200,8 +201,28 @@ export class EmailService {
 
     const text = `Olá ${data.firstName},\n\nSua inscrição na ${data.eventName} foi confirmada! Sua vaga está garantida.\n\nEvento: ${data.eventName}\nLocal: ${data.eventLocation}\n\nPodioTicket — podioticket.com.br`;
 
-    await this.send({ from: this.from, to: data.email, subject: `Inscrição confirmada — ${data.eventName}`, html, text });
-    this.logger.log(`Registration confirmed email sent to: ${data.email}`);
+    const msg: any = {
+      from: this.from,
+      to: data.email,
+      subject: `Inscrição confirmada — ${data.eventName}`,
+      html,
+      text,
+    };
+
+    if (data.ticketPdf) {
+      const safeName = data.eventName.replace(/[^a-zA-Z0-9À-ÿ _-]/g, '').trim().replace(/\s+/g, '_');
+      msg.attachments = [
+        {
+          content: data.ticketPdf.toString('base64'),
+          filename: `ingresso_${safeName}.pdf`,
+          type: 'application/pdf',
+          disposition: 'attachment',
+        },
+      ];
+    }
+
+    await this.send(msg);
+    this.logger.log(`Registration confirmed email sent to: ${data.email}${data.ticketPdf ? ' (with ticket PDF)' : ''}`);
   }
 
   async sendTransferRequested(data: {

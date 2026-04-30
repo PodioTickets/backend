@@ -19,6 +19,7 @@ import { PatchBillingAddressDto } from './dto/patch-billing-address.dto';
 import { PayOrderDto } from './dto/pay-order.dto';
 import { PatchCouponDto } from './dto/patch-coupon.dto';
 import { EmailService } from '../../common/services/email.service';
+import { TicketPdfService } from '../../common/services/ticket-pdf.service';
 
 // ─── typed error helpers ─────────────────────────────────────────────────────
 
@@ -277,6 +278,7 @@ export class OrdersService {
     private readonly cieloService: CieloService,
     private readonly redisService: OrdersRedisService,
     private readonly emailService: EmailService,
+    private readonly ticketPdfService: TicketPdfService,
   ) {}
 
   // ── 1. reserve ─────────────────────────────────────────────────────────────
@@ -2187,21 +2189,91 @@ export class OrdersService {
 
     this.logger.log(`Order ${orderId} paid successfully for user ${userId}`);
 
-    // Envio de email de confirmação — fire-and-forget
+    // Envio de email de confirmação com PDF do ingresso — fire-and-forget
     if (snapshotEvent) {
       const r2: any = this.prisma.getReadClient();
-      r2.user.findUnique({
-        where: { id: userId },
-        select: { email: true, firstName: true },
-      }).then((buyer: { email: string; firstName: string } | null) => {
+      r2.order.findUnique({
+        where: { id: orderId },
+        include: {
+          event: {
+            include: { organization: { select: { name: true, tradeName: true } } },
+          },
+          registrations: {
+            include: {
+              user: true,
+              tickets: { include: { ticket: { include: { category: true } } } },
+              products: { include: { product: true, variation: true } },
+              questionAnswers: { include: { question: true } },
+            },
+          },
+        },
+      }).then(async (order: any) => {
+        if (!order) return;
+        const event = order.event ?? snapshotEvent;
+        const orgName = event?.organization?.tradeName || event?.organization?.name || '';
+        const regs: any[] = order.registrations ?? [];
+        const locationParts = [snapshotEvent.location, (snapshotEvent as any).city, (snapshotEvent as any).state].filter(Boolean);
+
+        const pdfData = {
+          orderNumber: orderId.slice(0, 8).toUpperCase(),
+          issuedAt: new Date(),
+          event: {
+            name: snapshotEvent.name ?? '',
+            date: snapshotEvent.eventDate ?? new Date(),
+            organization: orgName,
+            location: locationParts.join(', ') || '—',
+            participantCount: regs.length,
+          },
+          registrations: regs.map((reg: any, idx: number) => {
+            const user = reg.user ?? {};
+            const ticketSnap = reg.tickets?.[0];
+            const ticket = ticketSnap?.ticket;
+            const catName = ticket?.category?.name ?? '';
+            const ticketName = ticket?.name ?? '';
+            const fullTicketName = catName && ticketName && catName !== ticketName
+              ? `${catName} - ${ticketName}` : ticketName || catName;
+            return {
+              index: idx + 1,
+              qrCode: reg.qrCode ?? reg.id,
+              participantName: (reg.participantName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim()) || 'Participante',
+              ticketName: fullTicketName,
+              email: reg.participantEmail ?? user.email,
+              cpf: reg.participantCpf ?? user.documentNumber,
+              dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
+              phone: reg.participantPhone ?? user.phone,
+              gender: reg.participantGender ?? user.gender,
+              questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => ({
+                question: qa.question?.question ?? '',
+                answer: qa.answer ?? '',
+              })),
+              products: (reg.products ?? []).map((rp: any) => ({
+                name: rp.product?.name ?? '',
+                price: rp.unitPrice ?? 0,
+                variationName: rp.variation?.name,
+                imageUrl: rp.product?.images?.[rp.product?.primaryImageIndex ?? 0],
+                isIncluded: rp.product?.isIncludedInTicket ?? false,
+              })),
+            };
+          }),
+        };
+
+        let ticketPdf: Buffer | undefined;
+        try {
+          ticketPdf = await this.ticketPdfService.generateTicketPdf(pdfData);
+        } catch (pdfErr: any) {
+          this.logger.warn('Failed to generate ticket PDF:', pdfErr?.message);
+        }
+
+        const buyer = regs.find((r: any) => r.user?.email)?.user;
         if (!buyer?.email) return;
-        const locationParts = [snapshotEvent.location, snapshotEvent.city, snapshotEvent.state].filter(Boolean);
+
         return this.emailService.sendRegistrationConfirmed({
           email: buyer.email,
           firstName: buyer.firstName || 'Participante',
           eventName: snapshotEvent.name,
           eventLocation: locationParts.join(', ') || '—',
           eventBannerUrl: (snapshotEvent as any).logoUrl || (snapshotEvent as any).bannerUrl || '',
+          ticketPdf,
         });
       }).catch((err: any) => this.logger.warn('Failed to send registration confirmation email:', err));
     }
