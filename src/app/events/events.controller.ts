@@ -11,7 +11,10 @@ import {
   Request,
   BadRequestException,
   Header,
+  Res,
+  StreamableFile,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import type { Request as ExpressRequest } from 'express';
 import {
   ApiTags,
@@ -41,6 +44,8 @@ import {
 import { DashboardQueryDto } from './dto/dashboard.dto';
 import { FinancialQueryDto } from './dto/financial.dto';
 import { RegistrationsQueryDto } from './dto/registrations.dto';
+import { ExportRegistrationsDto, EXPORT_FIELDS } from './dto/export-registrations.dto';
+import { ExportRegistrationsService } from './export-registrations.service';
 import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CacheTTL, NoCache } from 'src/common/decorators/cache.decorator';
@@ -59,7 +64,10 @@ function clientIp(req: ExpressRequest): string {
 @ApiTags('Events')
 @Controller('api/v1/events')
 export class EventsController {
-  constructor(private readonly eventsService: EventsService) { }
+  constructor(
+    private readonly eventsService: EventsService,
+    private readonly exportService: ExportRegistrationsService,
+  ) { }
 
   @Post()
   @UseGuards(JwtAuthGuard)
@@ -673,6 +681,64 @@ export class EventsController {
     @Param('orderId') orderId: string,
   ) {
     return this.eventsService.getOrderForOrganizer(req.user.id, eventId, orderId);
+  }
+
+  @Get(':eventId/registrations/export')
+  @UseGuards(JwtAuthGuard)
+  @NoCache()
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Export event registrations',
+    description: 'Exports registrations as TXT (CSV), Excel (.xlsx) or PDF. Only organizer can access.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiQuery({ name: 'format', required: true, enum: ['txt', 'excel', 'pdf'] })
+  @ApiQuery({ name: 'fields', required: false, type: String, description: 'Comma-separated field IDs. Defaults to all.' })
+  @ApiResponse({ status: 200, description: 'File download' })
+  @ApiResponse({ status: 400, description: 'Invalid format' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  async exportRegistrations(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Query() query: ExportRegistrationsDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const { format, fields: fieldsParam } = query;
+    if (!['txt', 'excel', 'pdf'].includes(format)) {
+      throw new BadRequestException('Invalid export format. Use txt, excel or pdf.');
+    }
+
+    const registrations = await this.eventsService.getRegistrationsForExport(req.user.id, eventId);
+    const fields = this.exportService.parseFields(fieldsParam);
+
+    // Fetch event name for file naming
+    const eventName = `inscricoes-${eventId.slice(0, 8)}`;
+
+    if (format === 'txt') {
+      const buf = this.exportService.generateTxt(registrations, fields);
+      res.set({
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${eventName}.csv"`,
+      });
+      return new StreamableFile(buf);
+    }
+
+    if (format === 'excel') {
+      const buf = this.exportService.generateExcel(registrations, fields, eventName);
+      res.set({
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Content-Disposition': `attachment; filename="${eventName}.xlsx"`,
+      });
+      return new StreamableFile(buf);
+    }
+
+    // pdf
+    const buf = await this.exportService.generatePdf(registrations, fields, eventName);
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${eventName}.pdf"`,
+    });
+    return new StreamableFile(buf);
   }
 
   @Get(':eventId/registrations')

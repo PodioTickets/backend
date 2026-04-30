@@ -5253,4 +5253,145 @@ export class EventsService {
       },
     };
   }
+
+  /**
+   * Fetch all registrations for a given event (no pagination) for export purposes.
+   * Caller must already have organizer access verified.
+   */
+  async getRegistrationsForExport(userId: string, eventId: string): Promise<any[]> {
+    await this.verifyOrganizerAccess(userId, eventId, 'dashboard');
+
+    const prismaRead = this.prisma.getReadClient();
+
+    const includeClause = {
+      user: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          phone: true,
+          documentNumber: true,
+          dateOfBirth: true,
+          gender: true,
+          avatarUrl: true,
+        },
+      },
+      tickets: {
+        include: {
+          ticket: {
+            include: {
+              category: { select: { id: true, name: true } },
+            },
+          },
+          batch: { select: { id: true, price: true } },
+        },
+      },
+      products: {
+        include: {
+          product: { select: { id: true, name: true } },
+          variation: { select: { id: true, name: true } },
+        },
+      },
+      questionAnswers: {
+        include: {
+          question: { select: { id: true, question: true, type: true } },
+        },
+      },
+      order: {
+        include: {
+          payment: {
+            select: {
+              id: true,
+              status: true,
+              method: true,
+              amount: true,
+              paymentDate: true,
+              createdAt: true,
+            },
+          },
+          user: {
+            select: { id: true, firstName: true, lastName: true, email: true },
+          },
+        },
+      },
+    };
+
+    const registrations = await prismaRead.registration.findMany({
+      where: {
+        eventId,
+        status: { not: 'PENDING' as any },
+      },
+      include: includeClause,
+      orderBy: [{ order: { createdAt: 'desc' } }, { id: 'asc' }],
+    });
+
+    return registrations.map((reg: any) => {
+      const u = reg.user;
+      const participant = u ?? {
+        id: null,
+        firstName: (reg.participantName ?? '').split(' ')[0] ?? '',
+        lastName: (reg.participantName ?? '').split(' ').slice(1).join(' ') ?? '',
+        email: reg.participantEmail ?? null,
+        phone: reg.participantPhone ?? null,
+        documentNumber: reg.participantCpf ?? null,
+        dateOfBirth: null,
+        gender: null,
+        avatarUrl: null,
+      };
+
+      const order = reg.order ?? {};
+      const billingAddress = this.resolveOrderBillingAddress(order, order.payment);
+
+      return {
+        id: reg.id,
+        status: reg.status,
+        user: participant,
+        emergencyContact: {
+          name: reg.emergencyContactName ?? null,
+          phone: reg.emergencyContactPhone ?? null,
+        },
+        ticket: reg.tickets?.[0]
+          ? (() => {
+              const rt = reg.tickets[0];
+              const snap = rt.ticketSnapshot as Record<string, any> | null;
+              const t = rt.ticket;
+              return {
+                name: snap?.name ?? t?.name ?? '',
+                modality: snap?.modality ?? t?.modality ?? '',
+                distance: snap?.distance ?? t?.distance ?? null,
+                distanceUnit: snap?.distanceUnit ?? t?.distanceUnit ?? null,
+                category: snap?.category ?? (t?.category ? t.category : null),
+              };
+            })()
+          : null,
+        products: (reg.products ?? []).map((rp: any) => {
+          const snap = rp.productSnapshot as Record<string, any> | null;
+          return {
+            product: { name: snap?.name ?? rp.product?.name ?? '' },
+            variationName: snap?.selectedVariation?.name ?? rp.variation?.name ?? null,
+          };
+        }),
+        questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => {
+          const qSnap = qa.questionSnapshot as Record<string, any> | null;
+          return {
+            question: { question: qSnap?.question ?? qa.question?.question ?? '' },
+            answer: qa.answer ?? '',
+          };
+        }),
+        order: {
+          finalAmount: order.finalAmount ? this.normalizeToCents(order.finalAmount) : null,
+          billingAddress,
+          payment: order.payment
+            ? {
+                status: order.payment.status,
+                method: order.payment.method,
+                paymentDate: order.payment.paymentDate,
+                createdAt: order.payment.createdAt,
+              }
+            : null,
+        },
+      };
+    });
+  }
 }
