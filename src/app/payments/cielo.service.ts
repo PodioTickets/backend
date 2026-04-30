@@ -66,7 +66,7 @@ export class CieloService {
     this.webhookSecret = this.configService.get<string>('CIELO_WEBHOOK_SECRET') || '';
 
     const baseURL = this.isSandbox
-      ? 'https://apisandbox.cieloecommerce.cielo.com.br'
+      ? 'https://apisandbox.braspag.com.br'
       : 'https://api.cieloecommerce.cielo.com.br';
 
     if (!this.merchantId || !this.merchantKey) {
@@ -121,6 +121,13 @@ export class CieloService {
       cvv: string;
       installments: number;
     },
+    cardToken?: {
+      token: string;
+      brand: string;
+      holder?: string;
+      securityCode?: string;
+      installments: number;
+    },
   ): Promise<CieloPaymentResult> {
     if (!this.axiosInstance) {
       throw new Error('Cielo is not configured');
@@ -143,15 +150,38 @@ export class CieloService {
 
       switch (paymentMethod) {
         case PaymentMethod.CREDIT_CARD:
-          if (!cardData) {
-            throw new Error('Card data is required for credit card payments');
+          if (!cardToken && !cardData) {
+            throw new Error('Card data or card token is required for credit card payments');
+          }
+
+          paymentData.Type = 'CreditCard';
+          paymentData.Capture = false;
+          if (this.isSandbox) {
+            paymentData.Provider = 'Simulado';
+          }
+
+          if (cardToken) {
+            paymentData.Installments = cardToken.installments || 1;
+            paymentData.CreditCard = {
+              CardToken: cardToken.token,
+              Brand: cardToken.brand,
+              ...(cardToken.holder && { Holder: cardToken.holder }),
+              ...(cardToken.securityCode && { SecurityCode: cardToken.securityCode }),
+            };
+
+            this.logger.debug('Credit card payment via token:', {
+              brand: cardToken.brand,
+              installments: paymentData.Installments,
+              hasSecurityCode: !!cardToken.securityCode,
+            });
+            break;
           }
 
           // Detectar bandeira do cartão baseado no número
           const cardBrand = this.detectCardBrand(cardData.number);
           if (!cardBrand) {
             this.logger.error('Unable to detect card brand', {
-              cardNumber: cardData.number?.replace(/\d(?=\d{4})/g, '*'), // Mascarar número para log
+              cardNumber: cardData.number?.replace(/\d(?=\d{4})/g, '*'),
             });
             throw new Error('Unable to detect card brand. Please check the card number.');
           }
@@ -196,42 +226,23 @@ export class CieloService {
             converted: expiryDate,
           });
 
-          const cardNumber = cardData.number.replace(/\D/g, ''); // Remover espaços e caracteres não numéricos
+          const cardNumber = cardData.number.replace(/\D/g, '');
 
-          // Validar e limpar CVV (deve conter apenas números)
           if (!cardData.cvv) {
-            throw new Error('CVV é obrigatório');
+            throw new Error('CVV is required');
           }
 
-          // Converter para string, remover caracteres não numéricos e validar
           const securityCodeStr = String(cardData.cvv).replace(/\D/g, '');
           if (!securityCodeStr || securityCodeStr.length < 3 || securityCodeStr.length > 4) {
-            throw new Error(`CVV inválido. Deve conter 3 ou 4 dígitos numéricos. Recebido: ${cardData.cvv} (limpo: ${securityCodeStr})`);
+            throw new Error(`Invalid CVV: must be 3 or 4 digits`);
           }
 
-          // Converter para número inteiro (Cielo pode esperar tipo Number, não string)
-          const securityCode = parseInt(securityCodeStr, 10);
-          if (isNaN(securityCode)) {
-            throw new Error(`CVV inválido. Não foi possível converter para número: ${securityCodeStr}`);
-          }
-
-          this.logger.debug('CVV validation:', {
-            original: cardData.cvv,
-            cleaned: securityCodeStr,
-            asNumber: securityCode,
-            length: securityCodeStr.length,
-            type: typeof securityCode,
-          });
-
-          paymentData.Type = 'CreditCard';
-          // Campos específicos de cartão de crédito
           paymentData.Installments = cardData.installments || 1;
-          paymentData.Capture = false;
           paymentData.CreditCard = {
             CardNumber: cardNumber,
             Holder: cardData.holder,
             ExpirationDate: expiryDate,
-            SecurityCode: securityCode, // Número inteiro (Cielo espera tipo Number)
+            SecurityCode: securityCodeStr,
             Brand: cardBrand,
           };
 
@@ -249,7 +260,7 @@ export class CieloService {
                 CardNumber: cardNumber.substring(0, 4) + '****' + cardNumber.substring(cardNumber.length - 4),
                 Holder: cardData.holder,
                 ExpirationDate: expiryDate,
-                SecurityCode: securityCode,
+                SecurityCode: securityCodeStr,
                 Brand: cardBrand,
               },
             }),
@@ -337,12 +348,12 @@ export class CieloService {
         };
       }
       this.logger.debug('Request body (masked):', JSON.stringify(maskedRequestBody, null, 2));
-      
+
       // Para PIX, log completo do request (sem dados sensíveis)
       if (paymentMethod === PaymentMethod.PIX) {
         this.logger.debug('PIX Request body (complete):', JSON.stringify(requestBody, null, 2));
         this.logger.debug('PIX Request body (as sent to Cielo):', {
-          url: '/1/sales',
+          url: '/v2/sales',
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -356,26 +367,24 @@ export class CieloService {
       let response: any;
       try {
         // Log da URL completa sendo usada
-        const fullUrl = `${this.axiosInstance.defaults.baseURL}/1/sales`;
-        
+        const fullUrl = `${this.axiosInstance.defaults.baseURL}/v2/sales`;
+
         // Log dos headers que serão enviados
         this.logger.debug('Making request to Cielo:', {
           method: 'POST',
           url: fullUrl,
           baseURL: this.axiosInstance.defaults.baseURL,
-          endpoint: '/1/sales',
+          endpoint: '/v2/sales',
           headers: {
             'Accept': this.axiosInstance.defaults.headers['Accept'],
             'Content-Type': this.axiosInstance.defaults.headers['Content-Type'],
             'MerchantId': this.axiosInstance.defaults.headers['MerchantId'],
-            'MerchantKey': this.axiosInstance.defaults.headers['MerchantKey'] ? '***present***' : '***missing***',
+            'MerchantKey': this.axiosInstance.defaults.headers['MerchantKey'],
           },
         });
-        
-        // Enviar headers explicitamente para garantir que sejam enviados corretamente
-        // O axios pode normalizar headers customizados, então vamos garantir que MerchantId e MerchantKey sejam enviados
+
         response = await this.axiosInstance.post<CieloPaymentResponse>(
-          '/1/sales',
+          '/v2/sales',
           requestBody,
           {
             headers: {
@@ -396,7 +405,7 @@ export class CieloService {
           amount: amountInCents,
           merchantOrderId,
         });
-        
+
         // Se o erro for capturado aqui, re-lançar para ser tratado no catch externo
         throw requestError;
       }
@@ -409,7 +418,7 @@ export class CieloService {
         paymentReturnCode: response.data?.Payment?.ReturnCode,
         paymentReturnMessage: response.data?.Payment?.ReturnMessage,
       });
-      
+
       // Para PIX, log completo da resposta
       if (paymentMethod === PaymentMethod.PIX) {
         this.logger.debug('PIX Response (complete):', JSON.stringify(response.data, null, 2));
@@ -417,7 +426,7 @@ export class CieloService {
       }
 
       const payment = response.data.Payment;
-      
+
       // Verificar se há erros na resposta mesmo com status 200
       if (!payment) {
         this.logger.error('No Payment object in Cielo response:', response.data);
@@ -435,22 +444,22 @@ export class CieloService {
       // Status 0 = NotFinished (pode ser erro se houver ReturnCode de erro)
       const returnCode = payment.ReturnCode;
       const returnMessage = payment.ReturnMessage;
-      
+
       // Códigos de retorno de erro comuns:
       // BP904 = O Json informado não é válido
       // 129 = Affiliation not found (problema de configuração da conta Cielo - PIX não habilitado)
       // Outros códigos começando com BP ou números >= 100 geralmente indicam erro
       // ReturnCode '4' = Operation Successful (sucesso)
       // ReturnCode '5' ou outros = Negado/Erro
-      
+
       // Verificar se há erro baseado no Status e ReturnCode
       const hasErrorReturnCode = returnCode && (
         returnCode.toString().startsWith('BP') || // Códigos BP são erros
         (typeof returnCode === 'number' && returnCode >= 100) || // Códigos numéricos >= 100 são erros
         returnCode.toString() === '5' // ReturnCode 5 = Negado
       );
-      
-      const isError = payment.Status === 2 || payment.Status === 3 || 
+
+      const isError = payment.Status === 2 || payment.Status === 3 ||
         (payment.Status === 0 && hasErrorReturnCode); // Status 0 com ReturnCode de erro
 
       const result: CieloPaymentResult = {
@@ -470,7 +479,7 @@ export class CieloService {
       if (isError) {
         // Mapear códigos de erro comuns para mensagens mais amigáveis
         let userFriendlyMessage = returnMessage || `Pagamento negado`;
-        
+
         if (returnCode) {
           const codeStr = returnCode.toString();
           // Mapear códigos de erro conhecidos
@@ -506,7 +515,7 @@ export class CieloService {
               }
           }
         }
-        
+
         result.error = userFriendlyMessage;
         result.errorDetails = {
           status: payment.Status,
@@ -565,12 +574,12 @@ export class CieloService {
       return result;
     } catch (error: any) {
       const errorData = error.response?.data;
-      
+
       // A Cielo pode retornar erros em diferentes formatos:
       // 1. Array de objetos com Code e Message: [{Code: 304, Message: "..."}]
       // 2. Objeto com Message: {Message: "..."}
       // 3. Objeto com ValidationErrors: {ValidationErrors: [...]}
-      
+
       let errorMessage = 'Failed to create payment';
       let errorDetails: any = null;
 
@@ -583,7 +592,10 @@ export class CieloService {
             errorMessage = firstError.Message;
             // Melhorar mensagem para erros específicos conhecidos
             if (firstError.Code === 129) {
-              errorMessage = 'Affiliation not found - A conta Cielo não está habilitada para PIX. Verifique se a afiliação está configurada para usar o Provider "Cielo2" no painel da Cielo.';
+              const methodHint = paymentMethod === PaymentMethod.PIX
+                ? 'Check if PIX is enabled and the Provider is set to "Cielo2" in the Cielo panel.'
+                : `Check if ${paymentMethod} is enabled for this affiliation in the Cielo panel.`;
+              errorMessage = `Affiliation not found - ${methodHint}`;
             }
           } else if (firstError?.message) {
             errorMessage = firstError.message;
@@ -593,11 +605,11 @@ export class CieloService {
         else if (typeof errorData === 'object') {
           errorDetails = errorData;
           // Tentar diferentes campos de mensagem
-          errorMessage = errorData.Message 
-            || errorData.message 
-            || errorData.error 
+          errorMessage = errorData.Message
+            || errorData.message
+            || errorData.error
             || errorMessage;
-          
+
           // Se tiver ValidationErrors, usar eles como detalhes
           if (errorData.ValidationErrors) {
             errorDetails = errorData.ValidationErrors;
@@ -659,7 +671,7 @@ export class CieloService {
     }
 
     try {
-      const url = `/1/sales/${paymentId}/capture`;
+      const url = `/v2/sales/${paymentId}/capture`;
       // amount já está em centavos, mas Cielo espera em centavos também
       const requestBody = amount ? { Amount: amount } : {};
 
@@ -685,7 +697,7 @@ export class CieloService {
     }
 
     try {
-      const url = `/1/sales/${paymentId}/void`;
+      const url = `/v2/sales/${paymentId}/void`;
       // amount já está em centavos, mas Cielo espera em centavos também
       const requestBody = amount ? { Amount: amount } : {};
 
@@ -712,7 +724,7 @@ export class CieloService {
 
     try {
       const response = await this.axiosInstance.get<CieloPaymentResponse>(
-        `/1/sales/${paymentId}`,
+        `/v2/sales/${paymentId}`,
       );
       return response.data;
     } catch (error: any) {

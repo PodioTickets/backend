@@ -63,6 +63,7 @@ export class CouponsService {
         cpfList: createCouponDto.cpfList ? (createCouponDto.cpfList as any) : null,
         cpfListStatus: createCouponDto.cpfListStatus || 'DISABLED',
         minCartValue: createCouponDto.minCartValue != null ? createCouponDto.minCartValue : null,
+        maxUsage: createCouponDto.maxUsage ?? null,
       },
     });
 
@@ -85,7 +86,7 @@ export class CouponsService {
     const limit = filterDto.limit || 10;
     const skip = (page - 1) * limit;
 
-    const where: any = { eventId };
+    const where: any = { eventId, deletedAt: null };
     if (filterDto.status) {
       where.status = filterDto.status;
     }
@@ -165,9 +166,11 @@ export class CouponsService {
       throw new NotFoundException('Coupon not found');
     }
 
-    // Não permitir atualizar cupons que já foram utilizados
-    if (coupon.usageCount > 0) {
-      throw new BadRequestException('Cannot update coupon that has been used');
+    // Limite não pode ser menor que o uso atual
+    if (updateCouponDto.maxUsage != null && updateCouponDto.maxUsage < coupon.usageCount) {
+      throw new BadRequestException(
+        `O limite não pode ser menor que o uso atual (${coupon.usageCount})`,
+      );
     }
 
     // Se o código está sendo atualizado, verificar se já existe
@@ -252,14 +255,16 @@ export class CouponsService {
       throw new NotFoundException('Coupon not found');
     }
 
-    // Não permitir deletar cupons que já foram utilizados
     if (coupon.usageCount > 0) {
-      throw new BadRequestException('Cannot delete coupon that has been used');
+      await prismaWrite.coupon.update({
+        where: { id: couponId },
+        data: { deletedAt: new Date() },
+      });
+    } else {
+      await prismaWrite.coupon.delete({
+        where: { id: couponId },
+      });
     }
-
-    await prismaWrite.coupon.delete({
-      where: { id: couponId },
-    });
 
     return {
       message: 'Coupon deleted successfully',
@@ -284,13 +289,12 @@ export class CouponsService {
       }
     }
 
-    // Validar campos obrigatórios para AGE
+    // Validar campos obrigatórios para AGE — requer minAge ou maxAge (ou ageRule/ageValue legado)
     if (dto.couponType === 'AGE') {
-      if (!dto.ageRule || !['MIN', 'MAX'].includes(dto.ageRule)) {
-        throw new BadRequestException('ageRule is required and must be MIN or MAX for AGE coupon type');
-      }
-      if (!dto.ageValue) {
-        throw new BadRequestException('ageValue is required for AGE coupon type');
+      const hasNewFields = (dto as any).minAge != null || (dto as any).maxAge != null;
+      const hasLegacyFields = dto.ageRule && dto.ageValue;
+      if (!hasNewFields && !hasLegacyFields) {
+        throw new BadRequestException('AGE coupon requires minAge/maxAge or ageRule/ageValue');
       }
     }
 

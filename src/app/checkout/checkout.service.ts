@@ -30,6 +30,7 @@ interface CouponValidationResult {
   discount: number;
   couponId?: string;
   error?: string;
+  effectiveUsage?: number;
 }
 
 interface VoucherValidationResult {
@@ -114,7 +115,7 @@ export class CheckoutService {
           dto.participants,
           initialPrices.subtotal,
           userId,
-          prismaRead,
+          prismaWrite,
         );
 
         if (!couponResult.isValid) {
@@ -131,7 +132,7 @@ export class CheckoutService {
           dto.tickets,
           dto.participants,
           initialPrices.subtotal,
-          prismaRead,
+          prismaWrite,
         );
       }
 
@@ -728,7 +729,7 @@ export class CheckoutService {
       },
     });
 
-    if (!coupon) {
+    if (!coupon || (coupon as any).deletedAt) {
       return {
         isValid: false,
         discount: 0,
@@ -804,16 +805,9 @@ export class CheckoutService {
     }
 
     if (coupon.couponType === 'AGE') {
-      // Validar idade dos participantes
       const validAges = participants.every((p) => {
         const age = this.calculateAge(p.birthDate);
-        if (coupon.ageRule === 'MIN' && age < parseInt(coupon.ageValue || '0')) {
-          return false;
-        }
-        if (coupon.ageRule === 'MAX' && age > parseInt(coupon.ageValue || '999')) {
-          return false;
-        }
-        return true;
+        return this.checkAgeCondition(coupon, age);
       });
       if (!validAges) {
         return {
@@ -840,20 +834,19 @@ export class CheckoutService {
       }
     }
 
-    // Calcular desconto (subtotal e coupon.value já estão em centavos)
-    let discount = 0;
-    if (coupon.type === 'PERCENTAGE') {
-      // coupon.value é porcentagem (ex: 10 = 10%)
-      discount = subtotal * (coupon.value / 100); // Valor exato
-    } else if (coupon.type === 'FIXED') {
-      // coupon.value já está em centavos
-      discount = Math.min(coupon.value, subtotal);
-    }
+    // Calcular desconto com aplicação parcial nos ingressos mais caros (uso restante)
+    const ticketsWithPrices = await this.fetchTicketPricesForCoupon(tickets, prisma);
+    const totalUnits = ticketsWithPrices.reduce((s, t) => s + t.quantity, 0);
+    const remaining = coupon.maxUsage != null ? coupon.maxUsage - coupon.usageCount : totalUnits;
+    const effectiveUsage = Math.min(Math.max(0, remaining), totalUnits);
+
+    const discount = this.computePartialCouponDiscount(ticketsWithPrices, coupon.type, coupon.value, effectiveUsage);
 
     return {
       isValid: true,
-      discount: discount, // Já está em centavos
+      discount,
       couponId: coupon.id,
+      effectiveUsage,
     };
   }
 
@@ -866,11 +859,13 @@ export class CheckoutService {
   ): Promise<CouponValidationResult> {
     const totalQuantity = tickets.reduce((sum, t) => sum + t.quantity, 0);
     const ticketIds = tickets.map((t) => t.ticketId);
+    const ticketsWithPrices = await this.fetchTicketPricesForCoupon(tickets, prisma);
 
     const autoCoupons = await prisma.coupon.findMany({
       where: {
         eventId,
         status: 'ACTIVE',
+        deletedAt: null,
         couponType: { in: ['QUANTITY', 'AGE'] },
         OR: [{ expiryDate: null }, { expiryDate: { gt: new Date() } }],
       },
@@ -889,25 +884,73 @@ export class CheckoutService {
 
       if (coupon.couponType === 'QUANTITY') {
         if (coupon.minQuantity && totalQuantity < coupon.minQuantity) continue;
+        // QUANTITY: all-or-nothing — se esgotado, não aplica
+        if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) continue;
+
+        const discount =
+          coupon.type === 'PERCENTAGE'
+            ? subtotal * (coupon.value / 100)
+            : Math.min(coupon.value, subtotal);
+        return { isValid: true, discount, couponId: coupon.id, effectiveUsage: 1 };
+
       } else if (coupon.couponType === 'AGE') {
         const allMatch = participants.every((p) => {
           const age = this.calculateAge(p.birthDate);
-          if (coupon.ageRule === 'MIN' && age < parseInt(coupon.ageValue || '0')) return false;
-          if (coupon.ageRule === 'MAX' && age > parseInt(coupon.ageValue || '999')) return false;
-          return true;
+          return this.checkAgeCondition(coupon, age);
         });
         if (!allMatch) continue;
+
+        // AGE: aplica nos ingressos mais caros dentro do uso restante
+        const remaining = coupon.maxUsage != null ? coupon.maxUsage - coupon.usageCount : totalQuantity;
+        const effectiveUsage = Math.min(Math.max(0, remaining), totalQuantity);
+        if (effectiveUsage <= 0) continue;
+        const discount = this.computePartialCouponDiscount(ticketsWithPrices, coupon.type, coupon.value, effectiveUsage);
+        return { isValid: true, discount, couponId: coupon.id, effectiveUsage };
       }
-
-      const discount =
-        coupon.type === 'PERCENTAGE'
-          ? subtotal * (coupon.value / 100)
-          : Math.min(coupon.value, subtotal);
-
-      return { isValid: true, discount, couponId: coupon.id };
     }
 
     return { isValid: false, discount: 0 };
+  }
+
+  private async fetchTicketPricesForCoupon(
+    tickets: ProcessCheckoutDto['tickets'],
+    prisma: any,
+  ): Promise<Array<{ ticketId: string; quantity: number; unitPrice: number }>> {
+    const now = new Date();
+    return Promise.all(
+      tickets.map(async (t) => {
+        const ticket = await prisma.ticket.findUnique({
+          where: { id: t.ticketId },
+          include: { batches: true },
+        });
+        const batch = (t as any).batchId
+          ? ticket?.batches.find((b: any) => b.id === (t as any).batchId)
+          : ticket?.batches.find(
+              (b: any) =>
+                (!b.startDate || new Date(b.startDate) <= now) &&
+                (!b.endDate || new Date(b.endDate) >= now),
+            );
+        return { ticketId: t.ticketId, quantity: t.quantity, unitPrice: batch?.price ?? 0 };
+      }),
+    );
+  }
+
+  private computePartialCouponDiscount(
+    ticketsWithPrices: Array<{ unitPrice: number; quantity: number }>,
+    couponValueType: string,
+    couponValue: number,
+    effectiveUsage: number,
+  ): number {
+    if (effectiveUsage <= 0) return 0;
+    const units = ticketsWithPrices
+      .flatMap((t) => Array(t.quantity).fill(t.unitPrice))
+      .sort((a, b) => b - a)
+      .slice(0, effectiveUsage);
+    if (couponValueType === 'PERCENTAGE') {
+      const base = units.reduce((s, p) => s + p, 0);
+      return Math.floor(base * (couponValue / 100));
+    }
+    return effectiveUsage * couponValue;
   }
 
   private async validateAndApplyVoucher(
@@ -1031,8 +1074,8 @@ export class CheckoutService {
       throw new BadRequestException('Método de pagamento não suportado');
     }
 
-    // Criar merchantOrderId único
-    const merchantOrderId = `checkout-${Date.now()}-${userId}`;
+    // Cielo limit: 50 chars. "chk-" (4) + 8-char id slice (8) + "-" (1) + timestamp (13) = 26
+    const merchantOrderId = `chk-${userId.replace(/-/g, '').slice(0, 8)}-${Date.now()}`;
 
     // Buscar dados do usuário
     const user = await this.prisma.getReadClient().user.findUnique({
@@ -1040,28 +1083,41 @@ export class CheckoutService {
       select: { firstName: true, lastName: true, email: true },
     });
 
-    // Preparar dados do cartão se for cartão de crédito
+    // Prepare card data for credit card payment (raw card or pre-tokenized)
     let cardData = undefined;
+    let cardTokenData = undefined;
     if (paymentMethod === PaymentMethod.CREDIT_CARD) {
-      if (!paymentData.card) {
-        throw new BadRequestException('Dados do cartão são obrigatórios para pagamento com cartão de crédito');
+      if (paymentData.cardToken) {
+        cardTokenData = {
+          token: paymentData.cardToken.token,
+          brand: paymentData.cardToken.brand,
+          holder: paymentData.cardToken.holder,
+          securityCode: paymentData.cardToken.securityCode,
+          installments: paymentData.cardToken.installments,
+        };
+        this.logger.debug('Card token prepared:', {
+          brand: cardTokenData.brand,
+          installments: cardTokenData.installments,
+          hasSecurityCode: !!cardTokenData.securityCode,
+        });
+      } else if (paymentData.card) {
+        cardData = {
+          number: paymentData.card.number,
+          holder: paymentData.card.name,
+          expiry: paymentData.card.expiry,
+          cvv: paymentData.card.cvv,
+          installments: paymentData.card.installments,
+        };
+        this.logger.debug('Card data prepared:', {
+          hasNumber: !!cardData.number,
+          hasHolder: !!cardData.holder,
+          hasExpiry: !!cardData.expiry,
+          hasCvv: !!cardData.cvv,
+          installments: cardData.installments,
+        });
+      } else {
+        throw new BadRequestException('Card data or card token is required for credit card payments');
       }
-
-      cardData = {
-        number: paymentData.card.number,
-        holder: paymentData.card.name,
-        expiry: paymentData.card.expiry,
-        cvv: paymentData.card.cvv,
-        installments: paymentData.card.installments,
-      };
-
-      this.logger.debug('Card data prepared:', {
-        hasNumber: !!cardData.number,
-        hasHolder: !!cardData.holder,
-        hasExpiry: !!cardData.expiry,
-        hasCvv: !!cardData.cvv,
-        installments: cardData.installments,
-      });
     }
 
     // Circuit breaker: rejeitar imediatamente se o circuito estiver aberto
@@ -1076,15 +1132,16 @@ export class CheckoutService {
     const cieloResult = await this.cieloService.createPayment(
       finalTotal,
       'BRL',
-      paymentMethod, // Passar o enum diretamente, não converter para string
+      paymentMethod,
       merchantOrderId,
       {
         name: `${user?.firstName} ${user?.lastName}`,
         email: user?.email,
-        identity: customerCpf, // CPF do primeiro participante (obrigatório para Cielo)
+        identity: customerCpf,
         identityType: customerCpf ? 'CPF' : undefined,
       },
-      cardData, // Passar dados do cartão se for cartão de crédito
+      cardData,
+      cardTokenData,
     );
 
     if (!cieloResult.success) {
@@ -1174,7 +1231,8 @@ export class CheckoutService {
           installmentValue: finalTotal / paymentData.card.installments,
         }
         : undefined,
-      cieloResult, // Retornar resultado completo da Cielo para salvar no banco
+      merchantOrderId,
+      cieloResult,
       // SEGURANÇA: mascarar PAN antes de retornar — nunca expor número completo, CVV ou validade
       cardData: cardData
         ? {
@@ -1254,7 +1312,7 @@ export class CheckoutService {
       // Informações básicas
       cieloPaymentId: cieloResultData?.paymentId,
       cieloStatus: cieloResultData?.cieloStatus,
-      merchantOrderId: cieloResultData?.paymentId ? `checkout-${Date.now()}-${userId}` : null,
+      merchantOrderId: cieloResultData?.paymentId ? (paymentResult.merchantOrderId ?? null) : null,
 
       // Informações de autorização (cartão de crédito)
       authorizationCode: cieloResultData?.authorizationCode || null,
@@ -1626,19 +1684,30 @@ export class CheckoutService {
     if (couponResult.couponId) {
       const freshCoupon = await prisma.coupon.findUnique({
         where: { id: couponResult.couponId },
-        select: { usageCount: true, maxUsage: true },
+        select: { usageCount: true, maxUsage: true, couponType: true },
       });
-      if (freshCoupon?.maxUsage && freshCoupon.usageCount >= freshCoupon.maxUsage) {
-        throw new BadRequestException(
-          'Cupom esgotado. Prossiga sem desconto ou escolha outro cupom.',
-        );
+      let usageIncrement: number;
+      if (freshCoupon?.couponType === 'QUANTITY') {
+        // QUANTITY: all-or-nothing — race condition protection
+        if (freshCoupon.maxUsage != null && freshCoupon.usageCount >= freshCoupon.maxUsage) {
+          throw new BadRequestException('Cupom esgotado. Prossiga sem desconto ou escolha outro cupom.');
+        }
+        usageIncrement = 1;
+      } else {
+        // DISCOUNT/AGE: uso parcial — aplica no máximo o restante disponível
+        const remaining = freshCoupon?.maxUsage != null
+          ? Math.max(0, freshCoupon.maxUsage - freshCoupon.usageCount)
+          : registrations.length;
+        usageIncrement = Math.min(remaining, registrations.length);
       }
-      await prisma.coupon.update({
-        where: { id: couponResult.couponId },
-        data: {
-          usageCount: { increment: registrations.length },
-        },
-      });
+      if (usageIncrement > 0) {
+        await prisma.coupon.update({
+          where: { id: couponResult.couponId },
+          data: {
+            usageCount: { increment: usageIncrement },
+          },
+        });
+      }
     }
 
     // 5. Marcar voucher como usado
@@ -1723,6 +1792,18 @@ export class CheckoutService {
       age--;
     }
     return age;
+  }
+
+  private checkAgeCondition(coupon: any, age: number): boolean {
+    // New fields take precedence over legacy ageRule/ageValue
+    if (coupon.minAge != null && age < coupon.minAge) return false;
+    if (coupon.maxAge != null && age > coupon.maxAge) return false;
+    // Legacy
+    if (!coupon.minAge && !coupon.maxAge) {
+      if (coupon.ageRule === 'MIN' && age < parseInt(coupon.ageValue || '0')) return false;
+      if (coupon.ageRule === 'MAX' && age > parseInt(coupon.ageValue || '999')) return false;
+    }
+    return true;
   }
 
   /**

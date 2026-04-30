@@ -18,7 +18,9 @@
       "Bash(grep -E \"\\\\.\\(prisma|ts\\)$\")",
       "Bash(pnpm add *)",
       "Bash(node *)",
-      "Bash(grep -E \"\\\\.ts$\")"
+      "Bash(grep -E \"\\\\.ts$\")",
+      "WebFetch(domain:docs.cielo.com.br)",
+      "WebFetch(domain:developercielo.github.io)"
     ]
   }
 }

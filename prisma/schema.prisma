@@ -313,6 +313,12 @@ model Event {
   zipCode               String? // CEP
   neighborhood          String? // Bairro
   googleMapsLink        String?
+  contactEmail          String?  @map("contact_email")
+  instagram             String?
+  facebook              String?
+  youtube               String?
+  tiktok                String?
+  website               String?
   regulationUrl         String? // URL do PDF do regulamento
   eventDate             DateTime
   registrationStartDate DateTime
@@ -777,6 +783,8 @@ model Coupon {
   maxAge        Int? // Idade máxima em anos (restrição de faixa etária)
   status        CouponStatus       @default(ACTIVE)
   usageCount    Int                @default(0)
+  maxUsage      Int?               // Limite máximo de usos do cupom
+  deletedAt     DateTime?          // Soft delete — cupom removido após uso
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
 
@@ -788,6 +796,7 @@ model Coupon {
   @@index([code])
   @@index([status])
   @@index([eventId, status])
+  @@index([deletedAt])
 }
 
 model Voucher {

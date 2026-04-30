@@ -4,6 +4,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  Matches,
   Max,
   Min,
   ValidateNested,
@@ -35,6 +36,31 @@ export class CardDataDto {
   installments?: number;
 }
 
+export class CardTokenDto {
+  @IsString()
+  @IsNotEmpty()
+  token: string;
+
+  @IsString()
+  @IsNotEmpty()
+  brand: string;
+
+  @IsOptional()
+  @IsString()
+  holder?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{3,4}$/, { message: 'Security code must be 3 or 4 digits' })
+  securityCode?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(12)
+  installments?: number;
+}
+
 export class PayOrderDto {
   @IsEnum(PaymentMethod)
   method: PaymentMethod;
@@ -43,6 +69,11 @@ export class PayOrderDto {
   @ValidateNested()
   @Type(() => CardDataDto)
   card?: CardDataDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CardTokenDto)
+  cardToken?: CardTokenDto;
 
   @IsOptional()
   @IsString()

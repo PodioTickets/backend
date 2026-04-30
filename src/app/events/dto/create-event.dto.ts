@@ -8,6 +8,7 @@ import {
   Min,
   Max,
   IsUrl,
+  IsEmail,
   ValidateNested,
   ValidateIf,
 } from 'class-validator';
@@ -64,6 +65,30 @@ export class CreateEventDto {
   @IsOptional()
   @IsUrl({ require_protocol: true }, { message: 'googleMapsLink must be a valid URL' })
   googleMapsLink?: string;
+
+  @IsOptional()
+  @IsEmail()
+  contactEmail?: string;
+
+  @IsOptional()
+  @IsString()
+  instagram?: string;
+
+  @IsOptional()
+  @IsString()
+  facebook?: string;
+
+  @IsOptional()
+  @IsString()
+  youtube?: string;
+
+  @IsOptional()
+  @IsString()
+  tiktok?: string;
+
+  @IsOptional()
+  @IsString()
+  website?: string;
 
   @IsOptional()
   @IsString()
@@ -132,6 +157,30 @@ export class UpdateEventDto {
   @IsOptional()
   @IsUrl({ require_protocol: true }, { message: 'googleMapsLink must be a valid URL' })
   googleMapsLink?: string;
+
+  @IsOptional()
+  @IsEmail()
+  contactEmail?: string;
+
+  @IsOptional()
+  @IsString()
+  instagram?: string;
+
+  @IsOptional()
+  @IsString()
+  facebook?: string;
+
+  @IsOptional()
+  @IsString()
+  youtube?: string;
+
+  @IsOptional()
+  @IsString()
+  tiktok?: string;
+
+  @IsOptional()
+  @IsString()
+  website?: string;
 
   @IsOptional()
   @IsString()

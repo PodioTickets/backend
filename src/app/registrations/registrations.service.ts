@@ -408,11 +408,7 @@ export class RegistrationsService {
     status?: RegistrationFilterStatus,
     userCpfClean?: string | null,
   ): Prisma.OrderWhereInput {
-    const orClauses: Prisma.OrderWhereInput[] = [
-      { userId },
-      { registrations: { some: { userId } } },
-      { registrations: { some: { invitedById: userId } } },
-    ];
+    const orClauses: Prisma.OrderWhereInput[] = [{ userId }];
     if (userCpfClean) {
       orClauses.push({ registrations: { some: { user: { documentNumberClean: userCpfClean } } } });
       orClauses.push({ registrations: { some: { participantCpfClean: userCpfClean } } });

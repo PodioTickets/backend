@@ -149,22 +149,20 @@ export class CreateCouponDto {
   @Type(() => Number)
   minQuantity?: number;
 
-  // Campos específicos para AGE
-  @ValidateIf((o) => o.couponType === CouponType.AGE)
-  @IsNotEmpty()
+  // Campos específicos para AGE (legado — use minAge/maxAge)
+  @IsOptional()
   @IsEnum(['MIN', 'MAX'])
   @ApiPropertyOptional({
-    description: 'Age rule (required if couponType is AGE)',
+    description: 'Age rule (legacy)',
     enum: ['MIN', 'MAX'],
     example: 'MIN',
   })
   ageRule?: string;
 
-  @ValidateIf((o) => o.couponType === CouponType.AGE)
-  @IsNotEmpty()
+  @IsOptional()
   @IsString()
   @ApiPropertyOptional({
-    description: 'Age value (required if couponType is AGE)',
+    description: 'Age value (legacy)',
     example: '9 anos',
   })
   ageValue?: string;
@@ -188,6 +186,16 @@ export class CreateCouponDto {
   })
   @Type(() => Number)
   maxAge?: number;
+
+  @IsOptional()
+  @IsInt()
+  @IsPositive()
+  @ApiPropertyOptional({
+    description: 'Número máximo de vezes que o cupom pode ser usado',
+    example: 100,
+  })
+  @Type(() => Number)
+  maxUsage?: number;
 }
 
 export class UpdateCouponDto {
@@ -270,6 +278,12 @@ export class UpdateCouponDto {
   @IsOptional()
   @IsEnum(CouponStatus)
   status?: CouponStatus;
+
+  @IsOptional()
+  @IsInt()
+  @IsPositive()
+  @Type(() => Number)
+  maxUsage?: number;
 }
 
 export class FilterCouponsDto {
