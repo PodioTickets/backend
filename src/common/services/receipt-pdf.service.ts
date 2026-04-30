@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import PDFDocument from 'pdfkit';
-import * as sharp from 'sharp';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const sharp: (input: Buffer) => import('sharp').Sharp = require('sharp');
 
 // ── SVG assets (same logo as ticket PDF) ─────────────────────────────────────
 
@@ -124,8 +125,7 @@ function fmtPaymentMethod(method: string): string {
 }
 
 function svgToPng(svgStr: string, w: number, h: number): Promise<Buffer> {
-  const sharpFn = (sharp as any) as (input: Buffer) => import('sharp').Sharp;
-  return sharpFn(Buffer.from(svgStr))
+  return sharp(Buffer.from(svgStr))
     .resize(Math.round(w * 2), Math.round(h * 2))
     .png()
     .toBuffer();
