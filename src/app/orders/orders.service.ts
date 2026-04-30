@@ -1786,6 +1786,7 @@ export class OrdersService {
           eventDate: true, registrationStartDate: true, registrationEndDate: true,
           location: true, city: true, state: true, country: true, zipCode: true, neighborhood: true,
           bannerUrl: true,
+          organization: { select: { name: true } },
         },
       }),
       r.question.findMany({
@@ -2189,6 +2190,34 @@ export class OrdersService {
 
     // Envio de email de confirmação — fire-and-forget
     if (snapshotEvent) {
+      // Build per-participant list mirroring the pIdx loop above
+      const emailParticipants: Array<{ name: string; ticketName: string; qrCode: string }> = [];
+      {
+        let epIdx = 0;
+        for (const rt of reservedTickets) {
+          const ticket = snapshotTicketById.get((rt as any).ticketId) as any;
+          const ticketName = ticket?.name || '—';
+          for (let qi = 0; qi < ((rt as any).quantity ?? 1); qi++) {
+            const p = (participants as any[])[epIdx];
+            const reg = registrations[epIdx];
+            emailParticipants.push({
+              name: p?.name || 'Participante',
+              ticketName,
+              qrCode: reg?.qrCode || '',
+            });
+            epIdx++;
+          }
+        }
+      }
+
+      const tz = 'America/Sao_Paulo';
+      const emissionDate = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric', timeZone: tz });
+      const eventDate = snapshotEvent.eventDate
+        ? new Date(snapshotEvent.eventDate).toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric', timeZone: tz })
+        : '—';
+      const orgName = (snapshotEvent as any).organization?.name || '—';
+      const orderNumber = `#PD-${orderId.replace(/-/g, '').slice(0, 8).toUpperCase()}`;
+
       const r2: any = this.prisma.getReadClient();
       r2.user.findUnique({
         where: { id: userId },
@@ -2202,6 +2231,11 @@ export class OrdersService {
           eventName: snapshotEvent.name,
           eventLocation: locationParts.join(', ') || '—',
           eventBannerUrl: (snapshotEvent as any).bannerUrl || '',
+          orderNumber,
+          emissionDate,
+          eventDate,
+          orgName,
+          participants: emailParticipants,
         });
       }).catch((err: any) => this.logger.warn('Failed to send registration confirmation email:', err));
     }
