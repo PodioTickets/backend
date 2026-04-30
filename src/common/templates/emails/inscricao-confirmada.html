@@ -87,9 +87,9 @@
             <p style="margin:0 0 40px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:400;color:#646464;line-height:20.80px;word-wrap:break-word;">Sua inscrição na <strong style="font-weight:700;color:#202020;">{{eventName}}</strong> foi confirmada. Veja o resumo abaixo e acesse os detalhes completos da sua inscrição quando precisar.</p>
 
             <!-- Event Card -->
-            <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 40px auto;max-width:308px;width:100%;background-color:#F9F9F9;border-radius:8px;border-collapse:separate;border-spacing:0;box-shadow:0px 2px 6px rgba(17,17,17,0.25);">
+            <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 40px auto;max-width:308px;width:100%;background-color:#F9F9F9;border-radius:8px;border-collapse:separate;border-spacing:0;box-shadow:0px 2px 6px rgba(17,17,17,0.25);overflow:hidden;">
               <tr>
-                <td style="padding:0;line-height:0;">
+                <td style="padding:0;line-height:0;border-radius:8px 8px 0 0;overflow:hidden;">
                   <img src="{{eventBannerUrl}}" width="308" height="232" alt="{{eventName}}" style="display:block;width:308px;height:232px;object-fit:cover;border-radius:8px 8px 0 0;">
                 </td>
               </tr>
@@ -109,7 +109,7 @@
                 </td>
               </tr>
               <tr>
-                <td style="padding:0;">
+                <td style="padding:0;border-radius:0 0 8px 8px;overflow:hidden;">
                   <!-- Status badge: top-right radius only, border top+right -->
                   <table cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:0;">
                     <tr>
