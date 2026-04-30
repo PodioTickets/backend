@@ -6,6 +6,7 @@ import { OrdersService } from './orders.service';
 import { OrdersExpirationService } from './orders-expiration.service';
 import { OrdersRedisService } from './orders-redis.service';
 import { OrdersController } from './orders.controller';
+import { EmailService } from '../../common/services/email.service';
 
 @Module({
   imports: [
@@ -13,7 +14,7 @@ import { OrdersController } from './orders.controller';
     ConfigModule,
     PaymentsModule, // exports CieloService
   ],
-  providers: [OrdersService, OrdersExpirationService, OrdersRedisService],
+  providers: [OrdersService, OrdersExpirationService, OrdersRedisService, EmailService],
   controllers: [OrdersController],
   exports: [OrdersService],
 })

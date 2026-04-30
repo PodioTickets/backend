@@ -18,6 +18,7 @@ import { PatchProductsDto } from './dto/patch-products.dto';
 import { PatchBillingAddressDto } from './dto/patch-billing-address.dto';
 import { PayOrderDto } from './dto/pay-order.dto';
 import { PatchCouponDto } from './dto/patch-coupon.dto';
+import { EmailService } from '../../common/services/email.service';
 
 // ─── typed error helpers ─────────────────────────────────────────────────────
 
@@ -275,6 +276,7 @@ export class OrdersService {
     private readonly prisma: PrismaService,
     private readonly cieloService: CieloService,
     private readonly redisService: OrdersRedisService,
+    private readonly emailService: EmailService,
   ) {}
 
   // ── 1. reserve ─────────────────────────────────────────────────────────────
@@ -1783,6 +1785,7 @@ export class OrdersService {
           id: true, name: true, slug: true,
           eventDate: true, registrationStartDate: true, registrationEndDate: true,
           location: true, city: true, state: true, country: true, zipCode: true, neighborhood: true,
+          bannerUrl: true,
         },
       }),
       r.question.findMany({
@@ -2183,6 +2186,26 @@ export class OrdersService {
     }
 
     this.logger.log(`Order ${orderId} paid successfully for user ${userId}`);
+
+    // Envio de email de confirmação — fire-and-forget
+    if (snapshotEvent) {
+      const r2: any = this.prisma.getReadClient();
+      r2.user.findUnique({
+        where: { id: userId },
+        select: { email: true, firstName: true },
+      }).then((buyer: { email: string; firstName: string } | null) => {
+        if (!buyer?.email) return;
+        const locationParts = [snapshotEvent.location, snapshotEvent.city, snapshotEvent.state].filter(Boolean);
+        return this.emailService.sendRegistrationConfirmed({
+          email: buyer.email,
+          firstName: buyer.firstName || 'Participante',
+          eventName: snapshotEvent.name,
+          eventLocation: locationParts.join(', ') || '—',
+          eventBannerUrl: (snapshotEvent as any).bannerUrl || '',
+        });
+      }).catch((err: any) => this.logger.warn('Failed to send registration confirmation email:', err));
+    }
+
     return body;
   }
 
