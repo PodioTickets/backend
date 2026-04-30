@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bem-vindo, organizador — PódioTicket</title>
+  <title>Bem-vindo à PódioTicket — Organizador</title>
   <style>
     @font-face {
       font-family: 'DM Sans';
@@ -57,23 +57,41 @@
         <tr>
           <td style="padding:60px 24px;border-bottom:1px solid #D9D9D9;background-color:#FCFCFC;">
 
-            <!-- ── Yellow Hero Card ── -->
-            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:linear-gradient(180deg,#FEFBE9 0%,#FFF7C2 100%);border:1px solid #F3D673;border-radius:8px;border-collapse:separate;border-spacing:0;margin-bottom:40px;">
+            <!-- ── Blue Hero Card ── -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:linear-gradient(180deg,#F2FAFB 0%,#DEF7F9 100%);border:1px solid #9DDDE7;border-radius:8px;border-collapse:separate;border-spacing:0;margin-bottom:16px;">
               <tr>
                 <td align="center" style="padding:32px;">
 
-                  <img src="https://www.podioticket.com.br/images/corrida-de-rua-org.png" width="102" height="64" alt="" style="display:block;margin:0 auto 32px auto;border-radius:8px;">
+                  <!-- Title -->
+                  <p style="margin:0 0 20px 0;font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:24px;font-weight:800;color:#0D3C48;line-height:26.40px;text-align:center;word-wrap:break-word;">Bem-vindo, {{firstName}}!</p>
 
-                  <p style="margin:0 0 20px 0;font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:24px;font-weight:800;color:#4F3422;line-height:26.40px;text-align:center;word-wrap:break-word;">Bem-vindo, {{firstName}}. Vamos juntos pro pódio!</p>
+                  <!-- Subtitle -->
+                  <p style="margin:0 0 32px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:500;color:#0D3C48;line-height:20.80px;text-align:center;word-wrap:break-word;">Tudo o que você precisa para criar, vender e gerenciar seus eventos esportivos, do início ao fim.</p>
 
-                  <p style="margin:0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:500;color:#4F3422;line-height:20.80px;text-align:center;word-wrap:break-word;">A plataforma completa pra criar, vender e gerenciar seus eventos esportivos do início ao fim.</p>
+                  <!-- Sport images row -->
+                  <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+                    <tr>
+                      <td style="padding-right:24px;vertical-align:middle;">
+                        <img src="https://www.podioticket.com.br/images/natacao-1.png" width="58" height="27" alt="Natação">
+                      </td>
+                      <td style="padding-right:24px;vertical-align:middle;">
+                        <img src="https://www.podioticket.com.br/images/corrida-de-rua-1.png" width="57" height="35" alt="Corrida de rua">
+                      </td>
+                      <td style="padding-right:24px;vertical-align:middle;">
+                        <img src="https://www.podioticket.com.br/images/ciclismo-1.png" width="42" height="38" alt="Ciclismo">
+                      </td>
+                      <td style="vertical-align:middle;">
+                        <img src="https://www.podioticket.com.br/images/triathlon-1.png" width="41" height="40" alt="Triathlon">
+                      </td>
+                    </tr>
+                  </table>
 
                 </td>
               </tr>
             </table>
 
             <!-- ── Success Banner ── -->
-            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#DAF1DB;border:1px solid #46A758;border-radius:8px;border-collapse:separate;border-spacing:0;margin-bottom:16px;">
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#DEF7F9;border:1px solid #9DDDE7;border-radius:8px;border-collapse:separate;border-spacing:0;margin-bottom:16px;">
               <tr>
                 <td style="padding:12px 16px;">
                   <table cellpadding="0" cellspacing="0" border="0">
@@ -81,14 +99,14 @@
                       <td style="padding-right:8px;vertical-align:middle;">
                         <img src="https://www.podioticket.com.br/images/check-circle.svg" width="24" height="24" alt="">
                       </td>
-                      <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:500;color:#193B30;line-height:20.80px;word-wrap:break-word;">Conta de organizador ativada</td>
+                      <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:500;color:#0D3C48;line-height:20.80px;word-wrap:break-word;">Sua organização foi criada com sucesso!</td>
                     </tr>
                   </table>
                 </td>
               </tr>
             </table>
 
-            <!-- ── Feature Card 1: Repasse ── -->
+            <!-- ── Feature Card 1: Configure repasse ── -->
             <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #D9D9D9;border-radius:8px;border-collapse:separate;border-spacing:0;margin-bottom:16px;">
               <tr>
                 <td style="padding:16px;">
@@ -97,24 +115,24 @@
                       <td style="padding-right:8px;vertical-align:middle;">
                         <img src="https://www.podioticket.com.br/images/bank.svg" width="24" height="24" alt="">
                       </td>
-                      <td style="font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:800;color:#308737;line-height:17.60px;word-wrap:break-word;">Configure os dados de repasse</td>
+                      <td style="font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:800;color:#107D98;line-height:17.60px;word-wrap:break-word;">Configure os dados de repasse</td>
                     </tr>
                   </table>
-                  <p style="margin:0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:18.20px;word-wrap:break-word;">Banco, agência e conta pra onde os repasses dos eventos serão enviados.</p>
+                  <p style="margin:0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:18.20px;word-wrap:break-word;">Banco, agência, conta e chave pix para receber os repasses dos eventos.</p>
                 </td>
               </tr>
             </table>
 
-            <!-- ── Feature Card 2: Criar evento ── -->
+            <!-- ── Feature Card 2: Crie seu primeiro evento ── -->
             <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #D9D9D9;border-radius:8px;border-collapse:separate;border-spacing:0;">
               <tr>
                 <td style="padding:16px;">
                   <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:12px;">
                     <tr>
                       <td style="padding-right:8px;vertical-align:middle;">
-                        <img src="https://www.podioticket.com.br/images/flash.svg" width="24" height="24" alt="">
+                        <img src="https://www.podioticket.com.br/images/flag.svg" width="24" height="24" alt="">
                       </td>
-                      <td style="font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:800;color:#308737;line-height:17.60px;word-wrap:break-word;">Crie seu primeiro evento</td>
+                      <td style="font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:800;color:#107D98;line-height:17.60px;word-wrap:break-word;">Crie seu primeiro evento</td>
                     </tr>
                   </table>
                   <p style="margin:0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:18.20px;word-wrap:break-word;">Defina ingressos, lotes, kits e variações. Publique quando estiver pronto.</p>
