@@ -43,29 +43,17 @@
 
         <!-- ════════ HEADER ════════ -->
         <tr>
-          <td style="padding:20px 24px;background:linear-gradient(180deg,#191919 0%,#2A2A2A 100%);">
-            <table width="100%" cellpadding="0" cellspacing="0" border="0">
+          <td align="center" style="height:88px;padding:28px 24px;background:linear-gradient(180deg,#191919 0%,#2A2A2A 100%);">
+            <table cellpadding="0" cellspacing="0" border="0">
               <tr>
-                <!-- Logo -->
-                <td style="vertical-align:middle;">
-                  <table cellpadding="0" cellspacing="0" border="0">
-                    <tr>
-                      <td style="padding-right:7px;vertical-align:middle;">
-                        <img src="https://www.podioticket.com.br/images/Vector-1.svg" alt="" width="33" height="32">
-                      </td>
-                      <td style="vertical-align:middle;">
-                        <img src="https://www.podioticket.com.br/images/P%C3%B3dio.svg" alt="Pódio" width="68" height="21">
-                      </td>
-                      <td style="vertical-align:middle;">
-                        <img src="https://www.podioticket.com.br/images/Ticket.svg" alt="Ticket" width="79" height="21">
-                      </td>
-                    </tr>
-                  </table>
+                <td style="padding-right:7px;vertical-align:middle;">
+                  <img src="https://www.podioticket.com.br/images/Vector-1.svg" alt="" width="33" height="32">
                 </td>
-                <!-- Order number + date -->
-                <td align="right" style="vertical-align:middle;">
-                  <p style="margin:0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:13px;font-weight:600;color:#FFFFFF;line-height:1.4;white-space:nowrap;">{{orderNumber}}</p>
-                  <p style="margin:4px 0 0 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:11px;font-weight:400;color:#9A9A9A;line-height:1.4;white-space:nowrap;">{{emissionDate}}</p>
+                <td style="vertical-align:middle;">
+                  <img src="https://www.podioticket.com.br/images/P%C3%B3dio.svg" alt="Pódio" width="68" height="21">
+                </td>
+                <td style="vertical-align:middle;">
+                  <img src="https://www.podioticket.com.br/images/Ticket.svg" alt="Ticket" width="79" height="21">
                 </td>
               </tr>
             </table>
@@ -74,10 +62,10 @@
 
         <!-- ════════ BODY ════════ -->
         <tr>
-          <td style="padding:40px 24px 0 24px;background-color:#FCFCFC;">
+          <td style="padding:60px 24px;border-bottom:1px solid #D9D9D9;background-color:#FCFCFC;">
 
             <!-- Success Banner -->
-            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#DAF1DB;border:1px solid #46A758;border-radius:8px;border-collapse:separate;border-spacing:0;margin-bottom:28px;">
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#DAF1DB;border:1px solid #46A758;border-radius:8px;border-collapse:separate;border-spacing:0;margin-bottom:44px;">
               <tr>
                 <td style="padding:12px 16px;">
                   <table cellpadding="0" cellspacing="0" border="0">
@@ -85,7 +73,7 @@
                       <td style="padding-right:8px;vertical-align:middle;">
                         <img src="https://www.podioticket.com.br/images/check-circle.svg" width="24" height="24" alt="">
                       </td>
-                      <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:500;color:#193B30;line-height:1.3;word-wrap:break-word;">Sua inscrição foi confirmada e sua vaga está garantida!</td>
+                      <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:500;color:#193B30;line-height:20.80px;word-wrap:break-word;">Sua inscrição foi confirmada e sua vaga está garantida!</td>
                     </tr>
                   </table>
                 </td>
@@ -93,65 +81,56 @@
             </table>
 
             <!-- Title -->
-            <p style="margin:0 0 12px 0;font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:20px;font-weight:800;color:#202020;line-height:1.2;word-wrap:break-word;">Sua inscrição está garantida, {{firstName}}! 🏃‍♀️</p>
+            <p style="margin:0 0 20px 0;font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:20px;font-weight:800;color:#202020;line-height:22px;word-wrap:break-word;">Sua inscrição está garantida, {{firstName}}!&nbsp;<img src="https://fonts.gstatic.com/s/e/notoemoji/latest/1f3c3_200d_2640_fe0f/emoji.svg" width="20" height="20" alt="🏃‍♀️" style="display:inline;vertical-align:middle;"></p>
 
             <!-- Description -->
-            <p style="margin:0 0 32px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:400;color:#646464;line-height:1.55;word-wrap:break-word;">Sua inscrição na <strong style="font-weight:700;color:#202020;">{{eventName}}</strong> foi confirmada. Veja o resumo abaixo e acesse os detalhes completos da sua inscrição quando precisar.</p>
+            <p style="margin:0 0 40px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:400;color:#646464;line-height:20.80px;word-wrap:break-word;">Sua inscrição na <strong style="font-weight:700;color:#202020;">{{eventName}}</strong> foi confirmada. Veja o resumo abaixo e acesse os detalhes completos da sua inscrição quando precisar.</p>
 
-            <!-- Divider -->
-            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:28px;">
-              <tr><td style="height:1px;background-color:#D9D9D9;font-size:0;line-height:0;"></td></tr>
-            </table>
-
-            <!-- Section title -->
-            <p style="margin:0 0 16px 0;font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:700;color:#202020;line-height:1.2;">Detalhes da inscrição</p>
-
-            <!-- Event summary card -->
-            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F9F9F9;border:1px solid #D9D9D9;border-radius:8px;border-collapse:separate;border-spacing:0;margin-bottom:32px;">
+            <!-- Event Card -->
+            <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 40px auto;max-width:308px;width:100%;background-color:#F9F9F9;border-radius:8px;border-collapse:separate;border-spacing:0;box-shadow:0px 2px 6px rgba(17,17,17,0.25);">
               <tr>
-                <td style="padding:16px 16px 4px 16px;">
-                  <p style="margin:0 0 14px 0;font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:15px;font-weight:700;color:#202020;line-height:1.2;word-wrap:break-word;">{{eventName}}</p>
-
-                  <!-- Date -->
-                  <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:10px;">
-                    <tr>
-                      <td style="width:22px;vertical-align:middle;font-size:15px;line-height:1;padding-right:6px;">📅</td>
-                      <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:1.3;vertical-align:middle;word-wrap:break-word;">{{eventDate}}</td>
-                    </tr>
-                  </table>
-
-                  <!-- Org -->
-                  <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:10px;">
-                    <tr>
-                      <td style="width:22px;vertical-align:middle;font-size:15px;line-height:1;padding-right:6px;">🏢</td>
-                      <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:1.3;vertical-align:middle;word-wrap:break-word;">{{orgName}}</td>
-                    </tr>
-                  </table>
-
+                <td style="padding:0;line-height:0;">
+                  <img src="{{eventBannerUrl}}" width="308" height="232" alt="{{eventName}}" style="display:block;width:100%;max-width:308px;height:232px;object-fit:cover;border-radius:8px 8px 0 0;">
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:16px 12px 12px 12px;">
+                  <!-- Event name -->
+                  <p style="margin:0 0 12px 0;font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:700;color:#202020;line-height:17.60px;word-wrap:break-word;">{{eventName}}</p>
                   <!-- Location -->
-                  <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:10px;">
+                  <table cellpadding="0" cellspacing="0" border="0">
                     <tr>
-                      <td style="width:22px;vertical-align:middle;font-size:15px;line-height:1;padding-right:6px;">📍</td>
-                      <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:1.3;vertical-align:middle;word-wrap:break-word;">{{eventLocation}}</td>
+                      <td style="padding-right:4px;vertical-align:middle;">
+                        <img src="https://www.podioticket.com.br/images/location.svg" width="20" height="20" alt="">
+                      </td>
+                      <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#202020;line-height:18.20px;word-wrap:break-word;">{{eventLocation}}</td>
                     </tr>
                   </table>
-
-                  <!-- Participants count -->
-                  <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:16px;">
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:0;">
+                  <!-- Status badge: top-right radius only, border top+right -->
+                  <table cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:0;">
                     <tr>
-                      <td style="width:22px;vertical-align:middle;font-size:15px;line-height:1;padding-right:6px;">👥</td>
-                      <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:1.3;vertical-align:middle;">{{participantCount}} atleta(s)</td>
+                      <td style="padding:12px;background-color:#C4E8D1;border-top:1px solid #94CE9A;border-right:1px solid #94CE9A;border-radius:0 16px 0 0;">
+                        <table cellpadding="0" cellspacing="0" border="0">
+                          <tr>
+                            <td style="padding-right:4px;vertical-align:middle;">
+                              <img src="https://www.podioticket.com.br/images/circle.svg" width="12" height="12" alt="">
+                            </td>
+                            <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:600;color:#203C25;line-height:18.20px;white-space:nowrap;vertical-align:middle;">Inscrição confirmada</td>
+                          </tr>
+                        </table>
+                      </td>
                     </tr>
                   </table>
                 </td>
               </tr>
             </table>
 
-            <!-- ════ PER-PARTICIPANT BLOCKS ════ -->
-            {{participantsHtml}}
-
             <!-- Footer note -->
-            <p style="margin:0 0 40px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:1.5;text-align:center;word-wrap:break-word;">Apresente o QR code na entrada do evento para confirmar sua participação.</p>
+            <p style="margin:0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:400;color:#646464;line-height:20.80px;text-align:center;word-wrap:break-word;">Segue em anexo o ingresso e o recibo em PDF para sua conferência.</p>
 
           </td>
         </tr>
@@ -162,17 +141,17 @@
 
             <img src="https://www.podioticket.com.br/images/Vector.svg" alt="" width="37" height="36" style="display:block;margin:0 auto 20px auto;">
 
-            <p style="margin:0 0 12px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:1.3;text-align:center;word-wrap:break-word;">Plataforma de inscrições para eventos esportivos</p>
+            <p style="margin:0 0 12px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:18.20px;text-align:center;word-wrap:break-word;">Plataforma de inscrições para eventos esportivos</p>
 
-            <p style="margin:0 0 52px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:500;color:#202020;line-height:1.3;text-align:center;word-wrap:break-word;">Este é um e-mail automático. Para suporte, acesse a Central de Ajuda.</p>
+            <p style="margin:0 0 52px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:500;color:#202020;line-height:18.20px;text-align:center;word-wrap:break-word;">Este é um e-mail automático. Para suporte, acesse a Central de Ajuda.</p>
 
             <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
               <tr>
-                <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:1.3;white-space:nowrap;">© 2026 Podioticket Ltda.</td>
+                <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:18.20px;white-space:nowrap;">© 2026 Podioticket Ltda.</td>
                 <td style="padding:0 8px;vertical-align:middle;">
                   <img src="https://www.podioticket.com.br/images/Ellipse%201.svg" width="6" height="6" alt="" style="border-radius:9999px;">
                 </td>
-                <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:1.3;white-space:nowrap;">CNPJ 65.174.909/0001-01</td>
+                <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:18.20px;white-space:nowrap;">CNPJ 65.174.909/0001-01</td>
               </tr>
             </table>
 

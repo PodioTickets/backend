@@ -190,58 +190,15 @@ export class EmailService {
     eventName: string;
     eventLocation: string;
     eventBannerUrl: string;
-    orderNumber: string;
-    emissionDate: string;
-    eventDate: string;
-    orgName: string;
-    participants: Array<{ name: string; ticketName: string; qrCode: string }>;
   }) {
-    const participantsHtml = data.participants.map((p, idx) => {
-      const qrUrl = p.qrCode
-        ? `https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(p.qrCode)}`
-        : '';
-      return `
-      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #D9D9D9;border-radius:8px;border-collapse:separate;border-spacing:0;margin-bottom:20px;overflow:hidden;">
-        <tr>
-          <td style="padding:12px 16px;background-color:#F9F9F9;border-bottom:1px solid #D9D9D9;">
-            <table width="100%" cellpadding="0" cellspacing="0" border="0">
-              <tr>
-                <td style="vertical-align:top;">
-                  <p style="margin:0 0 2px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:11px;font-weight:400;color:#646464;line-height:1.3;text-transform:uppercase;letter-spacing:0.5px;">Participante ${idx + 1}</p>
-                  <p style="margin:0;font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:15px;font-weight:700;color:#202020;line-height:1.3;word-wrap:break-word;">${this.escapeHtml(p.name)}</p>
-                </td>
-                <td align="right" style="vertical-align:top;padding-left:12px;">
-                  <p style="margin:0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:12px;font-weight:500;color:#202020;line-height:1.3;white-space:nowrap;">${this.escapeHtml(p.ticketName)}</p>
-                </td>
-              </tr>
-            </table>
-          </td>
-        </tr>
-        ${qrUrl ? `
-        <tr>
-          <td align="center" style="padding:24px 16px 20px 16px;">
-            <img src="${qrUrl}" width="160" height="160" alt="QR Code de acesso" style="display:block;border-radius:4px;border:1px solid #D9D9D9;">
-            <p style="margin:10px 0 0 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:12px;font-weight:400;color:#646464;line-height:1.4;text-align:center;">Apresente este QR code na entrada do evento</p>
-          </td>
-        </tr>
-        ` : ''}
-      </table>`;
-    }).join('\n');
-
     const html = this.loadTemplate('inscricao-confirmada.html', {
       firstName: this.escapeHtml(data.firstName),
       eventName: this.escapeHtml(data.eventName),
       eventLocation: this.escapeHtml(data.eventLocation),
       eventBannerUrl: data.eventBannerUrl,
-      orderNumber: this.escapeHtml(data.orderNumber),
-      emissionDate: this.escapeHtml(data.emissionDate),
-      eventDate: this.escapeHtml(data.eventDate),
-      orgName: this.escapeHtml(data.orgName),
-      participantCount: String(data.participants.length),
-      participantsHtml,
     });
 
-    const text = `Olá ${data.firstName},\n\nSua inscrição na ${data.eventName} foi confirmada! Sua vaga está garantida.\n\nPedido: ${data.orderNumber}\nEvento: ${data.eventName}\nData: ${data.eventDate}\nOrganização: ${data.orgName}\nLocal: ${data.eventLocation}\nParticipantes: ${data.participants.length}\n\nPodioTicket — podioticket.com.br`;
+    const text = `Olá ${data.firstName},\n\nSua inscrição na ${data.eventName} foi confirmada! Sua vaga está garantida.\n\nEvento: ${data.eventName}\nLocal: ${data.eventLocation}\n\nPodioTicket — podioticket.com.br`;
 
     await this.send({ from: this.from, to: data.email, subject: `Inscrição confirmada — ${data.eventName}`, html, text });
     this.logger.log(`Registration confirmed email sent to: ${data.email}`);
