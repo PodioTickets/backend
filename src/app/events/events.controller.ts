@@ -24,6 +24,7 @@ import {
   ApiParam,
   ApiQuery,
   ApiBody,
+  ApiProduces,
 } from '@nestjs/swagger';
 import { plainToClass } from 'class-transformer';
 import { validate } from 'class-validator';
@@ -687,16 +688,50 @@ export class EventsController {
   @UseGuards(JwtAuthGuard)
   @NoCache()
   @ApiBearerAuth()
+  @ApiProduces(
+    'text/plain',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/pdf',
+  )
   @ApiOperation({
     summary: 'Export event registrations',
-    description: 'Exports registrations as TXT (CSV), Excel (.xlsx) or PDF. Only organizer can access.',
+    description: `Exports all non-pending registrations for the event in the requested format.
+The response is a binary file download with the appropriate Content-Type and Content-Disposition headers.
+
+**Formats**
+- \`txt\` → UTF-8 CSV with BOM (\`.csv\`), comma-separated
+- \`excel\` → Excel workbook (\`.xlsx\`) — auto column widths, bold header row
+- \`pdf\` → Landscape A4 PDF with paginated, zebra-striped table
+
+**Access:** organizer members with \`dashboard\` permission or owner.`,
   })
   @ApiParam({ name: 'eventId', description: 'Event UUID' })
-  @ApiQuery({ name: 'format', required: true, enum: ['txt', 'excel', 'pdf'] })
-  @ApiQuery({ name: 'fields', required: false, type: String, description: 'Comma-separated field IDs. Defaults to all.' })
-  @ApiResponse({ status: 200, description: 'File download' })
-  @ApiResponse({ status: 400, description: 'Invalid format' })
-  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiQuery({
+    name: 'format',
+    required: true,
+    enum: ['txt', 'excel', 'pdf'],
+    description: 'Output file format',
+  })
+  @ApiQuery({
+    name: 'fields',
+    required: false,
+    type: String,
+    description: `Comma-separated list of field IDs to include in the export.
+Omit to export all 15 fields. Valid IDs:
+\`nome\` \`email\` \`cpf\` \`dataNascimento\` \`telefone\` \`sexo\`
+\`contatoEmergencia\` \`endereco\` \`ingresso\` \`produtosEscolhidos\`
+\`perguntasRespostas\` \`dataPagamento\` \`status\` \`formaPagamento\` \`valorPago\`
+
+Example: \`fields=nome,email,cpf,status,valorPago\``,
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Binary file download. Content-Type varies by format:\n- `text/plain` for TXT\n- `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` for Excel\n- `application/pdf` for PDF',
+  })
+  @ApiResponse({ status: 400, description: 'Invalid `format` value' })
+  @ApiResponse({ status: 401, description: 'Unauthorized — missing or invalid JWT' })
+  @ApiResponse({ status: 403, description: 'Forbidden — user is not an organizer of this event' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
   async exportRegistrations(
     @Request() req,
     @Param('eventId') eventId: string,
