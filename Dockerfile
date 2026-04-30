@@ -11,7 +11,7 @@ RUN apk add --no-cache \
     dos2unix \
     su-exec
 
-RUN npm install -g pnpm
+RUN corepack enable && corepack prepare pnpm@10.33.2 --activate
 
 WORKDIR /usr/src/app
 
@@ -66,7 +66,12 @@ COPY --from=build /usr/src/app/node_modules/.pnpm/@prisma+client*/node_modules/@
 
 # Garante que os binários do Prisma estejam executáveis
 USER root
-RUN find node_modules -name "*engine-linux-musl*" -type f -exec chmod +x {} \; 2>/dev/null || true && \
+RUN chmod +x node_modules/.prisma/client/libquery_engine-linux-musl* \
+        node_modules/@prisma/engines/libquery_engine-linux-musl* \
+        node_modules/@prisma/engines/migration-engine-linux-musl* \
+        node_modules/@prisma/engines/introspection-engine-linux-musl* \
+        node_modules/@prisma/engines/prisma-fmt-linux-musl* \
+        2>/dev/null || true && \
     chown -R nestjs:nodejs /usr/src/app/node_modules
 
 # Copia arquivos de configuração
