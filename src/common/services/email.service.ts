@@ -90,7 +90,7 @@ export class EmailService {
       </div>
       <div style="background-color:#fff;padding:20px;border-left:4px solid #007bff;margin:0 0 16px 0;">
         <p style="margin:0 0 8px 0;"><strong>Mensagem:</strong></p>
-        <p style="margin:0;">${data.message.replace(/\n/g, '<br>')}</p>
+        <p style="margin:0;">${this.escapeHtml(data.message).replace(/\n/g, '<br>')}</p>
       </div>
       <p style="margin:0;color:#666;font-size:12px;">Esta mensagem foi enviada através da plataforma Podio Ticket.<br>Responda diretamente ao email do remetente: ${this.escapeHtml(data.userEmail)}</p>
     </td></tr>
