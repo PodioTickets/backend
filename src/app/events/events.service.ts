@@ -5258,10 +5258,16 @@ export class EventsService {
    * Fetch all registrations for a given event (no pagination) for export purposes.
    * Caller must already have organizer access verified.
    */
-  async getRegistrationsForExport(userId: string, eventId: string): Promise<any[]> {
+  async getRegistrationsForExport(userId: string, eventId: string): Promise<{ registrations: any[]; eventName: string }> {
     await this.verifyOrganizerAccess(userId, eventId, 'dashboard');
 
     const prismaRead = this.prisma.getReadClient();
+
+    const event = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: { name: true },
+    });
+    const eventName = event?.name ?? 'Evento';
 
     const includeClause = {
       user: {
@@ -5381,6 +5387,7 @@ export class EventsService {
         }),
         order: {
           finalAmount: order.finalAmount ? this.normalizeToCents(order.finalAmount) : null,
+          purchaseDate: order.createdAt ?? null,
           billingAddress,
           payment: order.payment
             ? {
@@ -5393,5 +5400,7 @@ export class EventsService {
         },
       };
     });
+
+    return { registrations, eventName };
   }
 }

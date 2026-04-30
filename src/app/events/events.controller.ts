@@ -743,17 +743,16 @@ Example: \`fields=nome,email,cpf,status,valorPago\``,
       throw new BadRequestException('Invalid export format. Use txt, excel or pdf.');
     }
 
-    const registrations = await this.eventsService.getRegistrationsForExport(req.user.id, eventId);
+    const { registrations, eventName } = await this.eventsService.getRegistrationsForExport(req.user.id, eventId);
     const fields = this.exportService.parseFields(fieldsParam);
 
-    // Fetch event name for file naming
-    const eventName = `inscricoes-${eventId.slice(0, 8)}`;
+    const safeEventName = eventName.replace(/[^a-z0-9\-_áéíóúãõâêôçàüñ ]/gi, '').trim() || `evento-${eventId.slice(0, 8)}`;
 
     if (format === 'txt') {
-      const buf = this.exportService.generateTxt(registrations, fields);
+      const buf = this.exportService.generateTxt(registrations, fields, eventName);
       res.set({
         'Content-Type': 'text/plain; charset=utf-8',
-        'Content-Disposition': `attachment; filename="${eventName}.csv"`,
+        'Content-Disposition': `attachment; filename="${safeEventName}.csv"`,
       });
       return new StreamableFile(buf);
     }
@@ -762,7 +761,7 @@ Example: \`fields=nome,email,cpf,status,valorPago\``,
       const buf = this.exportService.generateExcel(registrations, fields, eventName);
       res.set({
         'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'Content-Disposition': `attachment; filename="${eventName}.xlsx"`,
+        'Content-Disposition': `attachment; filename="${safeEventName}.xlsx"`,
       });
       return new StreamableFile(buf);
     }
@@ -771,7 +770,7 @@ Example: \`fields=nome,email,cpf,status,valorPago\``,
     const buf = await this.exportService.generatePdf(registrations, fields, eventName);
     res.set({
       'Content-Type': 'application/pdf',
-      'Content-Disposition': `attachment; filename="${eventName}.pdf"`,
+      'Content-Disposition': `attachment; filename="${safeEventName}.pdf"`,
     });
     return new StreamableFile(buf);
   }
