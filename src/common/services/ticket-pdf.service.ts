@@ -37,7 +37,7 @@ export interface TicketPdfRegistration {
 }
 
 export interface TicketPdfData {
-  orderNumber: string; // e.g. "PD-2026-08491"
+  orderNumber: string;
   issuedAt: Date;
   event: {
     name: string;
@@ -55,17 +55,19 @@ const C = {
   gray12: '#202020',
   gray11: '#646464',
   gray6:  '#D9D9D9',
+  gray3:  '#F0F0F0',
   gray2:  '#F9F9F9',
   gray1:  '#FCFCFC',
   green:  '#1CB757',
+  greenPrimary: '#308737',
   white:  '#FFFFFF',
   blueTag: '#1D4ED8',
 } as const;
 
 const PAGE_W = 595;
 const PAGE_H = 842;
-const ML = 40; // margin left/right
-const MT = 32; // margin top
+const ML = 40;
+const MT = 32;
 const CONTENT_W = PAGE_W - ML * 2;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -101,14 +103,12 @@ async function qrPng(value: string, size: number): Promise<Buffer> {
 @Injectable()
 export class TicketPdfService {
   async generateTicketPdf(data: TicketPdfData): Promise<Buffer> {
-    // Pre-render assets
     const [vectorPng, podioPng, ticketPng] = await Promise.all([
       svgToPng(VECTOR_SVG, 29, 28),
       svgToPng(PODIO_SVG, 60, 19),
       svgToPng(TICKET_SVG, 70, 19),
     ]);
 
-    // Pre-render QR codes
     const qrBuffers = await Promise.all(
       data.registrations.map((r) => qrPng(r.qrCode || r.participantName, 80)),
     );
@@ -126,7 +126,6 @@ export class TicketPdfService {
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 
-      // ── Page state ──────────────────────────────────────────────────────────
       let y = 0;
 
       const newPage = () => {
@@ -138,102 +137,96 @@ export class TicketPdfService {
         if (y + needed > PAGE_H - MT) newPage();
       };
 
-      // ── Draw helpers ────────────────────────────────────────────────────────
-
       const hline = (yPos: number, x = ML, w = CONTENT_W, color = C.gray6) => {
         doc.save().strokeColor(color).lineWidth(0.5).moveTo(x, yPos).lineTo(x + w, yPos).stroke().restore();
       };
 
-      const labelValue = (
-        label: string,
-        value: string,
-        xPos: number,
-        yPos: number,
-        colW: number,
-      ) => {
-        doc.font('Helvetica').fontSize(9).fillColor(C.gray11).text(label, xPos, yPos, { width: colW, lineBreak: false });
-        doc.font('Helvetica-Bold').fontSize(10).fillColor(C.gray12).text(value || '—', xPos, yPos + 14, { width: colW, lineBreak: false });
-      };
+      // 2-column label/value grid: each item = [label, value], items paired left/right per row
+      const drawFieldGrid = (pairs: Array<[string, string]>, indentX = ML + 20) => {
+        const colW = (CONTENT_W - 40) / 2;
+        const rowH = 38;
+        for (let i = 0; i < pairs.length; i += 2) {
+          const [lLabel, lValue] = pairs[i];
+          doc.font('Helvetica').fontSize(9).fillColor(C.gray11).text(lLabel, indentX, y, { width: colW, lineBreak: false });
+          doc.font('Helvetica-Bold').fontSize(10).fillColor(C.gray12).text(lValue || '—', indentX, y + 14, { width: colW, lineBreak: false });
 
-      const infoRow = (label: string, value: string, yPos: number) => {
-        doc.font('Helvetica').fontSize(10).fillColor(C.gray12).text(label, ML + 20, yPos, { width: 160, lineBreak: false });
-        doc.font('Helvetica-Bold').fontSize(10).fillColor(C.gray12).text(value || '—', ML + 190, yPos, { continued: false, width: CONTENT_W - 190, lineBreak: false });
-        return yPos + 22;
+          const right = pairs[i + 1];
+          if (right) {
+            const [rLabel, rValue] = right;
+            const rX = indentX + colW;
+            doc.font('Helvetica').fontSize(9).fillColor(C.gray11).text(rLabel, rX, y, { width: colW, lineBreak: false });
+            doc.font('Helvetica-Bold').fontSize(10).fillColor(C.gray12).text(rValue || '—', rX, y + 14, { width: colW, lineBreak: false });
+          }
+
+          y += rowH;
+        }
       };
 
       // ── Header ─────────────────────────────────────────────────────────────
       const drawHeader = () => {
-        const hy = y;
+        doc.image(vectorPng, ML, y, { width: 29, height: 28 });
+        doc.image(podioPng, ML + 35, y + 5, { width: 60, height: 19 });
+        doc.image(ticketPng, ML + 100, y + 5, { width: 70, height: 19 });
 
-        // Logo: vector icon
-        doc.image(vectorPng, ML, hy, { width: 29, height: 28 });
-        // Pódio wordmark
-        doc.image(podioPng, ML + 35, hy + 5, { width: 60, height: 19 });
-        // Ticket wordmark
-        doc.image(ticketPng, ML + 100, hy + 5, { width: 70, height: 19 });
-
-        // Right: order number + date
-        const orderText = `#${data.orderNumber}`;
-        const dateText = fmtDateTime(data.issuedAt);
-
-        doc.font('Helvetica').fontSize(10).fillColor(C.gray12);
         const pedidoLabel = 'Pedido: ';
-        const pedidoLabelW = doc.widthOfString(pedidoLabel);
-
+        const pedidoLabelW = doc.font('Helvetica').fontSize(10).widthOfString(pedidoLabel);
         const rightX = ML + CONTENT_W;
-        doc.font('Helvetica').fontSize(10).fillColor(C.gray12).text(pedidoLabel, rightX - 160, hy + 2, { lineBreak: false });
-        doc.font('Helvetica-Bold').fontSize(10).fillColor(C.gray12).text(orderText, rightX - 160 + pedidoLabelW, hy + 2, { lineBreak: false });
-        doc.font('Helvetica').fontSize(9).fillColor(C.gray11).text(`Emitido em ${dateText}`, rightX - 160, hy + 16, { lineBreak: false, width: 160, align: 'right' });
 
-        y = hy + 36;
+        doc.font('Helvetica').fontSize(10).fillColor(C.gray12).text(pedidoLabel, rightX - 160, y + 2, { lineBreak: false });
+        doc.font('Helvetica-Bold').fontSize(10).fillColor(C.gray12).text(`#${data.orderNumber}`, rightX - 160 + pedidoLabelW, y + 2, { lineBreak: false });
+        doc.font('Helvetica').fontSize(9).fillColor(C.gray11).text(`Emitido em ${fmtDateTime(data.issuedAt)}`, rightX - 160, y + 16, { lineBreak: false, width: 160, align: 'right' });
 
-        // Divider
+        y += 36;
         hline(y);
         y += 20;
       };
 
       // ── Event card ─────────────────────────────────────────────────────────
       const drawEventCard = () => {
-        // Section title
         doc.font('Helvetica-Bold').fontSize(13).fillColor(C.gray12).text('Detalhes da inscrição', ML, y);
         y += 18;
         doc.font('Helvetica').fontSize(9).fillColor(C.gray11).text('Apresente os QR Codes na retirada do kit ou na entrada do evento', ML, y);
         y += 22;
 
         const cardH = 110;
-        // Card background
         doc.save()
           .roundedRect(ML, y, CONTENT_W, cardH, 8)
-          .fillColor(C.gray2)
-          .fill()
+          .fillColor(C.gray2).fill()
           .roundedRect(ML, y, CONTENT_W, cardH, 8)
-          .strokeColor(C.gray6)
-          .lineWidth(0.5)
-          .stroke()
+          .strokeColor(C.gray6).lineWidth(0.5).stroke()
           .restore();
 
-        // Event name row
+        // Event name row with image icon
         const iconY = y + 14;
-        // Small flag icon (square)
-        doc.save().rect(ML + 16, iconY, 16, 18).strokeColor(C.gray12).lineWidth(1.5).stroke().restore();
-        doc.font('Helvetica').fontSize(9).fillColor(C.gray11).text('Evento', ML + 40, iconY, { lineBreak: false });
-        doc.font('Helvetica-Bold').fontSize(11).fillColor(C.gray12).text(data.event.name, ML + 40, iconY + 13, { lineBreak: false, width: CONTENT_W - 60 });
-        y += cardH * 0.42;
+        doc.save()
+          .roundedRect(ML + 16, iconY, 20, 20, 3)
+          .fillColor(C.gray3).fill()
+          .roundedRect(ML + 16, iconY, 20, 20, 3)
+          .strokeColor(C.gray6).lineWidth(0.5).stroke()
+          .restore();
+        // Mountain/image icon simplified
+        doc.save().strokeColor(C.gray11).lineWidth(1)
+          .moveTo(ML + 19, iconY + 15).lineTo(ML + 23, iconY + 10).lineTo(ML + 27, iconY + 15)
+          .lineTo(ML + 32, iconY + 8).lineTo(ML + 34, iconY + 15).stroke().restore();
 
-        // Inner divider
+        doc.font('Helvetica').fontSize(9).fillColor(C.gray11).text('Evento', ML + 44, iconY, { lineBreak: false });
+        doc.font('Helvetica-Bold').fontSize(11).fillColor(C.gray12).text(data.event.name, ML + 44, iconY + 13, { lineBreak: false, width: CONTENT_W - 64 });
+
+        y += cardH * 0.42;
         hline(y, ML + 1, CONTENT_W - 2);
         y += 10;
 
-        // 4-col row: Data | Organização | Local | Participantes
         const cols = [
           { label: 'Data', value: fmtDate(data.event.date) },
           { label: 'Organização', value: data.event.organization },
           { label: 'Local', value: data.event.location },
-          { label: 'Participantes', value: `${data.event.participantCount} inscrições` },
+          { label: 'Participantes', value: `${data.event.participantCount} atletas` },
         ];
         const colW = CONTENT_W / 4;
         cols.forEach((col, i) => {
-          labelValue(col.label, col.value, ML + i * colW, y, colW - 4);
+          const cx = ML + i * colW;
+          doc.font('Helvetica').fontSize(9).fillColor(C.gray11).text(col.label, cx, y, { width: colW - 4, lineBreak: false });
+          doc.font('Helvetica-Bold').fontSize(10).fillColor(C.gray12).text(col.value || '—', cx, y + 14, { width: colW - 4, lineBreak: false });
         });
         y += 40;
       };
@@ -245,15 +238,10 @@ export class TicketPdfService {
         const cardX = ML;
         const cardW = CONTENT_W;
         const cardStartY = y;
-
-        // — Card header (QR + participant info) —
         const headerH = 100;
 
-        doc.save()
-          .roundedRect(cardX, cardStartY, cardW, 9999, 12)
-          .clip();
-
-        // Header bg (white)
+        // Clip to rounded card
+        doc.save().roundedRect(cardX, cardStartY, cardW, 9999, 12).clip();
         doc.rect(cardX, cardStartY, cardW, headerH).fillColor(C.white).fill();
 
         // QR code
@@ -269,57 +257,47 @@ export class TicketPdfService {
         doc.restore();
 
         y = cardStartY + headerH;
-
-        // Header bottom border
         hline(y, cardX + 1, cardW - 2);
 
-        // — Participant info section —
+        // ── Informações do participante ─────────────────────────────────────
         y += 16;
         doc.font('Helvetica-Bold').fontSize(12).fillColor(C.gray12).text('Informações do participante', ML + 20, y);
         y += 20;
 
-        const fields: Array<[string, string]> = [
-          ['Email', reg.email ?? ''],
-          ['CPF', reg.cpf ?? ''],
-          ['Data de nascimento', fmtDate(reg.dateOfBirth)],
-          ['Telefone', reg.phone ?? ''],
-          ['Sexo', reg.gender ?? ''],
-        ];
-        fields.forEach(([label, value]) => {
-          if (!value) return;
-          y = infoRow(label, value, y);
-        });
+        // Build pairs for 2-col grid: (Email, DOB), (CPF, Sexo), (Telefone, -)
+        const infoPairs: Array<[string, string]> = [];
+        if (reg.email) infoPairs.push(['Email', reg.email]);
+        if (reg.dateOfBirth) infoPairs.push(['Data de nascimento', fmtDate(reg.dateOfBirth)]);
+        if (reg.cpf) infoPairs.push(['CPF', reg.cpf]);
+        if (reg.gender) infoPairs.push(['Sexo', reg.gender]);
+        if (reg.phone) infoPairs.push(['Telefone', reg.phone]);
 
+        drawFieldGrid(infoPairs);
         y += 4;
 
-        // — Organizer Q&A —
+        // ── Perguntas do Organizador ────────────────────────────────────────
         if (reg.questionAnswers.length > 0) {
-          ensureSpace(40 + reg.questionAnswers.length * 22);
-
+          ensureSpace(40 + Math.ceil(reg.questionAnswers.length / 2) * 38);
           hline(y, cardX + 16, cardW - 32);
           y += 16;
-
           doc.font('Helvetica-Bold').fontSize(12).fillColor(C.gray12).text('Perguntas do Organizador', ML + 20, y);
           y += 20;
 
-          reg.questionAnswers.forEach(({ question, answer }) => {
-            y = infoRow(question, answer, y);
-          });
-
+          const qaPairs: Array<[string, string]> = reg.questionAnswers
+            .filter(qa => qa.answer)
+            .map(qa => [qa.question, qa.answer]);
+          drawFieldGrid(qaPairs);
           y += 4;
         }
 
-        // — Products —
+        // ── Produtos do kit ─────────────────────────────────────────────────
         if (reg.products.length > 0) {
-          ensureSpace(60 + Math.ceil(reg.products.length / 2) * 120);
-
+          ensureSpace(60 + Math.ceil(reg.products.length / 2) * 130);
           hline(y, cardX + 16, cardW - 32);
           y += 16;
-
           doc.font('Helvetica-Bold').fontSize(12).fillColor(C.gray12).text('Produtos do kit', ML + 20, y);
           y += 20;
 
-          // 2-column grid
           const productCardW = (CONTENT_W - 12) / 2;
           let col = 0;
           let rowY = y;
@@ -327,66 +305,61 @@ export class TicketPdfService {
           reg.products.forEach((prod) => {
             const px = ML + col * (productCardW + 12);
             const py = rowY;
-            const ph = 90;
+            const ph = 100;
 
-            // Card bg
             doc.save()
               .roundedRect(px, py, productCardW, ph, 8)
-              .fillColor(C.gray2)
-              .fill()
+              .fillColor(C.gray2).fill()
               .roundedRect(px, py, productCardW, ph, 8)
-              .strokeColor(C.gray6)
-              .lineWidth(0.5)
-              .stroke()
+              .strokeColor(C.gray6).lineWidth(0.5).stroke()
               .restore();
 
-            // Product image placeholder (40x40)
-            doc.save().rect(px + 12, py + 12, 40, 40).strokeColor(C.gray6).lineWidth(0.5).stroke().restore();
+            // Product image area
+            doc.save()
+              .roundedRect(px + 12, py + 12, 52, 52, 4)
+              .fillColor(C.gray3).fill()
+              .roundedRect(px + 12, py + 12, 52, 52, 4)
+              .strokeColor(C.gray6).lineWidth(0.5).stroke()
+              .restore();
 
-            // Name + price
-            const textX = px + 60;
-            const textW = productCardW - 72;
+            const textX = px + 72;
+            const textW = productCardW - 84;
             doc.font('Helvetica-Bold').fontSize(9).fillColor(C.gray12).text(prod.name, textX, py + 14, { width: textW, lineBreak: true });
-            if (prod.variationName) {
-              doc.font('Helvetica').fontSize(8).fillColor(C.gray11).text(prod.variationName, textX, py + 36, { width: textW, lineBreak: false });
-            }
             doc.font('Helvetica-Bold').fontSize(9).fillColor(C.gray12).text(fmtCurrency(prod.price), textX, py + 48, { lineBreak: false });
+
+            // Variation below image
+            if (prod.variationName) {
+              doc.font('Helvetica').fontSize(8).fillColor(C.gray11).text(`Tamanho: ${prod.variationName}`, px + 12, py + 68, { width: productCardW - 24, lineBreak: false });
+            }
 
             // Badge: Incluso / Adicional
             const badgeText = prod.isIncluded ? 'Incluso' : 'Adicional';
-            const badgeColor = prod.isIncluded ? C.green : C.blueTag;
+            const badgeColor = prod.isIncluded ? C.greenPrimary : C.blueTag;
             const badgeX = px + 12;
-            const badgeY = py + 64;
+            const badgeY = py + 80;
             doc.save()
               .roundedRect(badgeX, badgeY, 52, 16, 4)
-              .fillColor(badgeColor)
-              .fillOpacity(0.12)
-              .fill()
+              .fillColor(badgeColor).fillOpacity(0.12).fill()
               .restore();
             doc.font('Helvetica-Bold').fontSize(7).fillColor(badgeColor).text(badgeText, badgeX + 4, badgeY + 4, { lineBreak: false });
 
             col++;
-            if (col === 2) {
-              col = 0;
-              rowY += ph + 10;
-            }
+            if (col === 2) { col = 0; rowY += ph + 10; }
           });
 
-          if (col !== 0) rowY += 100; // incomplete last row
+          if (col !== 0) rowY += 110;
           y = rowY + 10;
         } else {
           y += 10;
         }
 
-        // Card outline (draw last so it's on top)
+        // Card outline drawn last
         doc.save()
           .roundedRect(cardX, cardStartY, cardW, y - cardStartY, 12)
-          .strokeColor(C.gray6)
-          .lineWidth(0.5)
-          .stroke()
+          .strokeColor(C.gray6).lineWidth(0.5).stroke()
           .restore();
 
-        y += 16; // gap between cards
+        y += 16;
       };
 
       // ── Render ─────────────────────────────────────────────────────────────

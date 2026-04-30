@@ -1,9 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import PDFDocument from 'pdfkit';
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
 const sharp: (input: Buffer) => import('sharp').Sharp = require('sharp');
 
-// ── SVG assets (same logo as ticket PDF) ─────────────────────────────────────
+// ── SVG assets ────────────────────────────────────────────────────────────────
 
 const VECTOR_SVG = `<svg width="29" height="28" viewBox="0 0 29 28" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M28.023 12.4933C27.1431 11.4496 25.8464 10.8458 24.482 10.8458H18.8104C18.1477 10.8458 17.5122 11.1017 17.0364 11.5617L0 28L6.70384 11.0729C6.96406 10.4145 7.60094 9.98316 8.30828 9.98316H15.1156C15.8833 9.98316 16.4656 9.35346 16.4656 8.63463C16.4656 8.5038 16.4469 7.07476 16.4067 6.94249C16.2327 6.37462 15.7079 5.98788 15.1156 5.98788H7.60813C7.06757 5.98788 6.55864 5.73485 6.23229 5.30499L1.22921 0H17.1571C17.1974 0 17.2376 0.00143767 17.2779 0.004313C17.2836 0.004313 17.2908 0.004313 17.298 0.00575067C17.9981 0.0632573 18.5991 0.539125 18.8076 1.21914L19.2432 2.64243C19.4114 3.18875 19.9146 3.56254 20.4868 3.56254H25.6854C26.4444 3.56254 27.1144 4.0571 27.3358 4.78312L28.6009 8.91497C28.9733 10.1327 28.7605 11.4539 28.023 12.4933Z" fill="url(#paint0_linear)"/><defs><linearGradient id="paint0_linear" x1="22.5514" y1="-1.14754" x2="0.808587" y2="28.4166" gradientUnits="userSpaceOnUse"><stop stop-color="#57D321"/><stop offset="0.523222" stop-color="#1CB757"/><stop offset="1" stop-color="#18773D"/></linearGradient></defs></svg>`;
 
@@ -27,7 +27,7 @@ export interface ReceiptPdfData {
   issuedAt: Date;
   organization: {
     name: string;
-    document?: string; // CNPJ/CPF raw digits
+    document?: string;
   };
   buyer: {
     name: string;
@@ -39,7 +39,7 @@ export interface ReceiptPdfData {
     location: string;
   };
   payment: {
-    method: string; // PIX, CREDIT_CARD, BOLETO, FREE, etc.
+    method: string;
     paidAt: Date;
     gateway?: string;
     transactionId?: string;
@@ -49,12 +49,12 @@ export interface ReceiptPdfData {
     couponCode?: string;
   };
   financial: {
-    subtotal: number;        // cents — ticket sum
-    discount: number;        // cents — voucher + coupon
+    subtotal: number;
+    discount: number;
     voucherCode?: string;
-    voucherPercent?: number; // e.g. 16.67
-    serviceFee: number;      // cents (shown as "Inclusa" when 0 or already embedded)
-    total: number;           // cents — final paid
+    voucherPercent?: number;
+    serviceFee: number;
+    total: number;
   };
   registrations: ReceiptPdfRegistrationRow[];
 }
@@ -62,20 +62,20 @@ export interface ReceiptPdfData {
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const C = {
-  gray12:   '#202020',
-  gray11:   '#646464',
-  gray6:    '#D9D9D9',
-  gray3:    '#F0F0F0',
-  gray2:    '#F9F9F9',
-  white:    '#FFFFFF',
-  green11:  '#21835D',
-  green12:  '#193B30',
-  green3:   '#DAF1DB',
-  green8:   '#46A758',
-  greenPrimary: '#308737',
+  gray12:         '#202020',
+  gray11:         '#646464',
+  gray6:          '#D9D9D9',
+  gray3:          '#F0F0F0',
+  gray2:          '#F9F9F9',
+  white:          '#FFFFFF',
+  green11:        '#21835D',
+  green12:        '#193B30',
+  green3:         '#DAF1DB',
+  green8:         '#46A758',
+  greenPrimary:   '#308737',
   greenPrimaryText: '#F5FBF5',
-  amber12:  '#4F3422',
-  pixColor: '#62B7AF',
+  amber12:        '#4F3422',
+  pixColor:       '#62B7AF',
 } as const;
 
 const PAGE_W = 595;
@@ -104,12 +104,8 @@ function fmtCurrency(cents: number): string {
 function fmtDocument(raw: string | undefined): string {
   if (!raw) return '—';
   const d = raw.replace(/\D/g, '');
-  if (d.length === 14) {
-    return d.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
-  }
-  if (d.length === 11) {
-    return d.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, '$1.$2.$3-$4');
-  }
+  if (d.length === 14) return d.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
+  if (d.length === 11) return d.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, '$1.$2.$3-$4');
   return raw;
 }
 
@@ -157,10 +153,7 @@ export class ReceiptPdfService {
 
       let y = 0;
 
-      const newPage = () => {
-        doc.addPage();
-        y = MT;
-      };
+      const newPage = () => { doc.addPage(); y = MT; };
 
       const ensureSpace = (needed: number) => {
         if (y + needed > PAGE_H - MT) newPage();
@@ -190,74 +183,95 @@ export class ReceiptPdfService {
       // ── Section badge ───────────────────────────────────────────────────────
       const drawSectionBadge = (num: string, label: string) => {
         ensureSpace(32);
-        // Green square badge with number
         doc.save().roundedRect(ML, y, 28, 28, 4).fillColor(C.greenPrimary).fill().restore();
         doc.font('Helvetica-Bold').fontSize(13).fillColor(C.greenPrimaryText).text(num, ML, y + 7, { width: 28, align: 'center', lineBreak: false });
-        doc.font('Helvetica-Bold').fontSize(11).fillColor(C.gray12).text(label, ML + 36, y + 7, { lineBreak: false });
+        doc.font('Helvetica-Bold').fontSize(11).fillColor(C.gray12).text(label, ML + 36, y + 8, { lineBreak: false });
         y += 36;
-      };
-
-      // ── Info card row (label left, value right) ─────────────────────────────
-      const drawKVRow = (label: string, value: string, x: number, w: number, yPos: number): number => {
-        doc.font('Helvetica').fontSize(10).fillColor(C.gray11).text(label, x, yPos, { width: w / 2 - 4, lineBreak: false });
-        doc.font('Helvetica-Bold').fontSize(10).fillColor(C.gray12).text(value, x + w / 2, yPos, { width: w / 2, align: 'right', lineBreak: false });
-        return yPos + 22;
       };
 
       // ── Render ─────────────────────────────────────────────────────────────
       newPage();
-
-      // Header
       drawHeader();
 
       // Title
       doc.font('Helvetica-Bold').fontSize(14).fillColor(C.gray12).text('Recibo de pagamento', ML, y);
       y += 28;
 
-      // ── Two-column cards: Organization | Buyer ──────────────────────────────
+      // ── Two-column cards: Organization (with icon) | Buyer (plain title) ───
       {
-        ensureSpace(140);
-        const cardW = (CONTENT_W - 20) / 2;
+        ensureSpace(160);
+        const cardW = (CONTENT_W - 16) / 2;
         const cardStartY = y;
         const leftX = ML;
-        const rightX = ML + cardW + 20;
-
-        // measure content heights first
-        const drawInfoCard = (x: number, w: number, title: string, rows: Array<[string, string]>) => {
-          const rowH = 22;
-          const totalH = 20 + 28 + 16 + rows.length * rowH + 16;
-          // Card border
-          doc.save().roundedRect(x, cardStartY, w, totalH, 8).strokeColor(C.gray6).lineWidth(0.5).stroke().restore();
-          let cy = cardStartY + 20;
-          // Title row with icon
-          doc.save().roundedRect(x + 20, cy + 2, 36, 36, 18).fillColor(C.green12).fill().restore();
-          doc.save().roundedRect(x + 20, cy + 2, 36, 36, 18).strokeColor(C.green8).lineWidth(0.5).stroke().restore();
-          // Small check icon (simplified — just circle)
-          doc.font('Helvetica-Bold').fontSize(12).fillColor(C.gray12).text(title, x + 64, cy + 10, { width: w - 84, lineBreak: false });
-          cy += 46;
-          hline(cy, x + 16, w - 32);
-          cy += 12;
-          rows.forEach(([label, value]) => {
-            cy = drawKVRow(label, value, x + 16, w - 32, cy);
-          });
-          return cy + 4;
-        };
+        const rightX = ML + cardW + 16;
+        const rowH = 28;
 
         const orgRows: Array<[string, string]> = [
           ['CNPJ', fmtDocument(data.organization.document)],
           ['Evento', data.event.name],
           ['Data', `${fmtDate(data.event.date)} · ${data.event.location}`],
         ];
-
         const buyerRows: Array<[string, string]> = [
-          ['CPF', fmtDocument(data.buyer.document)],
+          ['CNPJ', fmtDocument(data.buyer.document)],
           ['Evento', data.event.name],
           ['Data', `${fmtDate(data.event.date)} · ${data.event.location}`],
         ];
 
-        const leftBottom = drawInfoCard(leftX, cardW, data.organization.name, orgRows);
-        const rightBottom = drawInfoCard(rightX, cardW, data.buyer.name, buyerRows);
-        y = Math.max(leftBottom, rightBottom) + 20;
+        const leftCardH = 20 + 56 + 8 + orgRows.length * rowH + 16;
+        const rightCardH = 20 + 32 + 8 + buyerRows.length * rowH + 16;
+        const cardH = Math.max(leftCardH, rightCardH);
+
+        // Left card — org with dark-green circle icon
+        doc.save().roundedRect(leftX, cardStartY, cardW, cardH, 8).strokeColor(C.gray6).lineWidth(0.5).stroke().restore();
+        {
+          let cy = cardStartY + 20;
+
+          // Dark green circle icon
+          const iconCx = leftX + 20 + 18;
+          const iconCy = cy + 18;
+          doc.save().circle(iconCx, iconCy, 18).fillColor(C.green12).fill().restore();
+          doc.save().circle(iconCx, iconCy, 18).strokeColor(C.green8).lineWidth(0.5).stroke().restore();
+          // Building icon simplified (white)
+          doc.save().strokeColor(C.white).lineWidth(1.2)
+            .rect(iconCx - 8, iconCy - 6, 16, 12).stroke()
+            .moveTo(iconCx - 4, iconCy + 6).lineTo(iconCx - 4, iconCy + 1).lineTo(iconCx + 4, iconCy + 1).lineTo(iconCx + 4, iconCy + 6)
+            .stroke()
+            .restore();
+
+          // Org title
+          doc.font('Helvetica-Bold').fontSize(11).fillColor(C.gray12).text(data.organization.name, leftX + 20 + 42, cy + 10, { width: cardW - 72, lineBreak: false });
+          cy += 48;
+
+          hline(cy, leftX + 12, cardW - 24);
+          cy += 8;
+
+          orgRows.forEach(([label, value]) => {
+            doc.font('Helvetica').fontSize(9).fillColor(C.gray11).text(label, leftX + 16, cy, { width: cardW / 2 - 8, lineBreak: false });
+            doc.font('Helvetica-Bold').fontSize(9).fillColor(C.gray12).text(value, leftX + cardW / 2, cy, { width: cardW / 2 - 16, align: 'right', lineBreak: false });
+            cy += rowH;
+          });
+        }
+
+        // Right card — buyer, plain title (no icon)
+        doc.save().roundedRect(rightX, cardStartY, cardW, cardH, 8).strokeColor(C.gray6).lineWidth(0.5).stroke().restore();
+        {
+          let cy = cardStartY + 20;
+
+          // Plain title text
+          doc.font('Helvetica-Bold').fontSize(11).fillColor(C.gray12).text(data.buyer.name, rightX + 16, cy + 6, { width: cardW - 32, lineBreak: false });
+          cy += 40;
+
+          hline(cy, rightX + 12, cardW - 24);
+          cy += 8;
+
+          buyerRows.forEach(([label, value]) => {
+            doc.font('Helvetica').fontSize(9).fillColor(C.gray11).text(label, rightX + 16, cy, { width: cardW / 2 - 8, lineBreak: false });
+            doc.font('Helvetica-Bold').fontSize(9).fillColor(C.gray12).text(value, rightX + cardW / 2, cy, { width: cardW / 2 - 16, align: 'right', lineBreak: false });
+            cy += rowH;
+          });
+        }
+
+        y = cardStartY + cardH + 20;
       }
 
       // ── Payment method row ──────────────────────────────────────────────────
@@ -273,24 +287,38 @@ export class ReceiptPdfService {
           : data.payment.method === 'FREE' ? 'Sem cobrança'
           : 'Pagamento com cartão';
 
-        // Payment icon square
-        doc.save().rect(ML + 16, y + 10, 36, 36).fillColor(C.pixColor).fill().restore();
+        // Payment icon — diamond shape for PIX, rounded rect for others
+        const iconX = ML + 16;
+        const iconCY = y + rowH / 2;
+        if (data.payment.method === 'PIX') {
+          // Diamond (rotated square)
+          const s = 14;
+          doc.save()
+            .moveTo(iconX + s, iconCY)
+            .lineTo(iconX + s * 2, iconCY + s)
+            .lineTo(iconX + s, iconCY + s * 2)
+            .lineTo(iconX, iconCY + s)
+            .closePath()
+            .fillColor(C.pixColor).fill()
+            .restore();
+        } else {
+          doc.save().roundedRect(iconX, iconCY - 14, 28, 28, 4).fillColor(C.pixColor).fill().restore();
+        }
 
         doc.font('Helvetica-Bold').fontSize(13).fillColor(C.gray12).text(methodLabel, ML + 60, y + 10, { lineBreak: false });
-        doc.font('Helvetica').fontSize(10).fillColor(C.gray12).text(subLabel, ML + 60, y + 26, { lineBreak: false });
+        doc.font('Helvetica').fontSize(10).fillColor(C.gray11).text(subLabel, ML + 60, y + 26, { lineBreak: false });
 
-        // "Pago" badge
-        const badgeW = 60;
+        // "✓ Pago" badge
+        const badgeW = 72;
         const badgeX = ML + CONTENT_W - badgeW - 12;
         doc.save().roundedRect(badgeX, y + 16, badgeW, 24, 4).fillColor(C.green11).fill().restore();
-        doc.font('Helvetica-Bold').fontSize(10).fillColor('#FBFEFB').text('Pago', badgeX, y + 22, { width: badgeW, align: 'center', lineBreak: false });
+        doc.font('Helvetica-Bold').fontSize(10).fillColor('#FBFEFB').text('✓ Pago', badgeX, y + 22, { width: badgeW, align: 'center', lineBreak: false });
 
         y += rowH + 20;
       }
 
       // ── Section 1: Resumo financeiro ────────────────────────────────────────
       drawSectionBadge('1', 'Resumo financeiro');
-
       {
         ensureSpace(160);
         const cardX = ML;
@@ -310,18 +338,12 @@ export class ReceiptPdfService {
         lines.push({ label: 'Total pago', value: fmtCurrency(data.financial.total), bold: true });
 
         const rowH = 22;
-        const dividerCount = lines.length - 1;
-        const cardH = 20 + lines.length * rowH + dividerCount * 14 + 10;
-
+        const cardH = 16 + lines.length * rowH + (lines.length - 1) * 14 + 10;
         doc.save().roundedRect(cardX, cardY, CONTENT_W, cardH, 8).strokeColor(C.gray6).lineWidth(0.5).stroke().restore();
 
         let cy = cardY + 16;
         lines.forEach((line, i) => {
-          if (i > 0) {
-            cy += 6;
-            hline(cy, cardX + 16, CONTENT_W - 32);
-            cy += 8;
-          }
+          if (i > 0) { cy += 6; hline(cy, cardX + 16, CONTENT_W - 32); cy += 8; }
           const font = line.bold ? 'Helvetica-Bold' : 'Helvetica';
           const size = line.bold ? 13 : 11;
           doc.font(font).fontSize(size).fillColor(C.gray12).text(line.label, cardX + 16, cy, { lineBreak: false });
@@ -332,155 +354,180 @@ export class ReceiptPdfService {
         y = cardY + cardH + 20;
       }
 
-      // ── Section 2: Detalhes da transação ────────────────────────────────────
+      // ── Section 2: Detalhes da transação — 3-column grid ───────────────────
       drawSectionBadge('2', 'Detalhes da transação');
-
       {
-        ensureSpace(200);
+        ensureSpace(180);
         const cardX = ML;
         const cardY = y;
-        const txRows: Array<{ label: string; value: string; amber?: boolean }> = [];
+        const colW = CONTENT_W / 3;
+        const cellH = 44;
 
-        txRows.push({ label: 'Data da compra', value: fmtDateTime(data.payment.paidAt) });
-        txRows.push({ label: 'Gateway', value: data.payment.gateway || 'PódioTicket' });
+        // Build rows: [[col1, col2, col3], [col1, col2, col3]]
+        type TxCell = { label: string; value: string; amber?: boolean } | null;
+        const row1: TxCell[] = [
+          { label: 'Data da compra', value: fmtDateTime(data.payment.paidAt) },
+          { label: 'Gateway', value: data.payment.gateway || 'PódioTicket' },
+          (data.financial.voucherCode || data.payment.voucherCode)
+            ? { label: 'Voucher utilizado', value: (data.financial.voucherCode || data.payment.voucherCode)!, amber: true }
+            : null,
+        ];
+        const row2: TxCell[] = [
+          data.payment.txId ? { label: 'TxID', value: data.payment.txId } : null,
+          data.payment.transactionId ? { label: 'ID da transação', value: data.payment.transactionId } : null,
+          data.payment.e2eId ? { label: 'E2E ID (Pix)', value: data.payment.e2eId } : null,
+        ];
 
-        if (data.financial.voucherCode || data.payment.voucherCode) {
-          txRows.push({ label: 'Voucher utilizado', value: (data.financial.voucherCode || data.payment.voucherCode)!, amber: true });
-        }
-        if (data.payment.couponCode) {
-          txRows.push({ label: 'Cupom utilizado', value: data.payment.couponCode, amber: true });
-        }
-        if (data.payment.txId) {
-          txRows.push({ label: 'TxID', value: data.payment.txId });
-        }
-        if (data.payment.transactionId) {
-          txRows.push({ label: 'ID da transação', value: data.payment.transactionId });
-        }
-        if (data.payment.e2eId) {
-          txRows.push({ label: 'E2E ID (Pix)', value: data.payment.e2eId });
-        }
+        const hasRow2 = row2.some(Boolean);
+        const cardH = cellH + (hasRow2 ? cellH : 0) + 8;
 
-        const rowH = 44;
-        const cardH = txRows.length * rowH + 16;
         doc.save().roundedRect(cardX, cardY, CONTENT_W, cardH, 8).strokeColor(C.gray6).lineWidth(0.5).stroke().restore();
 
-        let cy = cardY + 12;
-        txRows.forEach((row, i) => {
-          if (i > 0) {
-            hline(cy, cardX + 1, CONTENT_W - 2);
-            cy += 4;
-          }
-          const color = row.amber ? C.amber12 : C.gray12;
-          doc.font('Helvetica').fontSize(10).fillColor(C.gray12).text(row.label, cardX + 16, cy, { lineBreak: false });
-          doc.font('Helvetica-Bold').fontSize(10).fillColor(color).text(row.value, cardX + 16, cy + 16, { width: CONTENT_W - 32, lineBreak: false });
-          cy += rowH;
-        });
+        const drawTxRow = (cells: TxCell[], rowY: number) => {
+          cells.forEach((cell, ci) => {
+            if (!cell) return;
+            const cx = cardX + ci * colW + 16;
+            const maxW = colW - 24;
+            doc.font('Helvetica').fontSize(9).fillColor(C.gray11).text(cell.label, cx, rowY + 6, { width: maxW, lineBreak: false });
+            const color = cell.amber ? C.amber12 : C.gray12;
+            // Truncate long values
+            const val = cell.value.length > 28 ? cell.value.slice(0, 26) + '…' : cell.value;
+            doc.font('Helvetica-Bold').fontSize(10).fillColor(color).text(val, cx, rowY + 20, { width: maxW, lineBreak: false });
+          });
+        };
+
+        drawTxRow(row1, cardY + 4);
+        if (hasRow2) {
+          hline(cardY + cellH, cardX + 1, CONTENT_W - 2);
+          drawTxRow(row2, cardY + cellH + 4);
+        }
 
         y = cardY + cardH + 20;
       }
 
       // ── Section 3: Ingressos adquiridos ─────────────────────────────────────
       drawSectionBadge('3', 'Ingressos adquiridos');
-
       {
-        ensureSpace(60 + data.registrations.length * 44);
+        ensureSpace(60 + data.registrations.length * 48);
         const cardX = ML;
         const cardY = y;
-        const COL_ID = 110;
-        const COL_VAL = 120;
-        const COL_TICKET = (CONTENT_W - COL_ID - COL_VAL) / 2;
-        const COL_PARTICIPANT = CONTENT_W - COL_ID - COL_VAL - COL_TICKET;
+
+        const COL_ID = 90;
+        const COL_VAL = 100;
+        const remaining = CONTENT_W - COL_ID - COL_VAL;
+        const COL_PARTICIPANT = Math.round(remaining * 0.55);
+        const COL_TICKET = remaining - COL_PARTICIPANT;
+
         const headerH = 36;
-        const rowH = 44;
+        const rowH = 48;
         const tableH = headerH + data.registrations.length * rowH;
 
-        // Table border
         doc.save().roundedRect(cardX, cardY, CONTENT_W, tableH, 8).strokeColor(C.gray6).lineWidth(0.5).stroke().restore();
 
-        // Header row
+        // Header
         doc.save().roundedRect(cardX, cardY, CONTENT_W, headerH, 8).fillColor(C.gray3).fill().restore();
-        hline(cardY, cardX + 1, CONTENT_W - 2, C.gray6);
-        hline(cardY + headerH, cardX + 1, CONTENT_W - 2, C.gray6);
+        hline(cardY + headerH, cardX + 1, CONTENT_W - 2);
 
         const headers = [
-          { label: 'ID inscrição', x: cardX + 16, w: COL_ID - 16, align: 'left' as const },
-          { label: 'Participante', x: cardX + COL_ID, w: COL_PARTICIPANT, align: 'left' as const },
-          { label: 'Ticket', x: cardX + COL_ID + COL_PARTICIPANT, w: COL_TICKET, align: 'left' as const },
+          { label: 'ID inscrição', x: cardX + 16, w: COL_ID - 16 },
+          { label: 'Participante', x: cardX + COL_ID, w: COL_PARTICIPANT },
+          { label: 'Ticket', x: cardX + COL_ID + COL_PARTICIPANT, w: COL_TICKET },
           { label: 'Valor', x: cardX + CONTENT_W - COL_VAL, w: COL_VAL - 16, align: 'right' as const },
         ];
         headers.forEach((h) => {
-          doc.font('Helvetica-Bold').fontSize(9).fillColor(C.gray12).text(h.label, h.x, cardY + 12, { width: h.w, align: h.align, lineBreak: false });
+          doc.font('Helvetica-Bold').fontSize(9).fillColor(C.gray12).text(h.label, h.x, cardY + 12, { width: h.w, align: h.align ?? 'left', lineBreak: false });
         });
 
-        // Data rows
+        // Rows
         let ry = cardY + headerH;
         data.registrations.forEach((reg) => {
           hline(ry + rowH, cardX + 1, CONTENT_W - 2, C.gray6);
 
-          // ID (shortened)
+          // ID
           const shortId = reg.id.slice(0, 8).toUpperCase();
-          doc.font('Helvetica-Bold').fontSize(9).fillColor(C.gray12).text(shortId, cardX + 16, ry + 10, { width: COL_ID - 20, lineBreak: false });
+          doc.font('Helvetica-Bold').fontSize(9).fillColor(C.gray12).text(shortId, cardX + 16, ry + 16, { width: COL_ID - 20, lineBreak: false });
 
-          // Participant: name + email
-          const partX = cardX + COL_ID;
-          doc.font('Helvetica-Bold').fontSize(9).fillColor(C.gray12).text(reg.participantName, partX + 4, ry + 8, { width: COL_PARTICIPANT - 8, lineBreak: false });
+          // Participant: avatar circle + name + email
+          const avatarR = 16;
+          const avatarCx = cardX + COL_ID + avatarR + 4;
+          const avatarCy = ry + rowH / 2;
+          doc.save().circle(avatarCx, avatarCy, avatarR).fillColor(C.gray3).fill().restore();
+          const initial = (reg.participantName || '?').charAt(0).toUpperCase();
+          doc.font('Helvetica-Bold').fontSize(11).fillColor(C.gray11)
+            .text(initial, avatarCx - avatarR, avatarCy - 8, { width: avatarR * 2, align: 'center', lineBreak: false });
+
+          const textX = cardX + COL_ID + avatarR * 2 + 10;
+          const textW = COL_PARTICIPANT - avatarR * 2 - 14;
+          doc.font('Helvetica-Bold').fontSize(9).fillColor(C.gray12).text(reg.participantName, textX, ry + 10, { width: textW, lineBreak: false });
           if (reg.email) {
-            doc.font('Helvetica').fontSize(8).fillColor(C.gray11).text(reg.email, partX + 4, ry + 22, { width: COL_PARTICIPANT - 8, lineBreak: false });
+            doc.font('Helvetica').fontSize(8).fillColor(C.gray11).text(reg.email, textX, ry + 24, { width: textW, lineBreak: false });
           }
 
           // Ticket: category + name
           const tickX = cardX + COL_ID + COL_PARTICIPANT;
           if (reg.ticketCategory) {
-            doc.font('Helvetica').fontSize(8).fillColor(C.gray11).text(reg.ticketCategory, tickX + 4, ry + 8, { width: COL_TICKET - 8, lineBreak: false });
+            doc.font('Helvetica').fontSize(8).fillColor(C.gray11).text(reg.ticketCategory, tickX + 4, ry + 10, { width: COL_TICKET - 8, lineBreak: false });
           }
-          doc.font('Helvetica-Bold').fontSize(9).fillColor(C.gray12).text(reg.ticketName, tickX + 4, ry + 22, { width: COL_TICKET - 8, lineBreak: false });
+          doc.font('Helvetica-Bold').fontSize(9).fillColor(C.gray12).text(reg.ticketName, tickX + 4, ry + 24, { width: COL_TICKET - 8, lineBreak: false });
 
           // Price
-          doc.font('Helvetica-Bold').fontSize(9).fillColor(C.gray12).text(fmtCurrency(reg.price), cardX + CONTENT_W - COL_VAL, ry + 15, { width: COL_VAL - 16, align: 'right', lineBreak: false });
+          doc.font('Helvetica-Bold').fontSize(9).fillColor(C.gray12)
+            .text(fmtCurrency(reg.price), cardX + CONTENT_W - COL_VAL, ry + 16, { width: COL_VAL - 16, align: 'right', lineBreak: false });
 
           ry += rowH;
         });
 
-        y = cardY + tableH + 12;
+        y = cardY + tableH + 10;
 
-        // Summary bar (green)
+        // Summary bar
         const total = data.registrations.reduce((s, r) => s + r.price, 0);
         doc.save().roundedRect(ML, y, CONTENT_W, 44, 8).fillColor(C.green3).fill().restore();
         doc.save().roundedRect(ML, y, CONTENT_W, 44, 8).strokeColor(C.green8).lineWidth(0.5).stroke().restore();
-        doc.font('Helvetica').fontSize(10).fillColor(C.green12).text(`${data.registrations.length} ingresso${data.registrations.length !== 1 ? 's' : ''} vinculado${data.registrations.length !== 1 ? 's' : ''} a este pedido`, ML + 16, y + 14, { lineBreak: false });
-        doc.font('Helvetica').fontSize(10).fillColor(C.green12).text('Subtotal: ', ML + CONTENT_W - 130, y + 14, { continued: true, lineBreak: false });
-        doc.font('Helvetica-Bold').fontSize(10).fillColor(C.green12).text(fmtCurrency(total), { lineBreak: false });
+        doc.font('Helvetica').fontSize(10).fillColor(C.green11)
+          .text(`${data.registrations.length} ingresso${data.registrations.length !== 1 ? 's' : ''} vinculado${data.registrations.length !== 1 ? 's' : ''} a este pedido`, ML + 16, y + 14, { lineBreak: false });
+        doc.font('Helvetica').fontSize(10).fillColor(C.green11)
+          .text('Subtotal: ', ML + CONTENT_W - 140, y + 14, { continued: true, lineBreak: false });
+        doc.font('Helvetica-Bold').fontSize(10).fillColor(C.green11).text(fmtCurrency(total), { lineBreak: false });
 
         y += 56;
       }
 
-      // ── Declaration notice ──────────────────────────────────────────────────
+      // ── Declaration — with ⓘ circle icon ───────────────────────────────────
       {
         ensureSpace(80);
         const gateway = data.payment.gateway || 'PódioTicket';
         const declText = `O pagamento referente ao pedido #${data.orderNumber} foi recebido e processado com sucesso pelo gateway ${gateway} em ${fmtDateTime(data.payment.paidAt)}. Este recibo é o comprovante oficial da transação. Para detalhes dos participantes (QR Code, dados pessoais e perguntas do organizador), consulte o PDF de ingressos enviado junto com este documento.`;
 
-        const declHeight = Math.max(60, doc.font('Helvetica').fontSize(9).heightOfString(declText, { width: CONTENT_W - 60 }) + 24);
+        const textW = CONTENT_W - 28;
+        const declHeight = Math.max(52, doc.font('Helvetica').fontSize(9).heightOfString(declText, { width: textW }) + 16);
         ensureSpace(declHeight + 8);
 
-        doc.font('Helvetica-Bold').fontSize(10).fillColor(C.amber12).text('Declaração: ', ML + 28, y + 8, { continued: true, lineBreak: false });
-        doc.font('Helvetica').fontSize(9).fillColor(C.amber12).text(declText, { width: CONTENT_W - 36 });
+        // ⓘ circle icon
+        const iconCx = ML + 8;
+        const iconCy = y + 8;
+        doc.save().circle(iconCx, iconCy, 8).strokeColor(C.amber12).lineWidth(0.8).stroke().restore();
+        doc.font('Helvetica-Bold').fontSize(9).fillColor(C.amber12)
+          .text('i', iconCx - 8, iconCy - 5, { width: 16, align: 'center', lineBreak: false });
+
+        doc.font('Helvetica-Bold').fontSize(10).fillColor(C.amber12)
+          .text('Declaração: ', ML + 22, y, { continued: true, lineBreak: false });
+        doc.font('Helvetica').fontSize(9).fillColor(C.amber12).text(declText, { width: textW - 4 });
         y = doc.y + 16;
       }
 
-      // ── Footer divider + info ───────────────────────────────────────────────
+      // ── Footer ─────────────────────────────────────────────────────────────
       {
-        ensureSpace(70);
+        ensureSpace(60);
         hline(y);
-        y += 16;
+        y += 14;
 
         doc.font('Helvetica').fontSize(9).fillColor(C.gray11)
           .text('Pagamento processado pela plataforma ', ML, y, { continued: true, lineBreak: false });
         doc.font('Helvetica-Bold').fontSize(9).fillColor(C.gray11)
-          .text('PódioTicket Ltda. ', { continued: true, lineBreak: false });
+          .text('PódioTicket Ltda.', { continued: false, lineBreak: false });
         doc.font('Helvetica').fontSize(9).fillColor(C.gray11)
-          .text('CNPJ 65.174.909/0001-01', ML + CONTENT_W - 180, y, { lineBreak: false });
-        y += 18;
+          .text('CNPJ 65.174.909/0001-01', ML + CONTENT_W - 175, y, { lineBreak: false });
+        y += 16;
 
         doc.font('Helvetica').fontSize(9).fillColor(C.gray11)
           .text('Suporte: suporte@podioticket.com.br', ML, y, { lineBreak: false });
