@@ -222,7 +222,7 @@ export class ExportRegistrationsService {
       const footerText = `${eventName}  •  Gerado em ${extractedAt.toLocaleString('pt-BR')}  •  ${registrations.length} inscrições`;
 
       const chunks: Buffer[] = [];
-      const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape', autoFirstPage: false });
+      const doc = new PDFDocument({ margin: 0, size: 'A4', layout: 'landscape', autoFirstPage: false });
 
       doc.on('data', (chunk: Buffer) => chunks.push(chunk));
       doc.on('end', () => resolve(Buffer.concat(chunks)));
