@@ -20,7 +20,8 @@ export class TicketPdfService {
         const qrDataUrl = await QRCode.toDataURL(reg.qrCode || reg.participantName, {
           width: 160,
           margin: 1,
-          color: { dark: '#000000', light: '#ffffff' },
+          errorCorrectionLevel: 'L',
+          color: { dark: '#1a1a1a', light: '#ffffff' },
         });
         return { ...reg, qrDataUrl };
       }),
