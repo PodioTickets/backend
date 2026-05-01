@@ -637,10 +637,10 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
             {
               style: {
                 height: 32,
-                width: 40,
-                padding: 6,
-                backgroundColor: C.gray2,
-                borderRadius: 2,
+                width: 48,
+                padding: 4,
+                backgroundColor: C.white,
+                borderRadius: 4,
                 borderWidth: 1,
                 borderColor: C.gray6,
                 borderStyle: 'solid',
@@ -651,7 +651,7 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
             isPix
               ? React.createElement(
                   Svg,
-                  { width: 20, height: 20, viewBox: '0 0 24 24' },
+                  { width: 22, height: 22, viewBox: '0 0 24 24' },
                   React.createElement(Path, { d: 'M12 2L17 7L12 12L7 7L12 2Z', fill: C.pixColor }),
                   React.createElement(Path, {
                     d: 'M17 7L22 12L17 17L12 12L17 7Z',
@@ -669,6 +669,11 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
                     opacity: 0.7,
                   }),
                 )
+              : data.payment.iconDataUri
+              ? React.createElement(Image, {
+                  src: data.payment.iconDataUri,
+                  style: { width: 40, height: 26, objectFit: 'contain' },
+                })
               : React.createElement(
                   Svg,
                   { width: 20, height: 20, viewBox: '0 0 24 24' },

@@ -2439,6 +2439,7 @@ export class OrdersService {
             e2eId: (payment.metadata as any)?.e2eId,
             voucherCode: order.voucher?.code,
             couponCode: order.coupon?.code,
+            cardBrand: (payment.metadata as any)?.cardBrand ?? undefined,
           },
           financial: {
             subtotal: order.totalAmount ?? 0,

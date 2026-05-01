@@ -33,6 +33,8 @@ export interface ReceiptPdfData {
     e2eId?: string;
     voucherCode?: string;
     couponCode?: string;
+    cardBrand?: string;
+    iconDataUri?: string;
   };
   financial: {
     subtotal: number;
