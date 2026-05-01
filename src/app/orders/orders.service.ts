@@ -1490,10 +1490,17 @@ export class OrdersService {
     );
     const totalAmount = ticketsSubtotal + productsSubtotal;
 
-    // Recalculate discount when products change: PERCENTAGE coupons apply to the full order
+    // Recalculate discount when products change: PERCENTAGE coupons apply to the full order.
+    // AGE coupons are excluded — their discount is bounded by effectiveUsage (qualifying
+    // participants), not totalAmount. Recalculating here would lose that constraint.
     let newDiscount = (order as any).discount ?? 0;
     const activeCoupon = (order as any).coupon;
-    if (activeCoupon && activeCoupon.type === 'PERCENTAGE' && !(order as any).voucherId) {
+    if (
+      activeCoupon &&
+      activeCoupon.type === 'PERCENTAGE' &&
+      activeCoupon.couponType !== 'AGE' &&
+      !(order as any).voucherId
+    ) {
       newDiscount = Math.floor(totalAmount * (activeCoupon.value / 100));
       newDiscount = Math.min(newDiscount, totalAmount);
     }
