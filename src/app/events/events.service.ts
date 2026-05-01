@@ -5332,7 +5332,7 @@ export class EventsService {
       orderBy: [{ order: { createdAt: 'desc' } }, { id: 'asc' }],
     });
 
-    return registrations.map((reg: any) => {
+    const exportData = registrations.map((reg: any) => {
       const u = reg.user;
       const participant = u ?? {
         id: null,
@@ -5401,6 +5401,6 @@ export class EventsService {
       };
     });
 
-    return { registrations, eventName };
+    return { registrations: exportData, eventName };
   }
 }

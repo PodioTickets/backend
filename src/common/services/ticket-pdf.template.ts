@@ -11,7 +11,6 @@ import {
   Defs,
   LinearGradient as LinearGradientBase,
   Stop,
-  Rect,
 } from '@react-pdf/renderer';
 import * as path from 'path';
 import {
@@ -496,15 +495,10 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
             { style: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' } },
             React.createElement(
               Svg,
-              { width: 24, height: 27, viewBox: '0 0 27 30' },
-              React.createElement(Rect, {
-                x: 1,
-                y: 1,
-                width: 25,
-                height: 28,
-                stroke: C.gray12,
-                strokeWidth: 2,
-                fill: 'none',
+              { width: 24, height: 24, viewBox: '0 0 24 24' },
+              React.createElement(Path, {
+                d: 'M3.75 2C4.16421 2 4.5 2.33579 4.5 2.75V3H15C16.1046 3 17 3.89543 17 5V12.75C17 13.4404 16.4404 14 15.75 14H4.5V21.25C4.5 21.6642 4.16421 22 3.75 22C3.33579 22 3 21.6642 3 21.25V2.75C3 2.33579 3.33579 2 3.75 2ZM19 7C20.1046 7 21 7.89543 21 9V16C21 17.1046 20.1046 18 19 18H9C7.89543 18 7 17.1046 7 16V15.5H15.75C17.2688 15.5 18.5 14.2688 18.5 12.75V7H19Z',
+                fill: C.gray12,
               }),
             ),
           ),
