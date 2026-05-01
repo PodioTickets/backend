@@ -79,6 +79,7 @@ const ORDER_INCLUDE = {
   reservedTickets: true,
   coupon: { select: { id: true, code: true, couponType: true, type: true, value: true, appliesTo: true, minAge: true, maxAge: true } },
   voucher: { select: { id: true, code: true, name: true, status: true } },
+  payment: { select: { id: true, method: true, status: true, amount: true, transactionId: true, paymentDate: true, createdAt: true, metadata: true } },
 } as const;
 
 // ─── shape helpers ───────────────────────────────────────────────────────────
@@ -256,6 +257,39 @@ function orderShape(order: any, discountOverride?: number, extra?: Record<string
 
   const tickets = distributeDiscount(order.reservedTickets ?? [], discount, resolvedEffectiveUsage, resolvedFixedPerUnit, resolvedQualifyingSlots);
 
+  const payment = order.payment ?? null;
+  const paymentMeta = (payment?.metadata as any) ?? {};
+  const shapedPayment = payment
+    ? {
+        id: payment.id,
+        method: payment.method,
+        status: payment.status,
+        amount: payment.amount,
+        transactionId: payment.transactionId ?? null,
+        paymentDate: payment.paymentDate ?? null,
+        createdAt: payment.createdAt,
+        pix:
+          paymentMeta.pix?.qrCode || paymentMeta.pix?.pixCode || paymentMeta.qrCode || paymentMeta.pixCode
+            ? {
+                qrCode: paymentMeta.pix?.qrCode ?? paymentMeta.qrCode ?? null,
+                pixCode: paymentMeta.pix?.pixCode ?? paymentMeta.pixCode ?? null,
+                expiresAt: paymentMeta.pix?.expiresAt ?? paymentMeta.expiresAt ?? null,
+              }
+            : null,
+        creditCard:
+          paymentMeta.creditCard || paymentMeta.authorizationCode
+            ? {
+                brand: paymentMeta.creditCard?.brand ?? null,
+                last4Digits: paymentMeta.creditCard?.last4Digits ?? null,
+                holder: paymentMeta.creditCard?.holder ?? null,
+                installments: paymentMeta.creditCard?.installments ?? null,
+                authorizationCode: paymentMeta.authorizationCode ?? null,
+                nsu: paymentMeta.proofOfSale ?? null,
+              }
+            : null,
+      }
+    : null;
+
   return {
     id: order.id,
     eventId: order.eventId,
@@ -281,6 +315,7 @@ function orderShape(order: any, discountOverride?: number, extra?: Record<string
     billingComplement: order.billingComplement ?? null,
     billingNeighborhood: order.billingNeighborhood ?? null,
     billingCity: order.billingCity ?? null,
+    payment: shapedPayment,
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
     serverTime: new Date(),
@@ -2104,11 +2139,8 @@ export class OrdersService {
             },
           });
 
-          const qrPayload = JSON.stringify({
-            registrationId: reg.id,
-            eventId: order.eventId,
-            userId: participantUserId ?? userId,
-          });
+          const frontendUrl = (process.env.FRONTEND_URL ?? '').replace(/\/$/, '');
+          const qrPayload = `${frontendUrl}/user/tickets/${reg.id}`;
           const updatedReg = await tx.registration.update({
             where: { id: reg.id },
             data: { qrCode: qrPayload },
