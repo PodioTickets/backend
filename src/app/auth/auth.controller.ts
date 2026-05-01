@@ -37,6 +37,7 @@ import {
 import { Response } from 'express';
 import { LocalAuthGuard } from './guards/local-auth.guard';
 import { GoogleAuthGuard } from './guards/google-auth.guard';
+import { TurnstileGuard } from './guards/turnstile.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 
@@ -63,10 +64,11 @@ export class AuthController {
   }
 
   @Post('login')
-  @UseGuards(LocalAuthGuard)
+  @UseGuards(TurnstileGuard, LocalAuthGuard)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Login with email/CPF and password (User account)' })
   @ApiResponse({ status: 200, description: 'Login successful' })
+  @ApiResponse({ status: 400, description: 'Turnstile verification failed' })
   @ApiResponse({ status: 401, description: 'Invalid credentials' })
   @ApiBody({
     schema: {
@@ -88,8 +90,12 @@ export class AuthController {
           description: 'Account type: USER (participant) or ORGANIZER. Defaults to USER if not provided.',
           example: 'USER',
         },
+        turnstileToken: {
+          type: 'string',
+          description: 'Cloudflare Turnstile token from frontend widget',
+        },
       },
-      required: ['emailOrCpf', 'password'],
+      required: ['emailOrCpf', 'password', 'turnstileToken'],
     },
   })
   async loginEmail(@Request() req) {
@@ -97,9 +103,11 @@ export class AuthController {
   }
 
   @Post('login/organizer')
+  @UseGuards(TurnstileGuard)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Login as organizer with email/CPF and password' })
   @ApiResponse({ status: 200, description: 'Login successful' })
+  @ApiResponse({ status: 400, description: 'Turnstile verification failed' })
   @ApiResponse({ status: 401, description: 'Invalid credentials' })
   @ApiBody({
     schema: {
@@ -115,8 +123,12 @@ export class AuthController {
           description: 'Organizer password',
           example: 'password123',
         },
+        turnstileToken: {
+          type: 'string',
+          description: 'Cloudflare Turnstile token from frontend widget',
+        },
       },
-      required: ['emailOrCpf', 'password'],
+      required: ['emailOrCpf', 'password', 'turnstileToken'],
     },
   })
   async loginOrganizer(@Body() body: { emailOrCpf: string; password: string }) {

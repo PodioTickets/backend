@@ -1,8 +1,10 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreatePaymentDto, ProcessPaymentDto, ConfirmPaymentDto } from './dto/create-payment.dto';
 import { PaymentStatus, PaymentMethod } from '@prisma/client';
 import { CieloService } from './cielo.service';
+import { PaymentGateway } from './payment.gateway';
+import { EmailService } from '../../common/services/email.service';
 import {
   PAYMENT_DETAILS_STANDARD_INCLUDE,
   TICKET_CATEGORY_DETAIL_INCLUDE,
@@ -10,9 +12,13 @@ import {
 
 @Injectable()
 export class PaymentsService {
+  private readonly logger = new Logger(PaymentsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly cieloService: CieloService,
+    private readonly gateway: PaymentGateway,
+    private readonly emailService: EmailService,
   ) { }
 
   /**
@@ -789,5 +795,135 @@ export class PaymentsService {
         })(),
       },
     };
+  }
+
+  async pollPixStatus(orderId: string, userId: string): Promise<{ status: PaymentStatus; paid: boolean }> {
+    const prismaRead = this.prisma.getReadClient();
+    const prismaWrite = this.prisma.getWriteClient();
+
+    const order = await prismaRead.order.findFirst({
+      where: { id: orderId, userId },
+      select: {
+        id: true,
+        payment: {
+          select: { id: true, transactionId: true, status: true, method: true, metadata: true },
+        },
+      },
+    });
+
+    if (!order) throw new NotFoundException('Order not found');
+    if (!order.payment) throw new NotFoundException('Payment not found');
+
+    const payment = order.payment;
+
+    if (payment.status === PaymentStatus.PAID) {
+      return { status: PaymentStatus.PAID, paid: true };
+    }
+
+    if (payment.method !== PaymentMethod.PIX || !payment.transactionId) {
+      return { status: payment.status as PaymentStatus, paid: false };
+    }
+
+    const braspagPayment = await this.cieloService.getPayment(payment.transactionId);
+    if (!braspagPayment) {
+      return { status: payment.status as PaymentStatus, paid: false };
+    }
+
+    const newStatus = this.cieloService.mapCieloStatusToPaymentStatus(braspagPayment.Payment.Status);
+
+    if (newStatus !== PaymentStatus.PAID) {
+      return { status: newStatus, paid: false };
+    }
+
+    // Confirm atomically — same idempotency pattern as the webhook handler
+    await prismaWrite.$transaction(async (tx) => {
+      const updated = await tx.payment.updateMany({
+        where: { id: payment.id, status: { not: PaymentStatus.PAID } },
+        data: { status: PaymentStatus.PAID, paymentDate: new Date() },
+      });
+
+      if (updated.count === 0) return; // already confirmed by concurrent request or webhook
+
+      await tx.payment.update({
+        where: { id: payment.id },
+        data: {
+          metadata: {
+            ...(payment.metadata as object),
+            cieloStatus: this.cieloService.mapCieloStatusToString(braspagPayment.Payment.Status),
+            confirmedViaPolling: true,
+            confirmedAt: new Date().toISOString(),
+          } as any,
+        },
+      });
+
+      await tx.registration.updateMany({
+        where: { orderId },
+        data: { status: 'CONFIRMED' },
+      });
+    });
+
+    // Emit WebSocket event so the frontend updates immediately
+    this.gateway.emitPaymentConfirmed(orderId);
+
+    // Send confirmation email fire-and-forget
+    prismaRead.registration.findMany({
+      where: { orderId },
+      select: {
+        user: { select: { email: true, firstName: true } },
+        event: { select: { name: true, location: true, bannerUrl: true } },
+      },
+    }).then((registrations: any[]) => {
+      const sends = registrations.map((reg: any) => {
+        if (!reg.user?.email || !reg.event) return Promise.resolve();
+        return this.emailService.sendRegistrationConfirmed({
+          email: reg.user.email,
+          firstName: reg.user.firstName ?? '',
+          eventName: reg.event.name,
+          eventLocation: reg.event.location ?? '',
+          eventBannerUrl: reg.event.bannerUrl ?? 'https://placehold.co/308x232',
+        });
+      });
+      return Promise.all(sends);
+    }).catch((err: any) => this.logger.warn('Failed to send confirmation emails:', err));
+
+    this.logger.log(`PIX confirmed via polling for order ${orderId}`);
+    return { status: PaymentStatus.PAID, paid: true };
+  }
+
+  async sandboxSimulatePixPaid(transactionId: string): Promise<{ confirmed: boolean; orderId: string }> {
+    if (this.cieloService.sandboxMode === false) {
+      throw new BadRequestException('Only available in sandbox mode');
+    }
+
+    const payment = await this.prisma.getReadClient().payment.findFirst({
+      where: { transactionId },
+      select: { id: true, orderId: true, status: true },
+    });
+
+    if (!payment) throw new NotFoundException(`Payment not found for transactionId: ${transactionId}`);
+    if (payment.status === PaymentStatus.PAID) {
+      this.gateway.emitPaymentConfirmed(payment.orderId);
+      return { confirmed: true, orderId: payment.orderId };
+    }
+
+    await this.prisma.getWriteClient().$transaction(async (tx) => {
+      await tx.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: PaymentStatus.PAID,
+          paymentDate: new Date(),
+          metadata: { simulatedAt: new Date().toISOString(), simulatedViaScript: true } as any,
+        },
+      });
+      await tx.registration.updateMany({
+        where: { orderId: payment.orderId },
+        data: { status: 'CONFIRMED' },
+      });
+    });
+
+    this.gateway.emitPaymentConfirmed(payment.orderId);
+    this.logger.log(`[SANDBOX] PIX simulated as paid for transactionId ${transactionId}, orderId ${payment.orderId}`);
+
+    return { confirmed: true, orderId: payment.orderId };
   }
 }

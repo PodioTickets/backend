@@ -408,24 +408,38 @@ export class UserService {
     const documentNumberClean = this.cleanDocumentNumber(dto.documentNumber);
 
     if (documentNumberClean) {
-      const existing = await prismaRead.linkedUser.findUnique({
-        where: { mainUserId_documentNumberClean: { mainUserId, documentNumberClean } },
+      const mainUser = await prismaRead.user.findUnique({
+        where: { id: mainUserId },
+        select: { documentNumberClean: true },
       });
-
-      if (existing) {
-        const updated = await prismaWrite.linkedUser.update({
-          where: { id: existing.id },
-          data: {
-            firstName: dto.firstName,
-            lastName: dto.lastName,
-            email: dto.email,
-            phone: dto.phone,
-            dateOfBirth,
-            gender: dto.gender,
-          },
-        });
-        return { success: true, data: this.formatLinkedProfile(updated) };
+      if (mainUser?.documentNumberClean && mainUser.documentNumberClean === documentNumberClean) {
+        throw new BadRequestException('Cannot add yourself as a linked user');
       }
+
+      const result = await prismaWrite.linkedUser.upsert({
+        where: { mainUserId_documentNumberClean: { mainUserId, documentNumberClean } },
+        update: {
+          firstName: dto.firstName,
+          lastName: dto.lastName,
+          email: dto.email ?? null,
+          phone: dto.phone,
+          dateOfBirth,
+          gender: dto.gender ?? null,
+        },
+        create: {
+          mainUserId,
+          firstName: dto.firstName,
+          lastName: dto.lastName,
+          email: dto.email ?? null,
+          documentNumber: dto.documentNumber ?? null,
+          documentNumberClean,
+          phone: dto.phone,
+          dateOfBirth,
+          gender: dto.gender ?? null,
+          relationshipType: 'outro',
+        },
+      });
+      return { success: true, data: this.formatLinkedProfile(result) };
     }
 
     const created = await prismaWrite.linkedUser.create({
@@ -434,8 +448,8 @@ export class UserService {
         firstName: dto.firstName,
         lastName: dto.lastName,
         email: dto.email ?? null,
-        documentNumber: dto.documentNumber ?? null,
-        documentNumberClean: documentNumberClean,
+        documentNumber: null,
+        documentNumberClean: null,
         phone: dto.phone,
         dateOfBirth,
         gender: dto.gender ?? null,

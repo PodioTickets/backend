@@ -174,18 +174,14 @@ export class CheckoutService {
         0,
         preDiscountTotal - couponResult.discount - voucherResult.discount,
       );
-      const pixDiscount =
-        dto.paymentMethod === PaymentMethod.PIX
-          ? Math.floor(discountedTotal * 0.05)
-          : 0;
       const finalPrices: PriceCalculation = {
         ...initialPrices,
         couponDiscount: couponResult.discount,
         voucherDiscount: voucherResult.discount,
         subtotal: preDiscountTotal,
         total: discountedTotal,
-        pixDiscount,
-        finalTotal: discountedTotal - pixDiscount,
+        pixDiscount: 0,
+        finalTotal: discountedTotal,
       };
 
       // 8. Processar pagamento
@@ -685,12 +681,8 @@ export class CheckoutService {
     const total = Math.max(0, subtotal - couponDiscount - voucherDiscount);
 
     // 6. Aplicar desconto PIX (5%)
-    let pixDiscount = 0;
-    let finalTotal = total;
-    if (paymentMethod === PaymentMethod.PIX) {
-      pixDiscount = total * 0.05; // 5% em centavos (valor exato)
-      finalTotal = total - pixDiscount;
-    }
+    const pixDiscount = 0;
+    const finalTotal = total;
 
     // Todos os valores já estão em centavos
     return {
@@ -1211,10 +1203,11 @@ export class CheckoutService {
       success: true,
       transactionId: cieloResult.paymentId,
       status: paymentStatus,
-      pix: cieloResult.qrCode
+      pix: cieloResult.qrCode || cieloResult.pixCode
         ? {
           qrCode: cieloResult.qrCode,
           qrCodeBase64: cieloResult.qrCode,
+          pixCode: cieloResult.pixCode,
           expirationDate: cieloResult.expiresAt || new Date(),
         }
         : undefined,

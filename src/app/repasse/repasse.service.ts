@@ -12,6 +12,7 @@ import { PaymentMethod, PaymentStatus, WithdrawalStatus } from '@prisma/client';
 // Prazo (dias) até que os 90% sejam liberados para saldo disponível
 const RETENTION_DAYS: Record<string, number> = {
   [PaymentMethod.PIX]: 1,
+  [PaymentMethod.DEBIT_CARD]: 2,
   [PaymentMethod.CREDIT_CARD]: 31,
   [PaymentMethod.BOLETO]: 3,
   [PaymentMethod.CRYPTO]: 30,

@@ -10,6 +10,8 @@ export interface CieloPaymentResult {
   clientSecret?: string;
   qrCode?: string;
   pixCode?: string;
+  txId?: string;        // Cielo2: SentOrderId (txid)
+  endToEndId?: string;  // Cielo2: set after payment is made
   barcode?: string;
   boletoUrl?: string;
   expiresAt?: Date;
@@ -35,14 +37,21 @@ export interface CieloPaymentResponse {
     Provider: string;
     ReturnCode?: number;
     ReturnMessage?: string;
-    ProofOfSale?: string;
-    AuthorizationCode?: string;
-    AuthenticationUrl?: string;
+    // Cielo2 PIX fields
+    SentOrderId?: string;        // txid in Cielo2 (was MerchantOrderId in legacy)
+    EndToEndId?: string;         // set after payment is made (Cielo2 only)
     QrCodeBase64Image?: string;
     QrCodeString?: string;
+    ExpirationDate?: string;
+    // Credit/debit card fields
+    AuthorizationCode?: string;
+    AuthenticationUrl?: string;
+    ProofOfSale?: string;        // not present in Cielo2 PIX
+    CreditCard?: { Brand?: string };
+    DebitCard?: { Brand?: string };
+    // Boleto fields
     DigitableLine?: string;
     BarCodeNumber?: string;
-    ExpirationDate?: string;
     Instructions?: string;
     Assignor?: string;
     Address?: string;
@@ -53,6 +62,7 @@ export interface CieloPaymentResponse {
 @Injectable()
 export class CieloService {
   private readonly axiosInstance: AxiosInstance;
+  private readonly queryAxiosInstance: AxiosInstance;
   private readonly logger = new Logger(CieloService.name);
   private readonly merchantId: string;
   private readonly merchantKey: string;
@@ -67,18 +77,16 @@ export class CieloService {
 
     const baseURL = this.isSandbox
       ? 'https://apisandbox.braspag.com.br'
-      : 'https://api.cieloecommerce.cielo.com.br';
+      : 'https://api.braspag.com.br';
+
+    const queryBaseURL = this.isSandbox
+      ? 'https://apiquerysandbox.braspag.com.br'
+      : 'https://apiquery.braspag.com.br';
 
     if (!this.merchantId || !this.merchantKey) {
       this.logger.warn('CIELO_MERCHANT_ID or CIELO_MERCHANT_KEY not configured. Cielo service will be disabled.');
       this.axiosInstance = null as any;
-      return;
-    }
-
-    // Verificar se as credenciais estão configuradas
-    if (!this.merchantId || !this.merchantKey) {
-      this.logger.warn('CIELO_MERCHANT_ID or CIELO_MERCHANT_KEY not configured. Cielo service will be disabled.');
-      this.axiosInstance = null as any;
+      this.queryAxiosInstance = null as any;
       return;
     }
 
@@ -89,15 +97,23 @@ export class CieloService {
       hasMerchantKey: !!this.merchantKey,
     });
 
+    const sharedHeaders = {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'MerchantId': this.merchantId,
+      'MerchantKey': this.merchantKey,
+    };
+
     this.axiosInstance = axios.create({
       baseURL,
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'MerchantId': this.merchantId,
-        'MerchantKey': this.merchantKey,
-      },
+      headers: sharedHeaders,
       timeout: 30000,
+    });
+
+    this.queryAxiosInstance = axios.create({
+      baseURL: queryBaseURL,
+      headers: sharedHeaders,
+      timeout: 15000,
     });
 
     this.logger.log(`Cielo service initialized (${this.isSandbox ? 'Sandbox' : 'Production'})`);
@@ -127,6 +143,13 @@ export class CieloService {
       holder?: string;
       securityCode?: string;
       installments: number;
+    },
+    threedsData?: {
+      cavv: string;
+      eci: string;
+      xid?: string;
+      version?: string;
+      referenceId?: string;
     },
   ): Promise<CieloPaymentResult> {
     if (!this.axiosInstance) {
@@ -267,24 +290,65 @@ export class CieloService {
           });
           break;
 
+        case PaymentMethod.DEBIT_CARD:
+          if (!cardData) {
+            throw new Error('Card data is required for debit card payments');
+          }
+          if (!threedsData) {
+            throw new Error('3DS authentication data is required for debit card payments');
+          }
+
+          paymentData.Type = 'DebitCard';
+          paymentData.Installments = 1;
+          if (this.isSandbox) {
+            paymentData.Provider = 'Simulado';
+          } else {
+            paymentData.Provider = 'Cielo2';
+          }
+
+          {
+            const debitBrand = this.detectCardBrand(cardData.number);
+            if (!debitBrand) throw new Error('Unable to detect card brand. Please check the card number.');
+
+            const debitExpiryParts = cardData.expiry.split('/');
+            let debitExpiryDate: string;
+            if (debitExpiryParts.length === 2) {
+              const m = debitExpiryParts[0].padStart(2, '0');
+              const y = debitExpiryParts[1].length === 2 ? `20${debitExpiryParts[1]}` : debitExpiryParts[1];
+              debitExpiryDate = `${m}/${y}`;
+            } else {
+              const cleaned = cardData.expiry.replace(/\D/g, '');
+              const m = cleaned.substring(0, 2).padStart(2, '0');
+              const y = cleaned.substring(2).length === 2 ? `20${cleaned.substring(2)}` : cleaned.substring(2);
+              debitExpiryDate = `${m}/${y}`;
+            }
+
+            paymentData.DebitCard = {
+              CardNumber: cardData.number.replace(/\D/g, ''),
+              Holder: cardData.holder,
+              ExpirationDate: debitExpiryDate,
+              SecurityCode: String(cardData.cvv).replace(/\D/g, ''),
+              Brand: debitBrand,
+            };
+
+            paymentData.ExternalAuthentication = {
+              Cavv: threedsData.cavv,
+              Eci: threedsData.eci,
+              ...(threedsData.xid && { Xid: threedsData.xid }),
+              Version: threedsData.version ?? '2',
+              ...(threedsData.referenceId && { ReferenceId: threedsData.referenceId }),
+            };
+          }
+          break;
+
         case PaymentMethod.PIX:
           paymentData.Type = 'Pix';
-          // Provider é obrigatório para PIX - deve ser "Cielo2"
-          paymentData.Provider = 'Cielo2';
-          // Amount deve ser número (não string) - a resposta da Cielo sempre retorna como número
+          paymentData.Provider = this.isSandbox ? 'Simulado' : 'Cielo2';
           paymentData.Amount = amountInCents;
-          // QrCode.Expiration é opcional - se não informado, padrão é 86400 segundos (24 horas)
-          // Vamos definir 1 hora (3600 segundos) para expiração
-          paymentData.QrCode = {
-            Expiration: 3600, // 1 hora em segundos
-          };
           this.logger.debug('PIX payment data:', {
             type: paymentData.Type,
             provider: paymentData.Provider,
             amount: paymentData.Amount,
-            amountType: typeof paymentData.Amount,
-            qrCodeExpiration: paymentData.QrCode.Expiration,
-            originalAmountInCents: amountInCents,
           });
           break;
 
@@ -459,7 +523,7 @@ export class CieloService {
         returnCode.toString() === '5' // ReturnCode 5 = Negado
       );
 
-      const isError = payment.Status === 2 || payment.Status === 3 ||
+      const isError = payment.Status === 3 ||
         (payment.Status === 0 && hasErrorReturnCode); // Status 0 com ReturnCode de erro
 
       const result: CieloPaymentResult = {
@@ -472,7 +536,7 @@ export class CieloService {
         proofOfSale: payment.ProofOfSale,
         returnCode: payment.ReturnCode?.toString(),
         returnMessage: payment.ReturnMessage,
-        cardBrand: payment.CreditCard?.Brand ?? undefined,
+        cardBrand: payment.CreditCard?.Brand ?? payment.DebitCard?.Brand ?? undefined,
       } as any;
 
       // Se houver erro, adicionar informações de erro com mensagens amigáveis
@@ -538,20 +602,24 @@ export class CieloService {
 
       // Adicionar informações específicas do método de pagamento
       if (paymentMethod === PaymentMethod.PIX) {
-        // Priorizar QrCodeBase64Image para exibição (imagem), mas também salvar QrCodeString (código)
-        // Conforme documentação Cielo: https://docs.cielo.com.br/ecommerce-cielo/reference/qrcode-pix
         if (payment.QrCodeBase64Image) {
-          result.qrCode = payment.QrCodeBase64Image; // Imagem base64 para exibição
+          result.qrCode = payment.QrCodeBase64Image;
         }
         if (payment.QrCodeString) {
-          result.pixCode = payment.QrCodeString; // Código PIX string para copiar/colar
-          // Se não tiver imagem, usar o código string como fallback
+          result.pixCode = payment.QrCodeString;
           if (!result.qrCode) {
             result.qrCode = payment.QrCodeString;
           }
         }
         if (payment.ExpirationDate) {
           result.expiresAt = new Date(payment.ExpirationDate);
+        }
+        // Cielo2: SentOrderId = txid, EndToEndId = identifier after payment
+        if (payment.SentOrderId) {
+          (result as any).txId = payment.SentOrderId;
+        }
+        if (payment.EndToEndId) {
+          (result as any).endToEndId = payment.EndToEndId;
         }
       }
 
@@ -665,6 +733,10 @@ export class CieloService {
     }
   }
 
+  get sandboxMode(): boolean {
+    return this.isSandbox;
+  }
+
   async capturePayment(paymentId: string, amount?: number): Promise<CieloPaymentResult> {
     if (!this.axiosInstance) {
       throw new Error('Cielo is not configured');
@@ -718,12 +790,12 @@ export class CieloService {
   }
 
   async getPayment(paymentId: string): Promise<CieloPaymentResponse | null> {
-    if (!this.axiosInstance) {
+    if (!this.queryAxiosInstance) {
       throw new Error('Cielo is not configured');
     }
 
     try {
-      const response = await this.axiosInstance.get<CieloPaymentResponse>(
+      const response = await this.queryAxiosInstance.get<CieloPaymentResponse>(
         `/v2/sales/${paymentId}`,
       );
       return response.data;

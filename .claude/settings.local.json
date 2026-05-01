@@ -20,7 +20,8 @@
       "Bash(node *)",
       "Bash(grep -E \"\\\\.ts$\")",
       "WebFetch(domain:docs.cielo.com.br)",
-      "WebFetch(domain:developercielo.github.io)"
+      "WebFetch(domain:developercielo.github.io)",
+      "WebFetch(domain:braspag.github.io)"
     ]
   }
 }

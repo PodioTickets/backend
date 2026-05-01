@@ -77,100 +77,83 @@ const MAX_TICKETS_PER_ORDER = 20;
 
 const ORDER_INCLUDE = {
   reservedTickets: true,
-  coupon: { select: { id: true, code: true, couponType: true, type: true, value: true, appliesTo: true } },
+  coupon: { select: { id: true, code: true, couponType: true, type: true, value: true, appliesTo: true, minAge: true, maxAge: true } },
   voucher: { select: { id: true, code: true, name: true, status: true } },
 } as const;
 
 // ─── shape helpers ───────────────────────────────────────────────────────────
 
 /**
- * Distribui o desconto total proporcionalmente entre os tickets.
- * Funciona para cupons PERCENTAGE e FIXED sem precisar saber o tipo.
- * O último ticket absorve o centavo residual de arredondamento.
+ * Expande reservedTickets em entradas individuais (quantity: 1 cada) e distribui
+ * o desconto do cupom apenas nas unidades cobertas pelo effectiveUsage.
+ * Sempre retorna uma entrada por ingresso, permitindo ao frontend identificar
+ * exatamente quais receberam desconto.
  */
-function distributeDiscount(reservedTickets: any[], totalDiscount: number, effectiveUsage?: number, fixedPerUnit?: number): any[] {
-  if (!totalDiscount || totalDiscount <= 0 || !reservedTickets.length) {
-    return reservedTickets.map((rt) => ({
-      ...rt,
-      unitDiscount: 0,
-      totalDiscount: 0,
-      finalUnitPrice: rt.unitPrice,
-      finalTotalPrice: rt.unitPrice * rt.quantity,
-    }));
+function distributeDiscount(
+  reservedTickets: any[],
+  totalDiscount: number,
+  effectiveUsage?: number,
+  fixedPerUnit?: number,
+  qualifyingSlots?: number[],
+): any[] {
+  // Expand all tickets into individual unit slots
+  const units: { rt: any; discount: number }[] = [];
+  for (const rt of reservedTickets) {
+    for (let i = 0; i < rt.quantity; i++) {
+      units.push({ rt, discount: 0 });
+    }
   }
 
-  const totalQuantity = reservedTickets.reduce((s, rt) => s + rt.quantity, 0);
-  const coveredQty = effectiveUsage ?? totalQuantity;
-  const isFixed = fixedPerUnit !== undefined && fixedPerUnit > 0;
-  const isPartial = coveredQty < totalQuantity;
+  if (!units.length) return [];
 
-  if (isFixed || isPartial) {
-    // Build flat list of unit-slots sorted by unitPrice desc, assign discount to top coveredQty
-    const units: { rtIdx: number; price: number; discount: number }[] = [];
-    reservedTickets.forEach((rt, rtIdx) => {
-      for (let i = 0; i < rt.quantity; i++) {
-        units.push({ rtIdx, price: rt.unitPrice, discount: 0 });
-      }
-    });
-    units.sort((a, b) => b.price - a.price);
+  const totalQuantity = units.length;
+  const coveredQty = Math.min(effectiveUsage ?? totalQuantity, totalQuantity);
 
-    if (isFixed) {
-      // FIXED: each covered unit gets exactly fixedPerUnit
-      for (let i = 0; i < coveredQty; i++) {
-        units[i].discount = fixedPerUnit!;
+  if (totalDiscount > 0 && coveredQty > 0) {
+    let sorted: number[];
+    if (qualifyingSlots && qualifyingSlots.length > 0) {
+      // Apply discount to specific participant positions first, then fill by price if needed
+      const validSlots = qualifyingSlots.filter(i => i >= 0 && i < totalQuantity);
+      if (validSlots.length >= coveredQty) {
+        sorted = validSlots.slice(0, coveredQty);
+      } else {
+        const byPrice = [...units.keys()]
+          .filter(i => !validSlots.includes(i))
+          .sort((a, b) => units[b].rt.unitPrice - units[a].rt.unitPrice);
+        sorted = [...validSlots, ...byPrice].slice(0, coveredQty);
       }
     } else {
-      // PERCENTAGE partial: distribute totalDiscount proportionally among covered units
-      const coveredSubtotal = units.slice(0, coveredQty).reduce((s, u) => s + u.price, 0);
+      sorted = [...units.keys()].sort((a, b) => units[b].rt.unitPrice - units[a].rt.unitPrice);
+    }
+
+    if (fixedPerUnit !== undefined && fixedPerUnit > 0) {
+      for (let i = 0; i < coveredQty; i++) {
+        units[sorted[i]].discount = fixedPerUnit;
+      }
+    } else {
+      // PERCENTAGE: distribute totalDiscount proportionally among covered slots
+      const coveredSubtotal = sorted.slice(0, coveredQty).reduce((s, i) => s + units[i].rt.unitPrice, 0);
       let distrib = 0;
       for (let i = 0; i < coveredQty; i++) {
         const isLast = i === coveredQty - 1;
-        units[i].discount = isLast
+        const slotIdx = sorted[i];
+        units[slotIdx].discount = isLast
           ? totalDiscount - distrib
-          : Math.round(totalDiscount * (units[i].price / coveredSubtotal));
-        distrib += units[i].discount;
+          : Math.round(totalDiscount * (units[slotIdx].rt.unitPrice / coveredSubtotal));
+        distrib += units[slotIdx].discount;
       }
     }
-
-    const ticketDiscounts = new Array(reservedTickets.length).fill(0);
-    for (const u of units) ticketDiscounts[u.rtIdx] += u.discount;
-
-    return reservedTickets.map((rt, idx) => {
-      const ticketDiscount = ticketDiscounts[idx];
-      const unitDiscount = rt.quantity > 0 ? Math.round(ticketDiscount / rt.quantity) : 0;
-      return {
-        ...rt,
-        unitDiscount,
-        totalDiscount: ticketDiscount,
-        finalUnitPrice: rt.unitPrice - unitDiscount,
-        finalTotalPrice: rt.unitPrice * rt.quantity - ticketDiscount,
-      };
-    });
   }
 
-  // PERCENTAGE full coverage: proportional across all tickets
-  const subtotal = reservedTickets.reduce((s, rt) => s + rt.unitPrice * rt.quantity, 0);
-  let distributed = 0;
-
-  return reservedTickets.map((rt, idx) => {
-    const ticketTotal = rt.unitPrice * rt.quantity;
-    const isLast = idx === reservedTickets.length - 1;
-
-    const ticketDiscount = isLast
-      ? totalDiscount - distributed
-      : Math.round(totalDiscount * (ticketTotal / subtotal));
-
-    distributed += ticketDiscount;
-
-    const unitDiscount = Math.round(ticketDiscount / rt.quantity);
-    return {
-      ...rt,
-      unitDiscount,
-      totalDiscount: ticketDiscount,
-      finalUnitPrice: rt.unitPrice - unitDiscount,
-      finalTotalPrice: ticketTotal - ticketDiscount,
-    };
-  });
+  return units.map(({ rt, discount }) => ({
+    ...rt,
+    quantity: 1,
+    unitDiscount: discount,
+    totalDiscount: discount,
+    couponApplied: discount > 0,
+    finalUnitPrice: rt.unitPrice - discount,
+    finalTotalPrice: rt.unitPrice - discount,
+  }));
 }
 
 function computePartialCouponDiscount(
@@ -229,12 +212,49 @@ function inferEffectiveUsage(
   }
 }
 
-function orderShape(order: any, discountOverride?: number, extra?: Record<string, unknown>, effectiveUsage?: number, fixedPerUnit?: number): Record<string, any> {
-  const discount = discountOverride ?? order.discount ?? 0;
+function orderShape(order: any, discountOverride?: number, extra?: Record<string, unknown>, effectiveUsage?: number, fixedPerUnit?: number, qualifyingSlots?: number[]): Record<string, any> {
   const coupon = order.coupon ?? null;
   const resolvedFixedPerUnit = fixedPerUnit ?? (coupon?.type === 'FIXED' ? coupon.value : undefined);
-  const resolvedEffectiveUsage = effectiveUsage ?? inferEffectiveUsage(order.reservedTickets ?? [], coupon, discount);
-  const tickets = distributeDiscount(order.reservedTickets ?? [], discount, resolvedEffectiveUsage, resolvedFixedPerUnit);
+
+  // For AGE coupons without explicit effectiveUsage: re-derive from pendingParticipants.
+  // This guarantees correct display regardless of stale order.discount in the DB.
+  let resolvedEffectiveUsage = effectiveUsage;
+  let resolvedQualifyingSlots = qualifyingSlots;
+  if (resolvedEffectiveUsage === undefined && coupon?.couponType === 'AGE' && Array.isArray(order.pendingParticipants) && order.pendingParticipants.length > 0) {
+    const participants = order.pendingParticipants as any[];
+    const min: number = coupon.minAge ?? 0;
+    const max: number = coupon.maxAge ?? Infinity;
+    const now = new Date();
+    const totalUnits = (order.reservedTickets ?? []).reduce((s: number, rt: any) => s + (rt.quantity ?? 1), 0);
+    const derived = participants
+      .map((p: any, i: number) => {
+        if (!p.birthDate || i >= totalUnits) return -1;
+        const age = Math.floor((now.getTime() - new Date(p.birthDate).getTime()) / (365.25 * 24 * 60 * 60 * 1000));
+        return age >= min && age <= max ? i : -1;
+      })
+      .filter(i => i >= 0);
+    if (derived.length > 0) {
+      resolvedEffectiveUsage = derived.length;
+      resolvedQualifyingSlots = resolvedQualifyingSlots ?? derived;
+    }
+  }
+
+  // When effectiveUsage was re-derived for an AGE coupon, also recompute the discount
+  // to avoid showing a stale DB value (e.g. 4470 when only 1 participant now qualifies).
+  let discount: number;
+  if (discountOverride !== undefined) {
+    discount = discountOverride;
+  } else if (resolvedEffectiveUsage !== undefined && effectiveUsage === undefined && coupon?.couponType === 'AGE') {
+    discount = computePartialCouponDiscount(order.reservedTickets ?? [], coupon.type, coupon.value, resolvedEffectiveUsage);
+  } else {
+    discount = order.discount ?? 0;
+  }
+
+  if (resolvedEffectiveUsage === undefined) {
+    resolvedEffectiveUsage = inferEffectiveUsage(order.reservedTickets ?? [], coupon, discount);
+  }
+
+  const tickets = distributeDiscount(order.reservedTickets ?? [], discount, resolvedEffectiveUsage, resolvedFixedPerUnit, resolvedQualifyingSlots);
 
   return {
     id: order.id,
@@ -728,6 +748,14 @@ export class OrdersService {
       throw new NotFoundException('Pedido não encontrado');
     }
 
+    if (!isOwner && userCpfClean) {
+      order.registrations = (order.registrations as any[]).filter(
+        (reg: any) =>
+          reg.participantCpfClean === userCpfClean ||
+          reg.user?.documentNumberClean === userCpfClean,
+      );
+    }
+
     // Batch-fetch variations that are no longer reachable via the FK relation
     // (happens when organizer deletes+recreates variations — old IDs become orphans)
     const orphanVariationIds = new Set<string>();
@@ -1019,6 +1047,53 @@ export class OrdersService {
     let autoCouponId: string | undefined;
     let autoDiscount = 0;
     let autoEffectiveUsage: number | undefined;
+    let shouldRemoveAgeCoupon = false;
+    let ageQualifyingSlots: number[] | undefined;
+
+    // Re-avaliar cupom AGE já aplicado quando participantes mudam
+    if (order.couponId && !order.voucherId) {
+      const existingCoupon = await r.coupon.findUnique({
+        where: { id: order.couponId },
+        select: { id: true, couponType: true, type: true, value: true, minAge: true, maxAge: true, maxUsage: true, usageCount: true, appliesTo: true },
+      });
+      if (existingCoupon?.couponType === 'AGE') {
+        const now = new Date();
+        const min = existingCoupon.minAge ?? 0;
+        const max = existingCoupon.maxAge ?? Infinity;
+        const ageMatchCount = participants.filter((p: any) => {
+          if (!p.birthDate) return false;
+          const age = Math.floor((now.getTime() - new Date(p.birthDate).getTime()) / (365.25 * 24 * 60 * 60 * 1000));
+          return age >= min && age <= max;
+        }).length;
+
+        if (ageMatchCount <= 0) {
+          shouldRemoveAgeCoupon = true;
+        } else {
+          let ageApplicableTickets = reservedTickets;
+          if (existingCoupon.appliesTo && existingCoupon.appliesTo !== 'all') {
+            let allowed: string[] = [];
+            try { allowed = JSON.parse(existingCoupon.appliesTo); } catch { allowed = []; }
+            ageApplicableTickets = reservedTickets.filter((rt: any) => allowed.includes(rt.ticketId));
+          }
+          const ageApplicableQty = ageApplicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
+          const remaining = existingCoupon.maxUsage != null
+            ? Math.max(0, existingCoupon.maxUsage - existingCoupon.usageCount)
+            : ageMatchCount;
+          const effectiveUsage = Math.min(remaining, ageMatchCount, ageApplicableQty);
+          const totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
+          ageQualifyingSlots = participants
+            .map((p: any, i: number) => {
+              if (!p.birthDate || i >= totalUnits) return -1;
+              const age = Math.floor((now.getTime() - new Date(p.birthDate).getTime()) / (365.25 * 24 * 60 * 60 * 1000));
+              return (age >= min && age <= max) ? i : -1;
+            })
+            .filter((i: number) => i >= 0);
+          autoCouponId = existingCoupon.id;
+          autoDiscount = computePartialCouponDiscount(ageApplicableTickets, existingCoupon.type, existingCoupon.value, effectiveUsage);
+          autoEffectiveUsage = effectiveUsage;
+        }
+      }
+    }
 
     if (!order.couponId && !order.voucherId) {
       const totalQuantity = reservedTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
@@ -1051,14 +1126,16 @@ export class OrdersService {
           if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) continue;
         } else if (coupon.couponType === 'AGE') {
           const now = new Date();
-          const allMatch = participants.every((p: any) => {
+          const min = coupon.minAge ?? 0;
+          const max = coupon.maxAge ?? Infinity;
+          const ageMatchCount = participants.filter((p: any) => {
             if (!p.birthDate) return false;
             const age = Math.floor((now.getTime() - new Date(p.birthDate).getTime()) / (365.25 * 24 * 60 * 60 * 1000));
-            const min = coupon.minAge ?? 0;
-            const max = coupon.maxAge ?? Infinity;
             return age >= min && age <= max;
-          });
-          if (!allMatch) continue;
+          }).length;
+          if (ageMatchCount <= 0) continue;
+          // Store for use in the age discount block below
+          (coupon as any)._ageMatchCount = ageMatchCount;
         }
 
         {
@@ -1086,15 +1163,28 @@ export class OrdersService {
             }
             autoDiscount = Math.min(autoDiscount, ticketsSubtotal + existingProductsSubtotal);
           } else {
-            // AGE: desconto nos ingressos mais caros pelo uso restante
+            // AGE: desconto apenas nos ingressos dos participantes que passaram no critério de idade
+            const ageMatchCount: number = (coupon as any)._ageMatchCount ?? 0;
             const autoApplicableQty = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
             const remaining = coupon.maxUsage != null
               ? Math.max(0, coupon.maxUsage - coupon.usageCount)
-              : autoApplicableQty;
-            const effectiveUsage = Math.min(remaining, autoApplicableQty);
+              : ageMatchCount;
+            const effectiveUsage = Math.min(remaining, ageMatchCount, autoApplicableQty);
             if (effectiveUsage <= 0) continue;
             autoDiscount = computePartialCouponDiscount(autoApplicableTickets, coupon.type, coupon.value, effectiveUsage);
             autoEffectiveUsage = effectiveUsage;
+            // Track which participant positions qualify for position-aware discount display
+            const _ageNow = new Date();
+            const _ageMin = coupon.minAge ?? 0;
+            const _ageMax = coupon.maxAge ?? Infinity;
+            const _totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
+            ageQualifyingSlots = participants
+              .map((p: any, i: number) => {
+                if (!p.birthDate || i >= _totalUnits) return -1;
+                const age = Math.floor((_ageNow.getTime() - new Date(p.birthDate).getTime()) / (365.25 * 24 * 60 * 60 * 1000));
+                return (age >= _ageMin && age <= _ageMax) ? i : -1;
+              })
+              .filter((i: number) => i >= 0);
           }
 
           autoCouponId = coupon.id;
@@ -1154,7 +1244,7 @@ export class OrdersService {
       0,
     );
     const newTotalAmount = newTicketsSubtotal + productsSubtotal;
-    const newDiscount = autoCouponId ? autoDiscount : shouldRemoveQuantityCoupon ? 0 : (order.discount ?? 0);
+    const newDiscount = autoCouponId ? autoDiscount : (shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon) ? 0 : (order.discount ?? 0);
     const newFinalAmount = Math.max(0, newTotalAmount - newDiscount);
 
     const updated = await w.$transaction(async (tx: any) => {
@@ -1193,12 +1283,16 @@ export class OrdersService {
             couponId: null,
             discount: 0,
           }),
+          ...(shouldRemoveAgeCoupon && {
+            couponId: null,
+            discount: 0,
+          }),
           updatedAt: new Date(),
         },
         include: ORDER_INCLUDE,
       });
     });
-    return orderShape(updated, newDiscount > 0 ? newDiscount : undefined, { couponAutoRemoved: shouldRemoveQuantityCoupon }, autoEffectiveUsage);
+    return orderShape(updated, newDiscount > 0 ? newDiscount : undefined, { couponAutoRemoved: shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon }, autoEffectiveUsage, undefined, ageQualifyingSlots);
   }
 
   // ── 3b. patchCoupon ───────────────────────────────────────────────────────
@@ -1260,6 +1354,7 @@ export class OrdersService {
       const remaining = coupon.maxUsage != null
         ? Math.max(0, coupon.maxUsage - coupon.usageCount)
         : applicableQuantity;
+      if (remaining <= 0) throw new AppUnprocessableException('COUPON_EXHAUSTED', 'Cupom esgotado');
       couponEffectiveUsage = Math.min(remaining, applicableQuantity);
       discount = computePartialCouponDiscount(applicableTickets, coupon.type, coupon.value, couponEffectiveUsage);
       discount = Math.min(discount, order.totalAmount as number);
@@ -1574,22 +1669,19 @@ export class OrdersService {
           couponId = coupon.id;
           break;
         } else if (coupon.couponType === 'AGE') {
-          // Validar idade dos participantes
+          // Validar idade dos participantes — aplica apenas nos que passam no critério
           const now = new Date();
-          const ages = participants.map((p: any) => {
-            if (!p.birthDate) return null;
-            const born = new Date(p.birthDate);
-            return Math.floor((now.getTime() - born.getTime()) / (365.25 * 24 * 60 * 60 * 1000));
-          }).filter((a: number | null) => a !== null) as number[];
-
-          if (ages.length === 0) continue;
-
           const minAge = coupon.minAge ?? 0;
           const maxAge = coupon.maxAge ?? Infinity;
-          const allMatch = ages.every((age: number) => age >= minAge && age <= maxAge);
-          if (!allMatch) continue;
+          const ageMatchCount = participants.filter((p: any) => {
+            if (!p.birthDate) return false;
+            const age = Math.floor((now.getTime() - new Date(p.birthDate).getTime()) / (365.25 * 24 * 60 * 60 * 1000));
+            return age >= minAge && age <= maxAge;
+          }).length;
 
-          // AGE: aplica nos ingressos mais caros pelo uso restante
+          if (ageMatchCount <= 0) continue;
+
+          // AGE: aplica nos ingressos mais caros dos participantes qualificados
           let ageApplicableTickets = reservedTickets;
           if (coupon.appliesTo && coupon.appliesTo !== 'all') {
             let allowed: string[] = [];
@@ -1599,8 +1691,8 @@ export class OrdersService {
           const ageApplicableQty = ageApplicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
           const remaining = coupon.maxUsage != null
             ? Math.max(0, coupon.maxUsage - coupon.usageCount)
-            : ageApplicableQty;
-          const effectiveUsage = Math.min(remaining, ageApplicableQty);
+            : ageMatchCount;
+          const effectiveUsage = Math.min(remaining, ageMatchCount, ageApplicableQty);
           if (effectiveUsage <= 0) continue;
           couponDiscount = computePartialCouponDiscount(ageApplicableTickets, coupon.type, coupon.value, effectiveUsage);
           couponId = coupon.id;
@@ -1625,9 +1717,8 @@ export class OrdersService {
     }
 
     const discountedTotal = Math.max(0, preDiscountTotal - couponDiscount - voucherDiscount);
-    const pixDiscount =
-      dto.method === PaymentMethod.PIX ? Math.floor(discountedTotal * 0.05) : 0;
-    const finalTotal = discountedTotal - pixDiscount;
+    const pixDiscount = 0;
+    const finalTotal = discountedTotal;
 
     // 6.8 Prepare payment data
     const user = await r.user.findUnique({
@@ -1645,6 +1736,10 @@ export class OrdersService {
     let cardTokenData:
       | { token: string; brand: string; holder?: string; securityCode?: string; installments: number }
       | undefined;
+    let threedsData:
+      | { cavv: string; eci: string; xid?: string; version?: string; referenceId?: string }
+      | undefined;
+
     if (dto.method === PaymentMethod.CREDIT_CARD) {
       if (dto.cardToken) {
         cardTokenData = {
@@ -1667,6 +1762,29 @@ export class OrdersService {
       }
     }
 
+    if (dto.method === PaymentMethod.DEBIT_CARD) {
+      if (!dto.card) {
+        throw new AppUnprocessableException('CARD_REQUIRED', 'Card data is required for debit card payments');
+      }
+      if (!dto.threeDs) {
+        throw new AppUnprocessableException('THREEDS_REQUIRED', '3DS authentication data is required for debit card payments');
+      }
+      cardData = {
+        number: dto.card.number,
+        holder: dto.card.name,
+        expiry: dto.card.expiry,
+        cvv: dto.card.cvv,
+        installments: 1,
+      };
+      threedsData = {
+        cavv: dto.threeDs.cavv,
+        eci: dto.threeDs.eci,
+        xid: dto.threeDs.xid,
+        version: dto.threeDs.version ?? '2',
+        referenceId: dto.threeDs.referenceId,
+      };
+    }
+
     // 6.9 Call Cielo
     let cieloResult: any;
     let paymentFailed = false;
@@ -1684,6 +1802,7 @@ export class OrdersService {
         },
         cardData,
         cardTokenData,
+        threedsData,
       );
       if (!cieloResult.success) {
         paymentFailed = true;
@@ -1722,11 +1841,23 @@ export class OrdersService {
           },
         });
 
-        await tx.payment.create({
-          data: {
+        await tx.payment.upsert({
+          where: { orderId },
+          create: {
             orderId,
             userId,
             method: dto.method,
+            status: PaymentStatus.PENDING,
+            amount: finalTotal,
+            transactionId: cieloResult.paymentId ?? null,
+            metadata: {
+              cieloPaymentId: cieloResult.paymentId,
+              qrCode: cieloResult.qrCode,
+              pixCode: cieloResult.pixCode,
+              expiresAt: cieloResult.expiresAt?.toISOString() ?? null,
+            },
+          },
+          update: {
             status: PaymentStatus.PENDING,
             amount: finalTotal,
             transactionId: cieloResult.paymentId ?? null,
@@ -1746,6 +1877,7 @@ export class OrdersService {
         payment: {
           method: dto.method,
           status: 'PENDING',
+          transactionId: cieloResult.paymentId ?? null,
           pix: {
             qrCode: cieloResult.qrCode ?? null,
             qrCodeBase64: cieloResult.qrCode ?? null,
@@ -1763,7 +1895,7 @@ export class OrdersService {
       return body;
     }
 
-    // 6.12 CREDIT_CARD: verify approval
+    // 6.12 CREDIT_CARD / DEBIT_CARD: verify approval
     const isApproved =
       cieloResult.cieloStatus === 'Authorized' ||
       cieloResult.cieloStatus === 'PaymentConfirmed';
@@ -1843,12 +1975,19 @@ export class OrdersService {
             authorizationCode: cieloResult.authorizationCode,
             proofOfSale: cieloResult.proofOfSale,
             cieloStatus: cieloResult.cieloStatus,
-            ...(dto.card && {
+            ...(dto.card && dto.method === PaymentMethod.CREDIT_CARD && {
               creditCard: {
                 brand: cieloResult.cardBrand ?? null,
                 last4Digits: dto.card.number.replace(/\s/g, '').slice(-4),
                 holder: dto.card.name,
                 installments: dto.card.installments ?? 1,
+              },
+            }),
+            ...(dto.card && dto.method === PaymentMethod.DEBIT_CARD && {
+              debitCard: {
+                brand: cieloResult.cardBrand ?? null,
+                last4Digits: dto.card.number.replace(/\s/g, '').slice(-4),
+                holder: dto.card.name,
               },
             }),
           },
@@ -2168,12 +2307,18 @@ export class OrdersService {
         method: dto.method,
         status: 'PAID',
         transactionId: cieloResult.paymentId ?? null,
-        creditCard: cardData
-          ? {
-              installments: cardData.installments,
-              installmentValue: Math.floor(finalTotal / cardData.installments),
-            }
-          : undefined,
+        ...(dto.method === PaymentMethod.CREDIT_CARD && cardData && {
+          creditCard: {
+            installments: cardData.installments,
+            installmentValue: Math.floor(finalTotal / cardData.installments),
+          },
+        }),
+        ...(dto.method === PaymentMethod.DEBIT_CARD && cardData && {
+          debitCard: {
+            brand: cieloResult.cardBrand ?? null,
+            last4Digits: cardData.number.replace(/\s/g, '').slice(-4),
+          },
+        }),
       },
       pricing: {
         ticketsSubtotal,

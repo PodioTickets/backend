@@ -10,6 +10,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PaymentMethod } from '@prisma/client';
 
 export class CardDataDto {
@@ -61,6 +62,33 @@ export class CardTokenDto {
   installments?: number;
 }
 
+export class ThreeDsAuthDto {
+  @ApiProperty({ description: 'Cardholder Authentication Verification Value (base64)' })
+  @IsString()
+  @IsNotEmpty()
+  cavv: string;
+
+  @ApiProperty({ description: 'Electronic Commerce Indicator' })
+  @IsString()
+  @IsNotEmpty()
+  eci: string;
+
+  @ApiPropertyOptional({ description: 'Transaction identifier from 3DS v1 (Xid)' })
+  @IsOptional()
+  @IsString()
+  xid?: string;
+
+  @ApiPropertyOptional({ description: '3DS version ("1" or "2")', default: '2' })
+  @IsOptional()
+  @IsString()
+  version?: string;
+
+  @ApiPropertyOptional({ description: 'Reference ID from 3DS v2 authentication' })
+  @IsOptional()
+  @IsString()
+  referenceId?: string;
+}
+
 export class PayOrderDto {
   @IsEnum(PaymentMethod)
   method: PaymentMethod;
@@ -74,6 +102,12 @@ export class PayOrderDto {
   @ValidateNested()
   @Type(() => CardTokenDto)
   cardToken?: CardTokenDto;
+
+  @ApiPropertyOptional({ description: '3DS authentication result — required for DEBIT_CARD' })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ThreeDsAuthDto)
+  threeDs?: ThreeDsAuthDto;
 
   @IsOptional()
   @IsString()

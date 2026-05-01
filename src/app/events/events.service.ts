@@ -4029,24 +4029,37 @@ export class EventsService {
         targetRefundType = 'REFUND';
       } else {
         // Status normal de registro (PENDING, CONFIRMED, CANCELLED, COMPLETED)
-        // Garantir que o status seja um valor válido do enum
         const validStatuses = ['CONFIRMED', 'CANCELLED', 'COMPLETED'];
         if (validStatuses.includes(status)) {
-          where.status = status as RegistrationStatus;
+          if (status === 'COMPLETED') {
+            // "COMPLETED" from the frontend means "paid" — registrations with a successful
+            // payment. Both CONFIRMED (paid, event upcoming) and COMPLETED (paid, attended)
+            // are considered paid; filter by payment.status = PAID instead of registration status.
+            where.status = { in: [RegistrationStatus.CONFIRMED, RegistrationStatus.COMPLETED] } as any;
+            where.order = {
+              ...where.order,
+              payment: {
+                status: PaymentStatus.PAID,
+              },
+            };
+          } else {
+            where.status = status as RegistrationStatus;
 
-          // Se o filtro for CANCELLED, excluir registrations com payment REFUNDED
-          // (chargeback e refund devem ser filtrados separadamente).
-          // Usamos OR para incluir também registrations sem order ou sem payment
-          // (ex: pagamento nunca foi criado ou falhou antes de registrar).
-          if (status === 'CANCELLED') {
-            if (!where.AND) where.AND = [];
-            where.AND.push({
-              OR: [
-                { order: { is: null } },
-                { order: { payment: { is: null } } },
-                { order: { payment: { status: { not: PaymentStatus.REFUNDED } } } },
-              ],
-            });
+            // Exclude REFUNDED registrations from CANCELLED view.
+            // When payment is null the nested filter evaluates false, so NOT(false) = true
+            // correctly includes registrations with no payment record.
+            if (status === 'CANCELLED') {
+              if (!where.AND) where.AND = [];
+              where.AND.push({
+                NOT: {
+                  order: {
+                    payment: {
+                      status: PaymentStatus.REFUNDED,
+                    },
+                  },
+                },
+              });
+            }
           }
         }
       }
@@ -5332,7 +5345,7 @@ export class EventsService {
       orderBy: [{ order: { createdAt: 'desc' } }, { id: 'asc' }],
     });
 
-    return registrations.map((reg: any) => {
+    const mapped = registrations.map((reg: any) => {
       const u = reg.user;
       const participant = u ?? {
         id: null,
@@ -5401,6 +5414,6 @@ export class EventsService {
       };
     });
 
-    return { registrations, eventName };
+    return { registrations: mapped, eventName };
   }
 }

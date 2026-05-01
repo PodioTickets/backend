@@ -133,6 +133,25 @@ export class PaymentsController {
     return this.paymentsService.getPaymentDetails(transactionId, 'transaction', req.user.id);
   }
 
+  @Post('sandbox/simulate-pix-paid/:transactionId')
+  @ApiOperation({ summary: '[SANDBOX ONLY] Simulate PIX payment confirmed', description: 'Marks a PIX as PAID and emits the WebSocket event. Only works when CIELO_ENV != production.' })
+  @ApiParam({ name: 'transactionId', description: 'Braspag PaymentId (transactionId)' })
+  sandboxSimulatePixPaid(@Param('transactionId') transactionId: string) {
+    return this.paymentsService.sandboxSimulatePixPaid(transactionId);
+  }
+
+  @Get('order/:orderId/pix-status')
+  @UseGuards(JwtAuthGuard)
+  @Throttle({ short: { limit: 20, ttl: 60000 } })
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Poll PIX payment status', description: 'Queries Braspag in real time for PIX status. Call every 5s while showing the QR code.' })
+  @ApiParam({ name: 'orderId', description: 'Order UUID' })
+  @ApiResponse({ status: 200, description: 'Returns current payment status' })
+  @ApiResponse({ status: 404, description: 'Order or payment not found' })
+  pollPixStatus(@Request() req, @Param('orderId') orderId: string) {
+    return this.paymentsService.pollPixStatus(orderId, req.user.id);
+  }
+
   @Get('order/:orderId/details')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()

@@ -4,6 +4,7 @@ import { CieloService } from './cielo.service';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
 import { ReceiptPdfService } from '../../common/services/receipt-pdf.service';
+import { PaymentGateway } from './payment.gateway';
 import { PaymentStatus, Prisma } from '@prisma/client';
 
 interface CieloWebhookEvent {
@@ -24,6 +25,7 @@ export class PaymentsWebhookService {
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
     private readonly receiptPdfService: ReceiptPdfService,
+    private readonly gateway: PaymentGateway,
   ) {}
 
   /**
@@ -151,6 +153,11 @@ export class PaymentsWebhookService {
 
       this.logger.log(`Payment ${fresh.id} updated via webhook to status ${paymentStatus}`);
     });
+
+    // Notify connected frontend clients immediately
+    if (confirmedOrderId) {
+      this.gateway.emitPaymentConfirmed(confirmedOrderId);
+    }
 
     // Fire-and-forget fora da transação: usa read client (transaction client já foi commitado)
     if (confirmedOrderId) {

@@ -426,6 +426,7 @@ export class RegistrationsService {
           AND: [
             participant,
             { payment: { status: PaymentStatus.PAID } },
+            { status: { not: 'CANCELLED' } },
           ],
         };
       case RegistrationFilterStatus.PENDING:

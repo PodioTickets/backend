@@ -10,6 +10,7 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { HttpModule } from '@nestjs/axios';
 import { EmailService } from '../../common/services/email.service';
+import { TurnstileGuard } from './guards/turnstile.guard';
 
 @Module({
   imports: [
@@ -30,7 +31,7 @@ import { EmailService } from '../../common/services/email.service';
       },
     }),
   ],
-  providers: [AuthService, EmailService, JwtStrategy, LocalStrategy, GoogleStrategy],
+  providers: [AuthService, EmailService, JwtStrategy, LocalStrategy, GoogleStrategy, TurnstileGuard],
   controllers: [AuthController],
   exports: [JwtModule, AuthService],
 })
