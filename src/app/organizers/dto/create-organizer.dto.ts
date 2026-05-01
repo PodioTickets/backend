@@ -45,6 +45,14 @@ export class ContactOrganizerDto {
   @IsString()
   phone?: string;
 
+  @IsOptional()
+  @IsString()
+  cpf?: string;
+
+  @IsOptional()
+  @IsString()
+  subject?: string;
+
   @IsString()
   message: string;
 

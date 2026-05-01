@@ -4,6 +4,24 @@ import { CreateOrganizerDto, UpdateOrganizerDto } from './dto/create-organizer.d
 import { EmailService } from '../../common/services/email.service';
 import { WhatsAppService } from '../../common/services/whatsapp.service';
 
+/**
+ * Remove URLs e domínios do texto da mensagem para evitar spam/phishing.
+ * Aplicado somente no backend, antes de salvar e enviar.
+ */
+function sanitizeMessage(text: string): string {
+  // 1. URLs com protocolo explícito (http, https, ftp, ws, wss)
+  let s = text.replace(/(?:https?|ftp|wss?):\/\/[^\s\])"'>]+/gi, '[link removido]');
+  // 2. Domínios com www.
+  s = s.replace(/\bwww\.[a-zA-Z0-9][a-zA-Z0-9\-.]{1,61}[a-zA-Z]{2,7}(?:\/[^\s]*)?\b/gi, '[link removido]');
+  // 3. Domínios simples com TLDs comuns (ex: site.com, meusite.com.br)
+  const tlds = 'com|net|org|br|io|co|app|dev|site|online|me|info|biz|tv|gg|us|uk|pt|mobi|shop|store|digital|tech|club|live|news|link|vc|ai|zip|mov';
+  s = s.replace(
+    new RegExp(`\\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?\\.)+(?:${tlds})(?:\\/[^\\s]*)?\\b`, 'gi'),
+    '[link removido]',
+  );
+  return s;
+}
+
 @Injectable()
 export class OrganizersService {
   private readonly logger = new Logger(OrganizersService.name);
@@ -239,10 +257,14 @@ export class OrganizersService {
     name: string;
     email: string;
     phone?: string;
+    cpf?: string;
+    subject?: string;
     message: string;
     eventId?: string;
     userId?: string;
   }) {
+    // Sanitizar mensagem: remove links e domínios antes de qualquer persistência ou envio
+    const cleanMessage = sanitizeMessage(contactData.message);
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
@@ -278,7 +300,7 @@ export class OrganizersService {
     const owner = organization.members[0];
     const event = contactData.eventId ? organization.events[0] : undefined;
 
-    // Criar mensagem no banco
+    // Criar mensagem no banco (já com mensagem sanitizada)
     const contactMessage = await prismaWrite.contactMessage.create({
       data: {
         organizationId: organization.id,
@@ -287,11 +309,11 @@ export class OrganizersService {
         name: contactData.name,
         email: contactData.email,
         phone: contactData.phone || null,
-        message: contactData.message,
+        message: cleanMessage,
       },
     });
 
-    // Enviar email
+    // Enviar email (mensagem já sanitizada)
     try {
       await this.emailService.sendContactMessageToOrganizer({
         organizerEmail: organization.email,
@@ -299,15 +321,16 @@ export class OrganizersService {
         userName: contactData.name,
         userEmail: contactData.email,
         userPhone: contactData.phone,
+        userCpf: contactData.cpf,
+        subject: contactData.subject,
         eventName: event?.name,
-        message: contactData.message,
+        message: cleanMessage,
       });
     } catch (error) {
-      // Log error but don't fail the request
-      console.error('Failed to send email:', error);
+      this.logger.warn('Failed to send contact email:', error);
     }
 
-    // Enviar WhatsApp se disponível
+    // Enviar WhatsApp se disponível (mensagem já sanitizada)
     if (owner?.user.phone) {
       try {
         await this.whatsappService.sendContactMessageToOrganizer({
@@ -317,11 +340,10 @@ export class OrganizersService {
           userEmail: contactData.email,
           userPhone: contactData.phone,
           eventName: event?.name,
-          message: contactData.message,
+          message: cleanMessage,
         });
       } catch (error) {
-        // Log error but don't fail the request
-        console.error('Failed to send WhatsApp:', error);
+        this.logger.warn('Failed to send WhatsApp:', error);
       }
     }
 

@@ -57,6 +57,18 @@ export class EmailService {
   private loadTemplate(templateName: string, vars: Record<string, string>): string {
     const filePath = path.join(__dirname, '..', 'templates', 'emails', templateName);
     let html = fs.readFileSync(filePath, 'utf8');
+
+    // Primeira passagem: blocos condicionais {{#key}}...{{/key}} e {{^key}}...{{/key}}
+    for (const [key, value] of Object.entries(vars)) {
+      const hasValue = value !== '' && value != null;
+      html = html.replace(new RegExp(`\\{\\{#${key}\\}\\}([\\s\\S]*?)\\{\\{\\/${key}\\}\\}`, 'g'), hasValue ? '$1' : '');
+      html = html.replace(new RegExp(`\\{\\{\\^${key}\\}\\}([\\s\\S]*?)\\{\\{\\/${key}\\}\\}`, 'g'), hasValue ? '' : '$1');
+    }
+    // Limpar blocos condicionais restantes (chaves ausentes do vars)
+    html = html.replace(/\{\{#\w+\}\}[\s\S]*?\{\{\/\w+\}\}/g, '');
+    html = html.replace(/\{\{\^\w+\}\}([\s\S]*?)\{\{\/\w+\}\}/g, '$1');
+
+    // Segunda passagem: substituição simples {{key}}
     for (const [key, value] of Object.entries(vars)) {
       html = html.split(`{{${key}}}`).join(value);
     }
@@ -69,42 +81,44 @@ export class EmailService {
     userName: string;
     userEmail: string;
     userPhone?: string;
+    userCpf?: string;
+    subject?: string;
     eventName?: string;
     message: string;
   }) {
-    const subject = `Nova mensagem de contato${data.eventName ? ` - ${data.eventName}` : ''}`;
-    const html = `<!DOCTYPE html>
-<html lang="pt-BR">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
-<body style="margin:0;padding:20px;font-family:Arial,sans-serif;line-height:1.6;color:#333;background-color:#f0f0f0;">
-  <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center">
-  <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;background-color:#fff;border-radius:8px;padding:32px;">
-    <tr><td>
-      <h2 style="margin:0 0 16px 0;color:#202020;">Nova mensagem de contato — Podio Ticket</h2>
-      <p style="margin:0 0 16px 0;">Você recebeu uma nova mensagem através da plataforma Podio Ticket:</p>
-      <div style="background-color:#f5f5f5;padding:20px;border-radius:5px;margin:0 0 16px 0;">
-        <p style="margin:0 0 8px 0;"><strong>De:</strong> ${this.escapeHtml(data.userName)}</p>
-        <p style="margin:0 0 8px 0;"><strong>Email:</strong> ${this.escapeHtml(data.userEmail)}</p>
-        ${data.userPhone ? `<p style="margin:0 0 8px 0;"><strong>Telefone:</strong> ${this.escapeHtml(data.userPhone)}</p>` : ''}
-        ${data.eventName ? `<p style="margin:0;"><strong>Evento:</strong> ${this.escapeHtml(data.eventName)}</p>` : ''}
-      </div>
-      <div style="background-color:#fff;padding:20px;border-left:4px solid #007bff;margin:0 0 16px 0;">
-        <p style="margin:0 0 8px 0;"><strong>Mensagem:</strong></p>
-        <p style="margin:0;">${this.escapeHtml(data.message).replace(/\n/g, '<br>')}</p>
-      </div>
-      <p style="margin:0;color:#666;font-size:12px;">Esta mensagem foi enviada através da plataforma Podio Ticket.<br>Responda diretamente ao email do remetente: ${this.escapeHtml(data.userEmail)}</p>
-    </td></tr>
-  </table>
-  </td></tr></table>
-</body>
-</html>`;
+    const emailSubject = `Nova mensagem de contato${data.eventName ? ` - ${data.eventName}` : ''}`;
 
-    const text = `Nova mensagem de contato${data.eventName ? ` — ${data.eventName}` : ''}\n\nDe: ${data.userName} (${data.userEmail})${data.userPhone ? `\nTelefone: ${data.userPhone}` : ''}\n\nMensagem:\n${data.message}\n\nResponda diretamente para: ${data.userEmail}`;
+    const html = this.loadTemplate('mensagem-organizador.html', {
+      userName: this.escapeHtml(data.userName),
+      userEmail: this.escapeHtml(data.userEmail),
+      userPhone: data.userPhone ? this.escapeHtml(data.userPhone) : '',
+      userCpf: data.userCpf ? this.escapeHtml(data.userCpf) : '',
+      subject: data.subject ? this.escapeHtml(data.subject) : '',
+      eventName: data.eventName ? this.escapeHtml(data.eventName) : '',
+      // white-space:pre-line no template preserva quebras de linha sem <br>
+      message: this.escapeHtml(data.message),
+    });
+
+    const textParts = [
+      `Nova mensagem de contato${data.eventName ? ` — ${data.eventName}` : ''}`,
+      '',
+      `De: ${data.userName} (${data.userEmail})`,
+      data.userPhone ? `Telefone: ${data.userPhone}` : null,
+      data.userCpf ? `CPF: ${data.userCpf}` : null,
+      data.subject ? `Assunto: ${data.subject}` : null,
+      '',
+      'Mensagem:',
+      data.message,
+      '',
+      `Responda diretamente para: ${data.userEmail}`,
+    ].filter((l) => l !== null);
+    const text = textParts.join('\n');
+
     await this.send({
       from: this.from,
       to: data.organizerEmail,
       replyTo: data.userEmail,
-      subject,
+      subject: emailSubject,
       html,
       text,
     });

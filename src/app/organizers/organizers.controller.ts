@@ -168,6 +168,8 @@ export class OrganizersController {
       name: contactDto.name,
       email: contactDto.email,
       phone: contactDto.phone,
+      cpf: contactDto.cpf,
+      subject: contactDto.subject,
       message: contactDto.message,
       eventId: contactDto.eventId,
       userId,
