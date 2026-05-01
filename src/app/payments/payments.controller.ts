@@ -133,7 +133,7 @@ export class PaymentsController {
     return this.paymentsService.getPaymentDetails(transactionId, 'transaction', req.user.id);
   }
 
-  @Post('sandbox/simulate-pix-paid/:transactionId')
+  @Get('sandbox/simulate-pix-paid/:transactionId')
   @ApiOperation({ summary: '[SANDBOX ONLY] Simulate PIX payment confirmed', description: 'Marks a PIX as PAID and emits the WebSocket event. Only works when CIELO_ENV != production.' })
   @ApiParam({ name: 'transactionId', description: 'Braspag PaymentId (transactionId)' })
   sandboxSimulatePixPaid(@Param('transactionId') transactionId: string) {

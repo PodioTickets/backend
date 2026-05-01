@@ -173,6 +173,7 @@ async function bootstrap() {
       req.path.startsWith('/uploads/') ||
       req.path.startsWith('/api/v1/auth') ||
       req.path.startsWith('/api/v1/upload') ||
+      req.path.startsWith('/api/v1/payments/sandbox/') ||
       req.headers['x-api-bypass'] ===
       configService.get<string>('API_BYPASS_SECRET')
     ) {
