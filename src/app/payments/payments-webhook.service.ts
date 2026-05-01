@@ -240,7 +240,7 @@ export class PaymentsWebhookService {
         const receiptPdfData = {
           orderNumber,
           issuedAt,
-          organization: { name: orgName, document: org.document },
+          organization: { name: orgName, document: org.document, logoUrl: org.logoUrl ?? undefined },
           buyer: {
             name: `${buyer.firstName ?? ''} ${buyer.lastName ?? ''}`.trim() || 'Comprador',
             document: buyer.documentNumber,
@@ -284,10 +284,8 @@ export class PaymentsWebhookService {
           }),
         };
 
-        const [ticketPdf, receiptPdf] = await Promise.allSettled([
-          this.ticketPdfService.generateTicketPdf(ticketPdfData).catch((e: any) => { this.logger.warn('Ticket PDF failed:', e?.message); return undefined; }),
-          this.receiptPdfService.generateReceiptPdf(receiptPdfData).catch((e: any) => { this.logger.warn('Receipt PDF failed:', e?.message); return undefined; }),
-        ]).then((results) => results.map((r) => (r.status === 'fulfilled' ? r.value : undefined)));
+        const ticketPdf = await this.ticketPdfService.generateTicketPdf(ticketPdfData).catch((e: any) => { this.logger.warn('Ticket PDF failed:', e?.message); return undefined; });
+        const receiptPdf = await this.receiptPdfService.generateReceiptPdf(receiptPdfData).catch((e: any) => { this.logger.warn('Receipt PDF failed:', e?.message); return undefined; });
 
         // Send one email per unique buyer (group by email)
         const byEmail = new Map<string, { firstName: string; email: string }>();
