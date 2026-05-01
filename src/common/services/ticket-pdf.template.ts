@@ -495,10 +495,14 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
             { style: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' } },
             React.createElement(
               Svg,
-              { width: 24, height: 24, viewBox: '0 0 24 24' },
+              { width: 24, height: 24, viewBox: '0 0 36 36' },
               React.createElement(Path, {
-                d: 'M3.75 2C4.16421 2 4.5 2.33579 4.5 2.75V3H15C16.1046 3 17 3.89543 17 5V12.75C17 13.4404 16.4404 14 15.75 14H4.5V21.25C4.5 21.6642 4.16421 22 3.75 22C3.33579 22 3 21.6642 3 21.25V2.75C3 2.33579 3.33579 2 3.75 2ZM19 7C20.1046 7 21 7.89543 21 9V16C21 17.1046 20.1046 18 19 18H9C7.89543 18 7 17.1046 7 16V15.5H15.75C17.2688 15.5 18.5 14.2688 18.5 12.75V7H19Z',
-                fill: C.gray12,
+                d: 'M4.5 33V21M4.5 21V4.5M4.5 21H10.5M4.5 4.5V3M4.5 4.5H22.5C24.1569 4.5 25.5 5.84315 25.5 7.5V10.5M25.5 10.5H28.5C30.1569 10.5 31.5 11.8431 31.5 13.5V25.5C31.5 27.1569 30.1569 28.5 28.5 28.5H13.5C11.8431 28.5 10.5 27.1569 10.5 25.5V21M25.5 10.5V18C25.5 19.6569 24.1569 21 22.5 21H10.5',
+                stroke: C.gray12,
+                strokeWidth: 2,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+                fill: 'none',
               }),
             ),
           ),
