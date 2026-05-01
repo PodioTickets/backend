@@ -77,6 +77,9 @@ RUN chmod +x node_modules/.prisma/client/libquery_engine-linux-musl* \
 # Copia arquivos de configuração
 COPY package.json docker-entrypoint.sh tsconfig.json tsconfig.node.json ./
 
+# Utility scripts (sandbox/debug tooling)
+COPY scripts ./scripts
+
 # Configura script de entrada (entrypoint roda como root para chown do volume uploads)
 RUN dos2unix docker-entrypoint.sh && \
     chmod +x docker-entrypoint.sh && \

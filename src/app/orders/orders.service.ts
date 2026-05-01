@@ -1960,37 +1960,47 @@ export class OrdersService {
         },
       });
 
-      // Create Payment record
-      await tx.payment.create({
-        data: {
-          orderId,
-          userId,
-          method: dto.method,
-          status: PaymentStatus.PAID,
-          amount: finalTotal,
-          transactionId: cieloResult.paymentId ?? null,
-          paymentDate: new Date(),
-          metadata: {
-            cieloPaymentId: cieloResult.paymentId,
-            authorizationCode: cieloResult.authorizationCode,
-            proofOfSale: cieloResult.proofOfSale,
-            cieloStatus: cieloResult.cieloStatus,
-            ...(dto.card && dto.method === PaymentMethod.CREDIT_CARD && {
-              creditCard: {
-                brand: cieloResult.cardBrand ?? null,
-                last4Digits: dto.card.number.replace(/\s/g, '').slice(-4),
-                holder: dto.card.name,
-                installments: dto.card.installments ?? 1,
-              },
-            }),
-            ...(dto.card && dto.method === PaymentMethod.DEBIT_CARD && {
-              debitCard: {
-                brand: cieloResult.cardBrand ?? null,
-                last4Digits: dto.card.number.replace(/\s/g, '').slice(-4),
-                holder: dto.card.name,
-              },
-            }),
-          },
+      // Upsert Payment record — a PENDING payment may already exist (e.g. prior PIX attempt).
+      const paymentData = {
+        orderId,
+        userId,
+        method: dto.method,
+        status: PaymentStatus.PAID,
+        amount: finalTotal,
+        transactionId: cieloResult.paymentId ?? null,
+        paymentDate: new Date(),
+        metadata: {
+          cieloPaymentId: cieloResult.paymentId,
+          authorizationCode: cieloResult.authorizationCode,
+          proofOfSale: cieloResult.proofOfSale,
+          cieloStatus: cieloResult.cieloStatus,
+          ...(dto.card && dto.method === PaymentMethod.CREDIT_CARD && {
+            creditCard: {
+              brand: cieloResult.cardBrand ?? null,
+              last4Digits: dto.card.number.replace(/\s/g, '').slice(-4),
+              holder: dto.card.name,
+              installments: dto.card.installments ?? 1,
+            },
+          }),
+          ...(dto.card && dto.method === PaymentMethod.DEBIT_CARD && {
+            debitCard: {
+              brand: cieloResult.cardBrand ?? null,
+              last4Digits: dto.card.number.replace(/\s/g, '').slice(-4),
+              holder: dto.card.name,
+            },
+          }),
+        },
+      };
+      await tx.payment.upsert({
+        where: { orderId },
+        create: paymentData,
+        update: {
+          method: paymentData.method,
+          status: paymentData.status,
+          amount: paymentData.amount,
+          transactionId: paymentData.transactionId,
+          paymentDate: paymentData.paymentDate,
+          metadata: paymentData.metadata,
         },
       });
 
