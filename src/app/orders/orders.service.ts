@@ -2309,10 +2309,8 @@ export class OrdersService {
           }),
         };
 
-        const [ticketPdf, receiptPdf] = await Promise.allSettled([
-          this.ticketPdfService.generateTicketPdf(ticketPdfData).catch((e: any) => { this.logger.warn('Ticket PDF failed:', e?.message); return undefined; }),
-          this.receiptPdfService.generateReceiptPdf(receiptPdfData).catch((e: any) => { this.logger.warn('Receipt PDF failed:', e?.message); return undefined; }),
-        ]).then((results) => results.map((r) => (r.status === 'fulfilled' ? r.value : undefined)));
+        const ticketPdf = await this.ticketPdfService.generateTicketPdf(ticketPdfData).catch((e: any) => { this.logger.warn('Ticket PDF failed:', e?.message); return undefined; });
+        const receiptPdf = await this.receiptPdfService.generateReceiptPdf(receiptPdfData).catch((e: any) => { this.logger.warn('Receipt PDF failed:', e?.message); return undefined; });
 
         const buyer = regs.find((r: any) => r.user?.email)?.user;
         if (!buyer?.email) return;
