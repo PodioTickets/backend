@@ -13,6 +13,7 @@ export interface ReceiptPdfData {
   organization: {
     name: string;
     document?: string;
+    logoUrl?: string;
   };
   buyer: {
     name: string;

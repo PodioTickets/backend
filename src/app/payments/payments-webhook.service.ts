@@ -233,7 +233,7 @@ export class PaymentsWebhookService {
         const receiptPdfData = {
           orderNumber,
           issuedAt,
-          organization: { name: orgName, document: org.document },
+          organization: { name: orgName, document: org.document, logoUrl: org.logoUrl ?? undefined },
           buyer: {
             name: `${buyer.firstName ?? ''} ${buyer.lastName ?? ''}`.trim() || 'Comprador',
             document: buyer.documentNumber,

@@ -4,6 +4,7 @@ import {
   Page,
   View,
   Text,
+  Image,
   Font,
   Svg,
   Path,
@@ -311,11 +312,11 @@ const TableRow = ({ row }: { row: ReceiptPdfRegistrationRow }) => {
     // ID
     React.createElement(
       View,
-      { style: { width: 100, paddingHorizontal: 12, paddingVertical: 10 } },
+      { style: { width: 80, paddingHorizontal: 12, paddingVertical: 10 } },
       React.createElement(
         Text,
         { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 600, color: C.gray12 } },
-        row.id,
+        row.id.slice(0, 8).toUpperCase(),
       ),
     ),
     // Participant
@@ -522,35 +523,32 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
           React.createElement(
             View,
             { style: { flexDirection: 'row', alignItems: 'center', gap: 8 } },
-            React.createElement(
-              View,
-              {
-                style: {
-                  width: 36,
-                  height: 36,
-                  backgroundColor: C.green12,
-                  borderRadius: 124,
-                  borderWidth: 1,
-                  borderColor: C.green8,
-                  borderStyle: 'solid',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                },
-              },
-              React.createElement(
-                Svg,
-                { width: 14, height: 14, viewBox: '0 0 16 16' },
-                React.createElement(Rect, {
-                  x: 1.33,
-                  y: 1.33,
-                  width: 13.33,
-                  height: 13.33,
-                  stroke: '#F9F9F9',
-                  strokeWidth: 1.5,
-                  fill: 'none',
-                }),
-              ),
-            ),
+            data.organization.logoUrl
+              ? React.createElement(Image, {
+                  src: data.organization.logoUrl,
+                  style: { width: 36, height: 36, borderRadius: 124, objectFit: 'cover' },
+                })
+              : React.createElement(
+                  View,
+                  {
+                    style: {
+                      width: 36,
+                      height: 36,
+                      backgroundColor: C.green12,
+                      borderRadius: 124,
+                      borderWidth: 1,
+                      borderColor: C.green8,
+                      borderStyle: 'solid',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    },
+                  },
+                  React.createElement(
+                    Text,
+                    { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 700, color: C.white } },
+                    (data.organization.name || '?')[0].toUpperCase(),
+                  ),
+                ),
             React.createElement(
               Text,
               {
@@ -559,6 +557,7 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
                   fontSize: 13,
                   fontWeight: 700,
                   color: C.gray12,
+                  flex: 1,
                 },
               },
               data.organization.name,
@@ -670,9 +669,22 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
                     opacity: 0.7,
                   }),
                 )
-              : React.createElement(View, {
-                  style: { width: 20, height: 20, backgroundColor: C.gray6, borderRadius: 2 },
-                }),
+              : React.createElement(
+                  Svg,
+                  { width: 20, height: 20, viewBox: '0 0 24 24' },
+                  React.createElement(Rect, {
+                    x: 2, y: 5, width: 20, height: 14, rx: 2,
+                    stroke: C.gray12, strokeWidth: 1.5, fill: 'none',
+                  }),
+                  React.createElement(Path, {
+                    d: 'M2 10H22',
+                    stroke: C.gray12, strokeWidth: 1.5,
+                  }),
+                  React.createElement(Path, {
+                    d: 'M6 15H10',
+                    stroke: C.gray12, strokeWidth: 1.5, strokeLinecap: 'round',
+                  }),
+                ),
           ),
           React.createElement(
             View,
@@ -855,7 +867,7 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
             },
             React.createElement(
               View,
-              { style: { width: 100, padding: 12 } },
+              { style: { width: 80, padding: 12 } },
               React.createElement(
                 Text,
                 {
@@ -866,7 +878,7 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
                     color: C.gray12,
                   },
                 },
-                'ID inscrição',
+                'ID',
               ),
             ),
             React.createElement(

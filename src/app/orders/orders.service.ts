@@ -2269,7 +2269,7 @@ export class OrdersService {
         const receiptPdfData = {
           orderNumber,
           issuedAt,
-          organization: { name: orgName, document: org.document },
+          organization: { name: orgName, document: org.document, logoUrl: org.logoUrl ?? undefined },
           buyer: {
             name: `${buyerUser.firstName ?? ''} ${buyerUser.lastName ?? ''}`.trim() || 'Comprador',
             document: buyerUser.documentNumber,
