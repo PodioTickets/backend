@@ -704,7 +704,15 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
                   color: C.gray12,
                 },
               },
-              data.payment.method || 'Pix',
+              (() => {
+                const m = (data.payment.method ?? '').toUpperCase();
+                if (m === 'CREDIT_CARD') return 'Cartão de crédito';
+                if (m === 'DEBIT_CARD') return 'Cartão de débito';
+                if (m.includes('PIX') || m === 'PIX') return 'Pix';
+                if (m === 'BOLETO') return 'Boleto';
+                if (m === 'FREE') return 'Gratuito';
+                return data.payment.method || 'Pix';
+              })(),
             ),
             React.createElement(
               Text,
