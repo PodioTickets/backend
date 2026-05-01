@@ -197,7 +197,7 @@ export class EmailService {
       firstName: this.escapeHtml(data.firstName),
       eventName: this.escapeHtml(data.eventName),
       eventLocation: this.escapeHtml(data.eventLocation),
-      eventBannerUrl: data.eventBannerUrl,
+      eventBannerUrl: this.escapeHtml(data.eventBannerUrl),
     });
 
     const text = `Olá ${data.firstName},\n\nSua inscrição na ${data.eventName} foi confirmada! Sua vaga está garantida.\n\nEvento: ${data.eventName}\nLocal: ${data.eventLocation}\n\nPodioTicket — podioticket.com.br`;

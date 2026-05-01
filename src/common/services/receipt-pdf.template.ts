@@ -19,6 +19,16 @@ import { ReceiptPdfData, ReceiptPdfRegistrationRow } from './receipt-pdf.types';
 
 const LinearGradient = LinearGradientBase as any;
 
+function formatPaymentMethod(method: string | undefined): string {
+  const m = (method ?? '').toUpperCase();
+  if (m === 'CREDIT_CARD') return 'Cartão de crédito';
+  if (m === 'DEBIT_CARD') return 'Cartão de débito';
+  if (m.includes('PIX')) return 'Pix';
+  if (m === 'BOLETO') return 'Boleto';
+  if (m === 'FREE') return 'Gratuito';
+  return method || 'Pix';
+}
+
 Font.registerHyphenationCallback((w) => [w]);
 
 const FP = path.join(process.cwd(), 'node_modules', '@fontsource');
@@ -704,15 +714,7 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
                   color: C.gray12,
                 },
               },
-              (() => {
-                const m = (data.payment.method ?? '').toUpperCase();
-                if (m === 'CREDIT_CARD') return 'Cartão de crédito';
-                if (m === 'DEBIT_CARD') return 'Cartão de débito';
-                if (m.includes('PIX') || m === 'PIX') return 'Pix';
-                if (m === 'BOLETO') return 'Boleto';
-                if (m === 'FREE') return 'Gratuito';
-                return data.payment.method || 'Pix';
-              })(),
+              formatPaymentMethod(data.payment.method),
             ),
             React.createElement(
               Text,
