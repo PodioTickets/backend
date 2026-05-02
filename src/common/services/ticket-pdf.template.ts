@@ -126,7 +126,7 @@ const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
       product.imageUrl
         ? React.createElement(Image, {
             src: product.imageUrl,
-            style: { width: 72, height: 72, borderRadius: 6, objectFit: 'cover' },
+            style: { width: 72, height: 72, borderRadius: 6, objectFit: 'fill' },
           })
         : React.createElement(View, {
             style: { width: 72, height: 72, borderRadius: 6, backgroundColor: C.gray6 },
