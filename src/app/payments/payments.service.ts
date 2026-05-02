@@ -891,178 +891,9 @@ export class PaymentsService {
     // Emit WebSocket event so the frontend updates immediately
     this.gateway.emitPaymentConfirmed(orderId);
 
-    // Send confirmation email fire-and-forget (same pattern as webhook handler)
-    prismaRead.order.findUnique({
-      where: { id: orderId },
-      include: {
-        event: { include: { organization: true } },
-        payment: true,
-        coupon: true,
-        voucher: true,
-        registrations: {
-          include: {
-            user: true,
-            tickets: { include: { ticket: { include: { category: true } } } },
-            products: { include: { product: true, variation: true } },
-            questionAnswers: { include: { question: true } },
-          },
-        },
-      },
-    }).then(async (order: any) => {
-      if (!order) return;
-      const event = order.event;
-      const org = event?.organization ?? {};
-      const orgName: string = org.tradeName || org.name || '';
-      const regs: any[] = order.registrations ?? [];
-      if (!regs.length) return;
-
-      const issuedAt = new Date();
-      const orderNumber = orderId.slice(0, 8).toUpperCase();
-
-      const ticketPdfData = {
-        orderNumber,
-        issuedAt,
-        event: {
-          name: event?.name ?? '',
-          date: event?.eventDate ?? new Date(),
-          organization: orgName,
-          location: formatEventAddress(event),
-          participantCount: regs.length,
-        },
-        registrations: regs.map((reg: any, idx: number) => {
-          const user = reg.user ?? {};
-          const ticket = reg.tickets?.[0]?.ticket;
-          const catName = ticket?.category?.name ?? '';
-          const ticketName = ticket?.name ?? '';
-          const fullTicketName = catName && ticketName && catName !== ticketName
-            ? `${catName} - ${ticketName}` : ticketName || catName;
-          return {
-            index: idx + 1,
-            qrCode: reg.qrCode ?? reg.id,
-            participantName: (reg.participantName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim()) || 'Participante',
-            ticketName: fullTicketName,
-            email: reg.participantEmail ?? user.email,
-            cpf: reg.participantCpf ?? user.documentNumber,
-            dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
-            phone: reg.participantPhone ?? user.phone,
-            gender: reg.participantGender ?? user.gender,
-            questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => ({
-              question: qa.question?.question ?? '',
-              answer: qa.answer ?? '',
-            })),
-            products: (reg.products ?? []).map((rp: any) => ({
-              name: rp.product?.name ?? rp.productSnapshot?.name ?? '',
-              price: rp.unitPrice ?? 0,
-              variationName: rp.variation?.name ?? rp.productSnapshot?.variationName,
-              imageUrl: rp.product?.images?.[rp.product?.primaryImageIndex ?? 0],
-              isIncluded: rp.product?.isIncludedInTicket ?? false,
-            })),
-          };
-        }),
-      };
-
-      const paymentRow = order.payment ?? {};
-      const buyer = regs.find((r: any) => r.user)?.user ?? {};
-      const receiptPdfData = {
-        orderNumber,
-        issuedAt,
-        organization: { name: orgName, document: org.document, logoUrl: org.logoUrl ?? undefined },
-        buyer: {
-          name: `${buyer.firstName ?? ''} ${buyer.lastName ?? ''}`.trim() || 'Comprador',
-          document: buyer.documentNumber,
-        },
-        event: {
-          name: event?.name ?? '',
-          date: event?.eventDate ?? new Date(),
-          location: event?.location ?? '',
-        },
-        payment: {
-          method: paymentRow.method ?? 'PIX',
-          paidAt: paymentRow.paymentDate ?? paymentRow.updatedAt ?? issuedAt,
-          gateway: 'Cielo',
-          transactionId: paymentRow.transactionId,
-          txId: (paymentRow.metadata as any)?.txId,
-          e2eId: (paymentRow.metadata as any)?.e2eId,
-          voucherCode: order.voucher?.code,
-          couponCode: order.coupon?.code,
-          cardBrand: (paymentRow.metadata as any)?.cardBrand ?? undefined,
-        },
-        financial: {
-          subtotal: order.totalAmount ?? 0,
-          discount: order.discount ?? 0,
-          voucherCode: order.voucher?.code,
-          serviceFee: order.serviceFee ?? 0,
-          total: order.finalAmount ?? 0,
-        },
-        registrations: regs.map((reg: any) => {
-          const user = reg.user ?? {};
-          const ticket = reg.tickets?.[0]?.ticket;
-          const catName = ticket?.category?.name ?? '';
-          const ticketName = ticket?.name ?? '';
-          const batch = reg.tickets?.[0]?.batch;
-          return {
-            id: reg.id,
-            participantName: (reg.participantName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim()) || 'Participante',
-            email: reg.participantEmail ?? user.email,
-            ticketCategory: catName || undefined,
-            ticketName: ticketName || catName,
-            price: batch?.price ?? 0,
-          };
-        }),
-      };
-
-      const ticketPdf = await this.ticketPdfService.generateTicketPdf(ticketPdfData)
-        .catch((e: any) => { this.logger.warn('Ticket PDF falhou:', e?.message); return undefined; });
-      const receiptPdf = await this.receiptPdfService.generateReceiptPdf(receiptPdfData)
-        .catch((e: any) => { this.logger.warn('Receipt PDF falhou:', e?.message); return undefined; });
-
-      const eventName = event?.name ?? '';
-      const eventLocation = event?.location ?? '';
-      const eventDate = formatEventDate(event?.eventDate);
-      const eventAddress = formatEventAddress(event);
-      const eventBannerUrl = event?.bannerUrl ?? 'https://placehold.co/308x232';
-
-      // Comprador = primeira inscrição com conta vinculada — recebe todos os ingressos + recibo
-      const buyerUser = regs.find((r: any) => r.user?.email)?.user;
-      const buyerEmail: string | undefined = buyerUser?.email;
-
-      if (buyerEmail) {
-        await this.emailService.sendRegistrationConfirmed({
-          email: buyerEmail,
-          firstName: buyerUser?.firstName || 'Participante',
-          eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
-          ticketPdf: ticketPdf as Buffer | undefined,
-          receiptPdf: receiptPdf as Buffer | undefined,
-        }).catch((err: any) => this.logger.warn('Email comprador falhou:', err));
-      }
-
-      // Participantes não-compradores — ingresso individual sem recibo, geração sequencial
-      for (const [idx, reg] of regs.entries()) {
-        const participantEmail: string | undefined = reg.participantEmail ?? reg.user?.email;
-        if (!participantEmail || participantEmail === buyerEmail) continue;
-
-        const participantName: string = (reg.participantName
-          ?? `${reg.user?.firstName ?? ''} ${reg.user?.lastName ?? ''}`.trim())
-          || 'Participante';
-        const regEntry = ticketPdfData.registrations[idx];
-        if (!regEntry) continue;
-
-        const individualPdfData = {
-          ...ticketPdfData,
-          event: { ...ticketPdfData.event, participantCount: 1 },
-          registrations: [{ ...regEntry, index: 1 }],
-        };
-        const individualTicketPdf = await this.ticketPdfService.generateTicketPdf(individualPdfData)
-          .catch((e: any) => { this.logger.warn(`PDF individual falhou para ${participantEmail}:`, e?.message); return undefined; });
-
-        await this.emailService.sendRegistrationConfirmed({
-          email: participantEmail,
-          firstName: participantName.split(' ')[0] || 'Participante',
-          eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
-          ticketPdf: individualTicketPdf as Buffer | undefined,
-        }).catch((err: any) => this.logger.warn(`Email participante ${participantEmail} falhou:`, err));
-      }
-    }).catch((err: any) => this.logger.warn('Failed to send confirmation emails:', err));
+    // Enviar email de confirmação fire-and-forget
+    this.sendConfirmationEmailForOrder(orderId)
+      .catch((err: any) => this.logger.warn('Falha ao enviar email de confirmação:', err));
 
     this.logger.log(`PIX confirmed via polling for order ${orderId}`);
     return { status: PaymentStatus.PAID, paid: true };
@@ -1102,6 +933,188 @@ export class PaymentsService {
     this.gateway.emitPaymentConfirmed(payment.orderId);
     this.logger.log(`[SANDBOX] PIX simulated as paid for transactionId ${transactionId}, orderId ${payment.orderId}`);
 
+    // Enviar email de confirmação fire-and-forget
+    this.sendConfirmationEmailForOrder(payment.orderId)
+      .catch((err: any) => this.logger.warn(`[SANDBOX] Falha ao enviar email de confirmação: ${err?.message}`));
+
     return { confirmed: true, orderId: payment.orderId };
+  }
+
+  /**
+   * Envia email de confirmação de inscrição com PDF do ingresso para um pedido já confirmado.
+   * Utilizado por pollPixStatus, sandboxSimulatePixPaid e outros fluxos de confirmação.
+   */
+  async sendConfirmationEmailForOrder(orderId: string): Promise<void> {
+    const order = await this.prisma.getReadClient().order.findUnique({
+      where: { id: orderId },
+      include: {
+        event: { include: { organization: true } },
+        payment: true,
+        coupon: true,
+        voucher: true,
+        registrations: {
+          include: {
+            user: true,
+            tickets: { include: { ticket: { include: { category: true } } } },
+            products: { include: { product: true, variation: true } },
+            questionAnswers: { include: { question: true } },
+          },
+        },
+      },
+    });
+
+    if (!order) return;
+    const event = order.event;
+    const org = event?.organization ?? {};
+    const orgName: string = org.tradeName || org.name || '';
+    const regs: any[] = order.registrations ?? [];
+    if (!regs.length) return;
+
+    const issuedAt = new Date();
+    const orderNumber = orderId.slice(0, 8).toUpperCase();
+
+    const ticketPdfData = {
+      orderNumber,
+      issuedAt,
+      event: {
+        name: event?.name ?? '',
+        date: event?.eventDate ?? new Date(),
+        organization: orgName,
+        location: formatEventAddress(event),
+        participantCount: regs.length,
+      },
+      registrations: regs.map((reg: any, idx: number) => {
+        const user = reg.user ?? {};
+        const ticket = reg.tickets?.[0]?.ticket;
+        const catName = ticket?.category?.name ?? '';
+        const ticketName = ticket?.name ?? '';
+        const fullTicketName = catName && ticketName && catName !== ticketName
+          ? `${catName} - ${ticketName}` : ticketName || catName;
+        return {
+          index: idx + 1,
+          qrCode: reg.qrCode ?? reg.id,
+          participantName: (reg.participantName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim()) || 'Participante',
+          ticketName: fullTicketName,
+          email: reg.participantEmail ?? user.email,
+          cpf: reg.participantCpf ?? user.documentNumber,
+          dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
+          phone: reg.participantPhone ?? user.phone,
+          gender: reg.participantGender ?? user.gender,
+          questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => ({
+            question: qa.question?.question ?? '',
+            answer: qa.answer ?? '',
+          })),
+          products: (reg.products ?? []).map((rp: any) => ({
+            name: rp.product?.name ?? rp.productSnapshot?.name ?? '',
+            price: rp.unitPrice ?? 0,
+            variationName: rp.variation?.name ?? rp.productSnapshot?.variationName,
+            imageUrl: rp.product?.images?.[rp.product?.primaryImageIndex ?? 0],
+            isIncluded: rp.product?.isIncludedInTicket ?? false,
+          })),
+        };
+      }),
+    };
+
+    const paymentRow = order.payment ?? {};
+    const buyer = regs.find((r: any) => r.user)?.user ?? {};
+    const receiptPdfData = {
+      orderNumber,
+      issuedAt,
+      organization: { name: orgName, document: org.document, logoUrl: org.logoUrl ?? undefined },
+      buyer: {
+        name: `${buyer.firstName ?? ''} ${buyer.lastName ?? ''}`.trim() || 'Comprador',
+        document: buyer.documentNumber,
+      },
+      event: {
+        name: event?.name ?? '',
+        date: event?.eventDate ?? new Date(),
+        location: event?.location ?? '',
+      },
+      payment: {
+        method: paymentRow.method ?? 'PIX',
+        paidAt: paymentRow.paymentDate ?? paymentRow.updatedAt ?? issuedAt,
+        gateway: 'Cielo',
+        transactionId: paymentRow.transactionId,
+        txId: (paymentRow.metadata as any)?.txId,
+        e2eId: (paymentRow.metadata as any)?.e2eId,
+        voucherCode: order.voucher?.code,
+        couponCode: order.coupon?.code,
+        cardBrand: (paymentRow.metadata as any)?.cardBrand ?? undefined,
+      },
+      financial: {
+        subtotal: order.totalAmount ?? 0,
+        discount: order.discount ?? 0,
+        voucherCode: order.voucher?.code,
+        serviceFee: order.serviceFee ?? 0,
+        total: order.finalAmount ?? 0,
+      },
+      registrations: regs.map((reg: any) => {
+        const user = reg.user ?? {};
+        const ticket = reg.tickets?.[0]?.ticket;
+        const catName = ticket?.category?.name ?? '';
+        const ticketName = ticket?.name ?? '';
+        const batch = reg.tickets?.[0]?.batch;
+        return {
+          id: reg.id,
+          participantName: (reg.participantName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim()) || 'Participante',
+          email: reg.participantEmail ?? user.email,
+          ticketCategory: catName || undefined,
+          ticketName: ticketName || catName,
+          price: batch?.price ?? 0,
+        };
+      }),
+    };
+
+    const ticketPdf = await this.ticketPdfService.generateTicketPdf(ticketPdfData)
+      .catch((e: any) => { this.logger.warn('Ticket PDF falhou:', e?.message); return undefined; });
+    const receiptPdf = await this.receiptPdfService.generateReceiptPdf(receiptPdfData)
+      .catch((e: any) => { this.logger.warn('Receipt PDF falhou:', e?.message); return undefined; });
+
+    const eventName = event?.name ?? '';
+    const eventLocation = event?.location ?? '';
+    const eventDate = formatEventDate(event?.eventDate);
+    const eventAddress = formatEventAddress(event);
+    const eventBannerUrl = event?.bannerUrl ?? 'https://placehold.co/308x232';
+
+    // Comprador = primeira inscrição com conta vinculada — recebe todos os ingressos + recibo
+    const buyerUser = regs.find((r: any) => r.user?.email)?.user;
+    const buyerEmail: string | undefined = buyerUser?.email;
+
+    if (buyerEmail) {
+      await this.emailService.sendRegistrationConfirmed({
+        email: buyerEmail,
+        firstName: buyerUser?.firstName || 'Participante',
+        eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
+        ticketPdf: ticketPdf as Buffer | undefined,
+        receiptPdf: receiptPdf as Buffer | undefined,
+      }).catch((err: any) => this.logger.warn('Email comprador falhou:', err));
+    }
+
+    // Participantes não-compradores — ingresso individual sem recibo, geração sequencial
+    for (const [idx, reg] of regs.entries()) {
+      const participantEmail: string | undefined = reg.participantEmail ?? reg.user?.email;
+      if (!participantEmail || participantEmail === buyerEmail) continue;
+
+      const participantName: string = (reg.participantName
+        ?? `${reg.user?.firstName ?? ''} ${reg.user?.lastName ?? ''}`.trim())
+        || 'Participante';
+      const regEntry = ticketPdfData.registrations[idx];
+      if (!regEntry) continue;
+
+      const individualPdfData = {
+        ...ticketPdfData,
+        event: { ...ticketPdfData.event, participantCount: 1 },
+        registrations: [{ ...regEntry, index: 1 }],
+      };
+      const individualTicketPdf = await this.ticketPdfService.generateTicketPdf(individualPdfData)
+        .catch((e: any) => { this.logger.warn(`PDF individual falhou para ${participantEmail}:`, e?.message); return undefined; });
+
+      await this.emailService.sendRegistrationConfirmed({
+        email: participantEmail,
+        firstName: participantName.split(' ')[0] || 'Participante',
+        eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
+        ticketPdf: individualTicketPdf as Buffer | undefined,
+      }).catch((err: any) => this.logger.warn(`Email participante ${participantEmail} falhou:`, err));
+    }
   }
 }
