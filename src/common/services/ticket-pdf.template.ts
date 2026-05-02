@@ -199,18 +199,20 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
     reg.dateOfBirth ? { label: 'Data de nascimento', value: fmtDate(reg.dateOfBirth) } : null,
     reg.phone ? { label: 'Telefone', value: reg.phone } : null,
     reg.gender ? { label: 'Sexo', value: reg.gender } : null,
+    reg.address ? { label: 'Endereço', value: reg.address } : null,
   ].filter(Boolean) as { label: string; value: string }[];
 
   return React.createElement(
     View,
     {
+      wrap: false,
       style: {
         backgroundColor: C.gray1,
         borderRadius: 12,
         borderWidth: 1,
         borderColor: C.gray6,
         borderStyle: 'solid',
-        marginTop: 12,
+        marginTop: 10,
       },
     },
     // header: QR + name
@@ -218,16 +220,16 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
       View,
       {
         style: {
-          padding: 16,
+          padding: 12,
           borderBottomWidth: 1,
           borderBottomColor: C.gray6,
           borderBottomStyle: 'solid',
           flexDirection: 'row',
           alignItems: 'center',
-          gap: 14,
+          gap: 12,
         },
       },
-      React.createElement(Image, { src: reg.qrDataUrl, style: { width: 72, height: 72 } }),
+      React.createElement(Image, { src: reg.qrDataUrl, style: { width: 60, height: 60 } }),
       React.createElement(
         View,
         { style: { gap: 10 } },
@@ -410,8 +412,8 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
         style: {
           fontFamily: 'DM Sans',
           backgroundColor: C.white,
-          paddingHorizontal: 48,
-          paddingVertical: 28,
+          paddingHorizontal: 36,
+          paddingVertical: 20,
         },
       },
       // header
@@ -422,7 +424,7 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
             flexDirection: 'row',
             justifyContent: 'space-between',
             alignItems: 'center',
-            marginBottom: 20,
+            marginBottom: 14,
           },
         },
         React.createElement(
@@ -460,10 +462,10 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
       // section title
       React.createElement(
         View,
-        { style: { gap: 6, marginTop: 20, marginBottom: 18 } },
+        { style: { gap: 4, marginTop: 14, marginBottom: 12 } },
         React.createElement(
           Text,
-          { style: { fontFamily: 'Manrope', fontSize: 15, fontWeight: 800, color: C.gray12 } },
+          { style: { fontFamily: 'Manrope', fontSize: 14, fontWeight: 800, color: C.gray12 } },
           'Detalhes da inscrição',
         ),
         React.createElement(
@@ -477,14 +479,14 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
         View,
         {
           style: {
-            padding: 14,
+            padding: 12,
             backgroundColor: C.gray2,
             borderRadius: 8,
             borderWidth: 1,
             borderColor: C.gray6,
             borderStyle: 'solid',
-            gap: 16,
-            marginBottom: 16,
+            gap: 12,
+            marginBottom: 12,
           },
         },
         React.createElement(

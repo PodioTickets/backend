@@ -5,10 +5,32 @@ import { PaymentStatus, PaymentMethod } from '@prisma/client';
 import { CieloService } from './cielo.service';
 import { PaymentGateway } from './payment.gateway';
 import { EmailService } from '../../common/services/email.service';
+import { TicketPdfService } from '../../common/services/ticket-pdf.service';
+import { ReceiptPdfService } from '../../common/services/receipt-pdf.service';
 import {
   PAYMENT_DETAILS_STANDARD_INCLUDE,
   TICKET_CATEGORY_DETAIL_INCLUDE,
 } from './payment-details-standard.include';
+
+function formatBillingAddress(order: any): string | undefined {
+  const parts: string[] = [];
+  if (order.billingStreet) {
+    let line: string = order.billingStreet;
+    if (order.billingNumber) line += `, ${order.billingNumber}`;
+    if (order.billingComplement) line += ` - ${order.billingComplement}`;
+    parts.push(line);
+  }
+  if (order.billingNeighborhood) parts.push(order.billingNeighborhood);
+  const cityState: string[] = [];
+  if (order.billingCity) cityState.push(order.billingCity);
+  if (order.billingStateUf) cityState.push(order.billingStateUf);
+  if (cityState.length) parts.push(cityState.join(' - '));
+  if (order.billingPostalCode) {
+    const cep = String(order.billingPostalCode).replace(/\D/g, '');
+    parts.push(cep.length === 8 ? `${cep.slice(0, 5)}-${cep.slice(5)}` : cep);
+  }
+  return parts.length ? parts.join(', ') : undefined;
+}
 
 @Injectable()
 export class PaymentsService {
@@ -19,6 +41,8 @@ export class PaymentsService {
     private readonly cieloService: CieloService,
     private readonly gateway: PaymentGateway,
     private readonly emailService: EmailService,
+    private readonly ticketPdfService: TicketPdfService,
+    private readonly receiptPdfService: ReceiptPdfService,
   ) { }
 
   /**
@@ -865,24 +889,152 @@ export class PaymentsService {
     // Emit WebSocket event so the frontend updates immediately
     this.gateway.emitPaymentConfirmed(orderId);
 
-    // Send confirmation email fire-and-forget
-    prismaRead.registration.findMany({
-      where: { orderId },
-      select: {
-        user: { select: { email: true, firstName: true } },
-        event: { select: { name: true, location: true, bannerUrl: true } },
+    // Send confirmation email fire-and-forget (same pattern as webhook handler)
+    prismaRead.order.findUnique({
+      where: { id: orderId },
+      include: {
+        event: { include: { organization: true } },
+        payment: true,
+        coupon: true,
+        voucher: true,
+        registrations: {
+          include: {
+            user: true,
+            tickets: { include: { ticket: { include: { category: true } } } },
+            products: { include: { product: true, variation: true } },
+            questionAnswers: { include: { question: true } },
+          },
+        },
       },
-    }).then((registrations: any[]) => {
-      const sends = registrations.map((reg: any) => {
-        if (!reg.user?.email || !reg.event) return Promise.resolve();
-        return this.emailService.sendRegistrationConfirmed({
-          email: reg.user.email,
-          firstName: reg.user.firstName ?? '',
-          eventName: reg.event.name,
-          eventLocation: reg.event.location ?? '',
-          eventBannerUrl: reg.event.bannerUrl ?? 'https://placehold.co/308x232',
-        });
+    }).then(async (order: any) => {
+      if (!order) return;
+      const event = order.event;
+      const org = event?.organization ?? {};
+      const orgName: string = org.tradeName || org.name || '';
+      const regs: any[] = order.registrations ?? [];
+      if (!regs.length) return;
+
+      const issuedAt = new Date();
+      const orderNumber = orderId.slice(0, 8).toUpperCase();
+      const billingAddress = formatBillingAddress(order);
+
+      const ticketPdfData = {
+        orderNumber,
+        issuedAt,
+        event: {
+          name: event?.name ?? '',
+          date: event?.eventDate ?? new Date(),
+          organization: orgName,
+          location: event?.location ?? '',
+          participantCount: regs.length,
+        },
+        registrations: regs.map((reg: any, idx: number) => {
+          const user = reg.user ?? {};
+          const ticket = reg.tickets?.[0]?.ticket;
+          const catName = ticket?.category?.name ?? '';
+          const ticketName = ticket?.name ?? '';
+          const fullTicketName = catName && ticketName && catName !== ticketName
+            ? `${catName} - ${ticketName}` : ticketName || catName;
+          return {
+            index: idx + 1,
+            qrCode: reg.qrCode ?? reg.id,
+            participantName: (reg.participantName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim()) || 'Participante',
+            ticketName: fullTicketName,
+            email: reg.participantEmail ?? user.email,
+            cpf: reg.participantCpf ?? user.documentNumber,
+            dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
+            phone: reg.participantPhone ?? user.phone,
+            gender: reg.participantGender ?? user.gender,
+            address: billingAddress,
+            questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => ({
+              question: qa.question?.question ?? '',
+              answer: qa.answer ?? '',
+            })),
+            products: (reg.products ?? []).map((rp: any) => ({
+              name: rp.product?.name ?? rp.productSnapshot?.name ?? '',
+              price: rp.unitPrice ?? 0,
+              variationName: rp.variation?.name ?? rp.productSnapshot?.variationName,
+              imageUrl: rp.product?.images?.[rp.product?.primaryImageIndex ?? 0],
+              isIncluded: rp.product?.isIncludedInTicket ?? false,
+            })),
+          };
+        }),
+      };
+
+      const paymentRow = order.payment ?? {};
+      const buyer = regs.find((r: any) => r.user)?.user ?? {};
+      const receiptPdfData = {
+        orderNumber,
+        issuedAt,
+        organization: { name: orgName, document: org.document, logoUrl: org.logoUrl ?? undefined },
+        buyer: {
+          name: `${buyer.firstName ?? ''} ${buyer.lastName ?? ''}`.trim() || 'Comprador',
+          document: buyer.documentNumber,
+        },
+        event: {
+          name: event?.name ?? '',
+          date: event?.eventDate ?? new Date(),
+          location: event?.location ?? '',
+        },
+        payment: {
+          method: paymentRow.method ?? 'PIX',
+          paidAt: paymentRow.paymentDate ?? paymentRow.updatedAt ?? issuedAt,
+          gateway: 'Cielo',
+          transactionId: paymentRow.transactionId,
+          txId: (paymentRow.metadata as any)?.txId,
+          e2eId: (paymentRow.metadata as any)?.e2eId,
+          voucherCode: order.voucher?.code,
+          couponCode: order.coupon?.code,
+          cardBrand: (paymentRow.metadata as any)?.cardBrand ?? undefined,
+        },
+        financial: {
+          subtotal: order.totalAmount ?? 0,
+          discount: order.discount ?? 0,
+          voucherCode: order.voucher?.code,
+          serviceFee: order.serviceFee ?? 0,
+          total: order.finalAmount ?? 0,
+        },
+        registrations: regs.map((reg: any) => {
+          const user = reg.user ?? {};
+          const ticket = reg.tickets?.[0]?.ticket;
+          const catName = ticket?.category?.name ?? '';
+          const ticketName = ticket?.name ?? '';
+          const batch = reg.tickets?.[0]?.batch;
+          return {
+            id: reg.id,
+            participantName: (reg.participantName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim()) || 'Participante',
+            email: reg.participantEmail ?? user.email,
+            ticketCategory: catName || undefined,
+            ticketName: ticketName || catName,
+            price: batch?.price ?? 0,
+          };
+        }),
+      };
+
+      const ticketPdf = await this.ticketPdfService.generateTicketPdf(ticketPdfData)
+        .catch((e: any) => { this.logger.warn('Ticket PDF failed:', e?.message); return undefined; });
+      const receiptPdf = await this.receiptPdfService.generateReceiptPdf(receiptPdfData)
+        .catch((e: any) => { this.logger.warn('Receipt PDF failed:', e?.message); return undefined; });
+
+      const byEmail = new Map<string, { firstName: string; email: string }>();
+      regs.forEach((reg: any) => {
+        const email = reg.user?.email;
+        if (email && !byEmail.has(email)) {
+          byEmail.set(email, { email, firstName: reg.user?.firstName ?? '' });
+        }
       });
+
+      const sends = Array.from(byEmail.values()).map((b) =>
+        this.emailService.sendRegistrationConfirmed({
+          email: b.email,
+          firstName: b.firstName,
+          eventName: event?.name ?? '',
+          eventLocation: event?.location ?? '',
+          eventBannerUrl: event?.bannerUrl ?? 'https://placehold.co/308x232',
+          ticketPdf: ticketPdf as Buffer | undefined,
+          receiptPdf: receiptPdf as Buffer | undefined,
+        }),
+      );
       return Promise.all(sends);
     }).catch((err: any) => this.logger.warn('Failed to send confirmation emails:', err));
 

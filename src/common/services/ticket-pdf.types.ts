@@ -16,6 +16,7 @@ export interface TicketPdfRegistration {
   dateOfBirth?: Date | string | null;
   phone?: string;
   gender?: string;
+  address?: string;
   questionAnswers: Array<{ question: string; answer: string }>;
   products: TicketPdfProduct[];
 }
