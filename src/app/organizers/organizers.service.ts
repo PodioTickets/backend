@@ -288,6 +288,7 @@ export class OrganizersService {
           select: {
             id: true,
             name: true,
+            contactEmail: true,
           },
         },
       },
@@ -315,8 +316,10 @@ export class OrganizersService {
 
     // Enviar email (mensagem já sanitizada)
     try {
+      // Usa o email de atendimento do evento quando disponível, senão o email da organização
+      const recipientEmail = (event as any)?.contactEmail || organization.email;
       await this.emailService.sendContactMessageToOrganizer({
-        organizerEmail: organization.email,
+        organizerEmail: recipientEmail,
         organizerName: organization.name,
         userName: contactData.name,
         userEmail: contactData.email,
