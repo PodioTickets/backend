@@ -254,15 +254,15 @@ const TxField = ({
 const InfoRow = ({ label, value }: { label: string; value: string }) =>
   React.createElement(
     View,
-    { style: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' } },
+    { style: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 } },
     React.createElement(
       Text,
-      { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray11 } },
+      { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray11, flexShrink: 0 } },
       label,
     ),
     React.createElement(
       Text,
-      { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 500, color: C.gray12 } },
+      { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 500, color: C.gray12, flex: 1, textAlign: 'right' } },
       value,
     ),
   );
