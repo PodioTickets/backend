@@ -123,16 +123,14 @@ const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
           alignItems: 'flex-start',
         },
       },
-      React.createElement(
-        View,
-        { style: { width: 72, height: 72, borderRadius: 6, backgroundColor: C.gray6, overflow: 'hidden' } },
-        product.imageUrl
-          ? React.createElement(Image, {
-              src: product.imageUrl,
-              style: { width: 72, height: 72, objectFit: 'contain' },
-            })
-          : null,
-      ),
+      product.imageUrl
+        ? React.createElement(Image, {
+            src: product.imageUrl,
+            style: { width: 72, height: 72, borderRadius: 6, objectFit: 'cover' },
+          })
+        : React.createElement(View, {
+            style: { width: 72, height: 72, borderRadius: 6, backgroundColor: C.gray6 },
+          }),
       React.createElement(
         View,
         { style: { flex: 1, gap: 6, paddingVertical: 4 } },
