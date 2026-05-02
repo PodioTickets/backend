@@ -74,8 +74,15 @@ function extractField(reg: any, field: ExportField): string {
       return formatDate(user.dateOfBirth);
     case 'telefone':
       return user.phone ?? '';
-    case 'sexo':
-      return user.gender ?? '';
+    case 'sexo': {
+      const generoMap: Record<string, string> = {
+        MALE: 'Masculino',
+        FEMALE: 'Feminino',
+        OTHER: 'Outro',
+        PREFER_NOT_TO_SAY: 'Prefiro não informar',
+      };
+      return generoMap[user.gender ?? ''] ?? (user.gender ?? '');
+    }
     case 'contatoEmergencia': {
       const ec = reg.emergencyContact ?? {};
       const parts = [ec.name, ec.phone].filter(Boolean);
@@ -83,22 +90,27 @@ function extractField(reg: any, field: ExportField): string {
     }
     case 'endereco': {
       const addr = order.billingAddress ?? {};
-      const parts = [
-        addr.street,
-        addr.number,
-        addr.complement,
-        addr.neighborhood,
-        addr.city,
-        addr.state,
-        addr.zipCode,
-      ].filter(Boolean);
-      return parts.join(', ');
+      const partes: string[] = [];
+      const cidadeEstado: string[] = [];
+      if (addr.city) cidadeEstado.push(addr.city);
+      if (addr.stateUf) cidadeEstado.push(addr.stateUf);
+      if (cidadeEstado.length) partes.push(cidadeEstado.join(' - '));
+      if (addr.neighborhood) partes.push(addr.neighborhood);
+      const logradouro = [addr.street, addr.number, addr.complement].filter(Boolean).join(', ');
+      if (logradouro) partes.push(logradouro);
+      if (addr.postalCode) {
+        const cep = String(addr.postalCode).replace(/\D/g, '');
+        partes.push(cep.length === 8 ? `${cep.slice(0, 5)}-${cep.slice(5)}` : cep);
+      }
+      return partes.join(', ');
     }
     case 'ingresso': {
+      const removerCorrida = (s: string) =>
+        s.replace(/\bcorrida\b/gi, '').replace(/\s{2,}/g, ' ').trim();
       const ticket = reg.ticket ?? null;
       if (!ticket) return '';
-      const categoryName = ticket.category?.name ?? ticket.modality ?? '';
-      const ticketName = ticket.name ?? '';
+      const categoryName = removerCorrida(ticket.category?.name ?? ticket.modality ?? '');
+      const ticketName = removerCorrida(ticket.name ?? '');
       if (categoryName && ticketName && categoryName !== ticketName) {
         return `${categoryName} - ${ticketName}`;
       }
@@ -236,7 +248,7 @@ export class ExportRegistrationsService {
 
       const headers = fields.map((f) => FIELD_LABELS[f]);
       const colW = Math.max(40, Math.floor(pageW / headers.length));
-      const rowH = 18;
+      const ROW_H_MIN = 18;
       const headerH = 22;
       const fontSize = fields.length > 10 ? 6 : fields.length > 7 ? 7 : 8;
 
@@ -293,23 +305,29 @@ export class ExportRegistrationsService {
       y = drawHeader(y);
 
       registrations.forEach((reg, rowIdx) => {
-        if (y + rowH > usableH) {
+        // Calcular altura dinâmica da linha com base no conteúdo mais alto
+        doc.font('Helvetica').fontSize(fontSize);
+        const cells = fields.map((f) => extractField(reg, f));
+        const alturas = cells.map((val) =>
+          doc.heightOfString(String(val || ''), { width: colW - 6 }) + 10,
+        );
+        const thisRowH = Math.max(ROW_H_MIN, ...alturas);
+
+        if (y + thisRowH > usableH) {
           y = addPage();
           y = drawHeader(y);
         }
         const bg = rowIdx % 2 === 0 ? '#F9F9F9' : '#FFFFFF';
-        doc.rect(MARGIN, y, pageW, rowH).fillColor(bg).fill();
+        doc.rect(MARGIN, y, pageW, thisRowH).fillColor(bg).fill();
         doc.fillColor('#202020').fontSize(fontSize).font('Helvetica');
-        fields.forEach((f, i) => {
-          const val = extractField(reg, f);
+        cells.forEach((val, i) => {
           doc.text(val, MARGIN + i * colW + 3, y + 5, {
             width: colW - 6,
-            lineBreak: false,
-            ellipsis: true,
+            lineBreak: true,
           });
         });
-        doc.rect(MARGIN, y, pageW, rowH).strokeColor('#E0E0E0').lineWidth(0.5).stroke();
-        y += rowH;
+        doc.rect(MARGIN, y, pageW, thisRowH).strokeColor('#E0E0E0').lineWidth(0.5).stroke();
+        y += thisRowH;
       });
 
       doc.end();
