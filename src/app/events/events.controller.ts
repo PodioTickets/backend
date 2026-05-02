@@ -743,7 +743,17 @@ Example: \`fields=nome,email,cpf,status,valorPago\``,
       throw new BadRequestException('Invalid export format. Use txt, excel or pdf.');
     }
 
-    const { registrations, eventName } = await this.eventsService.getRegistrationsForExport(req.user.id, eventId);
+    const { registrations, eventName } = await this.eventsService.getRegistrationsForExport(
+      req.user.id,
+      eventId,
+      {
+        search: query.search,
+        status: query.status,
+        ticketIds: query.ticketIds ? query.ticketIds.split(',').filter(Boolean) : undefined,
+        startDate: query.startDate,
+        endDate: query.endDate,
+      },
+    );
     const fields = this.exportService.parseFields(fieldsParam);
 
     const safeEventName = eventName.replace(/[^a-z0-9\-_áéíóúãõâêôçàüñ ]/gi, '').trim() || `evento-${eventId.slice(0, 8)}`;

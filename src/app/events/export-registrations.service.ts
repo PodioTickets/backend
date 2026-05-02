@@ -240,6 +240,8 @@ export class ExportRegistrationsService {
       const headerH = 22;
       const fontSize = fields.length > 10 ? 6 : fields.length > 7 ? 7 : 8;
 
+      const TITLE_H = 20;
+
       const drawFooter = () => {
         doc
           .fontSize(7)
@@ -251,6 +253,20 @@ export class ExportRegistrationsService {
             lineBreak: false,
           });
         doc.fillColor('#000000');
+      };
+
+      const drawTitle = (yPos: number): number => {
+        doc
+          .font('Helvetica-Bold')
+          .fontSize(10)
+          .fillColor('#202020')
+          .text(eventName, MARGIN, yPos + 4, {
+            width: pageW,
+            lineBreak: false,
+            ellipsis: true,
+          });
+        doc.font('Helvetica').fillColor('#000000');
+        return yPos + TITLE_H;
       };
 
       const drawHeader = (yPos: number): number => {
@@ -270,7 +286,7 @@ export class ExportRegistrationsService {
       const addPage = (): number => {
         doc.addPage();
         drawFooter();
-        return MARGIN;
+        return drawTitle(MARGIN);
       };
 
       let y = addPage();

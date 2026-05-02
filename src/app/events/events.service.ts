@@ -5271,7 +5271,17 @@ export class EventsService {
    * Fetch all registrations for a given event (no pagination) for export purposes.
    * Caller must already have organizer access verified.
    */
-  async getRegistrationsForExport(userId: string, eventId: string): Promise<{ registrations: any[]; eventName: string }> {
+  async getRegistrationsForExport(
+    userId: string,
+    eventId: string,
+    filters?: {
+      search?: string;
+      status?: string;
+      ticketIds?: string[];
+      startDate?: string;
+      endDate?: string;
+    },
+  ): Promise<{ registrations: any[]; eventName: string }> {
     await this.verifyOrganizerAccess(userId, eventId, 'dashboard');
 
     const prismaRead = this.prisma.getReadClient();
@@ -5336,11 +5346,52 @@ export class EventsService {
       },
     };
 
+    const where: any = {
+      eventId,
+      status: filters?.status && filters.status !== 'all'
+        ? (filters.status as any)
+        : { not: 'PENDING' as any },
+    };
+
+    if (filters?.ticketIds?.length) {
+      where.tickets = { some: { ticketId: { in: filters.ticketIds } } };
+    }
+
+    if (filters?.startDate || filters?.endDate) {
+      where.order = { createdAt: {} };
+      if (filters.startDate) where.order.createdAt.gte = new Date(filters.startDate);
+      if (filters.endDate) where.order.createdAt.lte = new Date(filters.endDate);
+    }
+
+    if (filters?.search) {
+      const searchTerm = filters.search;
+      const uuidMatches = await prismaRead.$queryRaw<{ id: string }[]>`
+        SELECT r.id FROM "Registration" r
+        JOIN "Order" o ON o.id = r."orderId"
+        WHERE r."eventId" = ${eventId}::uuid
+          AND (r.id::text ILIKE ${'%' + searchTerm + '%'} OR o.id::text ILIKE ${'%' + searchTerm + '%'})
+      `;
+      const uuidMatchIds = uuidMatches.map((row: any) => row.id);
+      where.OR = [
+        ...(uuidMatchIds.length > 0 ? [{ id: { in: uuidMatchIds } }] : []),
+        {
+          user: {
+            OR: [
+              { firstName: { contains: searchTerm, mode: 'insensitive' } },
+              { lastName: { contains: searchTerm, mode: 'insensitive' } },
+              { email: { contains: searchTerm, mode: 'insensitive' } },
+              { documentNumber: { contains: searchTerm, mode: 'insensitive' } },
+            ],
+          },
+        },
+        { participantName: { contains: searchTerm, mode: 'insensitive' } },
+        { participantEmail: { contains: searchTerm, mode: 'insensitive' } },
+        { participantCpf: { contains: searchTerm, mode: 'insensitive' } },
+      ];
+    }
+
     const registrations = await prismaRead.registration.findMany({
-      where: {
-        eventId,
-        status: { not: 'PENDING' as any },
-      },
+      where,
       include: includeClause,
       orderBy: [{ order: { createdAt: 'desc' } }, { id: 'asc' }],
     });

@@ -30,4 +30,29 @@ export class ExportRegistrationsDto {
   @IsOptional()
   @IsString()
   fields?: string;
+
+  /** Text search (name, email, CPF, registration/order ID). */
+  @IsOptional()
+  @IsString()
+  search?: string;
+
+  /** Registration status filter (e.g. CONFIRMED, CANCELLED). Omit or pass "all" for no filter. */
+  @IsOptional()
+  @IsString()
+  status?: string;
+
+  /** Comma-separated ticket IDs. */
+  @IsOptional()
+  @IsString()
+  ticketIds?: string;
+
+  /** ISO date — filter registrations created on or after this date. */
+  @IsOptional()
+  @IsString()
+  startDate?: string;
+
+  /** ISO date — filter registrations created on or before this date. */
+  @IsOptional()
+  @IsString()
+  endDate?: string;
 }
