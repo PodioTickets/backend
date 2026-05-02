@@ -2537,13 +2537,13 @@ export class OrdersService {
         const eventBannerUrl = (snapshotEvent as any).logoUrl || (snapshotEvent as any).bannerUrl || '';
 
         // Comprador = primeira inscrição com conta vinculada — recebe todos os ingressos + recibo
-        const buyerUser = regs.find((r: any) => r.user?.email)?.user;
-        const buyerEmail: string | undefined = buyerUser?.email;
+        const emailBuyer = regs.find((r: any) => r.user?.email)?.user;
+        const buyerEmail: string | undefined = emailBuyer?.email;
 
         if (buyerEmail) {
           await this.emailService.sendRegistrationConfirmed({
             email: buyerEmail,
-            firstName: buyerUser?.firstName || 'Participante',
+            firstName: emailBuyer?.firstName || 'Participante',
             eventName,
             eventLocation: location,
             eventDate,
