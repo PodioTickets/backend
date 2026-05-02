@@ -307,32 +307,57 @@ export class PaymentsWebhookService {
           }),
         };
 
-        const ticketPdf = await this.ticketPdfService.generateTicketPdf(ticketPdfData).catch((e: any) => { this.logger.warn('Ticket PDF failed:', e?.message); return undefined; });
-        const receiptPdf = await this.receiptPdfService.generateReceiptPdf(receiptPdfData).catch((e: any) => { this.logger.warn('Receipt PDF failed:', e?.message); return undefined; });
+        const ticketPdf = await this.ticketPdfService.generateTicketPdf(ticketPdfData)
+          .catch((e: any) => { this.logger.warn('Ticket PDF falhou:', e?.message); return undefined; });
+        const receiptPdf = await this.receiptPdfService.generateReceiptPdf(receiptPdfData)
+          .catch((e: any) => { this.logger.warn('Receipt PDF falhou:', e?.message); return undefined; });
 
-        // Send one email per unique buyer (group by email)
-        const byEmail = new Map<string, { firstName: string; email: string }>();
-        regs.forEach((reg: any) => {
-          const email = reg.user?.email;
-          if (email && !byEmail.has(email)) {
-            byEmail.set(email, { email, firstName: reg.user?.firstName ?? '' });
-          }
-        });
+        const eventName = event?.name ?? '';
+        const eventLocation = event?.location ?? '';
+        const eventDate = formatEventDate(event?.eventDate);
+        const eventAddress = formatEventAddress(event);
+        const eventBannerUrl = event?.bannerUrl ?? 'https://placehold.co/308x232';
 
-        const sends = Array.from(byEmail.values()).map((b) =>
-          this.emailService.sendRegistrationConfirmed({
-            email: b.email,
-            firstName: b.firstName,
-            eventName: event?.name ?? '',
-            eventLocation: event?.location ?? '',
-            eventDate: formatEventDate(event?.eventDate),
-            eventAddress: formatEventAddress(event),
-            eventBannerUrl: event?.bannerUrl ?? 'https://placehold.co/308x232',
+        // Comprador = primeira inscrição com conta vinculada — recebe todos os ingressos + recibo
+        const buyerUser = regs.find((r: any) => r.user?.email)?.user;
+        const buyerEmail: string | undefined = buyerUser?.email;
+
+        if (buyerEmail) {
+          await this.emailService.sendRegistrationConfirmed({
+            email: buyerEmail,
+            firstName: buyerUser?.firstName || 'Participante',
+            eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
             ticketPdf: ticketPdf as Buffer | undefined,
             receiptPdf: receiptPdf as Buffer | undefined,
-          }),
-        );
-        return Promise.all(sends);
+          }).catch((err: any) => this.logger.warn('Email comprador falhou:', err));
+        }
+
+        // Participantes não-compradores — ingresso individual sem recibo, geração sequencial
+        for (const [idx, reg] of regs.entries()) {
+          const participantEmail: string | undefined = reg.participantEmail ?? reg.user?.email;
+          if (!participantEmail || participantEmail === buyerEmail) continue;
+
+          const participantName: string = reg.participantName
+            ?? `${reg.user?.firstName ?? ''} ${reg.user?.lastName ?? ''}`.trim()
+            || 'Participante';
+          const regEntry = ticketPdfData.registrations[idx];
+          if (!regEntry) continue;
+
+          const individualPdfData = {
+            ...ticketPdfData,
+            event: { ...ticketPdfData.event, participantCount: 1 },
+            registrations: [{ ...regEntry, index: 1 }],
+          };
+          const individualTicketPdf = await this.ticketPdfService.generateTicketPdf(individualPdfData)
+            .catch((e: any) => { this.logger.warn(`PDF individual falhou para ${participantEmail}:`, e?.message); return undefined; });
+
+          await this.emailService.sendRegistrationConfirmed({
+            email: participantEmail,
+            firstName: participantName.split(' ')[0] || 'Participante',
+            eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
+            ticketPdf: individualTicketPdf as Buffer | undefined,
+          }).catch((err: any) => this.logger.warn(`Email participante ${participantEmail} falhou:`, err));
+        }
       }).catch((err: any) => this.logger.warn('Failed to send registration confirmed emails:', err));
     }
   }

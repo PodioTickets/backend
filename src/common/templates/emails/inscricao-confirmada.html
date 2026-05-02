@@ -141,7 +141,7 @@
             </table>
 
             <!-- Footer note -->
-            <p style="margin:0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:400;color:#646464;line-height:20.80px;text-align:center;word-wrap:break-word;">Segue em anexo o ingresso e o recibo em PDF para sua conferência.</p>
+            {{#hasReceipt}}<p style="margin:0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:400;color:#646464;line-height:20.80px;text-align:center;word-wrap:break-word;">Segue em anexo o ingresso e o recibo em PDF para sua conferência.</p>{{/hasReceipt}}{{^hasReceipt}}<p style="margin:0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:400;color:#646464;line-height:20.80px;text-align:center;word-wrap:break-word;">Segue em anexo o seu ingresso em PDF para sua conferência.</p>{{/hasReceipt}}
 
           </td>
         </tr>

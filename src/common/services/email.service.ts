@@ -216,6 +216,7 @@ export class EmailService {
       eventDate: this.escapeHtml(data.eventDate ?? ''),
       eventAddress: this.escapeHtml(data.eventAddress ?? data.eventLocation),
       eventBannerUrl: this.escapeHtml(data.eventBannerUrl),
+      hasReceipt: data.receiptPdf ? '1' : '',
     });
 
     const address = data.eventAddress ?? data.eventLocation;
