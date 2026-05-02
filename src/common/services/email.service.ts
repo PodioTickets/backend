@@ -203,6 +203,8 @@ export class EmailService {
     firstName: string;
     eventName: string;
     eventLocation: string;
+    eventDate?: string;
+    eventAddress?: string;
     eventBannerUrl: string;
     ticketPdf?: Buffer;
     receiptPdf?: Buffer;
@@ -211,10 +213,13 @@ export class EmailService {
       firstName: this.escapeHtml(data.firstName),
       eventName: this.escapeHtml(data.eventName),
       eventLocation: this.escapeHtml(data.eventLocation),
+      eventDate: this.escapeHtml(data.eventDate ?? ''),
+      eventAddress: this.escapeHtml(data.eventAddress ?? data.eventLocation),
       eventBannerUrl: this.escapeHtml(data.eventBannerUrl),
     });
 
-    const text = `Olá ${data.firstName},\n\nSua inscrição na ${data.eventName} foi confirmada! Sua vaga está garantida.\n\nEvento: ${data.eventName}\nLocal: ${data.eventLocation}\n\nPodioTicket — podioticket.com.br`;
+    const address = data.eventAddress ?? data.eventLocation;
+    const text = `Olá ${data.firstName},\n\nSua inscrição na ${data.eventName} foi confirmada! Sua vaga está garantida.\n\nEvento: ${data.eventName}\nData: ${data.eventDate ?? ''}\nLocal: ${address}\n\nPodioTicket — podioticket.com.br`;
 
     const msg: any = {
       from: this.from,

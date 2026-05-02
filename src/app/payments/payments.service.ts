@@ -12,6 +12,28 @@ import {
   TICKET_CATEGORY_DETAIL_INCLUDE,
 } from './payment-details-standard.include';
 
+function formatEventDate(date: Date | string | null | undefined): string {
+  if (!date) return '';
+  const d = new Date(date as string);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+function formatEventAddress(event: any): string {
+  const parts: string[] = [];
+  if (event.location) parts.push(event.location);
+  if (event.neighborhood) parts.push(event.neighborhood);
+  const cityState: string[] = [];
+  if (event.city) cityState.push(event.city);
+  if (event.state) cityState.push(event.state);
+  if (cityState.length) parts.push(cityState.join(' - '));
+  if (event.zipCode) {
+    const cep = String(event.zipCode).replace(/\D/g, '');
+    parts.push(cep.length === 8 ? `CEP ${cep.slice(0, 5)}-${cep.slice(5)}` : cep);
+  }
+  return parts.join(', ');
+}
+
 function formatBillingAddress(order: any): string | undefined {
   const parts: string[] = [];
   if (order.billingStreet) {
@@ -1030,6 +1052,8 @@ export class PaymentsService {
           firstName: b.firstName,
           eventName: event?.name ?? '',
           eventLocation: event?.location ?? '',
+          eventDate: formatEventDate(event?.eventDate),
+          eventAddress: formatEventAddress(event),
           eventBannerUrl: event?.bannerUrl ?? 'https://placehold.co/308x232',
           ticketPdf: ticketPdf as Buffer | undefined,
           receiptPdf: receiptPdf as Buffer | undefined,
