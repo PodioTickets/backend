@@ -29,26 +29,6 @@ function formatEventAddress(event: any): string {
   return parts.join(', ');
 }
 
-function formatBillingAddress(order: any): string | undefined {
-  const parts: string[] = [];
-  if (order.billingStreet) {
-    let line: string = order.billingStreet;
-    if (order.billingNumber) line += `, ${order.billingNumber}`;
-    if (order.billingComplement) line += ` - ${order.billingComplement}`;
-    parts.push(line);
-  }
-  if (order.billingNeighborhood) parts.push(order.billingNeighborhood);
-  const cityState: string[] = [];
-  if (order.billingCity) cityState.push(order.billingCity);
-  if (order.billingStateUf) cityState.push(order.billingStateUf);
-  if (cityState.length) parts.push(cityState.join(' - '));
-  if (order.billingPostalCode) {
-    const cep = String(order.billingPostalCode).replace(/\D/g, '');
-    parts.push(cep.length === 8 ? `${cep.slice(0, 5)}-${cep.slice(5)}` : cep);
-  }
-  return parts.length ? parts.join(', ') : undefined;
-}
-
 interface CieloWebhookEvent {
   PaymentId: string;
   Status: number;
@@ -234,7 +214,6 @@ export class PaymentsWebhookService {
         const orderNumber = orderId.slice(0, 8).toUpperCase();
 
         // Build TicketPdfData
-        const billingAddress = formatBillingAddress(order);
         const ticketPdfData = {
           orderNumber,
           issuedAt,
@@ -242,7 +221,7 @@ export class PaymentsWebhookService {
             name: event?.name ?? '',
             date: event?.eventDate ?? new Date(),
             organization: orgName,
-            location: event?.location ?? '',
+            location: formatEventAddress(event),
             participantCount: regs.length,
           },
           registrations: regs.map((reg: any, idx: number) => {
@@ -262,7 +241,6 @@ export class PaymentsWebhookService {
               dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
               phone: reg.participantPhone ?? user.phone,
               gender: reg.participantGender ?? user.gender,
-              address: billingAddress,
               questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => ({
                 question: qa.question?.question ?? '',
                 answer: qa.answer ?? '',
