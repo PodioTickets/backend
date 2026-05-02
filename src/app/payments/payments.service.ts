@@ -21,15 +21,15 @@ function formatEventDate(date: Date | string | null | undefined): string {
 
 function formatEventAddress(event: any): string {
   const parts: string[] = [];
-  if (event.location) parts.push(event.location);
-  if (event.neighborhood) parts.push(event.neighborhood);
   const cityState: string[] = [];
   if (event.city) cityState.push(event.city);
   if (event.state) cityState.push(event.state);
   if (cityState.length) parts.push(cityState.join(' - '));
+  if (event.neighborhood) parts.push(event.neighborhood);
+  if (event.location) parts.push(event.location);
   if (event.zipCode) {
     const cep = String(event.zipCode).replace(/\D/g, '');
-    parts.push(cep.length === 8 ? `CEP ${cep.slice(0, 5)}-${cep.slice(5)}` : cep);
+    parts.push(cep.length === 8 ? `${cep.slice(0, 5)}-${cep.slice(5)}` : cep);
   }
   return parts.join(', ');
 }

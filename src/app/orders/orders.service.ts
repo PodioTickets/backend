@@ -22,6 +22,30 @@ import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
 import { ReceiptPdfService } from '../../common/services/receipt-pdf.service';
 
+// ─── helpers de formatação ────────────────────────────────────────────────────
+
+function formatEventDate(date: Date | string | null | undefined): string {
+  if (!date) return '';
+  const d = new Date(date as string);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+function formatEventAddress(event: any): string {
+  const parts: string[] = [];
+  const cityState: string[] = [];
+  if (event.city) cityState.push(event.city);
+  if (event.state) cityState.push(event.state);
+  if (cityState.length) parts.push(cityState.join(' - '));
+  if (event.neighborhood) parts.push(event.neighborhood);
+  if (event.location) parts.push(event.location);
+  if (event.zipCode) {
+    const cep = String(event.zipCode).replace(/\D/g, '');
+    parts.push(cep.length === 8 ? `${cep.slice(0, 5)}-${cep.slice(5)}` : cep);
+  }
+  return parts.join(', ');
+}
+
 // ─── typed error helpers ─────────────────────────────────────────────────────
 
 class AppConflictException extends ConflictException {
@@ -2410,8 +2434,7 @@ export class OrdersService {
         const org = event?.organization ?? {};
         const orgName = org.tradeName || org.name || '';
         const regs: any[] = order.registrations ?? [];
-        const locationParts = [snapshotEvent.location, (snapshotEvent as any).city, (snapshotEvent as any).state].filter(Boolean);
-        const location = locationParts.join(', ') || '—';
+        const location = formatEventAddress(event) || '—';
 
         const issuedAt = new Date();
         const orderNumber = orderId.slice(0, 8).toUpperCase();
@@ -2515,6 +2538,8 @@ export class OrdersService {
           firstName: buyer.firstName || 'Participante',
           eventName: snapshotEvent.name,
           eventLocation: location,
+          eventDate: formatEventDate(snapshotEvent.eventDate ?? (event as any).eventDate),
+          eventAddress: location,
           eventBannerUrl: (snapshotEvent as any).logoUrl || (snapshotEvent as any).bannerUrl || '',
           ticketPdf: ticketPdf as Buffer | undefined,
           receiptPdf: receiptPdf as Buffer | undefined,
