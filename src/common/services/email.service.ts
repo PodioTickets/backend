@@ -207,7 +207,6 @@ export class EmailService {
     eventAddress?: string;
     eventBannerUrl: string;
     ticketPdf?: Buffer;
-    receiptPdf?: Buffer;
   }) {
     const html = this.loadTemplate('inscricao-confirmada.html', {
       firstName: this.escapeHtml(data.firstName),
@@ -216,7 +215,7 @@ export class EmailService {
       eventDate: this.escapeHtml(data.eventDate ?? ''),
       eventAddress: this.escapeHtml(data.eventAddress ?? data.eventLocation),
       eventBannerUrl: this.escapeHtml(data.eventBannerUrl),
-      hasReceipt: data.receiptPdf ? '1' : '',
+      hasReceipt: '',
     });
 
     const address = data.eventAddress ?? data.eventLocation;
@@ -241,19 +240,10 @@ export class EmailService {
         disposition: 'attachment',
       });
     }
-    if (data.receiptPdf) {
-      attachments.push({
-        content: data.receiptPdf.toString('base64'),
-        filename: `recibo_${safeName}.pdf`,
-        type: 'application/pdf',
-        disposition: 'attachment',
-      });
-    }
     if (attachments.length > 0) msg.attachments = attachments;
 
     await this.send(msg);
-    const attachInfo = [data.ticketPdf ? 'ticket' : '', data.receiptPdf ? 'receipt' : ''].filter(Boolean).join('+');
-    this.logger.log(`Registration confirmed email sent to: ${data.email}${attachInfo ? ` (${attachInfo} PDF)` : ''}`);
+    this.logger.log(`Registration confirmed email sent to: ${data.email}${data.ticketPdf ? ' (ticket PDF)' : ''}`);
   }
 
   async sendTransferRequested(data: {

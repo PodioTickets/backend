@@ -21,6 +21,7 @@ export interface TicketPdfRegistration {
 }
 
 export interface TicketPdfData {
+  orderId: string;
   orderNumber: string;
   issuedAt: Date;
   event: {

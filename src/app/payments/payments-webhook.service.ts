@@ -3,7 +3,6 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from './cielo.service';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
-import { ReceiptPdfService } from '../../common/services/receipt-pdf.service';
 import { PaymentGateway } from './payment.gateway';
 import { PaymentStatus, Prisma } from '@prisma/client';
 
@@ -46,7 +45,6 @@ export class PaymentsWebhookService {
     private readonly cieloService: CieloService,
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
-    private readonly receiptPdfService: ReceiptPdfService,
     private readonly gateway: PaymentGateway,
   ) {}
 
@@ -215,6 +213,7 @@ export class PaymentsWebhookService {
 
         // Build TicketPdfData
         const ticketPdfData = {
+          orderId,
           orderNumber,
           issuedAt,
           event: {
@@ -256,61 +255,8 @@ export class PaymentsWebhookService {
           }),
         };
 
-        // Build ReceiptPdfData
-        const payment = order.payment ?? {};
-        const buyer = regs.find((r: any) => r.user)?.user ?? {};
-        const receiptPdfData = {
-          orderNumber,
-          issuedAt,
-          organization: { name: orgName, document: org.document, logoUrl: org.logoUrl ?? undefined },
-          buyer: {
-            name: `${buyer.firstName ?? ''} ${buyer.lastName ?? ''}`.trim() || 'Comprador',
-            document: buyer.documentNumber,
-          },
-          event: {
-            name: event?.name ?? '',
-            date: event?.eventDate ?? new Date(),
-            location: event?.location ?? '',
-          },
-          payment: {
-            method: payment.method ?? 'PIX',
-            paidAt: payment.paymentDate ?? payment.updatedAt ?? issuedAt,
-            gateway: 'Cielo',
-            transactionId: payment.transactionId,
-            txId: (payment.metadata as any)?.txId,
-            e2eId: (payment.metadata as any)?.e2eId,
-            voucherCode: order.voucher?.code,
-            couponCode: order.coupon?.code,
-            cardBrand: (payment.metadata as any)?.cardBrand ?? undefined,
-          },
-          financial: {
-            subtotal: order.totalAmount ?? 0,
-            discount: order.discount ?? 0,
-            voucherCode: order.voucher?.code,
-            serviceFee: order.serviceFee ?? 0,
-            total: order.finalAmount ?? 0,
-          },
-          registrations: regs.map((reg: any) => {
-            const user = reg.user ?? {};
-            const ticket = reg.tickets?.[0]?.ticket;
-            const catName = ticket?.category?.name ?? '';
-            const ticketName = ticket?.name ?? '';
-            const batch = reg.tickets?.[0]?.batch;
-            return {
-              id: reg.id,
-              participantName: (reg.participantName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim()) || 'Participante',
-              email: reg.participantEmail ?? user.email,
-              ticketCategory: catName || undefined,
-              ticketName: ticketName || catName,
-              price: batch?.price ?? 0,
-            };
-          }),
-        };
-
         const ticketPdf = await this.ticketPdfService.generateTicketPdf(ticketPdfData)
           .catch((e: any) => { this.logger.warn('Ticket PDF falhou:', e?.message); return undefined; });
-        const receiptPdf = await this.receiptPdfService.generateReceiptPdf(receiptPdfData)
-          .catch((e: any) => { this.logger.warn('Receipt PDF falhou:', e?.message); return undefined; });
 
         const eventName = event?.name ?? '';
         const eventLocation = event?.location ?? '';
@@ -328,7 +274,6 @@ export class PaymentsWebhookService {
             firstName: buyerUser?.firstName || 'Participante',
             eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
             ticketPdf: ticketPdf as Buffer | undefined,
-            receiptPdf: receiptPdf as Buffer | undefined,
           }).catch((err: any) => this.logger.warn('Email comprador falhou:', err));
         }
 

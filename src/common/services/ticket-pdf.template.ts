@@ -84,15 +84,15 @@ const HR = () =>
 const FieldItem = ({ label, value }: { label: string; value: string }) =>
   React.createElement(
     View,
-    { style: { paddingVertical: 8, gap: 6 } },
+    { style: { paddingVertical: 6, gap: 4 } },
     React.createElement(
       Text,
-      { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray11 } },
+      { style: { fontFamily: 'DM Sans', fontSize: 9, fontWeight: 400, color: C.gray11 } },
       label,
     ),
     React.createElement(
       Text,
-      { style: { fontFamily: 'DM Sans', fontSize: 12, fontWeight: 500, color: C.gray12 } },
+      { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 500, color: C.gray12 } },
       value || '—',
     ),
   );
@@ -126,10 +126,10 @@ const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
       product.imageUrl
         ? React.createElement(Image, {
             src: product.imageUrl,
-            style: { width: 72, height: 72, borderRadius: 6, objectFit: 'fill' },
+            style: { width: 52, height: 52, borderRadius: 6, objectFit: 'fill' },
           })
         : React.createElement(View, {
-            style: { width: 72, height: 72, borderRadius: 6, backgroundColor: C.gray6 },
+            style: { width: 52, height: 52, borderRadius: 6, backgroundColor: C.gray6 },
           }),
       React.createElement(
         View,
@@ -228,18 +228,18 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
           gap: 12,
         },
       },
-      React.createElement(Image, { src: reg.qrDataUrl, style: { width: 60, height: 60 } }),
+      React.createElement(Image, { src: reg.qrDataUrl, style: { width: 48, height: 48 } }),
       React.createElement(
         View,
         { style: { gap: 10 } },
         React.createElement(
           Text,
-          { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray12 } },
+          { style: { fontFamily: 'DM Sans', fontSize: 9, fontWeight: 400, color: C.gray12 } },
           `Participante ${reg.index}`,
         ),
         React.createElement(
           Text,
-          { style: { fontFamily: 'Manrope', fontSize: 14, fontWeight: 700, color: C.gray12 } },
+          { style: { fontFamily: 'Manrope', fontSize: 12, fontWeight: 700, color: C.gray12 } },
           reg.participantName,
         ),
         React.createElement(
@@ -247,12 +247,12 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
           { style: { flexDirection: 'row', gap: 4 } },
           React.createElement(
             Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray11 } },
+            { style: { fontFamily: 'DM Sans', fontSize: 9, fontWeight: 400, color: C.gray11 } },
             'Ingresso: ',
           ),
           React.createElement(
             Text,
-            { style: { fontFamily: 'Manrope', fontSize: 11, fontWeight: 600, color: C.gray12 } },
+            { style: { fontFamily: 'Manrope', fontSize: 9, fontWeight: 600, color: C.gray12 } },
             reg.ticketName,
           ),
         ),
@@ -265,7 +265,7 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
           { style: { paddingHorizontal: 16, paddingVertical: 18, gap: 12 } },
           React.createElement(
             Text,
-            { style: { fontFamily: 'Manrope', fontSize: 13, fontWeight: 800, color: C.gray12 } },
+            { style: { fontFamily: 'Manrope', fontSize: 11, fontWeight: 800, color: C.gray12 } },
             'Informações do participante',
           ),
           React.createElement(
@@ -290,7 +290,7 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
             { style: { paddingHorizontal: 16, paddingVertical: 18, gap: 12 } },
             React.createElement(
               Text,
-              { style: { fontFamily: 'Manrope', fontSize: 13, fontWeight: 800, color: C.gray12 } },
+              { style: { fontFamily: 'Manrope', fontSize: 11, fontWeight: 800, color: C.gray12 } },
               'Perguntas do Organizador',
             ),
             React.createElement(
@@ -316,7 +316,7 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
             { style: { paddingHorizontal: 16, paddingVertical: 18, gap: 12 } },
             React.createElement(
               Text,
-              { style: { fontFamily: 'Manrope', fontSize: 13, fontWeight: 800, color: C.gray12 } },
+              { style: { fontFamily: 'Manrope', fontSize: 11, fontWeight: 800, color: C.gray12 } },
               'Produtos do kit',
             ),
             React.createElement(
@@ -411,8 +411,8 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
         style: {
           fontFamily: 'DM Sans',
           backgroundColor: C.white,
-          paddingHorizontal: 36,
-          paddingVertical: 20,
+          paddingHorizontal: 28,
+          paddingVertical: 14,
         },
       },
       // header
@@ -441,18 +441,18 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
             { style: { flexDirection: 'row', gap: 4 } },
             React.createElement(
               Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray12 } },
+              { style: { fontFamily: 'DM Sans', fontSize: 9, fontWeight: 400, color: C.gray12 } },
               'Pedido: ',
             ),
             React.createElement(
               Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 600, color: C.gray12 } },
-              data.orderNumber,
+              { style: { fontFamily: 'DM Sans', fontSize: 9, fontWeight: 600, color: C.gray12 } },
+              data.orderId,
             ),
           ),
           React.createElement(
             Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray11 } },
+            { style: { fontFamily: 'DM Sans', fontSize: 9, fontWeight: 400, color: C.gray11 } },
             `Emitido em ${fmtDateTime(data.issuedAt)}`,
           ),
         ),
@@ -464,12 +464,12 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
         { style: { gap: 4, marginTop: 14, marginBottom: 12 } },
         React.createElement(
           Text,
-          { style: { fontFamily: 'Manrope', fontSize: 14, fontWeight: 800, color: C.gray12 } },
+          { style: { fontFamily: 'Manrope', fontSize: 12, fontWeight: 800, color: C.gray12 } },
           'Detalhes da inscrição',
         ),
         React.createElement(
           Text,
-          { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray11 } },
+          { style: { fontFamily: 'DM Sans', fontSize: 9, fontWeight: 400, color: C.gray11 } },
           'Apresente os QR Codes na retirada do kit ou na entrada do evento',
         ),
       ),
@@ -512,12 +512,12 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
             { style: { gap: 6 } },
             React.createElement(
               Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray11 } },
+              { style: { fontFamily: 'DM Sans', fontSize: 9, fontWeight: 400, color: C.gray11 } },
               'Evento',
             ),
             React.createElement(
               Text,
-              { style: { fontFamily: 'Manrope', fontSize: 13, fontWeight: 700, color: C.gray12 } },
+              { style: { fontFamily: 'Manrope', fontSize: 11, fontWeight: 700, color: C.gray12 } },
               data.event.name,
             ),
           ),
@@ -543,7 +543,7 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
                 {
                   style: {
                     fontFamily: 'DM Sans',
-                    fontSize: 11,
+                    fontSize: 9,
                     fontWeight: 400,
                     color: C.gray11,
                   },
@@ -555,7 +555,7 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
                 {
                   style: {
                     fontFamily: 'DM Sans',
-                    fontSize: 12,
+                    fontSize: 10,
                     fontWeight: 500,
                     color: C.gray12,
                   },

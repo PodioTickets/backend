@@ -20,7 +20,6 @@ import { PayOrderDto } from './dto/pay-order.dto';
 import { PatchCouponDto } from './dto/patch-coupon.dto';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
-import { ReceiptPdfService } from '../../common/services/receipt-pdf.service';
 
 // ─── helpers de formatação ────────────────────────────────────────────────────
 
@@ -359,7 +358,6 @@ export class OrdersService {
     private readonly redisService: OrdersRedisService,
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
-    private readonly receiptPdfService: ReceiptPdfService,
   ) {}
 
   // ── 1. reserve ─────────────────────────────────────────────────────────────
@@ -2440,6 +2438,7 @@ export class OrdersService {
         const orderNumber = orderId.slice(0, 8).toUpperCase();
 
         const ticketPdfData = {
+          orderId,
           orderNumber,
           issuedAt,
           event: {
@@ -2481,56 +2480,8 @@ export class OrdersService {
           }),
         };
 
-        const payment = order.payment ?? {};
-        const buyerUser = regs.find((r: any) => r.user)?.user ?? {};
-        const receiptPdfData = {
-          orderNumber,
-          issuedAt,
-          organization: { name: orgName, document: org.document, logoUrl: org.logoUrl ?? undefined },
-          buyer: {
-            name: `${buyerUser.firstName ?? ''} ${buyerUser.lastName ?? ''}`.trim() || 'Comprador',
-            document: buyerUser.documentNumber,
-          },
-          event: { name: snapshotEvent.name ?? '', date: snapshotEvent.eventDate ?? new Date(), location },
-          payment: {
-            method: payment.method ?? 'PIX',
-            paidAt: payment.paymentDate ?? payment.updatedAt ?? issuedAt,
-            gateway: 'Cielo',
-            transactionId: payment.transactionId,
-            txId: (payment.metadata as any)?.txId,
-            e2eId: (payment.metadata as any)?.e2eId,
-            voucherCode: order.voucher?.code,
-            couponCode: order.coupon?.code,
-            cardBrand: (payment.metadata as any)?.cardBrand ?? undefined,
-          },
-          financial: {
-            subtotal: order.totalAmount ?? 0,
-            discount: order.discount ?? 0,
-            voucherCode: order.voucher?.code,
-            serviceFee: order.serviceFee ?? 0,
-            total: order.finalAmount ?? 0,
-          },
-          registrations: regs.map((reg: any) => {
-            const user = reg.user ?? {};
-            const ticket = reg.tickets?.[0]?.ticket;
-            const catName = ticket?.category?.name ?? '';
-            const ticketName = ticket?.name ?? '';
-            const batch = reg.tickets?.[0]?.batch;
-            return {
-              id: reg.id,
-              participantName: (reg.participantName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim()) || 'Participante',
-              email: reg.participantEmail ?? user.email,
-              ticketCategory: catName || undefined,
-              ticketName: ticketName || catName,
-              price: batch?.price ?? 0,
-            };
-          }),
-        };
-
         const ticketPdf = await this.ticketPdfService.generateTicketPdf(ticketPdfData)
           .catch((e: any) => { this.logger.warn('Ticket PDF falhou:', e?.message); return undefined; });
-        const receiptPdf = await this.receiptPdfService.generateReceiptPdf(receiptPdfData)
-          .catch((e: any) => { this.logger.warn('Receipt PDF falhou:', e?.message); return undefined; });
 
         const eventName = snapshotEvent.name;
         const eventDate = formatEventDate(snapshotEvent.eventDate ?? (event as any).eventDate);
@@ -2550,7 +2501,6 @@ export class OrdersService {
             eventAddress: location,
             eventBannerUrl,
             ticketPdf: ticketPdf as Buffer | undefined,
-            receiptPdf: receiptPdf as Buffer | undefined,
           }).catch((err: any) => this.logger.warn('Email comprador falhou:', err));
         }
 
