@@ -2559,8 +2559,8 @@ export class OrdersService {
           const participantEmail: string | undefined = reg.participantEmail ?? reg.user?.email;
           if (!participantEmail || participantEmail === buyerEmail) continue;
 
-          const participantName: string = reg.participantName
-            ?? `${reg.user?.firstName ?? ''} ${reg.user?.lastName ?? ''}`.trim()
+          const participantName: string = (reg.participantName
+            ?? `${reg.user?.firstName ?? ''} ${reg.user?.lastName ?? ''}`.trim())
             || 'Participante';
           const regEntry = ticketPdfData.registrations[idx];
           if (!regEntry) continue;
