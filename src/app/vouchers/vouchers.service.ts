@@ -106,6 +106,7 @@ export class VouchersService {
       const name = voucher.name;
       if (!groupsMap.has(name)) {
         groupsMap.set(name, {
+          id: voucher.id, // id do voucher mais antigo do grupo (representante estável)
           name,
           eventId: voucher.eventId,
           appliesTo: this.parseAppliesTo(voucher.appliesTo),
@@ -117,14 +118,14 @@ export class VouchersService {
           usedCount: 0,
           expiredCount: 0,
           inactiveCount: 0,
-          createdAt: voucher.createdAt, // Será atualizado para o mais antigo
-          updatedAt: voucher.updatedAt, // Será atualizado para o mais recente
+          createdAt: voucher.createdAt,
+          updatedAt: voucher.updatedAt,
         });
       }
-      
+
       const group = groupsMap.get(name);
       group.totalCount++;
-      
+
       switch (voucher.status) {
         case 'ACTIVE':
           group.activeCount++;
@@ -139,12 +140,13 @@ export class VouchersService {
           group.inactiveCount++;
           break;
       }
-      
-      // Atualizar createdAt para o mais antigo (primeiro voucher criado)
+
+      // Atualizar id e createdAt para o voucher mais antigo do grupo
       if (voucher.createdAt < group.createdAt) {
         group.createdAt = voucher.createdAt;
+        group.id = voucher.id;
       }
-      
+
       // Atualizar updatedAt para o mais recente
       if (voucher.updatedAt > group.updatedAt) {
         group.updatedAt = voucher.updatedAt;
@@ -182,26 +184,55 @@ export class VouchersService {
     const limit = filterDto.limit || 20;
     const skip = (page - 1) * limit;
 
-    const where: any = {
-      eventId,
-      name: groupName,
-    };
-    
+    const baseWhere = { eventId, name: groupName };
+    const filteredWhere: any = { ...baseWhere };
     if (filterDto.status) {
-      where.status = filterDto.status;
+      filteredWhere.status = filterDto.status;
     }
 
-    const [vouchers, total] = await Promise.all([
+    // Busca em paralelo: lista paginada (com filtro) + todos do grupo (sem filtro, para stats)
+    const [vouchers, total, allGroupVouchers] = await Promise.all([
       prismaRead.voucher.findMany({
-        where,
+        where: filteredWhere,
         skip,
         take: limit,
         orderBy: { createdAt: 'desc' },
       }),
-      prismaRead.voucher.count({ where }),
+      prismaRead.voucher.count({ where: filteredWhere }),
+      prismaRead.voucher.findMany({
+        where: baseWhere,
+        select: { id: true, status: true, expiryDate: true, createdAt: true },
+        orderBy: { createdAt: 'asc' },
+      }),
     ]);
 
-    // Converter appliesTo de JSON string para array quando necessário
+    // Estatísticas do grupo completo (independente do filtro de status)
+    const groupStats = allGroupVouchers.reduce(
+      (acc, v) => {
+        acc.totalCount++;
+        if (v.status === 'ACTIVE') acc.availableCount++;
+        else if (v.status === 'USED') acc.usedCount++;
+        else if (v.status === 'EXPIRED') acc.expiredCount++;
+        else if (v.status === 'INACTIVE') acc.inactiveCount++;
+        return acc;
+      },
+      { totalCount: 0, availableCount: 0, usedCount: 0, expiredCount: 0, inactiveCount: 0 },
+    );
+
+    const firstVoucher = allGroupVouchers[0];
+    const groupStatus =
+      groupStats.availableCount > 0 ? 'ACTIVE'
+      : groupStats.usedCount > 0 ? 'USED'
+      : groupStats.expiredCount > 0 ? 'EXPIRED'
+      : 'INACTIVE';
+
+    const groupSummary = {
+      name: groupName,
+      status: groupStatus,
+      expiryDate: firstVoucher?.expiryDate ?? null,
+      ...groupStats,
+    };
+
     const transformedVouchers = vouchers.map((voucher) => ({
       ...voucher,
       appliesTo: this.parseAppliesTo(voucher.appliesTo),
@@ -212,7 +243,7 @@ export class VouchersService {
     return {
       message: 'Group vouchers fetched successfully',
       data: {
-        groupName,
+        group: groupSummary,
         vouchers: transformedVouchers,
         pagination: {
           page,

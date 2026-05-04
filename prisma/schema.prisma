@@ -339,6 +339,13 @@ model Event {
   /// Percentual retido até a auditoria pós-evento (ex: 0.10 = 10%)
   retentionRate      Float       @default(0.10)
 
+  /// Percentual da taxa de 6% que o organizador absorve (0.0–6.0). O participante paga 6 - organizerFeePercent.
+  organizerFeePercent         Float     @default(0.0)
+  /// Número máximo de parcelas sem juros no cartão de crédito (1, 2 ou 3).
+  maxInstallments             Int       @default(1)
+  /// Preenchido ao publicar o evento. Após essa data as configurações financeiras ficam bloqueadas.
+  financialSettingsLockedAt   DateTime?
+
   organization       Organization                    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   topics             EventTopic[]
   modalities         Modality[]

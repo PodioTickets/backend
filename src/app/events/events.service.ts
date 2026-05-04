@@ -3,6 +3,7 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { OrganizerMemberAccessService } from '../organizations/organizer-member-access.service';
@@ -2049,6 +2050,75 @@ export class EventsService {
     );
   }
 
+  private buildFinancialSettingsPayload(event: any) {
+    const TOTAL_FEE = 6;
+    const organizerFeePercent: number = event.organizerFeePercent ?? 0;
+    return {
+      eventId: event.id,
+      organizerFeePercent,
+      participantFeePercent: TOTAL_FEE - organizerFeePercent,
+      maxInstallments: event.maxInstallments ?? 1,
+      acceptedPaymentMethods: ['PIX', 'DEBIT_CARD', 'CREDIT_CARD'],
+      lockedAt: event.financialSettingsLockedAt ?? null,
+    };
+  }
+
+  async getFinancialSettings(userId: string, eventId: string) {
+    await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
+
+    const event = await this.prisma.getReadClient().event.findUnique({
+      where: { id: eventId },
+      select: {
+        id: true,
+        organizerFeePercent: true,
+        maxInstallments: true,
+        financialSettingsLockedAt: true,
+      },
+    });
+
+    if (!event) throw new NotFoundException('Event not found');
+
+    return { data: this.buildFinancialSettingsPayload(event) };
+  }
+
+  async updateFinancialSettings(
+    userId: string,
+    eventId: string,
+    dto: { organizerFeePercent: number; maxInstallments: number },
+  ) {
+    await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
+
+    const event = await this.prisma.getReadClient().event.findUnique({
+      where: { id: eventId },
+      select: { id: true, financialSettingsLockedAt: true },
+    });
+
+    if (!event) throw new NotFoundException('Event not found');
+
+    if (event.financialSettingsLockedAt) {
+      throw new ConflictException({
+        error: 'FINANCIAL_SETTINGS_LOCKED',
+        message: 'As configurações financeiras não podem ser alteradas após a publicação do evento.',
+      });
+    }
+
+    const updated = await this.prisma.getWriteClient().event.update({
+      where: { id: eventId },
+      data: {
+        organizerFeePercent: dto.organizerFeePercent,
+        maxInstallments: dto.maxInstallments,
+      },
+      select: {
+        id: true,
+        organizerFeePercent: true,
+        maxInstallments: true,
+        financialSettingsLockedAt: true,
+      },
+    });
+
+    return { data: this.buildFinancialSettingsPayload(updated) };
+  }
+
   async publish(userId: string, eventId: string) {
     await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
@@ -2081,11 +2151,12 @@ export class EventsService {
       throw new BadRequestException('Event must have complete location information before publishing');
     }
 
-    // Atualizar status para PUBLISHED
+    // Atualizar status para PUBLISHED e travar configurações financeiras
     const updatedEvent = await prismaWrite.event.update({
       where: { id: eventId },
       data: {
         status: EventStatus.PUBLISHED,
+        financialSettingsLockedAt: new Date(),
       },
     });
 

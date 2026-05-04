@@ -192,6 +192,14 @@ export class AuthService {
     }
   }
 
+  async isEmailAvailable(email: string): Promise<boolean> {
+    const existing = await this.prisma.getReadClient().user.findFirst({
+      where: { email },
+      select: { id: true },
+    });
+    return existing === null;
+  }
+
   async register(registerDto: EmailRegisterDto) {
     try {
       const {

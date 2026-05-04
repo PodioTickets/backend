@@ -14,6 +14,11 @@ export class CouponsService {
     // Validar campos específicos por tipo
     this.validateCouponData(createCouponDto);
 
+    // Cupons AGE não podem ter intervalos sobrepostos no mesmo evento
+    if (createCouponDto.couponType === 'AGE') {
+      await this.assertNoAgeOverlap(eventId, createCouponDto as any);
+    }
+
     // Verificar se o código já existe para este evento (apenas se fornecido)
     if (createCouponDto.code) {
       const existingCoupon = await prismaWrite.coupon.findUnique({
@@ -195,6 +200,13 @@ export class CouponsService {
       this.validateCouponData(mergedData as any);
     }
 
+    // Cupons AGE: verificar sobreposição de faixa etária (excluindo o próprio cupom)
+    const effectiveType = updateCouponDto.couponType ?? coupon.couponType;
+    if (effectiveType === 'AGE') {
+      const merged = { ...coupon, ...updateCouponDto };
+      await this.assertNoAgeOverlap(eventId, merged as any, couponId);
+    }
+
     const updateData: any = { ...updateCouponDto };
     if (updateCouponDto.code) {
       updateData.code = updateCouponDto.code.toUpperCase();
@@ -269,6 +281,40 @@ export class CouponsService {
     return {
       message: 'Coupon deleted successfully',
     };
+  }
+
+  private async assertNoAgeOverlap(
+    eventId: string,
+    dto: { minAge?: number | null; maxAge?: number | null },
+    excludeId?: string,
+  ): Promise<void> {
+    const prismaRead = this.prisma.getReadClient();
+    const newMin = dto.minAge ?? 0;
+    const newMax = dto.maxAge ?? Infinity;
+
+    const existingAge = await prismaRead.coupon.findMany({
+      where: {
+        eventId,
+        couponType: 'AGE',
+        deletedAt: null,
+        status: { not: 'EXPIRED' },
+        ...(excludeId ? { id: { not: excludeId } } : {}),
+      },
+      select: { id: true, minAge: true, maxAge: true },
+    });
+
+    for (const existing of existingAge) {
+      const eMin = existing.minAge ?? 0;
+      const eMax = existing.maxAge ?? Infinity;
+      // Duas faixas se sobrepõem quando: newMin <= eMax E newMax >= eMin
+      if (newMin <= eMax && newMax >= eMin) {
+        const eMaxLabel = existing.maxAge != null ? String(existing.maxAge) : '∞';
+        const newMaxLabel = dto.maxAge != null ? String(dto.maxAge) : '∞';
+        throw new BadRequestException(
+          `Faixa etária ${newMin}–${newMaxLabel} anos sobrepõe o cupom existente ${eMin}–${eMaxLabel} anos`,
+        );
+      }
+    }
   }
 
   private validateCouponData(dto: CreateCouponDto | UpdateCouponDto) {

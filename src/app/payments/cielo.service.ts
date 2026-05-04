@@ -23,6 +23,7 @@ export interface CieloPaymentResult {
   returnCode?: string;
   returnMessage?: string;
   cardBrand?: string;
+  authenticationUrl?: string; // Debit card 3DS redirect URL
 }
 
 export interface CieloPaymentResponse {
@@ -151,6 +152,7 @@ export class CieloService {
       version?: string;
       referenceId?: string;
     },
+    returnUrl?: string,
   ): Promise<CieloPaymentResult> {
     if (!this.axiosInstance) {
       throw new Error('Cielo is not configured');
@@ -294,8 +296,8 @@ export class CieloService {
           if (!cardData) {
             throw new Error('Card data is required for debit card payments');
           }
-          if (!threedsData) {
-            throw new Error('3DS authentication data is required for debit card payments');
+          if (!threedsData && !returnUrl) {
+            throw new Error('Either 3DS authentication data or a returnUrl is required for debit card payments');
           }
 
           paymentData.Type = 'DebitCard';
@@ -331,13 +333,22 @@ export class CieloService {
               Brand: debitBrand,
             };
 
-            paymentData.ExternalAuthentication = {
-              Cavv: threedsData.cavv,
-              Eci: threedsData.eci,
-              ...(threedsData.xid && { Xid: threedsData.xid }),
-              Version: threedsData.version ?? '2',
-              ...(threedsData.referenceId && { ReferenceId: threedsData.referenceId }),
-            };
+            if (threedsData) {
+              // Post-3DS flow: frontend already authenticated externally
+              paymentData.Authenticate = true;
+              paymentData.ExternalAuthentication = {
+                Cavv: threedsData.cavv,
+                Eci: threedsData.eci,
+                ...(threedsData.xid && { Xid: threedsData.xid }),
+                Version: threedsData.version ?? '2',
+                ...(threedsData.referenceId && { ReferenceId: threedsData.referenceId }),
+              };
+            } else {
+              // Pre-3DS flow: Cielo handles 3DS redirect via ReturnUrl
+              // Authenticate: true é obrigatório para o Braspag iniciar o fluxo 3DS
+              paymentData.Authenticate = true;
+              paymentData.ReturnUrl = returnUrl;
+            }
           }
           break;
 
@@ -531,12 +542,12 @@ export class CieloService {
         paymentId: payment.PaymentId,
         paymentIntentId: payment.PaymentId,
         cieloStatus: this.mapCieloStatusToString(payment.Status),
-        // Adicionar informações adicionais para extrato
         authorizationCode: payment.AuthorizationCode,
         proofOfSale: payment.ProofOfSale,
         returnCode: payment.ReturnCode?.toString(),
         returnMessage: payment.ReturnMessage,
         cardBrand: payment.CreditCard?.Brand ?? payment.DebitCard?.Brand ?? undefined,
+        ...(payment.AuthenticationUrl && { authenticationUrl: payment.AuthenticationUrl }),
       } as any;
 
       // Se houver erro, adicionar informações de erro com mensagens amigáveis
@@ -829,13 +840,13 @@ export class CieloService {
   }
 
   mapCieloStatusToPaymentStatus(cieloStatus: number): PaymentStatus {
-    // Status da Cielo:
-    // 0 = NotFinished
-    // 1 = Authorized
-    // 2 = PaymentConfirmed
-    // 3 = Denied
-    // 10 = Voided
-    // 11 = Refunded
+    // Status da Cielo/Braspag:
+    // 0  = NotFinished
+    // 1  = Authorized
+    // 2  = PaymentConfirmed
+    // 3  = Denied
+    // 10 = Voided (cancelado/estornado pelo emissor ou lojista)
+    // 11 = Refunded (reembolso)
     // 12 = Pending
     // 13 = Aborted
 
@@ -849,6 +860,7 @@ export class CieloService {
       case 3: // Denied
       case 13: // Aborted
         return PaymentStatus.FAILED;
+      case 10: // Voided (cancelado/estornado)
       case 11: // Refunded
         return PaymentStatus.REFUNDED;
       default:

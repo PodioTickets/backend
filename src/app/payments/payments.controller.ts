@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Param, UseGuards, Request, Headers, RawBodyRequest, Req } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, UseGuards, Request, Headers, RawBodyRequest, Req, Query, Redirect } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
@@ -7,6 +7,7 @@ import {
   ApiParam,
   ApiBody,
   ApiHeader,
+  ApiQuery,
 } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { PaymentsService } from './payments.service';
@@ -104,19 +105,6 @@ export class PaymentsController {
     return this.paymentsService.getPaymentSummary(registrationId);
   }
 
-  @Get(':id')
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get payment by ID', description: 'Retrieves a single payment by ID. Only the payment owner can access it.' })
-  @ApiParam({ name: 'id', description: 'Payment UUID' })
-  @ApiResponse({ status: 200, description: 'Payment retrieved successfully' })
-  @ApiResponse({ status: 401, description: 'Unauthorized' })
-  @ApiResponse({ status: 403, description: 'Forbidden - Only payment owner can access' })
-  @ApiResponse({ status: 404, description: 'Payment not found' })
-  findOne(@Request() req, @Param('id') id: string) {
-    return this.paymentsService.findOne(id, req.user.id);
-  }
-
   @Get('transaction/:transactionId/details')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
@@ -131,13 +119,6 @@ export class PaymentsController {
   @ApiResponse({ status: 404, description: 'Payment not found' })
   getPaymentDetailsByTransaction(@Request() req, @Param('transactionId') transactionId: string) {
     return this.paymentsService.getPaymentDetails(transactionId, 'transaction', req.user.id);
-  }
-
-  @Get('sandbox/simulate-pix-paid/:transactionId')
-  @ApiOperation({ summary: '[SANDBOX ONLY] Simulate PIX payment confirmed', description: 'Marks a PIX as PAID and emits the WebSocket event. Only works when CIELO_ENV != production.' })
-  @ApiParam({ name: 'transactionId', description: 'Braspag PaymentId (transactionId)' })
-  sandboxSimulatePixPaid(@Param('transactionId') transactionId: string) {
-    return this.paymentsService.sandboxSimulatePixPaid(transactionId);
   }
 
   @Get('order/:orderId/pix-status')
@@ -183,5 +164,65 @@ export class PaymentsController {
   getPaymentDetailsByPaymentId(@Request() req, @Param('paymentId') paymentId: string) {
     return this.paymentsService.getPaymentDetails(paymentId, 'payment', req.user.id);
   }
-}
 
+  // ── GET /payments/3ds-callback ────────────────────────────────────────────
+  // Sem guard — o redirect vem do banco sem Bearer token.
+  // Declarado antes de @Get(':id') para não ser engolido pelo wildcard.
+  @Get('3ds-callback')
+  @Redirect()
+  @ApiOperation({
+    summary: '3DS debit card authentication callback',
+    description: 'Receives the bank redirect after 3DS authentication. Confirms the payment with Cielo, updates the order, and redirects the user to the frontend.',
+  })
+  @ApiQuery({ name: 'orderId', description: 'Order UUID', required: true })
+  @ApiResponse({ status: 302, description: 'Redirects to frontend with ?3ds=success|failed|error' })
+  async handle3dsCallback(@Query('orderId') orderId: string) {
+    if (!orderId) {
+      const fallback = (process.env.FRONTEND_URL ?? '').replace(/\/$/, '');
+      return { url: `${fallback}?3ds=error`, statusCode: 302 };
+    }
+    const redirectUrl = await this.webhookService.handle3dsCallback(orderId);
+    return { url: redirectUrl, statusCode: 302 };
+  }
+
+  @Get('sandbox/simulate-pix-paid/:transactionId')
+  @ApiOperation({ summary: '[SANDBOX ONLY] Simulate PIX payment confirmed', description: 'Marks a PIX as PAID and emits the WebSocket event. Only works when CIELO_ENV != production.' })
+  @ApiParam({ name: 'transactionId', description: 'Braspag PaymentId (transactionId)' })
+  sandboxSimulatePixPaid(@Param('transactionId') transactionId: string) {
+    return this.paymentsService.sandboxSimulatePixPaid(transactionId);
+  }
+
+  @Get('sandbox/simulate-debit-3ds-pending/:orderId')
+  @ApiOperation({
+    summary: '[SANDBOX ONLY] Simulate debit card 3DS redirect — step 1',
+    description: 'Creates a PENDING DEBIT_CARD payment for the order and returns the redirectUrl the frontend would show in the iframe. Use simulate-debit-3ds-paid to complete.',
+  })
+  @ApiParam({ name: 'orderId', description: 'Order UUID' })
+  sandboxSimulateDebit3dsPending(@Param('orderId') orderId: string) {
+    return this.paymentsService.sandboxSimulateDebit3dsPending(orderId);
+  }
+
+  @Get('sandbox/simulate-debit-3ds-paid/:orderId')
+  @ApiOperation({
+    summary: '[SANDBOX ONLY] Simulate debit card 3DS confirmed — step 2',
+    description: 'Marks the DEBIT_CARD payment as PAID, updates the order and registrations, and emits the payment:confirmed WebSocket event.',
+  })
+  @ApiParam({ name: 'orderId', description: 'Order UUID' })
+  sandboxSimulateDebit3dsPaid(@Param('orderId') orderId: string) {
+    return this.paymentsService.sandboxSimulateDebit3dsPaid(orderId);
+  }
+
+  // ── WILDCARD — deve ficar por último para não engolir rotas com segmento fixo ──
+  @Get(':id')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get payment by ID', description: 'Retrieves a single payment by ID. Only the payment owner can access it.' })
+  @ApiParam({ name: 'id', description: 'Payment UUID' })
+  @ApiResponse({ status: 200, description: 'Payment retrieved successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Only payment owner can access' })
+  @ApiResponse({ status: 404, description: 'Payment not found' })
+  findOne(@Request() req, @Param('id') id: string) {
+    return this.paymentsService.findOne(id, req.user.id);
+  }
+}

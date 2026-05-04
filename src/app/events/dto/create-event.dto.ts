@@ -5,6 +5,8 @@ import {
   IsEnum,
   IsBoolean,
   IsInt,
+  IsNumber,
+  IsIn,
   Min,
   Max,
   IsUrl,
@@ -102,6 +104,17 @@ export class CreateEventDto {
 
   @IsDateString()
   registrationEndDate: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(6)
+  organizerFeePercent?: number;
+
+  @IsOptional()
+  @IsInt()
+  @IsIn([1, 2, 3])
+  maxInstallments?: number;
 }
 
 export class UpdateEventDto {

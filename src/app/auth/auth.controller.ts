@@ -5,11 +5,13 @@ import {
   Body,
   UseGuards,
   Get,
+  Query,
   HttpCode,
   HttpStatus,
   Res,
   BadRequestException,
   UnauthorizedException,
+  ForbiddenException,
   Request,
 } from '@nestjs/common';
 import * as crypto from 'crypto';
@@ -19,6 +21,7 @@ import {
   ApiResponse,
   ApiBearerAuth,
   ApiBody,
+  ApiQuery,
 } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
@@ -45,6 +48,20 @@ import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 @Controller('api/v1/auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
+
+  @Get('email/availability')
+  @Throttle({ short: { limit: 10, ttl: 60000 } })
+  @ApiOperation({ summary: 'Check email availability', description: 'Returns whether an email address is already registered' })
+  @ApiQuery({ name: 'email', description: 'Email address to check', required: true })
+  @ApiResponse({ status: 200, description: '{ available: boolean }' })
+  @ApiResponse({ status: 400, description: 'Missing or invalid email' })
+  async checkEmailAvailability(@Query('email') email: string) {
+    if (!email || !email.includes('@')) {
+      throw new BadRequestException('Invalid email address');
+    }
+    const available = await this.authService.isEmailAvailable(email.toLowerCase().trim());
+    return { available };
+  }
 
   @Post('register')
   @ApiOperation({ 
@@ -99,6 +116,32 @@ export class AuthController {
     },
   })
   async loginEmail(@Request() req) {
+    return this.authService.login(req.user);
+  }
+
+  @Post('login/admin')
+  @UseGuards(LocalAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: '[Admin] Login — no Turnstile, role-gated' })
+  @ApiResponse({ status: 200, description: 'Login successful' })
+  @ApiResponse({ status: 401, description: 'Invalid credentials' })
+  @ApiResponse({ status: 403, description: 'Admin role required' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        emailOrCpf: { type: 'string' },
+        password: { type: 'string' },
+        accountType: { type: 'string', enum: ['USER', 'ORGANIZER'], default: 'USER' },
+      },
+      required: ['emailOrCpf', 'password'],
+    },
+  })
+  async loginAdmin(@Request() req) {
+    const role = req.user?.role;
+    if (role !== 'ADMIN' && role !== 'PODIOGO_STAFF') {
+      throw new ForbiddenException('Admin access required');
+    }
     return this.authService.login(req.user);
   }
 

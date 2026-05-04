@@ -48,6 +48,7 @@ import { RegistrationsQueryDto } from './dto/registrations.dto';
 import { ExportRegistrationsDto, EXPORT_FIELDS } from './dto/export-registrations.dto';
 import { ExportRegistrationsService } from './export-registrations.service';
 import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
+import { UpdateFinancialSettingsDto } from './dto/financial-settings.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CacheTTL, NoCache } from 'src/common/decorators/cache.decorator';
 
@@ -381,6 +382,45 @@ export class EventsController {
   @ApiResponse({ status: 404, description: 'Location not found' })
   deleteLocation(@Request() req, @Param('eventId') eventId: string, @Param('locationId') locationId: string) {
     return this.eventsService.deleteLocation(req.user.id, eventId, locationId);
+  }
+
+  @Get(':eventId/financial-settings')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @NoCache()
+  @ApiOperation({
+    summary: 'Get financial settings',
+    description: 'Returns current financial settings for the event (fee split and max installments).',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiResponse({ status: 200, description: 'Financial settings' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  getFinancialSettings(@Request() req, @Param('eventId') eventId: string) {
+    return this.eventsService.getFinancialSettings(req.user.id, eventId);
+  }
+
+  @Patch(':eventId/financial-settings')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Update financial settings',
+    description: 'Updates fee split and max installments. Blocked after event publication.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiBody({ type: UpdateFinancialSettingsDto })
+  @ApiResponse({ status: 200, description: 'Financial settings updated' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  @ApiResponse({ status: 409, description: 'FINANCIAL_SETTINGS_LOCKED — event already published' })
+  updateFinancialSettings(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Body() dto: UpdateFinancialSettingsDto,
+  ) {
+    return this.eventsService.updateFinancialSettings(req.user.id, eventId, dto);
   }
 
   @Post(':eventId/publish')

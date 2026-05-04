@@ -607,11 +607,11 @@ export class PaymentsService {
       let isOrganizer = payment.order?.event?.organization?.members?.some(
         (member: any) => member.userId === userId,
       );
-      
+
       // Se não encontrou, busca todos os membros da organização
       // Pode buscar organizationId de payment.order.event.organizationId ou payment.order.event.organization.id
       let organizationId = payment.order?.event?.organizationId || payment.order?.event?.organization?.id;
-      
+
       // Se ainda não encontrou o organizationId, busca o evento diretamente
       if (!organizationId && payment.order?.eventId) {
         const event = await prismaRead.event.findUnique({
@@ -620,7 +620,7 @@ export class PaymentsService {
         });
         organizationId = event?.organizationId;
       }
-      
+
       if (!isOrganizer && organizationId) {
         const allMembers = await prismaRead.organizationMember.findMany({
           where: {
@@ -630,7 +630,7 @@ export class PaymentsService {
         });
         isOrganizer = allMembers.length > 0;
       }
-      
+
       if (!isOrganizer) {
         throw new BadRequestException('Access denied');
       }
@@ -644,15 +644,15 @@ export class PaymentsService {
     const billingFromOrder =
       orderRow?.billingCountry != null && String(orderRow.billingCountry).trim() !== ''
         ? {
-            country: orderRow.billingCountry,
-            postalCode: orderRow.billingPostalCode,
-            stateUf: orderRow.billingStateUf,
-            street: orderRow.billingStreet,
-            number: orderRow.billingNumber,
-            complement: orderRow.billingComplement,
-            neighborhood: orderRow.billingNeighborhood,
-            city: orderRow.billingCity,
-          }
+          country: orderRow.billingCountry,
+          postalCode: orderRow.billingPostalCode,
+          stateUf: orderRow.billingStateUf,
+          street: orderRow.billingStreet,
+          number: orderRow.billingNumber,
+          complement: orderRow.billingComplement,
+          neighborhood: orderRow.billingNeighborhood,
+          city: orderRow.billingCity,
+        }
         : metadata.billingAddress ?? null;
 
     // Buscar cupom usado (se houver)
@@ -763,7 +763,7 @@ export class PaymentsService {
         // Todos os inscritos do pedido
         registrations: (() => {
           const orderRegistrations = (payment as any).order?.registrations || [];
-          
+
           // Mapear as registrations existentes
           const queriedReg = (payment as any)._queriedRegistration ?? null;
           const mappedRegistrations = orderRegistrations.map((reg: any) => {
@@ -799,11 +799,11 @@ export class PaymentsService {
               } : null,
             };
           });
-          
+
           // Verificar se o comprador (buyer) já está na lista de registrations
           const buyerId = buyer?.id;
           const buyerAlreadyInList = buyerId && orderRegistrations.some((reg: any) => reg.userId === buyerId);
-          
+
           // Se o comprador não estiver na lista, adicionar (mesmo sem registration, ele fez o pedido)
           if (buyerId && !buyerAlreadyInList) {
             mappedRegistrations.push({
@@ -814,7 +814,7 @@ export class PaymentsService {
               ticketCategory: null,
             });
           }
-          
+
           return mappedRegistrations;
         })(),
       },
@@ -884,6 +884,38 @@ export class PaymentsService {
         where: { orderId },
         data: { status: 'CONFIRMED' },
       });
+
+      // Marcar cupom/voucher como usados
+      const paidOrder = await tx.order.findUnique({
+        where: { id: orderId },
+        select: { couponId: true, voucherId: true, userId: true, reservedTickets: true },
+      });
+      if (paidOrder?.couponId) {
+        const coupon = await tx.coupon.findUnique({
+          where: { id: paidOrder.couponId },
+          select: { couponType: true, maxUsage: true, usageCount: true },
+        });
+        if (coupon) {
+          const tickets = (paidOrder.reservedTickets ?? []) as any[];
+          const ticketCount = tickets.reduce((s: number, rt: any) => s + (rt.quantity ?? 1), 0);
+          const remaining = coupon.maxUsage != null
+            ? Math.max(0, coupon.maxUsage - coupon.usageCount)
+            : ticketCount;
+          const increment = coupon.couponType === 'QUANTITY' ? 1 : Math.min(remaining, ticketCount);
+          if (increment > 0) {
+            await tx.coupon.update({
+              where: { id: paidOrder.couponId },
+              data: { usageCount: { increment } },
+            });
+          }
+        }
+      }
+      if (paidOrder?.voucherId) {
+        await tx.voucher.update({
+          where: { id: paidOrder.voucherId },
+          data: { status: 'USED', usedAt: new Date(), usedBy: paidOrder.userId },
+        });
+      }
     });
 
     // Emit WebSocket event so the frontend updates immediately
@@ -904,7 +936,7 @@ export class PaymentsService {
 
     const payment = await this.prisma.getReadClient().payment.findFirst({
       where: { transactionId },
-      select: { id: true, orderId: true, status: true },
+      select: { id: true, orderId: true, status: true, metadata: true },
     });
 
     if (!payment) throw new NotFoundException(`Payment not found for transactionId: ${transactionId}`);
@@ -919,7 +951,11 @@ export class PaymentsService {
         data: {
           status: PaymentStatus.PAID,
           paymentDate: new Date(),
-          metadata: { simulatedAt: new Date().toISOString(), simulatedViaScript: true } as any,
+          metadata: {
+            ...(payment.metadata as object),
+            simulatedAt: new Date().toISOString(),
+            simulatedViaScript: true,
+          } as any,
         },
       });
       await tx.registration.updateMany({
@@ -936,6 +972,112 @@ export class PaymentsService {
       .catch((err: any) => this.logger.warn(`[SANDBOX] Falha ao enviar email de confirmação: ${err?.message}`));
 
     return { confirmed: true, orderId: payment.orderId };
+  }
+
+  async sandboxSimulateDebit3dsPending(orderId: string): Promise<{ redirectUrl: string; orderId: string }> {
+    if (this.cieloService.sandboxMode === false) {
+      throw new BadRequestException('Only available in sandbox mode');
+    }
+
+    const order = await this.prisma.getReadClient().order.findUnique({
+      where: { id: orderId },
+      select: { id: true, status: true, userId: true, finalAmount: true, totalAmount: true },
+    });
+    if (!order) throw new NotFoundException(`Order not found: ${orderId}`);
+    if (order.status !== 'PENDING') throw new BadRequestException(`Order ${orderId} is not PENDING`);
+
+    const amount = order.finalAmount ?? order.totalAmount ?? 0;
+    const fakeCieloPaymentId = `sandbox-3ds-${Date.now()}`;
+
+    await this.prisma.getWriteClient().payment.upsert({
+      where: { orderId },
+      create: {
+        orderId,
+        userId: order.userId,
+        method: 'DEBIT_CARD',
+        status: PaymentStatus.PENDING,
+        amount,
+        transactionId: fakeCieloPaymentId,
+        metadata: {
+          cieloPaymentId: fakeCieloPaymentId,
+          sandboxSimulated: true,
+          debitCard: { brand: 'Visa', last4Digits: '0001', holder: 'SANDBOX TEST' },
+        } as any,
+      },
+      update: {
+        status: PaymentStatus.PENDING,
+        amount,
+        transactionId: fakeCieloPaymentId,
+        method: 'DEBIT_CARD',
+        metadata: {
+          cieloPaymentId: fakeCieloPaymentId,
+          sandboxSimulated: true,
+          debitCard: { brand: 'Visa', last4Digits: '0001', holder: 'SANDBOX TEST' },
+        } as any,
+      },
+    });
+
+    const serverUrl = (process.env.SERVER_URL ?? 'http://localhost:3333').replace(/\/$/, '');
+    const redirectUrl = `${serverUrl}/api/v1/payments/3ds-callback?orderId=${orderId}`;
+
+    this.logger.log(`[SANDBOX] 3DS pending simulated for order ${orderId}`);
+    return { redirectUrl, orderId };
+  }
+
+  async sandboxSimulateDebit3dsPaid(orderId: string): Promise<{ confirmed: boolean; orderId: string }> {
+    if (this.cieloService.sandboxMode === false) {
+      throw new BadRequestException('Only available in sandbox mode');
+    }
+
+    const payment = await this.prisma.getReadClient().payment.findFirst({
+      where: { orderId, method: 'DEBIT_CARD' },
+      select: { id: true, orderId: true, status: true, metadata: true },
+    });
+    if (!payment) throw new NotFoundException(`No DEBIT_CARD payment found for order ${orderId}`);
+    if (payment.status === PaymentStatus.PAID) {
+      this.gateway.emitPaymentConfirmed(orderId);
+      return { confirmed: true, orderId };
+    }
+
+    let confirmedOrderId: string | null = null;
+
+    await this.prisma.getWriteClient().$transaction(async (tx: any) => {
+      const updated = await tx.payment.updateMany({
+        where: { id: payment.id, status: { not: PaymentStatus.PAID } },
+        data: {
+          status: PaymentStatus.PAID,
+          paymentDate: new Date(),
+          metadata: {
+            ...(payment.metadata as object),
+            sandboxConfirmedAt: new Date().toISOString(),
+            sandboxSimulated: true,
+          } as any,
+        },
+      });
+      if (updated.count === 0) { confirmedOrderId = orderId; return; }
+
+      await tx.$queryRaw`
+        UPDATE "Order"
+        SET "status" = 'PAID'::"OrderStatus", "updatedAt" = NOW()
+        WHERE id = ${orderId}::uuid AND "status" = 'PENDING'::"OrderStatus"
+      `;
+
+      await tx.registration.updateMany({
+        where: { orderId, status: 'PENDING' },
+        data: { status: 'CONFIRMED' },
+      });
+
+      confirmedOrderId = orderId;
+    });
+
+    if (confirmedOrderId) {
+      this.gateway.emitPaymentConfirmed(confirmedOrderId);
+      this.sendConfirmationEmailForOrder(confirmedOrderId)
+        .catch((err: any) => this.logger.warn(`[SANDBOX] 3DS email failed: ${err?.message}`));
+      this.logger.log(`[SANDBOX] Debit 3DS confirmed for order ${orderId}`);
+    }
+
+    return { confirmed: true, orderId };
   }
 
   /**
@@ -963,8 +1105,8 @@ export class PaymentsService {
 
     if (!order) return;
     const event = order.event;
-    const org = event?.organization ?? {};
-    const orgName: string = org.tradeName || org.name || '';
+    const org = event?.organization as { tradeName?: string | null; name?: string | null } | null;
+    const orgName: string = org?.tradeName || org?.name || '';
     const regs: any[] = order.registrations ?? [];
     if (!regs.length) return;
 

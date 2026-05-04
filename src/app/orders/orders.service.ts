@@ -84,7 +84,9 @@ function resolveActiveBatchForReserve(
     if (curr.triggerType === 'AFTER_PREVIOUS_SOLD_OUT') {
       if (prev.quantitySold >= prev.quantity) activeIdx = i;
     } else {
-      if (curr.startDate && now >= curr.startDate) activeIdx = i;
+      const prevExpired = prev.endDate && now > new Date(prev.endDate);
+      const currStarted = !curr.startDate || now >= new Date(curr.startDate);
+      if (prevExpired || (currStarted && curr.startDate != null)) activeIdx = i;
     }
   }
 
@@ -893,11 +895,12 @@ export class OrdersService {
               paymentDate: payment.paymentDate ?? null,
               createdAt: payment.createdAt,
               pix:
-                metadata.pix?.qrCode || metadata.pix?.pixCode || metadata.qrCode || metadata.pixCode
+                payment.method === 'PIX'
                   ? {
                       qrCode: metadata.pix?.qrCode ?? metadata.qrCode ?? null,
+                      qrCodeBase64: metadata.pix?.qrCode ?? metadata.qrCode ?? null,
                       pixCode: metadata.pix?.pixCode ?? metadata.pixCode ?? null,
-                      expiresAt: metadata.pix?.expiresAt ?? null,
+                      expiresAt: metadata.pix?.expiresAt ?? metadata.expiresAt ?? null,
                     }
                   : null,
               creditCard:
@@ -1382,17 +1385,38 @@ export class OrdersService {
     let couponFixedPerUnit: number | undefined;
 
     if (dto.couponCode) {
+      const normalizedCode = dto.couponCode.toUpperCase().trim();
       const coupon = await r.coupon.findFirst({
         where: {
           eventId: order.eventId,
-          code: dto.couponCode.toUpperCase().trim(),
+          code: normalizedCode,
           status: 'ACTIVE',
           couponType: 'DISCOUNT',
           deletedAt: null,
         },
       });
 
-      if (!coupon) throw new AppUnprocessableException('COUPON_NOT_FOUND', 'Cupom não encontrado ou inválido');
+      // Se não é um cupom, verifica se o código pertence a um voucher (frontend usa campo único)
+      if (!coupon) {
+        const voucher = await r.voucher.findUnique({ where: { code: normalizedCode } });
+        if (voucher && voucher.eventId === order.eventId && voucher.status === 'ACTIVE') {
+          if (!voucher.expiryDate || new Date(voucher.expiryDate) > new Date()) {
+            discount = ticketsSubtotal;
+            voucherId = voucher.id;
+            const finalAmountV = Math.max(0, order.totalAmount - discount);
+            const updatedV = await w.order.update({
+              where: { id: orderId },
+              data: { couponId: null, voucherId, discount, finalAmount: finalAmountV, updatedAt: new Date() },
+              include: ORDER_INCLUDE,
+            });
+            return {
+              ...orderShape(updatedV, discount),
+              appliedDiscount: { type: 'voucher', discount },
+            };
+          }
+        }
+        throw new AppUnprocessableException('COUPON_NOT_FOUND', 'Cupom não encontrado ou inválido');
+      }
       if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) throw new AppUnprocessableException('COUPON_EXPIRED', 'Cupom expirado');
       if (coupon.minCartValue && order.totalAmount < coupon.minCartValue) {
         throw new AppUnprocessableException('COUPON_MIN_VALUE', `Valor mínimo do pedido para este cupom: R$ ${(coupon.minCartValue / 100).toFixed(2)}`);
@@ -1414,9 +1438,33 @@ export class OrdersService {
       if (remaining <= 0) throw new AppUnprocessableException('COUPON_EXHAUSTED', 'Cupom esgotado');
       couponEffectiveUsage = Math.min(remaining, applicableQuantity);
       discount = computePartialCouponDiscount(applicableTickets, coupon.type, coupon.value, couponEffectiveUsage);
-      discount = Math.min(discount, order.totalAmount as number);
       couponId = coupon.id;
       if (coupon.type === 'FIXED') couponFixedPerUnit = coupon.value;
+
+      // Se o cupom não cobre todos os ingressos e já existe um voucher ativo no pedido,
+      // manter o voucher nos ingressos que o cupom não alcança (desconto combinado)
+      const applicableTicketIds = new Set(applicableTickets.map((rt: any) => rt.ticketId));
+      const nonApplicableTickets = reservedTickets.filter((rt: any) => !applicableTicketIds.has(rt.ticketId));
+      if (nonApplicableTickets.length > 0 && order.voucherId) {
+        const existingVoucher = await r.voucher.findUnique({
+          where: { id: order.voucherId },
+          select: { id: true, status: true, expiryDate: true, eventId: true },
+        });
+        if (
+          existingVoucher &&
+          existingVoucher.eventId === order.eventId &&
+          existingVoucher.status === 'ACTIVE' &&
+          (!existingVoucher.expiryDate || new Date(existingVoucher.expiryDate) > new Date())
+        ) {
+          const voucherPartialDiscount = nonApplicableTickets.reduce(
+            (sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0,
+          );
+          discount += voucherPartialDiscount;
+          voucherId = order.voucherId;
+        }
+      }
+
+      discount = Math.min(discount, order.totalAmount as number);
 
     } else if (dto.voucherCode) {
       const voucher = await r.voucher.findUnique({
@@ -1666,35 +1714,59 @@ export class OrdersService {
       );
     }
 
+    // Fall back to coupon/voucher already applied via PATCH /coupon, so the frontend
+    // doesn't need to re-send the code on every pay attempt.
+    // Quando ambos coexistem (desconto combinado: cupom em alguns ingressos + voucher nos restantes),
+    // carrega os dois códigos independentemente.
+    const effectiveCouponCode: string | undefined = dto.couponCode ?? (
+      order.couponId && (order.coupon as any)?.couponType === 'DISCOUNT'
+        ? (order.coupon as any)?.code
+        : undefined
+    );
+    const effectiveVoucherCode: string | undefined = dto.voucherCode ?? (
+      order.voucherId
+        ? (order.voucher as any)?.code
+        : undefined
+    );
+
     let couponDiscount = 0;
     let couponId: string | undefined;
     let voucherDiscount = 0;
     let voucherId: string | undefined;
+    // IDs dos tickets cobertos pelo cupom — usado pelo bloco do voucher para cobrir o restante
+    let couponApplicableTicketIds: Set<string> | undefined;
 
-    if (dto.couponCode) {
+    if (effectiveCouponCode) {
       // Cupom com código (DISCOUNT type)
       const coupon = await r.coupon.findFirst({
         where: {
           eventId: order.eventId,
-          code: dto.couponCode.toUpperCase().trim(),
+          code: effectiveCouponCode.toUpperCase().trim(),
           status: 'ACTIVE',
           deletedAt: null,
         },
       });
       if (coupon && (!coupon.expiryDate || new Date(coupon.expiryDate) > new Date())) {
-        // Aplica desconto nos ingressos mais caros dentro do uso restante
-        const applicableQty = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
+        let applicableTicketsPay = reservedTickets;
+        if (coupon.appliesTo && coupon.appliesTo !== 'all') {
+          let allowedIds: string[] = [];
+          try { allowedIds = JSON.parse(coupon.appliesTo); } catch { allowedIds = [coupon.appliesTo]; }
+          applicableTicketsPay = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
+        }
+        couponApplicableTicketIds = new Set(applicableTicketsPay.map((rt: any) => rt.ticketId));
+
+        const applicableQty = applicableTicketsPay.reduce((s: number, rt: any) => s + rt.quantity, 0);
         const remaining = coupon.maxUsage != null
           ? Math.max(0, coupon.maxUsage - coupon.usageCount)
           : applicableQty;
         const effectiveUsage = Math.min(remaining, applicableQty);
-        couponDiscount = computePartialCouponDiscount(reservedTickets, coupon.type, coupon.value, effectiveUsage);
+        couponDiscount = computePartialCouponDiscount(applicableTicketsPay, coupon.type, coupon.value, effectiveUsage);
         couponId = coupon.id;
       }
     }
 
     // Cupons automáticos (QUANTITY / AGE) — sem código, aplicados se condição satisfeita
-    if (!couponId && !dto.voucherCode) {
+    if (!couponId && !effectiveVoucherCode) {
       const totalQuantity = reservedTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
       const ticketIds = reservedTickets.map((rt: any) => rt.ticketId);
 
@@ -1765,9 +1837,9 @@ export class OrdersService {
       }
     }
 
-    if (dto.voucherCode) {
+    if (effectiveVoucherCode) {
       const voucher = await r.voucher.findUnique({
-        where: { code: dto.voucherCode.toUpperCase().trim() },
+        where: { code: effectiveVoucherCode.toUpperCase().trim() },
       });
       if (
         voucher &&
@@ -1775,7 +1847,17 @@ export class OrdersService {
         voucher.status === 'ACTIVE' &&
         (!voucher.expiryDate || new Date(voucher.expiryDate) > new Date())
       ) {
-        voucherDiscount = ticketsSubtotal;
+        // Se há um cupom cobrindo parte dos ingressos, o voucher desconta apenas os demais
+        if (couponApplicableTicketIds && couponApplicableTicketIds.size > 0) {
+          const nonCouponTickets = reservedTickets.filter(
+            (rt: any) => !couponApplicableTicketIds!.has(rt.ticketId),
+          );
+          voucherDiscount = nonCouponTickets.reduce(
+            (s: number, rt: any) => s + rt.unitPrice * rt.quantity, 0,
+          );
+        } else {
+          voucherDiscount = ticketsSubtotal;
+        }
         voucherId = voucher.id;
       }
     }
@@ -1830,9 +1912,6 @@ export class OrdersService {
       if (!dto.card) {
         throw new AppUnprocessableException('CARD_REQUIRED', 'Card data is required for debit card payments');
       }
-      if (!dto.threeDs) {
-        throw new AppUnprocessableException('THREEDS_REQUIRED', '3DS authentication data is required for debit card payments');
-      }
       cardData = {
         number: dto.card.number,
         holder: dto.card.name,
@@ -1840,19 +1919,33 @@ export class OrdersService {
         cvv: dto.card.cvv,
         installments: 1,
       };
-      threedsData = {
-        cavv: dto.threeDs.cavv,
-        eci: dto.threeDs.eci,
-        xid: dto.threeDs.xid,
-        version: dto.threeDs.version ?? '2',
-        referenceId: dto.threeDs.referenceId,
-      };
+      if (dto.threeDs) {
+        threedsData = {
+          cavv: dto.threeDs.cavv,
+          eci: dto.threeDs.eci,
+          xid: dto.threeDs.xid,
+          version: dto.threeDs.version ?? '2',
+          referenceId: dto.threeDs.referenceId,
+        };
+      }
     }
 
     // 6.9 Call Cielo
     let cieloResult: any;
     let paymentFailed = false;
     try {
+      let debitReturnUrl: string | undefined;
+      if (dto.method === PaymentMethod.DEBIT_CARD && !threedsData) {
+        const serverUrl = (process.env.SERVER_URL ?? '').replace(/\/$/, '');
+        if (!serverUrl || !serverUrl.startsWith('http')) {
+          throw new AppUnprocessableException(
+            'SERVER_URL_REQUIRED',
+            'SERVER_URL environment variable must be set to a valid HTTP(S) URL to use debit card without pre-authenticated 3DS',
+          );
+        }
+        debitReturnUrl = `${serverUrl}/api/v1/payments/3ds-callback?orderId=${orderId}`;
+      }
+
       cieloResult = await this.cieloService.createPayment(
         finalTotal,
         'BRL',
@@ -1867,6 +1960,7 @@ export class OrdersService {
         cardData,
         cardTokenData,
         threedsData,
+        debitReturnUrl,
       );
       if (!cieloResult.success) {
         paymentFailed = true;
@@ -1948,6 +2042,75 @@ export class OrdersService {
             pixCode: cieloResult.pixCode ?? null,
             expiresAt: cieloResult.expiresAt ?? newExpiresAt,
           },
+        },
+        expiresAt: newExpiresAt,
+        serverTime: new Date(),
+      };
+
+      if (idempotencyKey) {
+        await this.redisService.setIdempotencyResult(idempotencyKey, 202, body);
+      }
+      return body;
+    }
+
+    // 6.11.5 DEBIT_CARD: bank requested 3DS authentication — store pending payment, return redirectUrl
+    if (dto.method === PaymentMethod.DEBIT_CARD && cieloResult.authenticationUrl) {
+      const newExpiresAt = new Date(Date.now() + RESERVATION_TTL_MINUTES * 60 * 1000);
+
+      await w.$transaction(async (tx: any) => {
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            expiresAt: newExpiresAt,
+            discount: couponDiscount + voucherDiscount,
+            finalAmount: finalTotal,
+            totalAmount: preDiscountTotal,
+            ...(couponId && { couponId }),
+            ...(voucherId && { voucherId }),
+            updatedAt: new Date(),
+          },
+        });
+        await tx.payment.upsert({
+          where: { orderId },
+          create: {
+            orderId,
+            userId,
+            method: PaymentMethod.DEBIT_CARD,
+            status: PaymentStatus.PENDING,
+            amount: finalTotal,
+            transactionId: cieloResult.paymentId ?? null,
+            metadata: {
+              cieloPaymentId: cieloResult.paymentId,
+              debitCard: {
+                brand: cieloResult.cardBrand ?? null,
+                last4Digits: dto.card!.number.replace(/\s/g, '').slice(-4),
+                holder: dto.card!.name,
+              },
+            },
+          },
+          update: {
+            status: PaymentStatus.PENDING,
+            amount: finalTotal,
+            transactionId: cieloResult.paymentId ?? null,
+            metadata: {
+              cieloPaymentId: cieloResult.paymentId,
+              debitCard: {
+                brand: cieloResult.cardBrand ?? null,
+                last4Digits: dto.card!.number.replace(/\s/g, '').slice(-4),
+                holder: dto.card!.name,
+              },
+            },
+          },
+        });
+      });
+
+      const body = {
+        orderId,
+        status: 'PENDING',
+        payment: {
+          method: PaymentMethod.DEBIT_CARD,
+          status: 'pending',
+          redirectUrl: cieloResult.authenticationUrl,
         },
         expiresAt: newExpiresAt,
         serverTime: new Date(),
