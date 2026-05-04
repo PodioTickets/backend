@@ -971,6 +971,9 @@ export class PaymentsService {
     const issuedAt = new Date();
     const orderNumber = orderId.slice(0, 8).toUpperCase();
 
+    // ID do comprador para distinguir inscrição própria de inscrição de convidado
+    const buyerUserId = regs.find((r: any) => r.user?.email)?.user?.id as string | undefined;
+
     const ticketPdfData = {
       orderId,
       orderNumber,
@@ -983,7 +986,10 @@ export class PaymentsService {
         participantCount: regs.length,
       },
       registrations: regs.map((reg: any, idx: number) => {
-        const user = reg.user ?? {};
+        // Usar dados do User vinculado apenas na inscrição do próprio comprador;
+        // convidados têm reg.user = comprador → não usar user.* como fallback
+        const isBuyerReg = buyerUserId && reg.user?.id === buyerUserId && !reg.participantName;
+        const user = isBuyerReg ? (reg.user ?? {}) : {};
         const ticket = reg.tickets?.[0]?.ticket;
         const catName = ticket?.category?.name ?? '';
         const ticketName = ticket?.name ?? '';
@@ -992,7 +998,7 @@ export class PaymentsService {
         return {
           index: idx + 1,
           qrCode: reg.qrCode ?? reg.id,
-          participantName: (reg.participantName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim()) || 'Participante',
+          participantName: (reg.participantName ?? `${(reg.user ?? {}).firstName ?? ''} ${(reg.user ?? {}).lastName ?? ''}`.trim()) || 'Participante',
           ticketName: fullTicketName,
           email: reg.participantEmail ?? user.email,
           cpf: reg.participantCpf ?? user.documentNumber,
@@ -1021,7 +1027,7 @@ export class PaymentsService {
     const eventLocation = event?.location ?? '';
     const eventDate = formatEventDate(event?.eventDate);
     const eventAddress = formatEventAddress(event);
-    const eventBannerUrl = event?.bannerUrl ?? 'https://placehold.co/308x232';
+    const eventBannerUrl = event?.logoUrl ?? event?.bannerUrl ?? 'https://placehold.co/308x232';
 
     // Comprador = primeira inscrição com conta vinculada — recebe todos os ingressos + recibo
     const buyerUser = regs.find((r: any) => r.user?.email)?.user;

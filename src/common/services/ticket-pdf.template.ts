@@ -204,7 +204,6 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
   return React.createElement(
     View,
     {
-      wrap: false,
       style: {
         backgroundColor: C.gray1,
         borderRadius: 12,
