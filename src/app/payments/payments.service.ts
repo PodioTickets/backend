@@ -220,6 +220,10 @@ export class PaymentsService {
       return paymentUpdate;
     });
 
+    // Enviar email de confirmação fire-and-forget
+    this.sendConfirmationEmailForOrder(payment.orderId)
+      .catch((err: any) => this.logger.warn('Falha ao enviar email de confirmação (cartão):', err));
+
     return {
       message: 'Payment confirmed successfully',
       data: { payment: updatedPayment },
@@ -293,6 +297,12 @@ export class PaymentsService {
 
       return paymentUpdate;
     });
+
+    // Enviar email de confirmação fire-and-forget se pagamento confirmado
+    if (paymentStatus === PaymentStatus.PAID) {
+      this.sendConfirmationEmailForOrder(payment.orderId)
+        .catch((err: any) => this.logger.warn('Falha ao enviar email de confirmação (processPayment):', err));
+    }
 
     return {
       message: 'Payment processed successfully',
