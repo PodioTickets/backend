@@ -1274,39 +1274,51 @@ export class AuthService {
 
   // ──────────────── 2FA por e-mail ────────────────
 
+  private static readonly MFA_MAX_ATTEMPTS = 5;
+  private static readonly MFA_CODE_TTL_MS = 10 * 60 * 1000; // 10 minutos
+  private static readonly MFA_RATE_TTL_MS = 60 * 1000;       // 1 minuto entre envios
+
   /**
-   * Gera código de 6 dígitos, armazena no cache por 10 minutos e envia por e-mail.
-   * Pode ser chamado para ativar ou desativar o 2FA.
+   * Gera código de 6 dígitos, armazena no cache e envia por e-mail.
+   * Rate limit: 1 envio por minuto por usuário.
+   * O rate limit só é aplicado após envio bem-sucedido para não bloquear
+   * o usuário em caso de falha no envio do e-mail.
    */
   async send2FACode(userId: string, userEmail: string): Promise<void> {
-    // Limite de 1 envio por minuto por usuário
     const rateLimitKey = `2fa_rate:${userId}`;
     if (await this.cacheManager.get(rateLimitKey)) {
       throw new BadRequestException('Aguarde 1 minuto antes de solicitar um novo código.');
     }
 
-    // Gera código numérico de 6 dígitos
-    const code = String(crypto.randomInt(100000, 999999));
+    // randomInt(min, max) → min <= n < max; usa 1_000_000 para incluir 999999
+    const code = String(crypto.randomInt(100000, 1000000));
     const cacheKey = `2fa_code:${userId}`;
+    const attemptsKey = `2fa_attempts:${userId}`;
 
-    // Armazena por 10 minutos
-    await this.cacheManager.set(cacheKey, code, 10 * 60 * 1000);
-    await this.cacheManager.set(rateLimitKey, true, 60 * 1000);
+    // Armazena código e zera tentativas antes de enviar
+    await this.cacheManager.set(cacheKey, code, AuthService.MFA_CODE_TTL_MS);
+    await this.cacheManager.del(attemptsKey);
 
-    await this.emailService.send2FACode(userEmail, code);
+    // Tenta enviar; desfaz o código armazenado se o e-mail falhar
+    try {
+      await this.emailService.send2FACode(userEmail, code);
+    } catch (emailError) {
+      await this.cacheManager.del(cacheKey);
+      this.logger.error(`Falha ao enviar código 2FA para usuário ${userId}:`, emailError);
+      throw new BadRequestException('Falha ao enviar o e-mail. Tente novamente.');
+    }
+
+    // Rate limit aplicado SOMENTE após envio bem-sucedido
+    await this.cacheManager.set(rateLimitKey, true, AuthService.MFA_RATE_TTL_MS);
     this.logger.log(`Código 2FA enviado para usuário ${userId}`);
   }
 
   /**
    * Verifica o código e habilita o 2FA para o usuário.
+   * Após 5 tentativas incorretas o código é invalidado.
    */
   async enable2FA(userId: string, code: string): Promise<void> {
-    const cacheKey = `2fa_code:${userId}`;
-    const stored = await this.cacheManager.get<string>(cacheKey);
-
-    if (!stored || stored !== code) {
-      throw new BadRequestException('Código incorreto ou expirado.');
-    }
+    await this.verifyAndConsume2FACode(userId, code);
 
     const prismaWrite = this.prisma.getWriteClient();
     await prismaWrite.user.update({
@@ -1314,20 +1326,15 @@ export class AuthService {
       data: { mfaEnabled: true },
     });
 
-    await this.cacheManager.del(cacheKey);
     this.logger.log(`2FA habilitado para usuário ${userId}`);
   }
 
   /**
    * Verifica o código e desabilita o 2FA para o usuário.
+   * Após 5 tentativas incorretas o código é invalidado.
    */
   async disable2FA(userId: string, code: string): Promise<void> {
-    const cacheKey = `2fa_code:${userId}`;
-    const stored = await this.cacheManager.get<string>(cacheKey);
-
-    if (!stored || stored !== code) {
-      throw new BadRequestException('Código incorreto ou expirado.');
-    }
+    await this.verifyAndConsume2FACode(userId, code);
 
     const prismaWrite = this.prisma.getWriteClient();
     await prismaWrite.user.update({
@@ -1335,7 +1342,50 @@ export class AuthService {
       data: { mfaEnabled: false, totpSecret: null },
     });
 
-    await this.cacheManager.del(cacheKey);
     this.logger.log(`2FA desabilitado para usuário ${userId}`);
+  }
+
+  /**
+   * Verifica o código 2FA de forma segura (tempo constante) e o invalida após uso.
+   * Limita a 5 tentativas incorretas; invalida o código ao atingir o limite.
+   */
+  private async verifyAndConsume2FACode(userId: string, code: string): Promise<void> {
+    const cacheKey = `2fa_code:${userId}`;
+    const attemptsKey = `2fa_attempts:${userId}`;
+
+    const stored = await this.cacheManager.get<string>(cacheKey);
+
+    if (!stored) {
+      throw new BadRequestException('Código incorreto ou expirado.');
+    }
+
+    // Verifica limite de tentativas antes de comparar
+    const attempts = (await this.cacheManager.get<number>(attemptsKey)) || 0;
+    if (attempts >= AuthService.MFA_MAX_ATTEMPTS) {
+      await this.cacheManager.del(cacheKey);
+      this.logger.warn(`Código 2FA invalidado por excesso de tentativas — usuário ${userId}`);
+      throw new BadRequestException('Muitas tentativas incorretas. Solicite um novo código.');
+    }
+
+    // Comparação em tempo constante para evitar timing attacks
+    const isValid =
+      stored.length === code.length &&
+      crypto.timingSafeEqual(Buffer.from(stored, 'utf8'), Buffer.from(code, 'utf8'));
+
+    if (!isValid) {
+      const newAttempts = attempts + 1;
+      await this.cacheManager.set(attemptsKey, newAttempts, AuthService.MFA_CODE_TTL_MS);
+      if (newAttempts >= AuthService.MFA_MAX_ATTEMPTS) {
+        await this.cacheManager.del(cacheKey);
+        this.logger.warn(`Código 2FA invalidado por excesso de tentativas — usuário ${userId}`);
+      } else {
+        this.logger.warn(`Tentativa incorreta de código 2FA (${newAttempts}/${AuthService.MFA_MAX_ATTEMPTS}) — usuário ${userId}`);
+      }
+      throw new BadRequestException('Código incorreto ou expirado.');
+    }
+
+    // Código válido: consome (impede reuso)
+    await this.cacheManager.del(cacheKey);
+    await this.cacheManager.del(attemptsKey);
   }
 }

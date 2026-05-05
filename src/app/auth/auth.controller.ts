@@ -393,7 +393,8 @@ export class AuthController {
   }
 
   @Post('2fa/enable')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, ThrottlerGuard)
+  @Throttle({ short: { limit: 10, ttl: 60000 } })
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Ativa o 2FA após verificação do código enviado por e-mail' })
@@ -406,7 +407,8 @@ export class AuthController {
   }
 
   @Post('2fa/disable')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, ThrottlerGuard)
+  @Throttle({ short: { limit: 10, ttl: 60000 } })
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Desativa o 2FA após verificação do código enviado por e-mail' })
