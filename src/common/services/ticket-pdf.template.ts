@@ -201,7 +201,7 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
     reg.cpf ? { label: 'CPF', value: reg.cpf } : null,
     reg.dateOfBirth ? { label: 'Data de nascimento', value: fmtDate(reg.dateOfBirth) } : null,
     reg.phone ? { label: 'Telefone', value: reg.phone } : null,
-    reg.gender ? { label: 'Sexo', value: reg.gender } : null,
+    reg.gender ? { label: 'Sexo', value: reg.gender === 'MALE' ? 'Masculino' : reg.gender === 'FEMALE' ? 'Feminino' : reg.gender } : null,
   ].filter(Boolean) as { label: string; value: string }[];
 
   return React.createElement(
