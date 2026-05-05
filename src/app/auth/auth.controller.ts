@@ -384,9 +384,24 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Envia código 2FA por e-mail (ativar ou desativar)' })
-  @ApiResponse({ status: 200, description: 'Código enviado para o e-mail do usuário' })
-  @ApiResponse({ status: 400, description: 'Rate limit: aguarde 1 minuto' })
+  @ApiOperation({
+    summary: 'Envia código OTP por e-mail para ativar ou desativar o 2FA',
+    description:
+      'Gera um código numérico de 6 dígitos, armazena em cache com TTL de 10 minutos e envia ao e-mail do usuário autenticado. ' +
+      'Protegido por rate limit de 1 requisição por minuto por usuário. ' +
+      'O código é invalidado automaticamente após 5 tentativas erradas.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Código enviado com sucesso',
+    schema: { example: { message: 'Código enviado para o seu e-mail.', success: true } },
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Rate limit ativo — aguarde 1 minuto antes de solicitar novo código',
+    schema: { example: { message: 'Aguarde 1 minuto antes de solicitar um novo código.' } },
+  })
+  @ApiResponse({ status: 401, description: 'Não autenticado' })
   async send2FACode(@Request() req) {
     await this.authService.send2FACode(req.user.id, req.user.email);
     return { message: 'Código enviado para o seu e-mail.', success: true };
@@ -397,10 +412,26 @@ export class AuthController {
   @Throttle({ short: { limit: 10, ttl: 60000 } })
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Ativa o 2FA após verificação do código enviado por e-mail' })
+  @ApiOperation({
+    summary: 'Ativa o 2FA após verificação do código OTP enviado por e-mail',
+    description:
+      'Verifica o código de 6 dígitos em tempo constante (proteção contra timing attack). ' +
+      'Em caso de sucesso, salva `mfaEnabled = true` no banco e invalida o código do cache. ' +
+      'Após 5 tentativas incorretas o código é descartado e um novo deve ser solicitado.',
+  })
   @ApiBody({ type: TwoFactorCodeDto })
-  @ApiResponse({ status: 200, description: '2FA ativado com sucesso' })
-  @ApiResponse({ status: 400, description: 'Código incorreto ou expirado' })
+  @ApiResponse({
+    status: 200,
+    description: '2FA ativado com sucesso',
+    schema: { example: { message: '2FA ativado com sucesso.', success: true } },
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Código incorreto, expirado ou número de tentativas excedido',
+    schema: { example: { message: 'Código incorreto ou expirado.' } },
+  })
+  @ApiResponse({ status: 401, description: 'Não autenticado' })
+  @ApiResponse({ status: 429, description: 'Muitas requisições — throttle ativo' })
   async enable2FA(@Request() req, @Body() dto: TwoFactorCodeDto) {
     await this.authService.enable2FA(req.user.id, dto.code);
     return { message: '2FA ativado com sucesso.', success: true };
@@ -411,10 +442,25 @@ export class AuthController {
   @Throttle({ short: { limit: 10, ttl: 60000 } })
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Desativa o 2FA após verificação do código enviado por e-mail' })
+  @ApiOperation({
+    summary: 'Desativa o 2FA após verificação do código OTP enviado por e-mail',
+    description:
+      'Mesma lógica de verificação do endpoint de ativação. ' +
+      'Em caso de sucesso, salva `mfaEnabled = false` e limpa `totpSecret` no banco.',
+  })
   @ApiBody({ type: TwoFactorCodeDto })
-  @ApiResponse({ status: 200, description: '2FA desativado com sucesso' })
-  @ApiResponse({ status: 400, description: 'Código incorreto ou expirado' })
+  @ApiResponse({
+    status: 200,
+    description: '2FA desativado com sucesso',
+    schema: { example: { message: '2FA desativado com sucesso.', success: true } },
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Código incorreto, expirado ou número de tentativas excedido',
+    schema: { example: { message: 'Código incorreto ou expirado.' } },
+  })
+  @ApiResponse({ status: 401, description: 'Não autenticado' })
+  @ApiResponse({ status: 429, description: 'Muitas requisições — throttle ativo' })
   async disable2FA(@Request() req, @Body() dto: TwoFactorCodeDto) {
     await this.authService.disable2FA(req.user.id, dto.code);
     return { message: '2FA desativado com sucesso.', success: true };
