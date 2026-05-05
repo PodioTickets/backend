@@ -409,6 +409,52 @@ export class EmailService {
     this.logger.log(`Email changed notification sent: ${data.oldEmail} → ${data.newEmail}`);
   }
 
+  async sendOrganizerCommunication(data: {
+    recipientEmail: string;
+    firstName: string;
+    eventName: string;
+    orgName: string;
+    orgAvatarUrl?: string;
+    subject: string;
+    messageHtml: string;
+    instagram?: string;
+    facebook?: string;
+    youtube?: string;
+    tiktok?: string;
+    website?: string;
+  }) {
+    const hasSocialLinks = !!(data.instagram || data.facebook || data.youtube || data.tiktok || data.website);
+
+    // Carrega template sem o messageHtml para evitar substituição de {{}} dentro do conteúdo livre
+    let html = this.loadTemplate('comunicado-organizador.html', {
+      eventName: this.escapeHtml(data.eventName),
+      orgName: this.escapeHtml(data.orgName),
+      orgAvatarUrl: data.orgAvatarUrl ? this.escapeHtml(data.orgAvatarUrl) : '',
+      subject: this.escapeHtml(data.subject),
+      instagram: data.instagram ? this.escapeHtml(data.instagram) : '',
+      facebook: data.facebook ? this.escapeHtml(data.facebook) : '',
+      youtube: data.youtube ? this.escapeHtml(data.youtube) : '',
+      tiktok: data.tiktok ? this.escapeHtml(data.tiktok) : '',
+      website: data.website ? this.escapeHtml(data.website) : '',
+      hasSocialLinks: hasSocialLinks ? 'true' : '',
+    });
+
+    // Injeta o corpo da mensagem SEM escaping — já foi sanitizado pelo serviço chamador
+    html = html.replace('<!-- PODIO_MSG_BODY -->', data.messageHtml);
+
+    const text = `${data.subject}\n\n${data.eventName} — ${data.orgName}\n\nPodioTicket — podioticket.com.br`;
+
+    await this.send({
+      from: this.from,
+      to: data.recipientEmail,
+      subject: `${data.subject} — ${data.eventName}`,
+      html,
+      text,
+    });
+
+    this.logger.log(`Comunicado organização enviado para: ${data.recipientEmail}`);
+  }
+
   private escapeHtml(text: string): string {
     return String(text)
       .replace(/&/g, '&amp;')
