@@ -819,6 +819,7 @@ model Voucher {
   status        VoucherStatus @default(ACTIVE)
   usedAt        DateTime? // Data em que foi usado
   usedBy        String?       @db.Uuid // ID do usuário que usou
+  deletedAt     DateTime? // Soft delete — grupo removido quando há vendas
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
@@ -830,6 +831,7 @@ model Voucher {
   @@index([code])
   @@index([status])
   @@index([eventId, status])
+  @@index([deletedAt])
   @@index([code, status]) // Para busca rápida por código e status
 }
 

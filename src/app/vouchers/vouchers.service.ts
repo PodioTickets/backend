@@ -88,7 +88,7 @@ export class VouchersService {
     const limit = filterDto.limit || 20;
     const skip = (page - 1) * limit;
 
-    const where: any = { eventId };
+    const where: any = { eventId, deletedAt: null };
     if (filterDto.status) {
       where.status = filterDto.status;
     }
@@ -184,7 +184,7 @@ export class VouchersService {
     const limit = filterDto.limit || 20;
     const skip = (page - 1) * limit;
 
-    const baseWhere = { eventId, name: groupName };
+    const baseWhere = { eventId, name: groupName, deletedAt: null };
     const filteredWhere: any = { ...baseWhere };
     if (filterDto.status) {
       filteredWhere.status = filterDto.status;
@@ -388,25 +388,50 @@ export class VouchersService {
 
     const prismaWrite = this.prisma.getWriteClient();
 
-    const voucher = await prismaWrite.voucher.findUnique({
+    // Identificar o grupo pelo ID do voucher representante
+    const representative = await prismaWrite.voucher.findUnique({
       where: { id: voucherId },
+      select: { id: true, eventId: true, name: true },
     });
 
-    if (!voucher || voucher.eventId !== eventId) {
-      throw new NotFoundException('Voucher not found');
+    if (!representative || representative.eventId !== eventId) {
+      throw new NotFoundException('Voucher group not found');
     }
 
-    // Não permitir deletar vouchers que já foram utilizados
-    if (voucher.status === VoucherStatus.USED) {
-      throw new BadRequestException('Cannot delete voucher that has been used');
-    }
-
-    await prismaWrite.voucher.delete({
-      where: { id: voucherId },
+    // Carregar todos os vouchers do grupo
+    const groupVouchers = await prismaWrite.voucher.findMany({
+      where: { eventId, name: representative.name, deletedAt: null },
+      select: { id: true, status: true },
     });
+
+    if (groupVouchers.length === 0) {
+      throw new NotFoundException('Voucher group not found');
+    }
+
+    const hasSales = groupVouchers.some((v) => v.status === VoucherStatus.USED);
+
+    if (hasSales) {
+      // Soft-delete: marca com deletedAt apenas os não usados (usados ficam para auditoria)
+      await prismaWrite.voucher.updateMany({
+        where: {
+          eventId,
+          name: representative.name,
+          deletedAt: null,
+          status: { not: VoucherStatus.USED },
+        },
+        data: { deletedAt: new Date() },
+      });
+    } else {
+      // Hard-delete: nenhum voucher do grupo foi utilizado
+      await prismaWrite.voucher.deleteMany({
+        where: { eventId, name: representative.name, deletedAt: null },
+      });
+    }
 
     return {
-      message: 'Voucher deleted successfully',
+      message: hasSales
+        ? 'Voucher group soft-deleted (group has sales)'
+        : 'Voucher group deleted successfully',
     };
   }
 
