@@ -455,6 +455,32 @@ export class EmailService {
     this.logger.log(`Comunicado organização enviado para: ${data.recipientEmail}`);
   }
 
+  async sendMemberAdded(data: {
+    recipientEmail: string;
+    firstName: string;
+    orgName: string;
+    registeredAt: string;
+  }) {
+    const html = this.loadTemplate('membro-adicionado.html', {
+      firstName: this.escapeHtml(data.firstName),
+      email: this.escapeHtml(data.recipientEmail),
+      orgName: this.escapeHtml(data.orgName),
+      registeredAt: this.escapeHtml(data.registeredAt),
+    });
+
+    const text = `Olá ${data.firstName},\n\nVocê foi adicionado como colaborador da organização ${data.orgName} na PódioTicket.\n\nE-mail de acesso: ${data.recipientEmail}\nOrganização: ${data.orgName}\nCadastrado em: ${data.registeredAt}\n\nAcesse o painel em: https://www.podioticket.com.br/organizador\n\nPodioTicket — podioticket.com.br`;
+
+    await this.send({
+      from: this.from,
+      to: data.recipientEmail,
+      subject: `Bem-vindo à equipe — ${data.orgName}`,
+      html,
+      text,
+    });
+
+    this.logger.log(`Email de membro adicionado enviado para: ${data.recipientEmail}`);
+  }
+
   private escapeHtml(text: string): string {
     return String(text)
       .replace(/&/g, '&amp;')

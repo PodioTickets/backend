@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, ForbiddenException, ConflictException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, ConflictException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
   CreateOrganizationDto,
@@ -28,12 +28,16 @@ import {
 import { resolveOrganizerPageViewActionLabel } from './organizer-audit-page-label.util';
 import { formatAuditLogItemForResponse } from './audit-log-item-format.util';
 import { buildAuditChangeDetails } from './audit-log-change-details.util';
+import { EmailService } from '../../common/services/email.service';
 
 @Injectable()
 export class OrganizationsService {
+  private readonly logger = new Logger(OrganizationsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly mfaService: MFAService,
+    private readonly emailService: EmailService,
   ) {}
 
   private mapFromKeysOrThrow(keys: string[]): OrganizerPermissionsMap {
@@ -943,6 +947,27 @@ export class OrganizationsService {
         ],
       },
     });
+
+    // Dispara email de boas-vindas ao novo membro (fire-and-forget)
+    const registeredAt = new Intl.DateTimeFormat('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: 'America/Sao_Paulo',
+    }).format(new Date()).replace(',', ' ·');
+
+    this.emailService
+      .sendMemberAdded({
+        recipientEmail: member.user.email,
+        firstName: member.user.firstName ?? member.user.email,
+        orgName: member.organization.name,
+        registeredAt,
+      })
+      .catch((err: any) =>
+        this.logger.warn(`Falha ao enviar email de boas-vindas ao membro (userId=${member.userId}): ${err?.message ?? err}`),
+      );
 
     return {
       message: 'Member added successfully',
