@@ -435,12 +435,13 @@ function estimatePageHeight(data: TicketPdfTemplateData): number {
     // Produtos
     if (reg.products.length > 0) {
       h += 1 + 24 + 18 + 20; // HR + padding + título + gap
-      h += Math.ceil(reg.products.length / 2) * 220; // linha de produto
+      // Cada linha de produto: imagem 100 + padding top/bottom 32 + seção tamanho/badge ~90
+      h += Math.ceil(reg.products.length / 2) * 280;
       h += 24;
     }
   }
 
-  h += 32 + 200; // paddingBottom + buffer de segurança
+  h += 32 + 500; // paddingBottom + buffer de segurança generoso
   return Math.max(842, h);
 }
 
