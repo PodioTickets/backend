@@ -3,7 +3,7 @@ set -e
 
 echo "⏳ Aguardando Postgres..."
 
-until pg_isready -h postgres -p 5432 -U "$POSTGRES_USER"; do
+until pg_isready -h 34.95.198.14 -p 5432 -U "$POSTGRES_USER"; do
   sleep 2
 done
 
