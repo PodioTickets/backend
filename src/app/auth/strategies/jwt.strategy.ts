@@ -40,6 +40,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         genderDetails: true,
         language: true,
         avatarUrl: true,
+        mfaEnabled: true,
       },
     });
 
@@ -68,6 +69,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       genderDetails: user.genderDetails,
       language: user.language,
       avatarUrl: user.avatarUrl,
+      mfaEnabled: user.mfaEnabled,
     };
   }
 }

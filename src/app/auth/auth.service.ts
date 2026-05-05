@@ -1266,9 +1266,76 @@ export class AuthService {
     } catch (error: any) {
       console.error('Error validating Google code:', error.response?.data || error.message);
       throw new BadRequestException(
-        error.response?.data?.error_description || 
+        error.response?.data?.error_description ||
         'Failed to validate Google authorization code'
       );
     }
+  }
+
+  // ──────────────── 2FA por e-mail ────────────────
+
+  /**
+   * Gera código de 6 dígitos, armazena no cache por 10 minutos e envia por e-mail.
+   * Pode ser chamado para ativar ou desativar o 2FA.
+   */
+  async send2FACode(userId: string, userEmail: string): Promise<void> {
+    // Limite de 1 envio por minuto por usuário
+    const rateLimitKey = `2fa_rate:${userId}`;
+    if (await this.cacheManager.get(rateLimitKey)) {
+      throw new BadRequestException('Aguarde 1 minuto antes de solicitar um novo código.');
+    }
+
+    // Gera código numérico de 6 dígitos
+    const code = String(crypto.randomInt(100000, 999999));
+    const cacheKey = `2fa_code:${userId}`;
+
+    // Armazena por 10 minutos
+    await this.cacheManager.set(cacheKey, code, 10 * 60 * 1000);
+    await this.cacheManager.set(rateLimitKey, true, 60 * 1000);
+
+    await this.emailService.send2FACode(userEmail, code);
+    this.logger.log(`Código 2FA enviado para usuário ${userId}`);
+  }
+
+  /**
+   * Verifica o código e habilita o 2FA para o usuário.
+   */
+  async enable2FA(userId: string, code: string): Promise<void> {
+    const cacheKey = `2fa_code:${userId}`;
+    const stored = await this.cacheManager.get<string>(cacheKey);
+
+    if (!stored || stored !== code) {
+      throw new BadRequestException('Código incorreto ou expirado.');
+    }
+
+    const prismaWrite = this.prisma.getWriteClient();
+    await prismaWrite.user.update({
+      where: { id: userId },
+      data: { mfaEnabled: true },
+    });
+
+    await this.cacheManager.del(cacheKey);
+    this.logger.log(`2FA habilitado para usuário ${userId}`);
+  }
+
+  /**
+   * Verifica o código e desabilita o 2FA para o usuário.
+   */
+  async disable2FA(userId: string, code: string): Promise<void> {
+    const cacheKey = `2fa_code:${userId}`;
+    const stored = await this.cacheManager.get<string>(cacheKey);
+
+    if (!stored || stored !== code) {
+      throw new BadRequestException('Código incorreto ou expirado.');
+    }
+
+    const prismaWrite = this.prisma.getWriteClient();
+    await prismaWrite.user.update({
+      where: { id: userId },
+      data: { mfaEnabled: false, totpSecret: null },
+    });
+
+    await this.cacheManager.del(cacheKey);
+    this.logger.log(`2FA desabilitado para usuário ${userId}`);
   }
 }

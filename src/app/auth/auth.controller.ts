@@ -36,6 +36,7 @@ import {
   VerifyResetCodeDto,
   ResendResetCodeDto,
   VerifyEmailChangeDto,
+  TwoFactorCodeDto,
 } from './dto/auth.dto';
 import { Response } from 'express';
 import { LocalAuthGuard } from './guards/local-auth.guard';
@@ -375,6 +376,46 @@ export class AuthController {
       message: 'User profile',
       success: true,
     };
+  }
+
+  // ──────────────── 2FA ────────────────
+
+  @Post('2fa/send-code')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Envia código 2FA por e-mail (ativar ou desativar)' })
+  @ApiResponse({ status: 200, description: 'Código enviado para o e-mail do usuário' })
+  @ApiResponse({ status: 400, description: 'Rate limit: aguarde 1 minuto' })
+  async send2FACode(@Request() req) {
+    await this.authService.send2FACode(req.user.id, req.user.email);
+    return { message: 'Código enviado para o seu e-mail.', success: true };
+  }
+
+  @Post('2fa/enable')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Ativa o 2FA após verificação do código enviado por e-mail' })
+  @ApiBody({ type: TwoFactorCodeDto })
+  @ApiResponse({ status: 200, description: '2FA ativado com sucesso' })
+  @ApiResponse({ status: 400, description: 'Código incorreto ou expirado' })
+  async enable2FA(@Request() req, @Body() dto: TwoFactorCodeDto) {
+    await this.authService.enable2FA(req.user.id, dto.code);
+    return { message: '2FA ativado com sucesso.', success: true };
+  }
+
+  @Post('2fa/disable')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Desativa o 2FA após verificação do código enviado por e-mail' })
+  @ApiBody({ type: TwoFactorCodeDto })
+  @ApiResponse({ status: 200, description: '2FA desativado com sucesso' })
+  @ApiResponse({ status: 400, description: 'Código incorreto ou expirado' })
+  async disable2FA(@Request() req, @Body() dto: TwoFactorCodeDto) {
+    await this.authService.disable2FA(req.user.id, dto.code);
+    return { message: '2FA desativado com sucesso.', success: true };
   }
 
   @Get('csrf-token')

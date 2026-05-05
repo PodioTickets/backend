@@ -481,6 +481,31 @@ export class EmailService {
     this.logger.log(`Email de membro adicionado enviado para: ${data.recipientEmail}`);
   }
 
+  async send2FACode(recipientEmail: string, code: string): Promise<void> {
+    const html = this.loadTemplate('codigo-2fa.html', {
+      code: this.escapeHtml(code),
+    });
+
+    const text = [
+      'Código de verificação — PódioTicket',
+      '',
+      `Seu código de verificação é: ${code}`,
+      '',
+      'Este código expira em 10 minutos.',
+      'Se você não solicitou este código, ignore este e-mail.',
+    ].join('\n');
+
+    await this.send({
+      from: this.from,
+      to: recipientEmail,
+      subject: 'Código de verificação de segurança — PódioTicket',
+      html,
+      text,
+    });
+
+    this.logger.log(`Código 2FA enviado para: ${recipientEmail}`);
+  }
+
   private escapeHtml(text: string): string {
     return String(text)
       .replace(/&/g, '&amp;')

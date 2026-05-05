@@ -279,3 +279,11 @@ export class VerifyEmailChangeDto {
   @IsNotEmpty()
   code: string;
 }
+
+export class TwoFactorCodeDto {
+  @ApiProperty({ description: 'Código de 6 dígitos enviado por e-mail para ativar/desativar o 2FA' })
+  @IsString()
+  @IsNotEmpty()
+  @Length(6, 6)
+  code: string;
+}
