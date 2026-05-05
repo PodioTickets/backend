@@ -81,7 +81,7 @@
                         <table cellpadding="0" cellspacing="0" border="0" style="display:inline-table;">
                           <tr>
                             <td style="padding-right:6px;vertical-align:middle;">
-                              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M13.5889 16.3718C13.9341 16.9696 13.7297 17.7346 13.1319 18.0798C12.534 18.4249 11.7691 18.2196 11.4239 17.6218L9.83797 14.8747L12.3878 14.2907L13.5889 16.3718ZM2.7491 9.87274C3.34694 9.52771 4.11197 9.73294 4.45711 10.3307L6.54012 13.9391C6.88528 14.537 6.67997 15.302 6.08211 15.6472C5.48432 15.992 4.72018 15.7868 4.37508 15.1891L2.29207 11.5807C1.94689 10.9829 2.15124 10.2179 2.7491 9.87274ZM10.5596 3.3952C11.3229 2.57403 12.663 2.7252 13.2237 3.69598L16.8009 9.89129C17.3615 10.8624 16.8216 12.099 15.7286 12.3493L8.03328 14.112C7.97976 13.8646 7.88734 13.6203 7.75399 13.3893L5.67098 9.78094C5.53766 9.5501 5.37302 9.34838 5.18563 9.1784L10.5596 3.3952ZM18.0401 6.30829L19.1788 6.61297C19.5122 6.70234 19.7095 7.0452 19.6202 7.3786C19.5308 7.71177 19.1888 7.91 18.8555 7.82098L17.7169 7.51532C17.3835 7.42598 17.1852 7.08311 17.2745 6.74969C17.3639 6.41645 17.7068 6.21907 18.0401 6.30829ZM16.6788 2.28289C17.0122 2.37227 17.2095 2.71513 17.1202 3.04852L16.8155 4.18719C16.726 4.52033 16.3831 4.7179 16.0499 4.6286C15.7166 4.53915 15.5192 4.1963 15.6085 3.86297L15.9132 2.72528C16.0025 2.39186 16.3454 2.19356 16.6788 2.28289Z" fill="#203C25"/></svg>
+                              <img src="https://www.podioticket.com.br/images/icon-megaphone.svg" width="20" height="20" alt="">
                             </td>
                             <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:600;color:#203C25;vertical-align:middle;">Comunicado oficial</td>
                           </tr>
@@ -99,7 +99,9 @@
                         <img src="{{orgAvatarUrl}}" alt="{{orgName}}" width="52" height="52" style="display:block;width:52px;height:52px;border-radius:50%;border:1px solid #46A758;object-fit:cover;">
                         {{/orgAvatarUrl}}
                         {{^orgAvatarUrl}}
-                        <div style="width:52px;height:52px;border-radius:50%;border:1px solid #46A758;background-color:#193B30;display:inline-block;"></div>
+                        <table width="52" height="52" cellpadding="0" cellspacing="0" border="0" style="border-radius:50%;border:1px solid #46A758;background-color:#193B30;border-collapse:separate;">
+                          <tr><td width="52" height="52">&nbsp;</td></tr>
+                        </table>
                         {{/orgAvatarUrl}}
                       </td>
                       <!-- Coluna: label + nome da org -->
@@ -131,36 +133,46 @@
               <tr>
                 {{#instagram}}
                 <td style="padding-right:4px;">
-                  <a href="{{instagram}}" target="_blank" style="display:inline-block;width:40px;height:40px;border:0.67px solid #D9D9D9;border-radius:50%;text-align:center;line-height:40px;">
-                    <img src="https://www.podioticket.com.br/images/social-instagram.svg" width="24" height="24" alt="Instagram" style="display:inline-block;vertical-align:middle;margin-top:8px;">
+                  <a href="{{instagram}}" target="_blank" style="text-decoration:none;">
+                    <table width="40" height="40" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #D9D9D9;border-radius:50%;border-collapse:separate;">
+                      <tr><td width="40" height="40" align="center" valign="middle"><img src="https://www.podioticket.com.br/images/social-instagram.svg" width="24" height="24" alt="Instagram" style="display:block;"></td></tr>
+                    </table>
                   </a>
                 </td>
                 {{/instagram}}
                 {{#facebook}}
                 <td style="padding-right:4px;">
-                  <a href="{{facebook}}" target="_blank" style="display:inline-block;width:40px;height:40px;border:0.67px solid #D9D9D9;border-radius:50%;text-align:center;line-height:40px;">
-                    <img src="https://www.podioticket.com.br/images/social-facebook.svg" width="24" height="24" alt="Facebook" style="display:inline-block;vertical-align:middle;margin-top:8px;">
+                  <a href="{{facebook}}" target="_blank" style="text-decoration:none;">
+                    <table width="40" height="40" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #D9D9D9;border-radius:50%;border-collapse:separate;">
+                      <tr><td width="40" height="40" align="center" valign="middle"><img src="https://www.podioticket.com.br/images/social-facebook.svg" width="24" height="24" alt="Facebook" style="display:block;"></td></tr>
+                    </table>
                   </a>
                 </td>
                 {{/facebook}}
                 {{#youtube}}
                 <td style="padding-right:4px;">
-                  <a href="{{youtube}}" target="_blank" style="display:inline-block;width:40px;height:40px;border:0.67px solid #D9D9D9;border-radius:50%;text-align:center;line-height:40px;">
-                    <img src="https://www.podioticket.com.br/images/social-youtube.svg" width="24" height="24" alt="YouTube" style="display:inline-block;vertical-align:middle;margin-top:8px;">
+                  <a href="{{youtube}}" target="_blank" style="text-decoration:none;">
+                    <table width="40" height="40" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #D9D9D9;border-radius:50%;border-collapse:separate;">
+                      <tr><td width="40" height="40" align="center" valign="middle"><img src="https://www.podioticket.com.br/images/social-youtube.svg" width="24" height="24" alt="YouTube" style="display:block;"></td></tr>
+                    </table>
                   </a>
                 </td>
                 {{/youtube}}
                 {{#tiktok}}
                 <td style="padding-right:4px;">
-                  <a href="{{tiktok}}" target="_blank" style="display:inline-block;width:40px;height:40px;border:0.67px solid #D9D9D9;border-radius:50%;text-align:center;line-height:40px;">
-                    <img src="https://www.podioticket.com.br/images/social-tiktok.svg" width="24" height="24" alt="TikTok" style="display:inline-block;vertical-align:middle;margin-top:8px;">
+                  <a href="{{tiktok}}" target="_blank" style="text-decoration:none;">
+                    <table width="40" height="40" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #D9D9D9;border-radius:50%;border-collapse:separate;">
+                      <tr><td width="40" height="40" align="center" valign="middle"><img src="https://www.podioticket.com.br/images/social-tiktok.svg" width="24" height="24" alt="TikTok" style="display:block;"></td></tr>
+                    </table>
                   </a>
                 </td>
                 {{/tiktok}}
                 {{#website}}
                 <td>
-                  <a href="{{website}}" target="_blank" style="display:inline-block;width:40px;height:40px;border:0.67px solid #D9D9D9;border-radius:50%;text-align:center;line-height:40px;">
-                    <img src="https://www.podioticket.com.br/images/social-website.svg" width="24" height="24" alt="Website" style="display:inline-block;vertical-align:middle;margin-top:8px;">
+                  <a href="{{website}}" target="_blank" style="text-decoration:none;">
+                    <table width="40" height="40" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #D9D9D9;border-radius:50%;border-collapse:separate;">
+                      <tr><td width="40" height="40" align="center" valign="middle"><img src="https://www.podioticket.com.br/images/social-website.svg" width="24" height="24" alt="Website" style="display:block;"></td></tr>
+                    </table>
                   </a>
                 </td>
                 {{/website}}
