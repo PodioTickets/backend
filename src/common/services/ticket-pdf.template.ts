@@ -526,44 +526,58 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
           ),
         ),
         React.createElement(HR, null),
+        /* Duas linhas de 2 colunas evita bug de altura no yoga-layout com texto longo */
         React.createElement(
           View,
-          { style: { flexDirection: 'row', gap: 12 } },
-          ...[
-            { label: 'Data', value: fmtDate(data.event.date) },
-            { label: 'Organização', value: data.event.organization },
-            { label: 'Local', value: data.event.location },
-            {
-              label: 'Participantes',
-              value: `${data.event.participantCount} atleta${data.event.participantCount !== 1 ? 's' : ''}`,
-            },
-          ].map(({ label, value }) =>
-            React.createElement(
-              View,
-              { key: label, style: { flex: 1, gap: 12 } },
+          { style: { gap: 16 } },
+          /* Linha 1: Data + Organização */
+          React.createElement(
+            View,
+            { style: { flexDirection: 'row', gap: 12 } },
+            ...[
+              { label: 'Data', value: fmtDate(data.event.date) },
+              { label: 'Organização', value: data.event.organization },
+            ].map(({ label, value }) =>
               React.createElement(
-                Text,
-                {
-                  style: {
-                    fontFamily: 'DM Sans',
-                    fontSize: 14,
-                    fontWeight: 400,
-                    color: C.gray11,
-                  },
-                },
-                label,
+                View,
+                { key: label, style: { flex: 1, minWidth: 0, gap: 8 } },
+                React.createElement(
+                  Text,
+                  { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 400, color: C.gray11 } },
+                  label,
+                ),
+                React.createElement(
+                  Text,
+                  { style: { fontFamily: 'DM Sans', fontSize: 16, fontWeight: 500, color: C.gray12 } },
+                  value,
+                ),
               ),
+            ),
+          ),
+          /* Linha 2: Local + Participantes */
+          React.createElement(
+            View,
+            { style: { flexDirection: 'row', gap: 12 } },
+            ...[
+              { label: 'Local', value: data.event.location },
+              {
+                label: 'Participantes',
+                value: `${data.event.participantCount} atleta${data.event.participantCount !== 1 ? 's' : ''}`,
+              },
+            ].map(({ label, value }) =>
               React.createElement(
-                Text,
-                {
-                  style: {
-                    fontFamily: 'DM Sans',
-                    fontSize: 16,
-                    fontWeight: 500,
-                    color: C.gray12,
-                  },
-                },
-                value,
+                View,
+                { key: label, style: { flex: 1, minWidth: 0, gap: 8 } },
+                React.createElement(
+                  Text,
+                  { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 400, color: C.gray11 } },
+                  label,
+                ),
+                React.createElement(
+                  Text,
+                  { style: { fontFamily: 'DM Sans', fontSize: 16, fontWeight: 500, color: C.gray12 } },
+                  value,
+                ),
               ),
             ),
           ),
