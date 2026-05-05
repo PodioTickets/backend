@@ -201,13 +201,12 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
     reg.cpf ? { label: 'CPF', value: reg.cpf } : null,
     reg.dateOfBirth ? { label: 'Data de nascimento', value: fmtDate(reg.dateOfBirth) } : null,
     reg.phone ? { label: 'Telefone', value: reg.phone } : null,
-    reg.gender ? { label: 'Sexo', value: reg.gender } : null,
+    reg.gender ? { label: 'Sexo', value: reg.gender === 'MALE' ? 'Masculino' : reg.gender === 'FEMALE' ? 'Feminino' : reg.gender } : null,
   ].filter(Boolean) as { label: string; value: string }[];
 
   return React.createElement(
     View,
     {
-      wrap: false,
       style: {
         backgroundColor: C.gray1,
         borderRadius: 12,
@@ -403,14 +402,59 @@ const TicketBrand = () =>
     }),
   );
 
-export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
-  React.createElement(
+/* Calcula altura aproximada para página única (scroll infinito) */
+function estimatePageHeight(data: TicketPdfTemplateData): number {
+  // Cabeçalho fixo: logo + HR + título seção + event card
+  let h = 32 + 60 + 1 + 20 + 18 + 12 + 14 + 16; // header + section title
+  h += 16 + 36 + 8 + 16 + 1 + 20; // event card: icon row + HR + gap
+  h += (14 + 8 + 16) * 2 + 16; // 2 linhas de metadata
+  h += 16; // card padding
+
+  for (const reg of data.registrations) {
+    h += 16; // marginTop do card
+
+    // Cabeçalho do participante: QR 80px + padding
+    h += 20 + 80 + 20;
+
+    // Informações do participante
+    const fieldCount = [reg.email, reg.cpf, reg.dateOfBirth, reg.phone, reg.gender]
+      .filter(Boolean).length;
+    if (fieldCount > 0) {
+      h += 24 + 18 + 20; // padding + título + gap
+      h += fieldCount * (8 + 16 + 12 + 16 + 8); // cada FieldItem
+      h += 24;
+    }
+
+    // Perguntas
+    if (reg.questionAnswers.length > 0) {
+      h += 1 + 24 + 18 + 20; // HR + padding + título + gap
+      h += reg.questionAnswers.length * (8 + 16 + 12 + 16 + 8);
+      h += 24;
+    }
+
+    // Produtos
+    if (reg.products.length > 0) {
+      h += 1 + 24 + 18 + 20; // HR + padding + título + gap
+      // Cada linha de produto: imagem 100 + padding top/bottom 32 + seção tamanho/badge ~90
+      h += Math.ceil(reg.products.length / 2) * 280;
+      h += 24;
+    }
+  }
+
+  h += 32 + 500; // paddingBottom + buffer de segurança generoso
+  return Math.max(842, h);
+}
+
+export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) => {
+  const pageHeight = estimatePageHeight(data);
+
+  return React.createElement(
     Document,
     { title: `Ingresso — ${data.event.name}`, author: 'PódioTicket' },
     React.createElement(
       Page,
       {
-        size: 'A4',
+        size: [595, pageHeight],
         style: {
           fontFamily: 'DM Sans',
           backgroundColor: C.white,
@@ -526,44 +570,58 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
           ),
         ),
         React.createElement(HR, null),
+        /* Duas linhas de 2 colunas evita bug de altura no yoga-layout com texto longo */
         React.createElement(
           View,
-          { style: { flexDirection: 'row', gap: 12 } },
-          ...[
-            { label: 'Data', value: fmtDate(data.event.date) },
-            { label: 'Organização', value: data.event.organization },
-            { label: 'Local', value: data.event.location },
-            {
-              label: 'Participantes',
-              value: `${data.event.participantCount} atleta${data.event.participantCount !== 1 ? 's' : ''}`,
-            },
-          ].map(({ label, value }) =>
-            React.createElement(
-              View,
-              { key: label, style: { flex: 1, gap: 12 } },
+          { style: { gap: 16 } },
+          /* Linha 1: Data + Organização */
+          React.createElement(
+            View,
+            { style: { flexDirection: 'row', gap: 12 } },
+            ...[
+              { label: 'Data', value: fmtDate(data.event.date) },
+              { label: 'Organização', value: data.event.organization },
+            ].map(({ label, value }) =>
               React.createElement(
-                Text,
-                {
-                  style: {
-                    fontFamily: 'DM Sans',
-                    fontSize: 14,
-                    fontWeight: 400,
-                    color: C.gray11,
-                  },
-                },
-                label,
+                View,
+                { key: label, style: { flex: 1, minWidth: 0, gap: 8 } },
+                React.createElement(
+                  Text,
+                  { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 400, color: C.gray11 } },
+                  label,
+                ),
+                React.createElement(
+                  Text,
+                  { style: { fontFamily: 'DM Sans', fontSize: 16, fontWeight: 500, color: C.gray12 } },
+                  value,
+                ),
               ),
+            ),
+          ),
+          /* Linha 2: Local + Participantes */
+          React.createElement(
+            View,
+            { style: { flexDirection: 'row', gap: 12 } },
+            ...[
+              { label: 'Local', value: data.event.location },
+              {
+                label: 'Participantes',
+                value: `${data.event.participantCount} atleta${data.event.participantCount !== 1 ? 's' : ''}`,
+              },
+            ].map(({ label, value }) =>
               React.createElement(
-                Text,
-                {
-                  style: {
-                    fontFamily: 'DM Sans',
-                    fontSize: 16,
-                    fontWeight: 500,
-                    color: C.gray12,
-                  },
-                },
-                value,
+                View,
+                { key: label, style: { flex: 1, minWidth: 0, gap: 8 } },
+                React.createElement(
+                  Text,
+                  { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 400, color: C.gray11 } },
+                  label,
+                ),
+                React.createElement(
+                  Text,
+                  { style: { fontFamily: 'DM Sans', fontSize: 16, fontWeight: 500, color: C.gray12 } },
+                  value,
+                ),
               ),
             ),
           ),
@@ -575,3 +633,4 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
       ),
     ),
   );
+};

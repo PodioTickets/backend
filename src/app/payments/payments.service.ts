@@ -1138,10 +1138,11 @@ export class PaymentsService {
         participantCount: regs.length,
       },
       registrations: regs.map((reg: any, idx: number) => {
-        // Usar dados do User vinculado apenas na inscrição do próprio comprador;
-        // convidados têm reg.user = comprador → não usar user.* como fallback
-        const isBuyerReg = buyerUserId && reg.user?.id === buyerUserId && !reg.participantName;
-        const user = isBuyerReg ? (reg.user ?? {}) : {};
+        // Usa reg.user como fallback para todas as inscrições:
+        // - Inscrição do comprador: reg.participantEmail é null → usa user.email etc.
+        // - Guest com participantEmail próprio: usa o dele (prioridade sobre user.*)
+        // - Guest sem participantEmail: cai no user do comprador como contato de referência
+        const user = reg.user ?? {};
         const ticket = reg.tickets?.[0]?.ticket;
         const catName = ticket?.category?.name ?? '';
         const ticketName = ticket?.name ?? '';
