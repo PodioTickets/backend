@@ -1386,6 +1386,26 @@ export class OrdersService {
 
     if (dto.couponCode) {
       const normalizedCode = dto.couponCode.toUpperCase().trim();
+
+      // Voucher takes priority over coupon when both share the same code
+      const voucherByCode = await r.voucher.findUnique({ where: { code: normalizedCode } });
+      if (voucherByCode && voucherByCode.eventId === order.eventId && voucherByCode.status === 'ACTIVE') {
+        if (!voucherByCode.expiryDate || new Date(voucherByCode.expiryDate) > new Date()) {
+          discount = ticketsSubtotal;
+          voucherId = voucherByCode.id;
+          const finalAmountV = Math.max(0, order.totalAmount - discount);
+          const updatedV = await w.order.update({
+            where: { id: orderId },
+            data: { couponId: null, voucherId, discount, finalAmount: finalAmountV, updatedAt: new Date() },
+            include: ORDER_INCLUDE,
+          });
+          return {
+            ...orderShape(updatedV, discount),
+            appliedDiscount: { type: 'voucher', discount },
+          };
+        }
+      }
+
       const coupon = await r.coupon.findFirst({
         where: {
           eventId: order.eventId,
@@ -1396,25 +1416,7 @@ export class OrdersService {
         },
       });
 
-      // Se não é um cupom, verifica se o código pertence a um voucher (frontend usa campo único)
       if (!coupon) {
-        const voucher = await r.voucher.findUnique({ where: { code: normalizedCode } });
-        if (voucher && voucher.eventId === order.eventId && voucher.status === 'ACTIVE') {
-          if (!voucher.expiryDate || new Date(voucher.expiryDate) > new Date()) {
-            discount = ticketsSubtotal;
-            voucherId = voucher.id;
-            const finalAmountV = Math.max(0, order.totalAmount - discount);
-            const updatedV = await w.order.update({
-              where: { id: orderId },
-              data: { couponId: null, voucherId, discount, finalAmount: finalAmountV, updatedAt: new Date() },
-              include: ORDER_INCLUDE,
-            });
-            return {
-              ...orderShape(updatedV, discount),
-              appliedDiscount: { type: 'voucher', discount },
-            };
-          }
-        }
         throw new AppUnprocessableException('COUPON_NOT_FOUND', 'Cupom não encontrado ou inválido');
       }
       if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) throw new AppUnprocessableException('COUPON_EXPIRED', 'Cupom expirado');

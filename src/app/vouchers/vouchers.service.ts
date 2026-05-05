@@ -201,35 +201,80 @@ export class VouchersService {
       prismaRead.voucher.count({ where: filteredWhere }),
       prismaRead.voucher.findMany({
         where: baseWhere,
-        select: { id: true, status: true, expiryDate: true, createdAt: true },
+        select: { id: true, status: true, expiryDate: true, createdAt: true, appliesTo: true },
         orderBy: { createdAt: 'asc' },
       }),
     ]);
+
+    const now = new Date();
+    const firstVoucher = allGroupVouchers[0];
+    const groupExpiryDate = firstVoucher?.expiryDate ?? null;
 
     // Estatísticas do grupo completo (independente do filtro de status)
     const groupStats = allGroupVouchers.reduce(
       (acc, v) => {
         acc.totalCount++;
-        if (v.status === 'ACTIVE') acc.availableCount++;
+        const expiryDate = v.expiryDate ?? groupExpiryDate;
+        const effectivelyExpired = v.status === 'ACTIVE' && expiryDate != null && expiryDate < now;
+        if (v.status === 'ACTIVE' && !effectivelyExpired) acc.availableCount++;
         else if (v.status === 'USED') acc.usedCount++;
-        else if (v.status === 'EXPIRED') acc.expiredCount++;
+        else if (v.status === 'EXPIRED' || effectivelyExpired) acc.expiredCount++;
         else if (v.status === 'INACTIVE') acc.inactiveCount++;
         return acc;
       },
       { totalCount: 0, availableCount: 0, usedCount: 0, expiredCount: 0, inactiveCount: 0 },
     );
 
-    const firstVoucher = allGroupVouchers[0];
     const groupStatus =
       groupStats.availableCount > 0 ? 'ACTIVE'
       : groupStats.usedCount > 0 ? 'USED'
       : groupStats.expiredCount > 0 ? 'EXPIRED'
       : 'INACTIVE';
 
+    const parsedAppliesTo = this.parseAppliesTo(firstVoucher?.appliesTo ?? null);
+    const linkedTicketId: string | null = Array.isArray(parsedAppliesTo)
+      ? (parsedAppliesTo[0] ?? null)
+      : (parsedAppliesTo ?? null);
+    let linkedTicket: { id: string; name: string; category: { id: string; name: string } | null; price: number | null } | null = null;
+    if (linkedTicketId) {
+      const ticket = await prismaRead.ticket.findUnique({
+        where: { id: linkedTicketId },
+        select: {
+          id: true,
+          name: true,
+          category: { select: { id: true, name: true } },
+          batches: {
+            select: { id: true, price: true, quantity: true, availableQuantity: true, startDate: true, endDate: true, sortOrder: true, triggerType: true },
+            orderBy: { sortOrder: 'asc' },
+          },
+        },
+      });
+      if (ticket) {
+        const batchIds = ticket.batches.map((b) => b.id);
+        const soldRows = batchIds.length > 0
+          ? await prismaRead.registrationTicket.groupBy({
+              by: ['batchId'],
+              where: { batchId: { in: batchIds }, registration: { status: { not: 'CANCELLED' } } },
+              _count: { id: true },
+            })
+          : [];
+        const soldMap = new Map(soldRows.map((s) => [s.batchId, s._count.id]));
+        const batchesWithSold = ticket.batches.map((b) => ({ ...b, quantitySold: soldMap.get(b.id) ?? 0 }));
+        const activePrice = this.resolveActiveBatchPrice(batchesWithSold);
+        linkedTicket = {
+          id: ticket.id,
+          name: ticket.name,
+          category: ticket.category ?? null,
+          price: activePrice,
+        };
+      }
+    }
+
     const groupSummary = {
       name: groupName,
       status: groupStatus,
       expiryDate: firstVoucher?.expiryDate ?? null,
+      linkedTicket,
       ...groupStats,
     };
 
@@ -486,9 +531,17 @@ export class VouchersService {
   }
 
   private validateVoucherData(dto: CreateVoucherDto | UpdateVoucherDto) {
-    // Validar CPF list
     if (dto.cpfListStatus === 'ENABLED' && (!dto.cpfList || dto.cpfList.length === 0)) {
       throw new BadRequestException('cpfList is required when cpfListStatus is ENABLED');
+    }
+
+    if (dto.appliesTo !== undefined && dto.appliesTo !== null) {
+      if (dto.appliesTo === 'all') {
+        throw new BadRequestException('appliesTo must be a single ticket ID, not "all"');
+      }
+      if (Array.isArray(dto.appliesTo) && dto.appliesTo.length > 1) {
+        throw new BadRequestException('appliesTo must be a single ticket ID');
+      }
     }
   }
 
@@ -500,6 +553,25 @@ export class VouchersService {
     
     // Caso contrário, tentar fazer parse direto
     return new Date(dateString);
+  }
+
+  private resolveActiveBatchPrice(
+    batches: Array<{ id: string; price: number; quantity: number; availableQuantity: number; startDate: Date | null; endDate: Date | null; sortOrder: number; triggerType: string; quantitySold: number }>,
+  ): number | null {
+    if (batches.length === 0) return null;
+    const sorted = [...batches].sort((a, b) => a.sortOrder - b.sortOrder);
+    const now = new Date();
+    let activeIdx = 0;
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = sorted[activeIdx];
+      const curr = sorted[i];
+      if (curr.triggerType === 'AFTER_PREVIOUS_SOLD_OUT') {
+        if (prev.quantitySold >= prev.quantity) activeIdx = i;
+      } else {
+        if (curr.startDate && now >= curr.startDate) activeIdx = i;
+      }
+    }
+    return sorted[activeIdx].price;
   }
 
   private parseAppliesTo(appliesTo: string | null): string | string[] | null {

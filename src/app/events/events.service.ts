@@ -3168,7 +3168,7 @@ export class EventsService {
 
     return Array.from(ticketMap.values())
       .map(ticket => ({ ...ticket, total: Math.round(ticket.total) }))
-      .sort((a, b) => b.total - a.total)
+      .sort((a, b) => b.quantity - a.quantity)
       .slice((page - 1) * limit, page * limit);
   }
 
