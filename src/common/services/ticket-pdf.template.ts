@@ -402,14 +402,58 @@ const TicketBrand = () =>
     }),
   );
 
-export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
-  React.createElement(
+/* Calcula altura aproximada para página única (scroll infinito) */
+function estimatePageHeight(data: TicketPdfTemplateData): number {
+  // Cabeçalho fixo: logo + HR + título seção + event card
+  let h = 32 + 60 + 1 + 20 + 18 + 12 + 14 + 16; // header + section title
+  h += 16 + 36 + 8 + 16 + 1 + 20; // event card: icon row + HR + gap
+  h += (14 + 8 + 16) * 2 + 16; // 2 linhas de metadata
+  h += 16; // card padding
+
+  for (const reg of data.registrations) {
+    h += 16; // marginTop do card
+
+    // Cabeçalho do participante: QR 80px + padding
+    h += 20 + 80 + 20;
+
+    // Informações do participante
+    const fieldCount = [reg.email, reg.cpf, reg.dateOfBirth, reg.phone, reg.gender]
+      .filter(Boolean).length;
+    if (fieldCount > 0) {
+      h += 24 + 18 + 20; // padding + título + gap
+      h += fieldCount * (8 + 16 + 12 + 16 + 8); // cada FieldItem
+      h += 24;
+    }
+
+    // Perguntas
+    if (reg.questionAnswers.length > 0) {
+      h += 1 + 24 + 18 + 20; // HR + padding + título + gap
+      h += reg.questionAnswers.length * (8 + 16 + 12 + 16 + 8);
+      h += 24;
+    }
+
+    // Produtos
+    if (reg.products.length > 0) {
+      h += 1 + 24 + 18 + 20; // HR + padding + título + gap
+      h += Math.ceil(reg.products.length / 2) * 220; // linha de produto
+      h += 24;
+    }
+  }
+
+  h += 32 + 200; // paddingBottom + buffer de segurança
+  return Math.max(842, h);
+}
+
+export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) => {
+  const pageHeight = estimatePageHeight(data);
+
+  return React.createElement(
     Document,
     { title: `Ingresso — ${data.event.name}`, author: 'PódioTicket' },
     React.createElement(
       Page,
       {
-        size: 'A4',
+        size: [595, pageHeight],
         style: {
           fontFamily: 'DM Sans',
           backgroundColor: C.white,
@@ -588,3 +632,4 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
       ),
     ),
   );
+};
