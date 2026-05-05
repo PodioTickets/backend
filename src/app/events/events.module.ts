@@ -1,17 +1,19 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { EventsService } from './events.service';
 import { EventsController } from './events.controller';
 import { EventNotificationsService } from './event-notifications.service';
 import { OrganizerEventNotificationsController } from './organizer-event-notifications.controller';
 import { ExportRegistrationsService } from './export-registrations.service';
+import { EmailService } from '../../common/services/email.service';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { OrganizationsModule } from '../organizations/organizations.module';
 import { TicketsModule } from '../tickets/tickets.module';
 
 @Module({
-  imports: [PrismaModule, OrganizationsModule, TicketsModule],
+  imports: [PrismaModule, OrganizationsModule, TicketsModule, ConfigModule],
   controllers: [EventsController, OrganizerEventNotificationsController],
-  providers: [EventsService, EventNotificationsService, ExportRegistrationsService],
+  providers: [EventsService, EventNotificationsService, ExportRegistrationsService, EmailService],
   exports: [EventsService, EventNotificationsService, ExportRegistrationsService],
 })
 export class EventsModule {}

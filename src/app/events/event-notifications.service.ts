@@ -1,10 +1,12 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { OrganizerMemberAccessService } from '../organizations/organizer-member-access.service';
+import { EmailService } from '../../common/services/email.service';
 import {
   CreateEventNotificationDto,
   EVENT_NOTIFICATION_CHANNEL_VALUES,
@@ -62,9 +64,12 @@ function eventNotifications(client: PrismaClient) {
 
 @Injectable()
 export class EventNotificationsService {
+  private readonly logger = new Logger(EventNotificationsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly organizerMemberAccess: OrganizerMemberAccessService,
+    private readonly emailService: EmailService,
   ) {}
 
   private allowedChannelSet = new Set<string>(EVENT_NOTIFICATION_CHANNEL_VALUES);
@@ -209,7 +214,7 @@ export class EventNotificationsService {
         title,
         messageHtml: sanitized,
         channels,
-        status: 'review',
+        status: 'sent',
         createdById: userId,
       },
       select: {
@@ -221,6 +226,11 @@ export class EventNotificationsService {
       },
     });
 
+    // Disparo fire-and-forget: envia emails para todos os inscritos confirmados
+    this.dispatchEmailsAsync(eventId, title, sanitized).catch((err) =>
+      this.logger.warn(`Falha no disparo assíncrono de comunicado (eventId=${eventId}): ${err?.message ?? err}`),
+    );
+
     return {
       message: 'Notificação registrada.',
       data: {
@@ -231,5 +241,91 @@ export class EventNotificationsService {
         status: created.status,
       },
     };
+  }
+
+  /**
+   * Busca dados do evento/organização e envia o comunicado sequencialmente
+   * para todos os participantes com inscrição confirmada.
+   * Execução assíncrona — não bloqueia o retorno da API.
+   */
+  private async dispatchEmailsAsync(
+    eventId: string,
+    subject: string,
+    messageHtml: string,
+  ): Promise<void> {
+    const prismaRead = this.prisma.getReadClient();
+
+    // Busca evento com dados da organização
+    const event = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      include: { organization: true },
+    });
+
+    if (!event) {
+      this.logger.warn(`dispatchEmailsAsync: evento não encontrado (id=${eventId})`);
+      return;
+    }
+
+    const org = event.organization as {
+      name: string;
+      tradeName?: string | null;
+      logoUrl?: string | null;
+      instagram?: string | null;
+      facebook?: string | null;
+      youtube?: string | null;
+      tiktok?: string | null;
+      website?: string | null;
+    } | null;
+
+    const orgName = org?.tradeName || org?.name || 'Organizador';
+
+    // Busca todas as inscrições confirmadas com email do participante/usuário
+    const registrations = await prismaRead.registration.findMany({
+      where: { eventId, status: 'CONFIRMED' },
+      select: {
+        participantEmail: true,
+        participantName: true,
+        user: { select: { email: true, firstName: true } },
+      },
+    });
+
+    // Coleta destinatários únicos por email
+    const seen = new Set<string>();
+    const recipients: { email: string; name: string }[] = [];
+    for (const reg of registrations) {
+      const email = reg.participantEmail ?? reg.user?.email;
+      if (!email || seen.has(email)) continue;
+      seen.add(email);
+      recipients.push({
+        email,
+        name: reg.participantName ?? reg.user?.firstName ?? 'Participante',
+      });
+    }
+
+    this.logger.log(`Comunicado "${subject}" — enviando para ${recipients.length} destinatário(s) (eventId=${eventId})`);
+
+    // Envio sequencial para evitar sobrecarga e respeitar regra do projeto
+    for (const recipient of recipients) {
+      await this.emailService
+        .sendOrganizerCommunication({
+          recipientEmail: recipient.email,
+          firstName: recipient.name,
+          eventName: event.name,
+          orgName,
+          orgAvatarUrl: org?.logoUrl ?? undefined,
+          subject,
+          messageHtml,
+          instagram: org?.instagram ?? undefined,
+          facebook: org?.facebook ?? undefined,
+          youtube: org?.youtube ?? undefined,
+          tiktok: org?.tiktok ?? undefined,
+          website: org?.website ?? undefined,
+        })
+        .catch((err) =>
+          this.logger.warn(`Falha ao enviar comunicado para ${recipient.email}: ${err?.message ?? err}`),
+        );
+    }
+
+    this.logger.log(`Comunicado enviado com sucesso para ${recipients.length} destinatário(s) (eventId=${eventId})`);
   }
 }

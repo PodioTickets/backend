@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Comunicado — PódioTicket</title>
+  <style>
+    @font-face {
+      font-family: 'DM Sans';
+      font-style: normal;
+      font-weight: 400 600;
+      font-display: swap;
+      src: url(https://fonts.gstatic.com/s/dmsans/v17/rP2Yp2ywxg089UriI5-g4vlH9VoD8Cmcqbu0-K4.woff2) format('woff2');
+    }
+    @font-face {
+      font-family: 'Manrope';
+      font-style: normal;
+      font-weight: 700;
+      font-display: swap;
+      src: url(https://fonts.gstatic.com/s/manrope/v20/xn7gYHE41ni1AdIRggexSg.woff2) format('woff2');
+    }
+    @font-face {
+      font-family: 'Manrope';
+      font-style: normal;
+      font-weight: 800;
+      font-display: swap;
+      src: url(https://fonts.gstatic.com/s/manrope/v20/xn7gYHE41ni1AdIRggexSg.woff2) format('woff2');
+    }
+    body { margin: 0; padding: 0; background-color: #F0F0F0; }
+    table { border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { border: 0; display: block; }
+    a { color: inherit !important; text-decoration: none !important; }
+    a[x-apple-data-detectors] { color: inherit !important; text-decoration: none !important; }
+  </style>
+</head>
+<body style="margin:0;padding:0;background-color:#F0F0F0;">
+
+<table width="100%" cellpadding="0" cellspacing="0" border="0">
+  <tr>
+    <td align="center" style="padding:20px 0;">
+
+      <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background-color:#FCFCFC;border-radius:12px;overflow:hidden;border-collapse:separate;border-spacing:0;">
+
+        <!-- ════════ HEADER ════════ -->
+        <tr>
+          <td align="center" style="height:88px;padding:28px 24px;background:linear-gradient(180deg,#191919 0%,#2A2A2A 100%);">
+            <table cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="padding-right:7px;vertical-align:middle;">
+                  <img src="https://www.podioticket.com.br/images/Vector-1.svg" alt="" width="33" height="32">
+                </td>
+                <td style="vertical-align:middle;">
+                  <img src="https://www.podioticket.com.br/images/P%C3%B3dio.svg" alt="Pódio" width="68" height="21">
+                </td>
+                <td style="vertical-align:middle;">
+                  <img src="https://www.podioticket.com.br/images/Ticket.svg" alt="Ticket" width="79" height="21">
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- ════════ BODY ════════ -->
+        <tr>
+          <td style="padding:60px 24px;border-bottom:1px solid #D9D9D9;background-color:#FCFCFC;">
+
+            <!-- Card verde: identificação do evento e organização -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:linear-gradient(180deg,#F4FBF6 0%,#E6F6EB 100%);border:1px solid #ADDDC0;border-radius:8px;border-collapse:separate;border-spacing:0;margin-bottom:32px;">
+              <tr>
+                <td style="padding:20px;">
+
+                  <!-- Linha superior: nome do evento + badge "Comunicado oficial" -->
+                  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:16px;">
+                    <tr>
+                      <!-- Esquerda: label + nome do evento -->
+                      <td style="vertical-align:middle;">
+                        <span style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#203C25;">Evento:&nbsp;</span><span style="font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:700;color:#203C25;">{{eventName}}</span>
+                      </td>
+                      <!-- Direita: ícone + "Comunicado oficial" -->
+                      <td align="right" style="vertical-align:middle;white-space:nowrap;">
+                        <table cellpadding="0" cellspacing="0" border="0" style="display:inline-table;">
+                          <tr>
+                            <td style="padding-right:6px;vertical-align:middle;">
+                              <img src="https://www.podioticket.com.br/images/icon-megaphone.svg" width="20" height="20" alt="">
+                            </td>
+                            <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:600;color:#203C25;vertical-align:middle;">Comunicado oficial</td>
+                          </tr>
+                        </table>
+                      </td>
+                    </tr>
+                  </table>
+
+                  <!-- Linha inferior: avatar + "Mensagem de" + nome da org -->
+                  <table cellpadding="0" cellspacing="0" border="0">
+                    <tr>
+                      <!-- Avatar da organização (condicional) -->
+                      <td style="padding-right:8px;vertical-align:middle;">
+                        {{#orgAvatarUrl}}
+                        <img src="{{orgAvatarUrl}}" alt="{{orgName}}" width="52" height="52" style="display:block;width:52px;height:52px;border-radius:50%;border:1px solid #46A758;object-fit:cover;">
+                        {{/orgAvatarUrl}}
+                        {{^orgAvatarUrl}}
+                        <table width="52" height="52" cellpadding="0" cellspacing="0" border="0" style="border-radius:50%;border:1px solid #46A758;background-color:#193B30;border-collapse:separate;">
+                          <tr><td width="52" height="52">&nbsp;</td></tr>
+                        </table>
+                        {{/orgAvatarUrl}}
+                      </td>
+                      <!-- Coluna: label + nome da org -->
+                      <td style="vertical-align:middle;">
+                        <p style="margin:0 0 2px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#203C25;">Mensagem de</p>
+                        <p style="margin:0;font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:700;color:#203C25;">{{orgName}}</p>
+                      </td>
+                    </tr>
+                  </table>
+
+                </td>
+              </tr>
+            </table>
+
+            <!-- Título da comunicação -->
+            <p style="margin:0 0 24px 0;font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:24px;font-weight:800;color:#202020;line-height:1.2;word-wrap:break-word;">{{subject}}</p>
+
+            <!-- Corpo da mensagem: injetado sem escape de HTML -->
+            <div style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:400;color:#646464;line-height:1.3;word-wrap:break-word;">
+              <!-- PODIO_MSG_BODY -->
+            </div>
+
+            <!-- Divisor -->
+            <hr style="border:none;border-top:1px solid #D9D9D9;margin:40px 0;">
+
+            <!-- Seção de redes sociais (condicional) -->
+            {{#hasSocialLinks}}
+            <table cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                {{#instagram}}
+                <td style="padding-right:4px;">
+                  <a href="{{instagram}}" target="_blank" style="text-decoration:none;">
+                    <table width="40" height="40" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #D9D9D9;border-radius:50%;border-collapse:separate;">
+                      <tr><td width="40" height="40" align="center" valign="middle"><img src="https://www.podioticket.com.br/images/social-instagram.svg" width="24" height="24" alt="Instagram" style="display:block;"></td></tr>
+                    </table>
+                  </a>
+                </td>
+                {{/instagram}}
+                {{#facebook}}
+                <td style="padding-right:4px;">
+                  <a href="{{facebook}}" target="_blank" style="text-decoration:none;">
+                    <table width="40" height="40" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #D9D9D9;border-radius:50%;border-collapse:separate;">
+                      <tr><td width="40" height="40" align="center" valign="middle"><img src="https://www.podioticket.com.br/images/social-facebook.svg" width="24" height="24" alt="Facebook" style="display:block;"></td></tr>
+                    </table>
+                  </a>
+                </td>
+                {{/facebook}}
+                {{#youtube}}
+                <td style="padding-right:4px;">
+                  <a href="{{youtube}}" target="_blank" style="text-decoration:none;">
+                    <table width="40" height="40" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #D9D9D9;border-radius:50%;border-collapse:separate;">
+                      <tr><td width="40" height="40" align="center" valign="middle"><img src="https://www.podioticket.com.br/images/social-youtube.svg" width="24" height="24" alt="YouTube" style="display:block;"></td></tr>
+                    </table>
+                  </a>
+                </td>
+                {{/youtube}}
+                {{#tiktok}}
+                <td style="padding-right:4px;">
+                  <a href="{{tiktok}}" target="_blank" style="text-decoration:none;">
+                    <table width="40" height="40" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #D9D9D9;border-radius:50%;border-collapse:separate;">
+                      <tr><td width="40" height="40" align="center" valign="middle"><img src="https://www.podioticket.com.br/images/social-tiktok.svg" width="24" height="24" alt="TikTok" style="display:block;"></td></tr>
+                    </table>
+                  </a>
+                </td>
+                {{/tiktok}}
+                {{#website}}
+                <td>
+                  <a href="{{website}}" target="_blank" style="text-decoration:none;">
+                    <table width="40" height="40" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #D9D9D9;border-radius:50%;border-collapse:separate;">
+                      <tr><td width="40" height="40" align="center" valign="middle"><img src="https://www.podioticket.com.br/images/social-website.svg" width="24" height="24" alt="Website" style="display:block;"></td></tr>
+                    </table>
+                  </a>
+                </td>
+                {{/website}}
+              </tr>
+            </table>
+            {{/hasSocialLinks}}
+
+          </td>
+        </tr>
+
+        <!-- ════════ FOOTER ════════ -->
+        <tr>
+          <td align="center" style="padding:40px 24px;background:linear-gradient(180deg,#F9F9F9 0%,#F0F0F0 100%);">
+
+            <img src="https://www.podioticket.com.br/images/Vector.svg" alt="" width="37" height="36" style="display:block;margin:0 auto 20px auto;">
+
+            <p style="margin:0 0 12px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:18.20px;text-align:center;word-wrap:break-word;">Plataforma de inscrições para eventos esportivos</p>
+
+            <p style="margin:0 0 52px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:500;color:#202020;line-height:18.20px;text-align:center;word-wrap:break-word;">Este é um e-mail automático. Para suporte, acesse a Central de Ajuda.</p>
+
+            <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+              <tr>
+                <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:18.20px;white-space:nowrap;">© 2026 Podioticket Ltda.</td>
+                <td style="padding:0 8px;vertical-align:middle;">
+                  <img src="https://www.podioticket.com.br/images/Ellipse%201.svg" width="6" height="6" alt="" style="border-radius:9999px;">
+                </td>
+                <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#646464;line-height:18.20px;white-space:nowrap;">CNPJ 65.174.909/0001-01</td>
+              </tr>
+            </table>
+
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>
+
+</body>
+</html>

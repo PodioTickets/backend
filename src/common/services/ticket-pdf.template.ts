@@ -207,6 +207,7 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
   return React.createElement(
     View,
     {
+      wrap: false,
       style: {
         backgroundColor: C.gray1,
         borderRadius: 12,
@@ -443,18 +444,18 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) =>
             { style: { flexDirection: 'row', gap: 4 } },
             React.createElement(
               Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 400, color: C.gray12 } },
+              { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray12 } },
               'Pedido: ',
             ),
             React.createElement(
               Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 600, color: C.gray12 } },
+              { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 600, color: C.gray12 } },
               data.orderId,
             ),
           ),
           React.createElement(
             Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 400, color: C.gray11 } },
+            { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray11 } },
             `Emitido em ${fmtDateTime(data.issuedAt)}`,
           ),
         ),
