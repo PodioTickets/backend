@@ -1126,11 +1126,6 @@ export class PaymentsService {
     // ID do comprador para distinguir inscrição própria de inscrição de convidado
     const buyerUserId = regs.find((r: any) => r.user?.email)?.user?.id as string | undefined;
 
-    // Garante que apenas a primeira inscrição do comprador usa os dados do user;
-    // se o comprador comprou múltiplos ingressos para si mesmo, as demais inscrições
-    // não devem herdar os dados pessoais dele (evita "dados do participante 1" em todos)
-    let buyerRegAlreadyUsed = false;
-
     const ticketPdfData = {
       orderId,
       orderNumber,
@@ -1143,15 +1138,11 @@ export class PaymentsService {
         participantCount: regs.length,
       },
       registrations: regs.map((reg: any, idx: number) => {
-        // Usar dados do User vinculado apenas na primeira inscrição do próprio comprador;
-        // inscrições subsequentes do mesmo user (ou de convidados) ficam com user = {}
-        const isFirstBuyerReg =
-          !buyerRegAlreadyUsed &&
-          !!buyerUserId &&
-          reg.user?.id === buyerUserId &&
-          !reg.participantName;
-        if (isFirstBuyerReg) buyerRegAlreadyUsed = true;
-        const user = isFirstBuyerReg ? (reg.user ?? {}) : {};
+        // Usa reg.user como fallback para todas as inscrições:
+        // - Inscrição do comprador: reg.participantEmail é null → usa user.email etc.
+        // - Guest com participantEmail próprio: usa o dele (prioridade sobre user.*)
+        // - Guest sem participantEmail: cai no user do comprador como contato de referência
+        const user = reg.user ?? {};
         const ticket = reg.tickets?.[0]?.ticket;
         const catName = ticket?.category?.name ?? '';
         const ticketName = ticket?.name ?? '';
