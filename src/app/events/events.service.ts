@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Logger,
   NotFoundException,
   BadRequestException,
   ForbiddenException,
@@ -43,14 +44,18 @@ import {
 } from './dto/kit-selection-display.dto';
 import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
 import { TicketsService } from '../tickets/tickets.service';
+import { EmailService } from '../../common/services/email.service';
 
 @Injectable()
 export class EventsService {
+  private readonly logger = new Logger(EventsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly organizerMemberAccess: OrganizerMemberAccessService,
     private readonly organizationsService: OrganizationsService,
     private readonly ticketsService: TicketsService,
+    private readonly emailService: EmailService,
   ) {}
 
   /**
@@ -2152,13 +2157,43 @@ export class EventsService {
     }
 
     // Atualizar status para PUBLISHED e travar configurações financeiras
+    const submittedAt = new Date();
     const updatedEvent = await prismaWrite.event.update({
       where: { id: eventId },
       data: {
         status: EventStatus.PUBLISHED,
-        financialSettingsLockedAt: new Date(),
+        financialSettingsLockedAt: submittedAt,
       },
     });
+
+    // Buscar e-mail e nome do organizador para notificação
+    const organizer = await prismaRead.user.findUnique({
+      where: { id: userId },
+      select: { email: true, firstName: true },
+    });
+
+    if (organizer?.email) {
+      const weekdays = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
+      const eventDt = new Date(event.eventDate);
+      const eventDateFormatted = `${eventDt.toLocaleDateString('pt-BR')} · ${weekdays[eventDt.getDay()]}`;
+      const submittedHH = String(submittedAt.getHours()).padStart(2, '0');
+      const submittedMM = String(submittedAt.getMinutes()).padStart(2, '0');
+      const submittedAtFormatted = `${submittedAt.toLocaleDateString('pt-BR')} · ${submittedHH}h${submittedMM}`;
+      const eventLocation = [event.location, event.city].filter(Boolean).join(', ');
+
+      this.emailService
+        .sendEventUnderReview({
+          recipientEmail: organizer.email,
+          eventName: event.name,
+          eventBannerUrl: event.bannerUrl ?? '',
+          eventDate: eventDateFormatted,
+          eventLocation,
+          submittedAt: submittedAtFormatted,
+        })
+        .catch((err) =>
+          this.logger.warn(`Falha ao enviar email de evento em análise (eventId=${eventId}): ${err?.message ?? err}`),
+        );
+    }
 
     return {
       message: 'Event published successfully',
