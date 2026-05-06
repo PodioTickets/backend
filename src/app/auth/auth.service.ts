@@ -91,13 +91,14 @@ export class AuthService {
             documentNumber: true,
             role: true,
             accountType: true,
+            mfaEnabled: true,
           },
         });
       } else {
         // Buscar por CPF/documentNumber (limpar formatação)
         const documentNumberClean = emailOrCpf.replace(/\D/g, '');
         user = await prismaWrite.user.findUnique({
-          where: { 
+          where: {
             documentNumberClean_accountType: {
               documentNumberClean: documentNumberClean,
               accountType: accountType,
@@ -113,6 +114,7 @@ export class AuthService {
             documentNumber: true,
             role: true,
             accountType: true,
+            mfaEnabled: true,
           },
         });
       }
@@ -355,8 +357,19 @@ export class AuthService {
   }
 
   async login(user: any) {
-    const payload = { 
-      email: user.email, 
+    // Se o usuário tiver 2FA ativo, emitir desafio MFA em vez de tokens reais
+    if (user.mfaEnabled) {
+      await this.send2FACode(user.id, user.email);
+      const mfaToken = this.jwtService.sign(
+        { sub: user.id, mfaPending: true, accountType: user.accountType || 'USER' },
+        { expiresIn: '10m' },
+      );
+      this.logger.log(`Login com MFA iniciado para usuário ${user.id}`);
+      return { mfaRequired: true, mfaToken };
+    }
+
+    const payload = {
+      email: user.email,
       sub: user.id,
       accountType: user.accountType || 'USER', // Incluir accountType no JWT
     };
@@ -399,6 +412,80 @@ export class AuthService {
         error?.message || 'Failed to generate tokens',
       );
     }
+  }
+
+  /**
+   * Verifica o token MFA temporário + código OTP e emite tokens reais de acesso.
+   * Chamado por POST /auth/2fa/verify-login após login com mfaEnabled=true.
+   */
+  async verifyLoginMfa(mfaToken: string, code: string): Promise<any> {
+    // Decodifica e valida o token temporário
+    let payload: any;
+    try {
+      payload = this.jwtService.verify(mfaToken);
+    } catch {
+      throw new UnauthorizedException('Token MFA inválido ou expirado.');
+    }
+
+    if (!payload?.mfaPending || !payload?.sub) {
+      throw new UnauthorizedException('Token MFA inválido.');
+    }
+
+    const userId = payload.sub as string;
+    const accountType = (payload.accountType as string) || 'USER';
+
+    // Verifica e consome o código OTP
+    await this.verifyAndConsume2FACode(userId, code);
+
+    // Busca dados do usuário para montar a resposta
+    const prismaWrite = this.prisma.getWriteClient();
+    const user = await prismaWrite.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        documentNumber: true,
+        role: true,
+        accountType: true,
+        avatarUrl: true,
+      },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('Usuário não encontrado.');
+    }
+
+    const accessPayload = { email: user.email, sub: user.id, accountType };
+    const accessToken = this.jwtService.sign(accessPayload);
+    const refreshToken = await this.createRefreshToken(user.id);
+
+    await prismaWrite.user.update({
+      where: { id: user.id },
+      data: { lastLoginAt: new Date() },
+    });
+
+    this.logger.log(`Login com MFA concluído para usuário ${user.id}`);
+
+    return {
+      message: 'Login successful',
+      success: true,
+      data: {
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        user: {
+          id: user.id,
+          email: user.email,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          documentNumber: user.documentNumber,
+          role: user.role,
+          accountType: user.accountType || 'USER',
+          avatarUrl: user.avatarUrl,
+        },
+      },
+    };
   }
 
   async refreshToken(refreshTokenDto: RefreshTokenDto) {

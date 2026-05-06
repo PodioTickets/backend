@@ -37,6 +37,7 @@ import {
   ResendResetCodeDto,
   VerifyEmailChangeDto,
   TwoFactorCodeDto,
+  VerifyLoginMfaDto,
 } from './dto/auth.dto';
 import { Response } from 'express';
 import { LocalAuthGuard } from './guards/local-auth.guard';
@@ -464,6 +465,33 @@ export class AuthController {
   async disable2FA(@Request() req, @Body() dto: TwoFactorCodeDto) {
     await this.authService.disable2FA(req.user.id, dto.code);
     return { message: '2FA desativado com sucesso.', success: true };
+  }
+
+  @Post('2fa/verify-login')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Verifica o código MFA e emite tokens reais de acesso',
+    description:
+      'Chamado quando o login retorna { mfaRequired: true, mfaToken }. ' +
+      'Recebe o token MFA temporário (validade 10 min) e o código OTP enviado ao e-mail do usuário. ' +
+      'Em caso de sucesso, retorna access_token e refresh_token definitivos.',
+  })
+  @ApiBody({ type: VerifyLoginMfaDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Login MFA concluído — tokens reais retornados',
+    schema: {
+      example: {
+        message: 'Login successful',
+        success: true,
+        data: { access_token: 'eyJ...', refresh_token: '...', user: {} },
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Código incorreto, expirado ou tentativas esgotadas' })
+  @ApiResponse({ status: 401, description: 'Token MFA inválido ou expirado' })
+  async verifyLoginMfa(@Body() dto: VerifyLoginMfaDto) {
+    return this.authService.verifyLoginMfa(dto.mfaToken, dto.code);
   }
 
   @Get('csrf-token')

@@ -288,3 +288,17 @@ export class TwoFactorCodeDto {
   @Matches(/^\d{6}$/, { message: 'O código deve conter exatamente 6 dígitos numéricos' })
   code: string;
 }
+
+export class VerifyLoginMfaDto {
+  @ApiProperty({ description: 'Token MFA temporário retornado quando mfaRequired=true no login', example: 'eyJhbGci...' })
+  @IsString()
+  @IsNotEmpty()
+  mfaToken: string;
+
+  @ApiProperty({ description: 'Código numérico de 6 dígitos enviado por e-mail', example: '482931' })
+  @IsString()
+  @IsNotEmpty()
+  @Length(6, 6)
+  @Matches(/^\d{6}$/, { message: 'O código deve conter exatamente 6 dígitos numéricos' })
+  code: string;
+}
