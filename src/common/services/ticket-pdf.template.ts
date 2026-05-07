@@ -78,6 +78,19 @@ function fmtCurrency(cents: number): string {
   return (cents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
 
+function fmtCPF(cpf: string): string {
+  const d = cpf.replace(/\D/g, '');
+  if (d.length !== 11) return cpf;
+  return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
+}
+
+function fmtPhone(phone: string): string {
+  const d = phone.replace(/\D/g, '');
+  if (d.length === 11) return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
+  if (d.length === 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
+  return phone;
+}
+
 const HR = () =>
   React.createElement(View, { style: { height: 1, backgroundColor: C.gray6 } });
 
@@ -144,7 +157,7 @@ const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
         React.createElement(
           Text,
           { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 700, color: C.gray12 } },
-          fmtCurrency(product.price),
+          product.isIncluded ? 'Incluso' : fmtCurrency(product.price),
         ),
       ),
     ),
@@ -167,30 +180,25 @@ const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
             ),
           )
         : null,
-      React.createElement(
-        View,
-        {
-          style: {
-            paddingHorizontal: 12,
-            paddingVertical: 8,
-            backgroundColor: product.isIncluded ? C.green3 : C.blue3,
-            borderRadius: 8,
-            alignSelf: 'flex-start',
-          },
-        },
-        React.createElement(
-          Text,
-          {
-            style: {
-              fontFamily: 'DM Sans',
-              fontSize: 14,
-              fontWeight: 500,
-              color: product.isIncluded ? C.green12 : C.blue12,
+      !product.isIncluded
+        ? React.createElement(
+            View,
+            {
+              style: {
+                paddingHorizontal: 12,
+                paddingVertical: 8,
+                backgroundColor: C.blue3,
+                borderRadius: 8,
+                alignSelf: 'flex-start',
+              },
             },
-          },
-          product.isIncluded ? 'Incluso' : 'Adicional',
-        ),
-      ),
+            React.createElement(
+              Text,
+              { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 500, color: C.blue12 } },
+              'Adicional',
+            ),
+          )
+        : null,
     ),
   );
 
@@ -198,9 +206,9 @@ const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
 const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
   const fields = [
     reg.email ? { label: 'Email', value: reg.email } : null,
-    reg.cpf ? { label: 'CPF', value: reg.cpf } : null,
+    reg.cpf ? { label: 'CPF', value: fmtCPF(reg.cpf) } : null,
     reg.dateOfBirth ? { label: 'Data de nascimento', value: fmtDate(reg.dateOfBirth) } : null,
-    reg.phone ? { label: 'Telefone', value: reg.phone } : null,
+    reg.phone ? { label: 'Telefone', value: fmtPhone(reg.phone) } : null,
     reg.gender ? { label: 'Sexo', value: reg.gender === 'MALE' ? 'Masculino' : reg.gender === 'FEMALE' ? 'Feminino' : reg.gender } : null,
   ].filter(Boolean) as { label: string; value: string }[];
 

@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Logger,
   NotFoundException,
   BadRequestException,
   ForbiddenException,
@@ -43,15 +44,19 @@ import {
 } from './dto/kit-selection-display.dto';
 import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
 import { TicketsService } from '../tickets/tickets.service';
+import { EmailService } from '../../common/services/email.service';
 
 @Injectable()
 export class EventsService {
+  private readonly logger = new Logger(EventsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly organizerMemberAccess: OrganizerMemberAccessService,
     private readonly organizationsService: OrganizationsService,
     private readonly ticketsService: TicketsService,
-  ) {}
+    private readonly emailService: EmailService,
+  ) { }
 
   /**
    * Retorna o valor em centavos (valores já estão em centavos no banco)
@@ -1165,7 +1170,7 @@ export class EventsService {
       where: { slug },
       include: {
         organization: {
-          include: {  
+          include: {
             members: {
               where: { role: 'OWNER' },
               include: {
@@ -2152,10 +2157,43 @@ export class EventsService {
       throw new BadRequestException('Event must have complete location information before submitting for review');
     }
 
+    const submittedAt = new Date();
     const updatedEvent = await prismaWrite.event.update({
       where: { id: eventId },
-      data: { status: EventStatus.REVISION },
+      data: {
+        status: EventStatus.REVISION,
+        financialSettingsLockedAt: new Date(),
+      },
     });
+
+    // Buscar e-mail e nome do organizador para notificação
+    const organizer = await prismaRead.user.findUnique({
+      where: { id: userId },
+      select: { email: true, firstName: true },
+    });
+
+    if (organizer?.email) {
+      const weekdays = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
+      const eventDt = new Date(event.eventDate);
+      const eventDateFormatted = `${eventDt.toLocaleDateString('pt-BR')} · ${weekdays[eventDt.getDay()]}`;
+      const submittedHH = String(submittedAt.getHours()).padStart(2, '0');
+      const submittedMM = String(submittedAt.getMinutes()).padStart(2, '0');
+      const submittedAtFormatted = `${submittedAt.toLocaleDateString('pt-BR')} · ${submittedHH}h${submittedMM}`;
+      const eventLocation = [event.location, event.city].filter(Boolean).join(', ');
+
+      this.emailService
+        .sendEventUnderReview({
+          recipientEmail: organizer.email,
+          eventName: event.name,
+          eventBannerUrl: event.bannerUrl ?? '',
+          eventDate: eventDateFormatted,
+          eventLocation,
+          submittedAt: submittedAtFormatted,
+        })
+        .catch((err) =>
+          this.logger.warn(`Falha ao enviar email de evento em análise (eventId=${eventId}): ${err?.message ?? err}`),
+        );
+    }
 
     return {
       message: 'Event submitted for review successfully',
@@ -2410,41 +2448,41 @@ export class EventsService {
         select: { organizerFeeRate: true },
       }),
       prismaRead.registration.findMany({
-      where: registrationWhere,
-      include: {
-        order: {
-          include: {
-            payment: true,
+        where: registrationWhere,
+        include: {
+          order: {
+            include: {
+              payment: true,
+            },
           },
-        },
-        modalities: {
-          include: {
-            modality: true,
+          modalities: {
+            include: {
+              modality: true,
+            },
           },
-        },
-        tickets: {
-          include: {
-            ticket: {
-              include: {
-                category: {
-                  select: {
-                    id: true,
-                    name: true,
+          tickets: {
+            include: {
+              ticket: {
+                include: {
+                  category: {
+                    select: {
+                      id: true,
+                      name: true,
+                    },
                   },
                 },
               },
             },
           },
-        },
-        user: {
-          select: {
-            id: true,
-            city: true,
-            state: true,
+          user: {
+            select: {
+              id: true,
+              city: true,
+              state: true,
+            },
           },
         },
-      },
-    }),
+      }),
     ]);
 
     const organizerFeeRate: number = eventConfig?.organizerFeeRate ?? 0;
@@ -3945,13 +3983,13 @@ export class EventsService {
     // when multiple confirmed registrations belong to the same order.
     const rows = orderCreatedBetween
       ? await prismaRead.$queryRaw<
-          {
-            total: bigint;
-            paid: bigint;
-            cancelled: bigint;
-            collected: bigint;
-          }[]
-        >(Prisma.sql`
+        {
+          total: bigint;
+          paid: bigint;
+          cancelled: bigint;
+          collected: bigint;
+        }[]
+      >(Prisma.sql`
           WITH paid_orders AS (
             SELECT DISTINCT r."orderId", o."finalAmount"
             FROM "Registration" r
@@ -3982,13 +4020,13 @@ export class EventsService {
             ${upperBoundSql}
         `)
       : await prismaRead.$queryRaw<
-          {
-            total: bigint;
-            paid: bigint;
-            cancelled: bigint;
-            collected: bigint;
-          }[]
-        >(Prisma.sql`
+        {
+          total: bigint;
+          paid: bigint;
+          cancelled: bigint;
+          collected: bigint;
+        }[]
+      >(Prisma.sql`
           WITH paid_orders AS (
             SELECT DISTINCT r."orderId", o."finalAmount"
             FROM "Registration" r
@@ -4458,155 +4496,155 @@ export class EventsService {
         avatarUrl: null,
       };
       return ({
-      id: reg.id,
-      userId: reg.userId,
-      eventId: reg.eventId,
-      orderId: reg.orderId,
-      status: reg.status,
-      qrCode: reg.qrCode,
-      createdAt: reg.createdAt.toISOString(),
-      updatedAt: reg.updatedAt.toISOString(),
-      user: participantData,
-      // Dados do pedido (compartilhado entre participantes)
-      order: reg.order ? {
-        id: reg.order.id,
-        totalAmount: this.normalizeToCents(reg.order.totalAmount), // Normalizar para centavos
-        serviceFee: this.normalizeToCents(reg.order.serviceFee), // Normalizar para centavos
-        discount: this.normalizeToCents(reg.order.discount), // Normalizar para centavos
-        finalAmount: this.normalizeToCents(reg.order.finalAmount), // Normalizar para centavos
-        purchaseDate: reg.order.createdAt.toISOString(), // Data do pedido
-        // Informações do comprador (quem fez o pedido/pagamento)
-        buyer: reg.order.user ? {
-          id: reg.order.user.id,
-          firstName: reg.order.user.firstName,
-          lastName: reg.order.user.lastName,
-          email: reg.order.user.email,
-          avatarUrl: reg.order.user.avatarUrl,
-        } : null,
-        billingAddress: this.resolveOrderBillingAddress(reg.order, reg.order.payment),
-        // Informações do pagamento
-        payment: reg.order.payment ? (() => {
-          const payment = reg.order.payment;
+        id: reg.id,
+        userId: reg.userId,
+        eventId: reg.eventId,
+        orderId: reg.orderId,
+        status: reg.status,
+        qrCode: reg.qrCode,
+        createdAt: reg.createdAt.toISOString(),
+        updatedAt: reg.updatedAt.toISOString(),
+        user: participantData,
+        // Dados do pedido (compartilhado entre participantes)
+        order: reg.order ? {
+          id: reg.order.id,
+          totalAmount: this.normalizeToCents(reg.order.totalAmount), // Normalizar para centavos
+          serviceFee: this.normalizeToCents(reg.order.serviceFee), // Normalizar para centavos
+          discount: this.normalizeToCents(reg.order.discount), // Normalizar para centavos
+          finalAmount: this.normalizeToCents(reg.order.finalAmount), // Normalizar para centavos
+          purchaseDate: reg.order.createdAt.toISOString(), // Data do pedido
+          // Informações do comprador (quem fez o pedido/pagamento)
+          buyer: reg.order.user ? {
+            id: reg.order.user.id,
+            firstName: reg.order.user.firstName,
+            lastName: reg.order.user.lastName,
+            email: reg.order.user.email,
+            avatarUrl: reg.order.user.avatarUrl,
+          } : null,
+          billingAddress: this.resolveOrderBillingAddress(reg.order, reg.order.payment),
+          // Informações do pagamento
+          payment: reg.order.payment ? (() => {
+            const payment = reg.order.payment;
 
-          // Parsear metadata - Prisma Json pode vir como objeto ou string
-          let metadata: any = null;
-          if (payment.metadata) {
-            if (typeof payment.metadata === 'string') {
-              try {
-                metadata = JSON.parse(payment.metadata);
-              } catch (e) {
-                // Se falhar ao parsear, tentar usar como objeto
+            // Parsear metadata - Prisma Json pode vir como objeto ou string
+            let metadata: any = null;
+            if (payment.metadata) {
+              if (typeof payment.metadata === 'string') {
+                try {
+                  metadata = JSON.parse(payment.metadata);
+                } catch (e) {
+                  // Se falhar ao parsear, tentar usar como objeto
+                  metadata = payment.metadata;
+                }
+              } else {
+                // Já é um objeto
                 metadata = payment.metadata;
               }
-            } else {
-              // Já é um objeto
-              metadata = payment.metadata;
             }
-          }
 
-          // Determinar o status detalhado baseado no status e metadata
-          let paymentStatus = payment.status;
-          let refundType: 'CHARGEBACK' | 'REFUND' | null = null;
+            // Determinar o status detalhado baseado no status e metadata
+            let paymentStatus = payment.status;
+            let refundType: 'CHARGEBACK' | 'REFUND' | null = null;
 
-          // Se o status é REFUNDED, verificar o tipo no metadata
-          if (payment.status === PaymentStatus.REFUNDED) {
-            if (metadata && typeof metadata === 'object' && metadata.refundType) {
-              // Verificar se refundType é CHARGEBACK ou REFUND
-              const rt = String(metadata.refundType).toUpperCase();
-              refundType = rt === 'CHARGEBACK' ? 'CHARGEBACK' : 'REFUND';
-            } else {
-              // Se não tiver refundType no metadata, assumir REFUND (estorno padrão)
-              refundType = 'REFUND';
+            // Se o status é REFUNDED, verificar o tipo no metadata
+            if (payment.status === PaymentStatus.REFUNDED) {
+              if (metadata && typeof metadata === 'object' && metadata.refundType) {
+                // Verificar se refundType é CHARGEBACK ou REFUND
+                const rt = String(metadata.refundType).toUpperCase();
+                refundType = rt === 'CHARGEBACK' ? 'CHARGEBACK' : 'REFUND';
+              } else {
+                // Se não tiver refundType no metadata, assumir REFUND (estorno padrão)
+                refundType = 'REFUND';
+              }
             }
-          }
+
+            return {
+              id: payment.id,
+              status: paymentStatus,
+              refundType, // Sempre incluir refundType quando status for REFUNDED
+              method: payment.method,
+              amount: this.normalizeToCents(payment.amount), // Normalizar para centavos
+              paymentDate: payment.paymentDate?.toISOString() || null,
+              createdAt: payment.createdAt.toISOString(),
+              // Incluir metadata completo para facilitar renderização no frontend
+              metadata: metadata || null,
+            };
+          })() : null,
+        } : null,
+        // Modalidades/Ingressos do participante
+        modalities: reg.modalities.map((rm: any) => ({
+          id: rm.id,
+          modality: {
+            id: rm.modality.id,
+            name: rm.modality.name,
+            price: rm.modality.price, // Já está em centavos
+            ticketId: reg.tickets?.[0]?.ticket?.id,
+          },
+        })),
+        // Ticket do participante (cada registration tem apenas um ticket)
+        ticket: reg.tickets && reg.tickets.length > 0 ? (() => {
+          const registrationTicket = reg.tickets[0];
+          const ticket = registrationTicket.ticket;
+          const snap = registrationTicket.ticketSnapshot as Record<string, any> | null;
+
+          // Snapshot tem prioridade — preserva dados do momento da compra mesmo após edição/deleção
+          const ticketPrice = snap?.batch?.price ?? registrationTicket.batch?.price ?? 0;
+
+          // Soma dos produtos adicionados para este participante (já em centavos)
+          const productsTotal = (reg.products ?? []).reduce(
+            (sum: number, rp: any) => sum + (rp.totalPrice ?? 0),
+            0,
+          );
 
           return {
-            id: payment.id,
-            status: paymentStatus,
-            refundType, // Sempre incluir refundType quando status for REFUNDED
-            method: payment.method,
-            amount: this.normalizeToCents(payment.amount), // Normalizar para centavos
-            paymentDate: payment.paymentDate?.toISOString() || null,
-            createdAt: payment.createdAt.toISOString(),
-            // Incluir metadata completo para facilitar renderização no frontend
-            metadata: metadata || null,
+            id: ticket.id,
+            name: snap?.name ?? ticket.name,
+            description: snap?.description ?? ticket.description ?? null,
+            modality: snap?.modality ?? ticket.modality ?? null,
+            distance: snap?.distance ?? ticket.distance ?? null,
+            distanceUnit: snap?.distanceUnit ?? ticket.distanceUnit ?? null,
+            gender: snap?.gender ?? ticket.gender ?? null,
+            ageLimitMin: snap?.ageLimitMin ?? ticket.ageLimitMin ?? null,
+            ageLimitMax: snap?.ageLimitMax ?? ticket.ageLimitMax ?? null,
+            batchId: registrationTicket.batchId ?? null,
+            batchName: snap?.batch?.name ?? null,
+            category: snap?.category ?? (ticket.category ? { id: ticket.category.id, name: ticket.category.name } : null),
+            products: snap?.products ?? [],
+            price: ticketPrice,
+            productsTotal,
+            total: ticketPrice + productsTotal,
           };
         })() : null,
-      } : null,
-      // Modalidades/Ingressos do participante
-      modalities: reg.modalities.map((rm: any) => ({
-        id: rm.id,
-        modality: {
-          id: rm.modality.id,
-          name: rm.modality.name,
-          price: rm.modality.price, // Já está em centavos
-          ticketId: reg.tickets?.[0]?.ticket?.id,
-        },
-      })),
-      // Ticket do participante (cada registration tem apenas um ticket)
-      ticket: reg.tickets && reg.tickets.length > 0 ? (() => {
-        const registrationTicket = reg.tickets[0];
-        const ticket = registrationTicket.ticket;
-        const snap = registrationTicket.ticketSnapshot as Record<string, any> | null;
-
-        // Snapshot tem prioridade — preserva dados do momento da compra mesmo após edição/deleção
-        const ticketPrice = snap?.batch?.price ?? registrationTicket.batch?.price ?? 0;
-
-        // Soma dos produtos adicionados para este participante (já em centavos)
-        const productsTotal = (reg.products ?? []).reduce(
-          (sum: number, rp: any) => sum + (rp.totalPrice ?? 0),
-          0,
-        );
-
-        return {
-          id: ticket.id,
-          name: snap?.name ?? ticket.name,
-          description: snap?.description ?? ticket.description ?? null,
-          modality: snap?.modality ?? ticket.modality ?? null,
-          distance: snap?.distance ?? ticket.distance ?? null,
-          distanceUnit: snap?.distanceUnit ?? ticket.distanceUnit ?? null,
-          gender: snap?.gender ?? ticket.gender ?? null,
-          ageLimitMin: snap?.ageLimitMin ?? ticket.ageLimitMin ?? null,
-          ageLimitMax: snap?.ageLimitMax ?? ticket.ageLimitMax ?? null,
-          batchId: registrationTicket.batchId ?? null,
-          batchName: snap?.batch?.name ?? null,
-          category: snap?.category ?? (ticket.category ? { id: ticket.category.id, name: ticket.category.name } : null),
-          products: snap?.products ?? [],
-          price: ticketPrice,
-          productsTotal,
-          total: ticketPrice + productsTotal,
-        };
-      })() : null,
-      // Produtos adicionados para este participante
-      products: (reg.products ?? []).map((rp: any) => ({
-        id: rp.id,
-        product: { id: rp.product.id, name: rp.product.name },
-        variation: rp.variation ? { id: rp.variation.id, name: rp.variation.name } : null,
-        quantity: rp.quantity,
-        unitPrice: rp.unitPrice,
-        totalPrice: rp.totalPrice,
-      })),
-      // Itens de kit do participante
-      kitItems: reg.kitItems.map((ki: any) => ({
-        id: ki.id,
-        kitItem: {
-          id: ki.kitItem.id,
-          name: ki.kitItem.name,
-        },
-        selectedSize: ki.selectedSize,
-        quantity: ki.quantity,
-      })),
-      // Respostas do questionário do participante
-      questionAnswers: reg.questionAnswers.map((qa: any) => ({
-        id: qa.id,
-        question: {
-          id: qa.question.id,
-          question: qa.question.question,
-          type: qa.question.type,
-        },
-        answer: qa.answer,
-      })),
-    });
+        // Produtos adicionados para este participante
+        products: (reg.products ?? []).map((rp: any) => ({
+          id: rp.id,
+          product: { id: rp.product.id, name: rp.product.name },
+          variation: rp.variation ? { id: rp.variation.id, name: rp.variation.name } : null,
+          quantity: rp.quantity,
+          unitPrice: rp.unitPrice,
+          totalPrice: rp.totalPrice,
+        })),
+        // Itens de kit do participante
+        kitItems: reg.kitItems.map((ki: any) => ({
+          id: ki.id,
+          kitItem: {
+            id: ki.kitItem.id,
+            name: ki.kitItem.name,
+          },
+          selectedSize: ki.selectedSize,
+          quantity: ki.quantity,
+        })),
+        // Respostas do questionário do participante
+        questionAnswers: reg.questionAnswers.map((qa: any) => ({
+          id: qa.id,
+          question: {
+            id: qa.question.id,
+            question: qa.question.question,
+            type: qa.question.type,
+          },
+          answer: qa.answer,
+        })),
+      });
     });
 
     return {
@@ -4703,28 +4741,28 @@ export class EventsService {
           voucherId: order.voucherId,
           buyer: order.user
             ? {
-                id: order.user.id,
-                firstName: order.user.firstName,
-                lastName: order.user.lastName,
-                fullName: `${order.user.firstName} ${order.user.lastName}`,
-                email: order.user.email,
-                phone: order.user.phone,
-                documentNumber: order.user.documentNumber,
-                avatarUrl: order.user.avatarUrl,
-              }
+              id: order.user.id,
+              firstName: order.user.firstName,
+              lastName: order.user.lastName,
+              fullName: `${order.user.firstName} ${order.user.lastName}`,
+              email: order.user.email,
+              phone: order.user.phone,
+              documentNumber: order.user.documentNumber,
+              avatarUrl: order.user.avatarUrl,
+            }
             : null,
           billingAddress: this.resolveOrderBillingAddress(order, order.payment),
           payment: order.payment
             ? {
-                id: order.payment.id,
-                status: order.payment.status,
-                method: order.payment.method,
-                amount: this.normalizeToCents(order.payment.amount),
-                paymentDate: order.payment.paymentDate?.toISOString() ?? null,
-                transactionId: order.payment.transactionId,
-                createdAt: order.payment.createdAt.toISOString(),
-                metadata: paymentMetadata ?? null,
-              }
+              id: order.payment.id,
+              status: order.payment.status,
+              method: order.payment.method,
+              amount: this.normalizeToCents(order.payment.amount),
+              paymentDate: order.payment.paymentDate?.toISOString() ?? null,
+              transactionId: order.payment.transactionId,
+              createdAt: order.payment.createdAt.toISOString(),
+              metadata: paymentMetadata ?? null,
+            }
             : null,
           registrations: order.registrations.map((r) => ({
             id: r.id,
@@ -5526,17 +5564,17 @@ export class EventsService {
         },
         ticket: reg.tickets?.[0]
           ? (() => {
-              const rt = reg.tickets[0];
-              const snap = rt.ticketSnapshot as Record<string, any> | null;
-              const t = rt.ticket;
-              return {
-                name: snap?.name ?? t?.name ?? '',
-                modality: snap?.modality ?? t?.modality ?? '',
-                distance: snap?.distance ?? t?.distance ?? null,
-                distanceUnit: snap?.distanceUnit ?? t?.distanceUnit ?? null,
-                category: snap?.category ?? (t?.category ? t.category : null),
-              };
-            })()
+            const rt = reg.tickets[0];
+            const snap = rt.ticketSnapshot as Record<string, any> | null;
+            const t = rt.ticket;
+            return {
+              name: snap?.name ?? t?.name ?? '',
+              modality: snap?.modality ?? t?.modality ?? '',
+              distance: snap?.distance ?? t?.distance ?? null,
+              distanceUnit: snap?.distanceUnit ?? t?.distanceUnit ?? null,
+              category: snap?.category ?? (t?.category ? t.category : null),
+            };
+          })()
           : null,
         products: (reg.products ?? []).map((rp: any) => {
           const snap = rp.productSnapshot as Record<string, any> | null;
@@ -5558,11 +5596,11 @@ export class EventsService {
           billingAddress,
           payment: order.payment
             ? {
-                status: order.payment.status,
-                method: order.payment.method,
-                paymentDate: order.payment.paymentDate,
-                createdAt: order.payment.createdAt,
-              }
+              status: order.payment.status,
+              method: order.payment.method,
+              paymentDate: order.payment.paymentDate,
+              createdAt: order.payment.createdAt,
+            }
             : null,
         },
       };

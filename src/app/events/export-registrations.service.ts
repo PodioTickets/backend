@@ -147,6 +147,72 @@ function extractField(reg: any, field: ExportField): string {
   }
 }
 
+/** Coleta perguntas únicas em ordem de aparecimento entre todas as inscrições */
+function collectAllQuestions(registrations: any[]): string[] {
+  const seen = new Set<string>();
+  const questions: string[] = [];
+  for (const reg of registrations) {
+    for (const qa of (reg.questionAnswers ?? [])) {
+      const q: string = qa.question?.question ?? '';
+      if (q && !seen.has(q)) {
+        seen.add(q);
+        questions.push(q);
+      }
+    }
+  }
+  return questions;
+}
+
+/**
+ * Expande fields/headers/rows substituindo 'perguntasRespostas' por uma coluna
+ * por pergunta única, preenchendo a resposta correspondente em cada linha.
+ */
+function buildExpandedRows(
+  registrations: any[],
+  fields: ExportField[],
+): { headers: string[]; rows: string[][] } {
+  const hasPR = fields.includes('perguntasRespostas');
+  const allQuestions = hasPR ? collectAllQuestions(registrations) : [];
+
+  const headers: string[] = [];
+  for (const f of fields) {
+    if (f === 'perguntasRespostas') {
+      if (allQuestions.length === 0) {
+        headers.push(FIELD_LABELS['perguntasRespostas']);
+      } else {
+        headers.push(...allQuestions);
+      }
+    } else {
+      headers.push(FIELD_LABELS[f]);
+    }
+  }
+
+  const rows = registrations.map((reg) => {
+    const row: string[] = [];
+    for (const f of fields) {
+      if (f === 'perguntasRespostas') {
+        if (allQuestions.length === 0) {
+          row.push('');
+        } else {
+          const answerMap = new Map<string, string>();
+          for (const qa of (reg.questionAnswers ?? [])) {
+            const q: string = qa.question?.question ?? '';
+            if (q) answerMap.set(q, qa.answer ?? '');
+          }
+          for (const q of allQuestions) {
+            row.push(answerMap.get(q) ?? '');
+          }
+        }
+      } else {
+        row.push(extractField(reg, f));
+      }
+    }
+    return row;
+  });
+
+  return { headers, rows };
+}
+
 function csvEscape(cell: string): string {
   const s = String(cell ?? '').replace(/"/g, '""');
   return /[,"\n\r]/.test(s) ? `"${s}"` : s;
@@ -166,59 +232,54 @@ export class ExportRegistrationsService {
     return valid.length > 0 ? valid : [...EXPORT_FIELDS];
   }
 
-  /** Build a 2-D array of [headers, ...rows] (no metadata row) */
-  private buildRows(registrations: any[], fields: ExportField[]): string[][] {
-    const headers = fields.map((f) => FIELD_LABELS[f]);
-    const rows = registrations.map((reg) => fields.map((f) => extractField(reg, f)));
-    return [headers, ...rows];
-  }
-
   /** TXT: CSV — first line = metadata, second = headers, rest = data */
   generateTxt(registrations: any[], fields: ExportField[], eventName: string): Buffer {
     const extractedAt = new Date();
     const meta = metadataLine(eventName, extractedAt);
-    const dataRows = this.buildRows(registrations, fields);
+    const { headers, rows } = buildExpandedRows(registrations, fields);
 
     const lines = [
-      csvEscape(meta), // single-cell first line
-      ...dataRows.map((row) => row.map(csvEscape).join(',')),
-    ];
+      csvEscape(meta),
+      [headers, ...rows].map((row) => row.map(csvEscape).join(',')).join('\r\n'),
+    ].join('\r\n');
 
-    return Buffer.from('﻿' + lines.join('\r\n'), 'utf8'); // BOM + CRLF
+    return Buffer.from('﻿' + lines, 'utf8'); // BOM + CRLF
   }
 
   /** Excel: row 0 = metadata (merged), row 1 = headers (bold), rows 2+ = data */
   generateExcel(registrations: any[], fields: ExportField[], eventName: string): Buffer {
     const extractedAt = new Date();
     const meta = metadataLine(eventName, extractedAt);
-    const dataRows = this.buildRows(registrations, fields); // [headers, ...rows]
+    const { headers, rows } = buildExpandedRows(registrations, fields);
+    const totalCols = headers.length;
 
-    // Prepend metadata row
-    const allRows = [[meta, ...Array(fields.length - 1).fill('')], ...dataRows];
+    // Linha de metadata + cabeçalhos + dados
+    const allRows = [
+      [meta, ...Array(totalCols - 1).fill('')],
+      headers,
+      ...rows,
+    ];
 
     const ws = XLSX.utils.aoa_to_sheet(allRows);
 
     // Merge metadata across all columns
-    ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: fields.length - 1 } }];
+    ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: totalCols - 1 } }];
 
-    // Auto column widths (based on header + data rows, skip metadata row)
-    const colWidths = fields.map((f, i) => {
-      const maxLen = dataRows.reduce(
+    // Auto column widths (baseado em header + dados)
+    const colWidths = headers.map((h, i) => {
+      const maxLen = rows.reduce(
         (max, row) => Math.max(max, String(row[i] ?? '').length),
-        FIELD_LABELS[f].length,
+        h.length,
       );
       return { wch: Math.min(maxLen + 2, 60) };
     });
     ws['!cols'] = colWidths;
 
     // Style: metadata row bold, header row (row index 1) bold
-    const styleRows = [0, 1];
-    styleRows.forEach((r) => {
-      fields.forEach((_, c) => {
+    [0, 1].forEach((r) => {
+      headers.forEach((_, c) => {
         const cellRef = XLSX.utils.encode_cell({ r, c });
-        if (ws[cellRef]) {
-          ws[cellRef].s = { font: { bold: true } };
-        }
+        if (ws[cellRef]) ws[cellRef].s = { font: { bold: true } };
       });
     });
 
@@ -246,11 +307,11 @@ export class ExportRegistrationsService {
       const pageH = 595.28;              // A4 landscape height
       const usableH = pageH - MARGIN - FOOTER_H - 10; // top margin + footer space
 
-      const headers = fields.map((f) => FIELD_LABELS[f]);
+      const { headers, rows: expandedRows } = buildExpandedRows(registrations, fields);
       const colW = Math.max(40, Math.floor(pageW / headers.length));
       const ROW_H_MIN = 18;
       const headerH = 22;
-      const fontSize = fields.length > 10 ? 6 : fields.length > 7 ? 7 : 8;
+      const fontSize = headers.length > 10 ? 6 : headers.length > 7 ? 7 : 8;
 
       const TITLE_H = 20;
 
@@ -304,10 +365,9 @@ export class ExportRegistrationsService {
       let y = addPage();
       y = drawHeader(y);
 
-      registrations.forEach((reg, rowIdx) => {
+      expandedRows.forEach((cells, rowIdx) => {
         // Calcular altura dinâmica da linha com base no conteúdo mais alto
         doc.font('Helvetica').fontSize(fontSize);
-        const cells = fields.map((f) => extractField(reg, f));
         const alturas = cells.map((val) =>
           doc.heightOfString(String(val || ''), { width: colW - 6 }) + 10,
         );

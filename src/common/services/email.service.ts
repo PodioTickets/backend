@@ -481,6 +481,69 @@ export class EmailService {
     this.logger.log(`Email de membro adicionado enviado para: ${data.recipientEmail}`);
   }
 
+  async send2FACode(recipientEmail: string, code: string): Promise<void> {
+    const html = this.loadTemplate('codigo-2fa.html', {
+      code: this.escapeHtml(code),
+    });
+
+    const text = [
+      'Código de verificação — PódioTicket',
+      '',
+      `Seu código de verificação é: ${code}`,
+      '',
+      'Este código expira em 10 minutos.',
+      'Se você não solicitou este código, ignore este e-mail.',
+    ].join('\n');
+
+    await this.send({
+      from: this.from,
+      to: recipientEmail,
+      subject: 'Código de verificação de segurança — PódioTicket',
+      html,
+      text,
+    });
+
+    this.logger.log(`Código 2FA enviado para: ${recipientEmail}`);
+  }
+
+  async sendEventUnderReview(data: {
+    recipientEmail: string;
+    eventName: string;
+    eventBannerUrl: string;
+    eventDate: string;
+    eventLocation: string;
+    submittedAt: string;
+  }): Promise<void> {
+    const html = this.loadTemplate('evento-em-analise.html', {
+      eventName: this.escapeHtml(data.eventName),
+      eventBannerUrl: this.escapeHtml(data.eventBannerUrl),
+      eventDate: this.escapeHtml(data.eventDate),
+      eventLocation: this.escapeHtml(data.eventLocation),
+      submittedAt: this.escapeHtml(data.submittedAt),
+    });
+
+    const text = [
+      `Seu evento está em análise — PódioTicket`,
+      '',
+      `Evento: ${data.eventName}`,
+      `Data: ${data.eventDate}`,
+      `Local: ${data.eventLocation}`,
+      `Enviado para análise: ${data.submittedAt}`,
+      '',
+      'Recebemos sua solicitação de publicação. Nossa equipe fará uma revisão em até 1 dia útil.',
+    ].join('\n');
+
+    await this.send({
+      from: this.from,
+      to: data.recipientEmail,
+      subject: `Seu evento está em análise — ${data.eventName}`,
+      html,
+      text,
+    });
+
+    this.logger.log(`Email de evento em análise enviado para: ${data.recipientEmail} (evento: ${data.eventName})`);
+  }
+
   private escapeHtml(text: string): string {
     return String(text)
       .replace(/&/g, '&amp;')

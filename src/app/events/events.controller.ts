@@ -48,7 +48,11 @@ import { RegistrationsQueryDto } from './dto/registrations.dto';
 import { ExportRegistrationsDto, EXPORT_FIELDS } from './dto/export-registrations.dto';
 import { ExportRegistrationsService } from './export-registrations.service';
 import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
-import { UpdateFinancialSettingsDto } from './dto/financial-settings.dto';
+import {
+  UpdateFinancialSettingsDto,
+  FinancialSettingsDataWrapperDto,
+  FinancialSettingsLockedErrorDto,
+} from './dto/financial-settings.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CacheTTL, NoCache } from 'src/common/decorators/cache.decorator';
 
@@ -389,14 +393,17 @@ export class EventsController {
   @ApiBearerAuth()
   @NoCache()
   @ApiOperation({
-    summary: 'Get financial settings',
-    description: 'Returns current financial settings for the event (fee split and max installments).',
+    summary: 'Buscar configurações financeiras do evento',
+    description:
+      'Retorna a divisão da taxa de plataforma (6%) entre organizador e participante, ' +
+      'o número máximo de parcelas e os métodos de pagamento aceitos. ' +
+      '`lockedAt` fica null até a publicação do evento; após a publicação, nenhuma alteração é permitida.',
   })
-  @ApiParam({ name: 'eventId', description: 'Event UUID' })
-  @ApiResponse({ status: 200, description: 'Financial settings' })
-  @ApiResponse({ status: 401, description: 'Unauthorized' })
-  @ApiResponse({ status: 403, description: 'Forbidden' })
-  @ApiResponse({ status: 404, description: 'Event not found' })
+  @ApiParam({ name: 'eventId', type: 'string', format: 'uuid', description: 'UUID do evento' })
+  @ApiResponse({ status: 200, description: 'Configurações financeiras do evento', type: FinancialSettingsDataWrapperDto })
+  @ApiResponse({ status: 401, description: 'Não autenticado' })
+  @ApiResponse({ status: 403, description: 'Sem permissão (não é o organizador do evento)' })
+  @ApiResponse({ status: 404, description: 'Evento não encontrado' })
   getFinancialSettings(@Request() req, @Param('eventId') eventId: string) {
     return this.eventsService.getFinancialSettings(req.user.id, eventId);
   }
@@ -405,16 +412,23 @@ export class EventsController {
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({
-    summary: 'Update financial settings',
-    description: 'Updates fee split and max installments. Blocked after event publication.',
+    summary: 'Atualizar configurações financeiras do evento',
+    description:
+      'Atualiza a divisão da taxa da plataforma (`organizerFeePercent`) e o parcelamento máximo (`maxInstallments`). ' +
+      'A taxa total da plataforma é sempre 6%; `participantFeePercent = 6 - organizerFeePercent`. ' +
+      'Retorna 409 se o evento já foi publicado (configurações bloqueadas).',
   })
-  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiParam({ name: 'eventId', type: 'string', format: 'uuid', description: 'UUID do evento' })
   @ApiBody({ type: UpdateFinancialSettingsDto })
-  @ApiResponse({ status: 200, description: 'Financial settings updated' })
-  @ApiResponse({ status: 401, description: 'Unauthorized' })
-  @ApiResponse({ status: 403, description: 'Forbidden' })
-  @ApiResponse({ status: 404, description: 'Event not found' })
-  @ApiResponse({ status: 409, description: 'FINANCIAL_SETTINGS_LOCKED — event already published' })
+  @ApiResponse({ status: 200, description: 'Configurações financeiras atualizadas', type: FinancialSettingsDataWrapperDto })
+  @ApiResponse({ status: 401, description: 'Não autenticado' })
+  @ApiResponse({ status: 403, description: 'Sem permissão (não é o organizador do evento)' })
+  @ApiResponse({ status: 404, description: 'Evento não encontrado' })
+  @ApiResponse({
+    status: 409,
+    description: 'FINANCIAL_SETTINGS_LOCKED — configurações bloqueadas após publicação do evento',
+    type: FinancialSettingsLockedErrorDto,
+  })
   updateFinancialSettings(
     @Request() req,
     @Param('eventId') eventId: string,
