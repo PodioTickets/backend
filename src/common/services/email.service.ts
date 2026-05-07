@@ -82,20 +82,24 @@ export class EmailService {
     userEmail: string;
     userPhone?: string;
     userCpf?: string;
+    userAvatarUrl?: string;
     subject?: string;
     eventName?: string;
     message: string;
   }) {
-    const emailSubject = `Nova mensagem de contato${data.eventName ? ` - ${data.eventName}` : ''}`;
+    const emailSubject = data.eventName
+      ? `Nova mensagem de ${data.userName} sobre ${data.eventName}`
+      : `Nova mensagem de ${data.userName}`;
 
     const html = this.loadTemplate('mensagem-organizador.html', {
+      organizerName: this.escapeHtml(data.organizerName),
       userName: this.escapeHtml(data.userName),
       userEmail: this.escapeHtml(data.userEmail),
       userPhone: data.userPhone ? this.escapeHtml(data.userPhone) : '',
       userCpf: data.userCpf ? this.escapeHtml(data.userCpf) : '',
+      userAvatarUrl: data.userAvatarUrl ? this.escapeHtml(data.userAvatarUrl) : '',
       subject: data.subject ? this.escapeHtml(data.subject) : '',
       eventName: data.eventName ? this.escapeHtml(data.eventName) : '',
-      // white-space:pre-line no template preserva quebras de linha sem <br>
       message: this.escapeHtml(data.message),
     });
 
