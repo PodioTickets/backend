@@ -1,7 +1,7 @@
 import {
   Controller, Get, Post, Patch, Body, Param, Query, UseGuards,
   DefaultValuePipe, ParseIntPipe, UseInterceptors, UploadedFile,
-  BadRequestException,
+  BadRequestException, Request,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
@@ -178,5 +178,100 @@ export class AdminRepasseController {
   @ApiResponse({ status: 404, description: 'Not found' })
   rejectWithdrawal(@Param('id') id: string, @Body('notes') notes?: string) {
     return this.adminRepasseService.rejectWithdrawal(id, notes);
+  }
+
+  // ─── Retenção de 10% ───────────────────────────────────────────────────────
+
+  @Get('retention')
+  @NoCache()
+  @ApiOperation({
+    summary: '[Admin] Listar eventos com retenção de 10% pendente de liberação',
+    description:
+      'Retorna todos os eventos que possuem valor retido (10%) ainda não liberado pelo admin. ' +
+      'Inclui o valor total retido de cada evento calculado dinamicamente.',
+  })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
+  @ApiQuery({ name: 'search', required: false, type: String, description: 'Filter by event name or organization' })
+  @ApiQuery({ name: 'status', required: false, enum: ['pending', 'released'], description: 'Filter by retention status. Omit to return both.' })
+  @ApiResponse({
+    status: 200,
+    description: 'Events with retention (pending + released) and monthly stats',
+    schema: {
+      example: {
+        data: {
+          stats: {
+            pendingCount: 2,
+            totalPendingVolume: 10000,
+            totalProcessedThisMonth: 42000,
+          },
+          events: [
+            {
+              id: 'uuid',
+              name: 'Event Name',
+              slug: 'event-name',
+              logoUrl: null,
+              eventDate: '2026-03-01T00:00:00Z',
+              retentionRate: 0.1,
+              organization: { id: 'uuid', name: 'Org', email: 'org@email.com', logoUrl: null },
+              status: 'pending',
+              retainedAmount: 5000,
+              grossRevenue: 100000,
+              releasedAt: null,
+              releasedBy: null,
+              auditNotes: null,
+            },
+            {
+              id: 'uuid2',
+              name: 'Past Event',
+              slug: 'past-event',
+              logoUrl: null,
+              eventDate: '2026-01-10T00:00:00Z',
+              retentionRate: 0.1,
+              organization: { id: 'uuid', name: 'Org', email: 'org@email.com', logoUrl: null },
+              status: 'released',
+              retainedAmount: 8000,
+              grossRevenue: null,
+              releasedAt: '2026-05-01T10:00:00Z',
+              releasedBy: { id: 'uuid', firstName: 'Admin', lastName: 'User', email: 'admin@podio.com' },
+              auditNotes: 'Reviewed and approved.',
+            },
+          ],
+          pagination: { page: 1, limit: 20, total: 3, totalPages: 1 },
+        },
+      },
+    },
+  })
+  getEventsWithRetention(
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit: number,
+    @Query('search') search?: string,
+    @Query('status') status?: 'pending' | 'released',
+  ) {
+    return this.adminRepasseService.getEventsWithRetention(page, Math.min(limit, 100), search, status);
+  }
+
+  @Post('retention/:eventId/release')
+  @ApiOperation({
+    summary: '[Admin] Liberar retenção de 10% de um evento',
+    description:
+      'Libera o valor retido (10%) de um evento, movendo-o para saldo disponível do organizador. ' +
+      'Após a liberação, nenhum valor futuro desse evento ficará em retenção.',
+  })
+  @ApiParam({ name: 'eventId', type: String, description: 'UUID do evento' })
+  @ApiBody({
+    schema: {
+      properties: { notes: { type: 'string', description: 'Observações sobre a auditoria (opcional)' } },
+    },
+  })
+  @ApiResponse({ status: 201, description: 'Retenção liberada com sucesso' })
+  @ApiResponse({ status: 400, description: 'Retenção já foi liberada anteriormente' })
+  @ApiResponse({ status: 404, description: 'Evento não encontrado' })
+  releaseRetention(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Body('notes') notes?: string,
+  ) {
+    return this.adminRepasseService.releaseRetention(req.user.id, eventId, notes);
   }
 }

@@ -362,6 +362,14 @@ export class OrdersService {
     private readonly ticketPdfService: TicketPdfService,
   ) {}
 
+  private async isAdminUser(userId: string): Promise<boolean> {
+    const user = await this.prisma.getReadClient().user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    return user?.role === 'PODIOGO_STAFF' || user?.role === 'ADMIN';
+  }
+
   // ── 1. reserve ─────────────────────────────────────────────────────────────
 
   async reserve(userId: string, dto: ReserveOrderDto): Promise<Record<string, any>> {
@@ -693,8 +701,8 @@ export class OrdersService {
       where: { id: orderId },
       include: ORDER_INCLUDE,
     });
-    // Anti-IDOR: always 404
-    if (!order || order.userId !== userId) {
+    if (!order) throw new NotFoundException('Pedido não encontrado');
+    if (order.userId !== userId && !await this.isAdminUser(userId)) {
       throw new NotFoundException('Pedido não encontrado');
     }
     return orderShape(order);
@@ -1648,7 +1656,8 @@ export class OrdersService {
       where: { id: orderId },
       include: ORDER_INCLUDE,
     });
-    if (!order || order.userId !== userId) {
+    if (!order) throw new NotFoundException('Pedido não encontrado');
+    if (order.userId !== userId && !await this.isAdminUser(userId)) {
       throw new NotFoundException('Pedido não encontrado');
     }
 
@@ -2717,7 +2726,8 @@ export class OrdersService {
       where: { id: orderId },
       include: { payment: true },
     });
-    if (!order || order.userId !== userId) {
+    if (!order) throw new NotFoundException('Pedido não encontrado');
+    if (order.userId !== userId && !await this.isAdminUser(userId)) {
       throw new NotFoundException('Pedido não encontrado');
     }
 
@@ -2815,7 +2825,8 @@ export class OrdersService {
   async forceExpire(userId: string, orderId: string): Promise<{ message: string }> {
     const w: any = this.prisma.getWriteClient();
     const order = await w.order.findUnique({ where: { id: orderId } });
-    if (!order || order.userId !== userId) {
+    if (!order) throw new NotFoundException('Pedido não encontrado');
+    if (order.userId !== userId && !await this.isAdminUser(userId)) {
       throw new NotFoundException('Pedido não encontrado');
     }
     if (order.status !== 'PENDING') {
@@ -2836,7 +2847,8 @@ export class OrdersService {
       where: { id: orderId },
       include: ORDER_INCLUDE,
     });
-    if (!order || order.userId !== userId) {
+    if (!order) throw new NotFoundException('Pedido não encontrado');
+    if (order.userId !== userId && !await this.isAdminUser(userId)) {
       throw new NotFoundException('Pedido não encontrado');
     }
     return order;

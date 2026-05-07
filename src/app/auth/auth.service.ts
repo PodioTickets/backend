@@ -121,18 +121,22 @@ export class AuthService {
         return null;
       }
 
-      // Se for ORGANIZER, verificar se é membro de pelo menos uma organização
+      // Se for ORGANIZER, verificar se é membro de uma organização ativa
       if (accountType === 'ORGANIZER') {
         const member = await prismaRead.organizationMember.findFirst({
-          where: {
-            userId: user.id,
+          where: { userId: user.id },
+          select: {
+            id: true,
+            organization: { select: { isActive: true } },
           },
         });
 
         if (!member) {
-          // Usuário tem accountType ORGANIZER mas não é membro de nenhuma organização
-          console.log(`[AUTH] User ${user.id} has accountType ORGANIZER but is not a member of any organization`);
           return null;
+        }
+
+        if (!member.organization.isActive) {
+          throw new BadRequestException('Organization is inactive');
         }
       }
 
@@ -152,7 +156,11 @@ export class AuthService {
       const { password: _, ...result } = user;
       return result;
     } catch (error) {
-      console.error('[AUTH] Error validating user:', error);
+      // Re-throw intentional HTTP exceptions (e.g. inactive organization)
+      if (error instanceof BadRequestException || error instanceof UnauthorizedException) {
+        throw error;
+      }
+      this.logger.error('[AUTH] Error validating user:', error);
       return null;
     }
   }

@@ -37,6 +37,7 @@ enum Language {
 
 enum EventStatus {
   DRAFT
+  REVISION
   PUBLISHED
   SUSPENDED
   CANCELLED
@@ -216,6 +217,8 @@ model Organization {
   accountHolderName     String? // Nome do titular da conta
   accountHolderDocument String? // CPF/CNPJ do titular
 
+  isActive  Boolean  @default(true)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -228,6 +231,7 @@ model Organization {
   @@index([name])
   @@index([document])
   @@index([email])
+  @@index([isActive])
 }
 
 model OrganizationMember {
@@ -380,6 +384,7 @@ model EventNotification {
   messageHtml String                  @db.Text
   channels    String[]
   status      EventNotificationStatus @default(review)
+  deniedReason String?                @db.Text
   /**
    * Data/hora exibida na lista (v1 = criação do registro; futuro: pode atualizar ao enviar)
    */

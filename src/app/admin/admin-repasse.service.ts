@@ -1,10 +1,14 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { WithdrawalStatus } from '@prisma/client';
+import { RepasseService } from '../repasse/repasse.service';
 
 @Injectable()
 export class AdminRepasseService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly repasseService: RepasseService,
+  ) {}
 
   async getWithdrawals(params: {
     page: number;
@@ -232,6 +236,14 @@ export class AdminRepasseService {
     });
 
     return { message: 'Withdrawal rejected successfully', data: { withdrawal: updated } };
+  }
+
+  async getEventsWithRetention(page: number, limit: number, search?: string, status?: 'pending' | 'released') {
+    return this.repasseService.adminGetEventsWithRetention(page, limit, search, status);
+  }
+
+  async releaseRetention(adminUserId: string, eventId: string, notes?: string) {
+    return this.repasseService.adminReleaseRetention(adminUserId, eventId, notes);
   }
 
   async getStats() {

@@ -21,7 +21,14 @@
       "Bash(grep -E \"\\\\.ts$\")",
       "WebFetch(domain:docs.cielo.com.br)",
       "WebFetch(domain:developercielo.github.io)",
-      "WebFetch(domain:braspag.github.io)"
+      "WebFetch(domain:braspag.github.io)",
+      "Bash(Get-ChildItem -Path \"C:/Users/muril/Projects/PodioTickets/server\" -Depth 2 -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(awk '{print $NF}')",
+      "Bash(npx ts-node -e ' *)",
+      "Bash(Get-ChildItem \"C:\\\\Users\\\\muril\\\\Projects\\\\PodioTickets\\\\server\\\\prisma\\\\migrations\")",
+      "Bash(Sort-Object Name)",
+      "Bash(Select-Object -Last 5 -ExpandProperty Name)"
     ]
   }
 }

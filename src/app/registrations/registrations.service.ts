@@ -13,6 +13,14 @@ export class RegistrationsService {
     private readonly kitsService: KitsService,
   ) { }
 
+  private async isAdminUser(userId: string): Promise<boolean> {
+    const user = await this.prisma.getReadClient().user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    return user?.role === 'PODIOGO_STAFF' || user?.role === 'ADMIN';
+  }
+
   async create(userId: string, createRegistrationDto: CreateRegistrationWithInvitedUserDto) {
     const { eventId, modalities, kitItems = [], questionAnswers = [], termsAccepted, rulesAccepted, invitedUser, invitedUserId, couponCode, voucherCode } = createRegistrationDto;
 
@@ -914,14 +922,15 @@ export class RegistrationsService {
 
     const currentUser = await prismaRead.user.findUnique({
       where: { id: userId },
-      select: { documentNumberClean: true },
+      select: { documentNumberClean: true, role: true },
     });
+    const isAdmin = currentUser?.role === 'PODIOGO_STAFF' || currentUser?.role === 'ADMIN';
     const isBuyer = registration.order?.userId === userId;
     const isParticipant = registration.userId === userId;
     const isInviter = registration.invitedById === userId;
     const isCpfMatch = !!(currentUser?.documentNumberClean && (registration as any).participantCpfClean === currentUser.documentNumberClean);
 
-    if (!isParticipant && !isInviter && !isBuyer && !isCpfMatch) {
+    if (!isAdmin && !isParticipant && !isInviter && !isBuyer && !isCpfMatch) {
       throw new BadRequestException('Access denied - You can only view your own registrations');
     }
 
@@ -1100,7 +1109,7 @@ export class RegistrationsService {
       throw new NotFoundException('Inscrição não encontrada');
     }
     const isBuyerUpdate = registration.order?.eventId && (registration as any).invitedById === userId;
-    if (registration.userId !== userId && !isBuyerUpdate) {
+    if (registration.userId !== userId && !isBuyerUpdate && !await this.isAdminUser(userId)) {
       throw new NotFoundException('Inscrição não encontrada');
     }
 
@@ -1225,7 +1234,7 @@ export class RegistrationsService {
     const isBuyerCancel = registration.order?.userId === userId;
     const isParticipantCancel = registration.userId === userId;
     const isInviterCancel = registration.invitedById === userId;
-    if (!isParticipantCancel && !isInviterCancel && !isBuyerCancel) {
+    if (!isParticipantCancel && !isInviterCancel && !isBuyerCancel && !await this.isAdminUser(userId)) {
       throw new BadRequestException('Access denied');
     }
 

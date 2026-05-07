@@ -1573,6 +1573,8 @@ export class EventsService {
       ...patchFields
     } = updateEventDto;
     const updateData: Record<string, unknown> = { ...patchFields };
+    // Status transitions are only allowed through dedicated action endpoints
+    delete updateData['status'];
     for (const k of Object.keys(updateData)) {
       if (updateData[k] === undefined) {
         delete updateData[k];
@@ -2128,19 +2130,18 @@ export class EventsService {
     const event = await prismaRead.event.findUnique({
       where: { id: eventId },
       include: {
-        modalities: {
-          where: { isActive: true },
-        },
+        tickets: { where: { isActive: true }, select: { id: true } },
       },
     });
 
-    if (!event) {
-      throw new NotFoundException('Event not found');
+    if (!event) throw new NotFoundException('Event not found');
+
+    if (event.status !== EventStatus.DRAFT) {
+      throw new BadRequestException('Only DRAFT events can be submitted for review');
     }
 
-    // Validações antes de publicar
-    if (event.modalities.length === 0) {
-      throw new BadRequestException('Event must have at least one active modality before publishing');
+    if (event.tickets.length === 0) {
+      throw new BadRequestException('Event must have at least one active ticket before submitting for review');
     }
 
     if (!event.eventDate || new Date(event.eventDate) < new Date()) {
@@ -2148,20 +2149,16 @@ export class EventsService {
     }
 
     if (!event.location || !event.city || !event.state || !event.country) {
-      throw new BadRequestException('Event must have complete location information before publishing');
+      throw new BadRequestException('Event must have complete location information before submitting for review');
     }
 
-    // Atualizar status para PUBLISHED e travar configurações financeiras
     const updatedEvent = await prismaWrite.event.update({
       where: { id: eventId },
-      data: {
-        status: EventStatus.PUBLISHED,
-        financialSettingsLockedAt: new Date(),
-      },
+      data: { status: EventStatus.REVISION },
     });
 
     return {
-      message: 'Event published successfully',
+      message: 'Event submitted for review successfully',
       data: { event: updatedEvent },
     };
   }
@@ -2284,30 +2281,46 @@ export class EventsService {
 
     const prismaRead = this.prisma.getReadClient();
 
-    const registrations = await prismaRead.registration.findMany({
-      where: {
-        eventId,
-        order: {
-          payment: {
-            status: 'PAID',
+    const [eventConfig, registrations] = await Promise.all([
+      prismaRead.event.findUnique({
+        where: { id: eventId },
+        select: { organizerFeeRate: true },
+      }),
+      prismaRead.registration.findMany({
+        where: {
+          eventId,
+          order: {
+            payment: {
+              status: 'PAID',
+            },
           },
         },
-      },
-      include: {
-        order: {
-          include: {
-            payment: true,
+        include: {
+          order: {
+            include: {
+              payment: true,
+            },
+          },
+          modalities: {
+            include: {
+              modality: true,
+            },
           },
         },
-        modalities: {
-          include: {
-            modality: true,
-          },
-        },
-      },
-    });
+      }),
+    ]);
 
-    const total = registrations.reduce((sum, r) => sum + (r.order?.finalAmount || 0), 0);
+    const organizerFeeRate: number = eventConfig?.organizerFeeRate ?? 0;
+
+    // Deduplicate orders and apply organizer fee deduction
+    const seenOrders = new Set<string>();
+    let total = 0;
+    for (const r of registrations) {
+      if (r.order?.id && !seenOrders.has(r.order.id)) {
+        seenOrders.add(r.order.id);
+        total += Math.round((r.order.finalAmount ?? 0) * (1 - organizerFeeRate));
+      }
+    }
 
     // Agrupar por modalidade
     const breakdownMap = new Map<string, { ticketId: string; ticketName: string; revenue: number; quantity: number }>();
@@ -2390,8 +2403,13 @@ export class EventsService {
       };
     }
 
-    // Buscar todas as registrations do período
-    const registrations = await prismaRead.registration.findMany({
+    // Buscar evento (para taxa do organizador) e registrations em paralelo
+    const [eventConfig, registrations] = await Promise.all([
+      prismaRead.event.findUnique({
+        where: { id: eventId },
+        select: { organizerFeeRate: true },
+      }),
+      prismaRead.registration.findMany({
       where: registrationWhere,
       include: {
         order: {
@@ -2426,7 +2444,10 @@ export class EventsService {
           },
         },
       },
-    });
+    }),
+    ]);
+
+    const organizerFeeRate: number = eventConfig?.organizerFeeRate ?? 0;
 
     // Calcular métricas principais
     const paidRegistrations = registrations.filter(
@@ -2435,11 +2456,13 @@ export class EventsService {
     const cancelledRegistrations = registrations.filter((r) => r.status === RegistrationStatus.CANCELLED);
     const refundedRegistrations = registrations.filter((r) => r.order?.payment?.status === PaymentStatus.REFUNDED);
 
-    // Deduplicate by order to avoid counting the same order's finalAmount once per registration
+    // Deduplicate by order; apply organizer fee deduction to get net revenue (what organizer receives)
     const uniquePaidOrderAmounts = new Map<string, number>();
     for (const r of paidRegistrations) {
       if (r.order?.id && !uniquePaidOrderAmounts.has(r.order.id)) {
-        uniquePaidOrderAmounts.set(r.order.id, this.normalizeToCents(r.order.finalAmount));
+        const gross = this.normalizeToCents(r.order.finalAmount);
+        const net = Math.round(gross * (1 - organizerFeeRate));
+        uniquePaidOrderAmounts.set(r.order.id, net);
       }
     }
     const netRevenue = Array.from(uniquePaidOrderAmounts.values()).reduce((sum, v) => sum + v, 0);
@@ -2489,7 +2512,8 @@ export class EventsService {
     const previousUniquePaidOrders = new Map<string, number>();
     for (const r of previousPaid) {
       if (r.order?.id && !previousUniquePaidOrders.has(r.order.id)) {
-        previousUniquePaidOrders.set(r.order.id, this.normalizeToCents(r.order.finalAmount));
+        const gross = this.normalizeToCents(r.order.finalAmount);
+        previousUniquePaidOrders.set(r.order.id, Math.round(gross * (1 - organizerFeeRate)));
       }
     }
     const previousNetRevenue = Array.from(previousUniquePaidOrders.values()).reduce((sum, v) => sum + v, 0);
@@ -4176,6 +4200,8 @@ export class EventsService {
     if (search) {
       const isIdSearch = search.startsWith('#');
       const searchTerm = isIdSearch ? search.slice(1) : search;
+      // CPF/CNPJ formatados (ex: 503.798.000-00) → buscar também sem pontuação
+      const searchTermDigits = searchTerm.replace(/[.\-\/]/g, '');
 
       const uuidMatches = await prismaRead.$queryRaw<{ id: string }[]>`
         SELECT r.id FROM "Registration" r
@@ -4197,12 +4223,18 @@ export class EventsService {
                 { lastName: { contains: searchTerm, mode: 'insensitive' } },
                 { email: { contains: searchTerm, mode: 'insensitive' } },
                 { documentNumber: { contains: searchTerm, mode: 'insensitive' } },
+                ...(searchTermDigits !== searchTerm
+                  ? [{ documentNumber: { contains: searchTermDigits, mode: 'insensitive' as const } }]
+                  : []),
               ],
             },
           },
           { participantName: { contains: searchTerm, mode: 'insensitive' } },
           { participantEmail: { contains: searchTerm, mode: 'insensitive' } },
           { participantCpf: { contains: searchTerm, mode: 'insensitive' } },
+          ...(searchTermDigits !== searchTerm
+            ? [{ participantCpf: { contains: searchTermDigits, mode: 'insensitive' as const } }]
+            : []),
         ];
       }
     }

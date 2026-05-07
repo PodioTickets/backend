@@ -9,8 +9,10 @@ import {
   effectivePermissionsForMember,
   type OrganizerPermissionKey,
 } from './constants/organizer-permissions';
-import type { OrganizationMemberRole } from '@prisma/client';
+import type { OrganizationMemberRole, UserRole } from '@prisma/client';
 import type { Prisma } from '@prisma/client';
+
+const ADMIN_ROLES: UserRole[] = ['PODIOGO_STAFF', 'ADMIN'];
 
 export type OrganizerMemberWithAccess = {
   id: string;
@@ -111,6 +113,13 @@ export class OrganizerMemberAccessService {
     requiredPermission: OrganizerPermissionKey,
   ): Promise<void> {
     const prismaWrite = this.prisma.getWriteClient();
+
+    // Admin users bypass all org-level access checks
+    const user = await prismaWrite.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (user && ADMIN_ROLES.includes(user.role)) return;
 
     const event = await prismaWrite.event.findUnique({
       where: { id: eventId },

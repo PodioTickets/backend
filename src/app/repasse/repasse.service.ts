@@ -45,6 +45,22 @@ function isInstallment(metadata: any): boolean {
   return !!(metadata?.creditCard?.installments && metadata.creditCard.installments > 1);
 }
 
+function buildRetentionWhere(search?: string, status?: 'pending' | 'released'): any {
+  const where: any = {
+    orders: { some: { payment: { status: 'PAID' } } },
+  };
+  if (status === 'pending') where.audit = { is: null };
+  if (status === 'released') where.audit = { isNot: null };
+  if (search) {
+    where.OR = [
+      { name: { contains: search, mode: 'insensitive' } },
+      { organization: { name: { contains: search, mode: 'insensitive' } } },
+      { organization: { email: { contains: search, mode: 'insensitive' } } },
+    ];
+  }
+  return where;
+}
+
 @Injectable()
 export class RepasseService {
   private readonly logger = new Logger(RepasseService.name);
@@ -827,6 +843,187 @@ export class RepasseService {
     return {
       message: 'Event audited successfully',
       data: { audit },
+    };
+  }
+
+  // ─── Admin: global retention management ─────────────────────────────────
+
+  async adminGetEventsWithRetention(
+    page: number,
+    limit: number,
+    search?: string,
+    status?: 'pending' | 'released',
+  ) {
+    const prismaRead = this.prisma.getReadClient();
+
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    // Fetch events + monthly stats in parallel
+    const [monthlyAuditAgg, eventsRaw] = await Promise.all([
+      prismaRead.eventAudit.aggregate({
+        where: { createdAt: { gte: startOfMonth } },
+        _sum: { retentionReleased: true },
+      }),
+      prismaRead.event.findMany({
+        where: buildRetentionWhere(search, status),
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          logoUrl: true,
+          eventDate: true,
+          organizerFeeRate: true,
+          retentionRate: true,
+          organization: {
+            select: { id: true, name: true, email: true, logoUrl: true },
+          },
+          audit: {
+            select: {
+              id: true,
+              retentionReleased: true,
+              notes: true,
+              createdAt: true,
+              auditedBy: {
+                select: { id: true, firstName: true, lastName: true, email: true },
+              },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+
+    const allResults: any[] = [];
+
+    for (const event of eventsRaw) {
+      if (event.audit) {
+        // Released: use the stored value — no need to recalculate
+        allResults.push({
+          id: event.id,
+          name: event.name,
+          slug: event.slug,
+          logoUrl: event.logoUrl,
+          eventDate: event.eventDate,
+          retentionRate: event.retentionRate,
+          organization: event.organization,
+          status: 'released' as const,
+          retainedAmount: event.audit.retentionReleased,
+          grossRevenue: null,
+          releasedAt: event.audit.createdAt,
+          releasedBy: event.audit.auditedBy,
+          auditNotes: event.audit.notes,
+        });
+      } else {
+        // Pending: calculate current retained amount dynamically
+        const [paidOrders, refundedOrders, withdrawals] = await Promise.all([
+          this.loadPaidOrders(event.id, prismaRead),
+          this.loadRefundedOrders(event.id, prismaRead),
+          this.loadWithdrawals(event.id, prismaRead),
+        ]);
+
+        const committedWithdrawals = withdrawals.filter(
+          (w: any) => w.status === WithdrawalStatus.COMPLETED || w.status === WithdrawalStatus.PENDING,
+        );
+
+        const { valorRetido: retainedAmount, grossRevenue } = this.calcBreakdown(
+          paidOrders,
+          refundedOrders,
+          event.retentionRate,
+          false,
+          committedWithdrawals,
+          event.organizerFeeRate,
+        );
+
+        if (retainedAmount > 0) {
+          allResults.push({
+            id: event.id,
+            name: event.name,
+            slug: event.slug,
+            logoUrl: event.logoUrl,
+            eventDate: event.eventDate,
+            retentionRate: event.retentionRate,
+            organization: event.organization,
+            status: 'pending' as const,
+            retainedAmount,
+            grossRevenue,
+            releasedAt: null,
+            releasedBy: null,
+            auditNotes: null,
+          });
+        }
+      }
+    }
+
+    // Stats always reflect global state (pending events from allResults)
+    const pendingResults = allResults.filter((e) => e.status === 'pending');
+    const pendingCount = pendingResults.length;
+    const totalPendingVolume = pendingResults.reduce((s, e) => s + e.retainedAmount, 0);
+
+    const total = allResults.length;
+    const skip = (page - 1) * limit;
+
+    return {
+      message: 'Events with retention fetched successfully',
+      data: {
+        stats: {
+          pendingCount,
+          totalPendingVolume,
+          totalProcessedThisMonth: monthlyAuditAgg._sum.retentionReleased ?? 0,
+        },
+        events: allResults.slice(skip, skip + limit),
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        },
+      },
+    };
+  }
+
+  async adminReleaseRetention(adminUserId: string, eventId: string, notes?: string) {
+    const prismaRead = this.prisma.getReadClient();
+    const prismaWrite = this.prisma.getWriteClient();
+
+    const event = await this.loadEventConfig(eventId, prismaRead);
+
+    const existing = await this.loadAudit(eventId, prismaRead);
+    if (existing) throw new BadRequestException('Event retention has already been released');
+
+    const [paidOrders, refundedOrders, withdrawals] = await Promise.all([
+      this.loadPaidOrders(eventId, prismaRead),
+      this.loadRefundedOrders(eventId, prismaRead),
+      this.loadWithdrawals(eventId, prismaRead),
+    ]);
+
+    const committedWithdrawals = withdrawals.filter(
+      (w: any) => w.status === WithdrawalStatus.COMPLETED || w.status === WithdrawalStatus.PENDING,
+    );
+
+    const { valorRetido: retainedAmount } = this.calcBreakdown(
+      paidOrders,
+      refundedOrders,
+      event.retentionRate,
+      false,
+      committedWithdrawals,
+      event.organizerFeeRate,
+    );
+
+    const audit = await prismaWrite.eventAudit.create({
+      data: {
+        eventId,
+        auditedById: adminUserId,
+        retentionReleased: retainedAmount,
+        notes: notes ?? null,
+      },
+    });
+
+    this.logger.log(`Retention released for event ${eventId}: ${retainedAmount} cents by admin ${adminUserId}`);
+
+    return {
+      message: 'Retention released successfully',
+      data: { audit, retentionReleased: retainedAmount },
     };
   }
 }

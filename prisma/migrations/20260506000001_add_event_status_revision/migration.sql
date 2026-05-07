@@ -1,0 +1,2 @@
+-- AlterEnum: add REVISION between DRAFT and PUBLISHED
+ALTER TYPE "EventStatus" ADD VALUE IF NOT EXISTS 'REVISION';

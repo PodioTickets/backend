@@ -45,6 +45,14 @@ export class PaymentsService {
     private readonly ticketPdfService: TicketPdfService,
   ) { }
 
+  private async isAdminUser(userId: string): Promise<boolean> {
+    const user = await this.prisma.getReadClient().user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    return user?.role === 'PODIOGO_STAFF' || user?.role === 'ADMIN';
+  }
+
   /**
    * Retorna o valor em centavos (valores já estão em centavos no banco)
    */
@@ -610,19 +618,14 @@ export class PaymentsService {
       throw new NotFoundException('Payment not found');
     }
 
-    // Verificar permissão se userId for fornecido
-    if (userId && payment.userId !== userId) {
-      // Verificar se o usuário é organizador do evento
-      // Primeiro verifica nos membros já carregados (pode ter apenas OWNER)
+    // Verify access if userId is provided
+    if (userId && payment.userId !== userId && !await this.isAdminUser(userId)) {
       let isOrganizer = payment.order?.event?.organization?.members?.some(
         (member: any) => member.userId === userId,
       );
 
-      // Se não encontrou, busca todos os membros da organização
-      // Pode buscar organizationId de payment.order.event.organizationId ou payment.order.event.organization.id
       let organizationId = payment.order?.event?.organizationId || payment.order?.event?.organization?.id;
 
-      // Se ainda não encontrou o organizationId, busca o evento diretamente
       if (!organizationId && payment.order?.eventId) {
         const event = await prismaRead.event.findUnique({
           where: { id: payment.order.eventId },
@@ -633,10 +636,7 @@ export class PaymentsService {
 
       if (!isOrganizer && organizationId) {
         const allMembers = await prismaRead.organizationMember.findMany({
-          where: {
-            organizationId: organizationId,
-            userId: userId,
-          },
+          where: { organizationId, userId },
         });
         isOrganizer = allMembers.length > 0;
       }

@@ -211,10 +211,6 @@ export class UpdateEventDto {
   @IsDateString()
   registrationEndDate?: string;
 
-  @IsOptional()
-  @IsEnum(EventStatus)
-  status?: EventStatus;
-
   /** Rota/página do painel (opcional) para o audit log, ex.: `event-edit`, `events/abc/general` */
   @IsOptional()
   @IsString()

@@ -232,9 +232,9 @@ export class VouchersService {
       : 'INACTIVE';
 
     const parsedAppliesTo = this.parseAppliesTo(firstVoucher?.appliesTo ?? null);
-    const linkedTicketId: string | null = Array.isArray(parsedAppliesTo)
-      ? (parsedAppliesTo[0] ?? null)
-      : (parsedAppliesTo ?? null);
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const rawTicketId = Array.isArray(parsedAppliesTo) ? (parsedAppliesTo[0] ?? null) : (parsedAppliesTo ?? null);
+    const linkedTicketId: string | null = rawTicketId && uuidRegex.test(rawTicketId) ? rawTicketId : null;
     let linkedTicket: { id: string; name: string; category: { id: string; name: string } | null; price: number | null } | null = null;
     if (linkedTicketId) {
       const ticket = await prismaRead.ticket.findUnique({

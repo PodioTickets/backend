@@ -31,6 +31,14 @@ type NotificationListRow = {
 
 type NotificationDetailRow = NotificationListRow & { messageHtml: string };
 
+type NotificationAdminRow = NotificationListRow & {
+  messageHtml: string;
+  createdAt: Date;
+  deniedReason: string | null;
+  event: { id: string; name: string; slug: string; organization: { id: string; name: string; tradeName: string | null; logoUrl: string | null } };
+  createdBy: { id: string; firstName: string; lastName: string; email: string } | null;
+};
+
 /** Delegate gerado pelo Prisma após `prisma generate` (model `EventNotification`). */
 function eventNotifications(client: PrismaClient) {
   return (client as PrismaClient & {
@@ -47,6 +55,10 @@ function eventNotifications(client: PrismaClient) {
         where: object;
         select: object;
       }) => Promise<NotificationDetailRow | null>;
+      findUnique: (args: {
+        where: { id: string };
+        select: object;
+      }) => Promise<NotificationAdminRow | null>;
       create: (args: {
         data: {
           eventId: string;
@@ -56,6 +68,11 @@ function eventNotifications(client: PrismaClient) {
           status: string;
           createdById: string;
         };
+        select: object;
+      }) => Promise<NotificationListRow>;
+      update: (args: {
+        where: { id: string };
+        data: { status: string; deniedReason?: string | null };
         select: object;
       }) => Promise<NotificationListRow>;
     };
@@ -169,6 +186,7 @@ export class EventNotificationsService {
         channels: true,
         status: true,
         messageHtml: true,
+        deniedReason: true,
       },
     });
     if (!row) {
@@ -183,6 +201,7 @@ export class EventNotificationsService {
         channels: row.channels,
         status: row.status,
         messageHtml: row.messageHtml,
+        deniedReason: (row as any).deniedReason ?? null,
       },
     };
   }
@@ -214,7 +233,7 @@ export class EventNotificationsService {
         title,
         messageHtml: sanitized,
         channels,
-        status: 'sent',
+        status: 'review',
         createdById: userId,
       },
       select: {
@@ -226,19 +245,152 @@ export class EventNotificationsService {
       },
     });
 
-    // Disparo fire-and-forget: envia emails para todos os inscritos confirmados
-    this.dispatchEmailsAsync(eventId, title, sanitized).catch((err) =>
-      this.logger.warn(`Falha no disparo assíncrono de comunicado (eventId=${eventId}): ${err?.message ?? err}`),
-    );
-
     return {
-      message: 'Notificação registrada.',
+      message: 'Notificação enviada para revisão.',
       data: {
         id: created.id,
         occurredAt: created.occurredAt,
         title: created.title,
         channels: created.channels,
         status: created.status,
+      },
+    };
+  }
+
+  async adminList(page: number, limit: number, search?: string, eventId?: string, status?: string) {
+    const prismaRead = this.prisma.getReadClient();
+    const skip = (page - 1) * limit;
+
+    const where: Record<string, unknown> = {};
+    if (status) where.status = status;
+    if (eventId) where.eventId = eventId;
+    if (search?.trim()) {
+      where.title = { contains: search.trim(), mode: 'insensitive' };
+    }
+
+    const en = eventNotifications(prismaRead);
+    const [rows, total] = await Promise.all([
+      en.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { occurredAt: 'desc' },
+        select: {
+          id: true,
+          occurredAt: true,
+          title: true,
+          channels: true,
+          status: true,
+          createdAt: true,
+          event: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              organization: { select: { id: true, name: true, tradeName: true, logoUrl: true } },
+            },
+          },
+          createdBy: { select: { id: true, firstName: true, lastName: true, email: true } },
+        },
+      }),
+      en.count({ where }),
+    ]);
+
+    return {
+      message: 'Notifications fetched successfully',
+      data: {
+        items: rows,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit) || 0,
+        },
+      },
+    };
+  }
+
+  async adminGetOne(notificationId: string) {
+    const prismaRead = this.prisma.getReadClient();
+    const row = await eventNotifications(prismaRead).findUnique({
+      where: { id: notificationId },
+      select: {
+        id: true,
+        occurredAt: true,
+        title: true,
+        channels: true,
+        status: true,
+        messageHtml: true,
+        deniedReason: true,
+        createdAt: true,
+        event: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+            organization: { select: { id: true, name: true, tradeName: true, logoUrl: true } },
+          },
+        },
+        createdBy: { select: { id: true, firstName: true, lastName: true, email: true } },
+      },
+    });
+
+    if (!row) throw new NotFoundException('Notification not found');
+
+    return {
+      message: 'Notification fetched successfully',
+      data: row,
+    };
+  }
+
+  async adminReview(adminUserId: string, notificationId: string, action: 'approve' | 'deny', reason?: string) {
+    const prismaWrite = this.prisma.getWriteClient();
+
+    const row = await eventNotifications(prismaWrite).findUnique({
+      where: { id: notificationId },
+      select: {
+        id: true,
+        status: true,
+        eventId: true,
+        title: true,
+        messageHtml: true,
+        channels: true,
+        occurredAt: true,
+      },
+    });
+
+    if (!row) throw new NotFoundException('Notification not found');
+    if (row.status !== 'review') {
+      throw new BadRequestException(`Notification is already "${row.status}" and cannot be reviewed again`);
+    }
+
+    const newStatus = action === 'approve' ? 'sent' : 'denied';
+
+    const updated = await eventNotifications(prismaWrite).update({
+      where: { id: notificationId },
+      data: {
+        status: newStatus,
+        deniedReason: action === 'deny' ? (reason?.trim() || null) : null,
+      },
+      select: { id: true, status: true, occurredAt: true, title: true, channels: true },
+    });
+
+    this.logger.log(`Admin ${adminUserId} ${action}d notification ${notificationId} (eventId=${row.eventId})`);
+
+    if (action === 'approve') {
+      this.dispatchEmailsAsync(row.eventId, row.title, row.messageHtml).catch((err) =>
+        this.logger.warn(`Falha no disparo de comunicado aprovado (notificationId=${notificationId}): ${err?.message ?? err}`),
+      );
+    }
+
+    return {
+      message: action === 'approve' ? 'Notification approved and emails dispatched' : 'Notification denied',
+      data: {
+        id: updated.id,
+        status: updated.status,
+        occurredAt: updated.occurredAt,
+        title: updated.title,
+        channels: updated.channels,
       },
     };
   }

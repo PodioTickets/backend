@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EventStatus, Prisma } from '@prisma/client';
 
@@ -22,6 +22,8 @@ export interface AdminEventsQuery {
 
 @Injectable()
 export class AdminEventsService {
+  private readonly logger = new Logger(AdminEventsService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   async getEvents(query: AdminEventsQuery) {
@@ -198,6 +200,108 @@ export class AdminEventsService {
           totalPages: Math.ceil(total / limit),
         },
       },
+    };
+  }
+
+  async getRevisionEvents(page: number, limit: number, search?: string, organizationId?: string) {
+    const prismaRead = this.prisma.getReadClient();
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.EventWhereInput = { status: EventStatus.REVISION };
+
+    if (organizationId) where.organizationId = organizationId;
+
+    if (search) {
+      where.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { slug: { contains: search, mode: 'insensitive' } },
+        { city: { contains: search, mode: 'insensitive' } },
+        { organization: { name: { contains: search, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [events, total] = await Promise.all([
+      prismaRead.event.findMany({
+        where,
+        orderBy: { updatedAt: 'desc' },
+        skip,
+        take: limit,
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          logoUrl: true,
+          bannerUrl: true,
+          status: true,
+          city: true,
+          state: true,
+          country: true,
+          location: true,
+          eventDate: true,
+          registrationStartDate: true,
+          registrationEndDate: true,
+          organizerFeeRate: true,
+          retentionRate: true,
+          createdAt: true,
+          updatedAt: true,
+          organization: {
+            select: {
+              id: true,
+              name: true,
+              tradeName: true,
+              email: true,
+              logoUrl: true,
+              document: true,
+              phone: true,
+            },
+          },
+          _count: { select: { registrations: true, tickets: true } },
+        },
+      }),
+      prismaRead.event.count({ where }),
+    ]);
+
+    return {
+      message: 'Revision events fetched successfully',
+      data: {
+        events,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        },
+      },
+    };
+  }
+
+  async approveEvent(adminUserId: string, eventId: string) {
+    const prismaWrite = this.prisma.getWriteClient();
+
+    const event = await prismaWrite.event.findUnique({
+      where: { id: eventId },
+      select: { id: true, name: true, status: true },
+    });
+
+    if (!event) throw new NotFoundException('Event not found');
+    if (event.status !== EventStatus.REVISION) {
+      throw new BadRequestException('Only REVISION events can be published by admin');
+    }
+
+    const updatedEvent = await prismaWrite.event.update({
+      where: { id: eventId },
+      data: {
+        status: EventStatus.PUBLISHED,
+        financialSettingsLockedAt: new Date(),
+      },
+      select: { id: true, name: true, status: true, financialSettingsLockedAt: true, updatedAt: true },
+    });
+
+    this.logger.log(`Admin ${adminUserId} approved event ${eventId} (${event.name}) — status REVISION → PUBLISHED`);
+
+    return {
+      message: 'Event approved and published successfully',
+      data: { event: updatedEvent },
     };
   }
 }

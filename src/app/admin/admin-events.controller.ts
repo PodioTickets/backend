@@ -1,10 +1,10 @@
 import {
-  Controller, Get, Query, UseGuards,
-  DefaultValuePipe, ParseIntPipe,
+  Controller, Get, Post, Param, Query, UseGuards,
+  DefaultValuePipe, ParseIntPipe, Req,
 } from '@nestjs/common';
 import {
   ApiTags, ApiOperation, ApiBearerAuth,
-  ApiQuery, ApiResponse,
+  ApiQuery, ApiParam, ApiResponse,
 } from '@nestjs/swagger';
 import {
   IsEnum, IsISO8601, IsNumberString, IsOptional,
@@ -96,5 +96,79 @@ export class AdminEventsController {
       sortBy: query.sortBy,
       sortOrder: query.sortOrder,
     });
+  }
+
+  @Get('events/revision')
+  @NoCache()
+  @ApiOperation({ summary: '[Admin] Lista eventos aguardando revisão (status REVISION)' })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
+  @ApiQuery({ name: 'search', required: false, type: String, description: 'Busca por nome, slug, cidade ou organização' })
+  @ApiQuery({ name: 'organizationId', required: false, type: String, description: 'UUID da organização' })
+  @ApiResponse({
+    status: 200,
+    description: 'Lista paginada de eventos em revisão',
+    schema: {
+      example: {
+        message: 'Revision events fetched successfully',
+        data: {
+          events: [
+            {
+              id: 'evt-uuid',
+              name: 'Corrida das Pedras 2026',
+              slug: 'corrida-das-pedras-2026',
+              status: 'REVISION',
+              city: 'São Paulo',
+              state: 'SP',
+              eventDate: '2026-08-10T07:00:00.000Z',
+              updatedAt: '2026-05-06T12:00:00.000Z',
+              organization: { id: 'org-uuid', name: 'Events Co. LTDA', email: 'contato@eventsco.com' },
+              _count: { registrations: 0, tickets: 3 },
+            },
+          ],
+          pagination: { page: 1, limit: 20, total: 4, totalPages: 1 },
+        },
+      },
+    },
+  })
+  getRevisionEvents(
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit: number,
+    @Query('search') search?: string,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.adminEventsService.getRevisionEvents(
+      page,
+      Math.min(limit, 100),
+      search,
+      organizationId,
+    );
+  }
+
+  @Post('events/:eventId/publish')
+  @ApiOperation({ summary: '[Admin] Aprova evento em revisão → PUBLISHED' })
+  @ApiParam({ name: 'eventId', type: String, description: 'UUID do evento' })
+  @ApiResponse({
+    status: 200,
+    description: 'Evento publicado com sucesso',
+    schema: {
+      example: {
+        message: 'Event approved and published successfully',
+        data: {
+          event: {
+            id: 'evt-uuid',
+            name: 'Corrida das Pedras 2026',
+            status: 'PUBLISHED',
+            financialSettingsLockedAt: '2026-05-06T14:30:00.000Z',
+            updatedAt: '2026-05-06T14:30:00.000Z',
+          },
+        },
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Evento não está em status REVISION' })
+  @ApiResponse({ status: 404, description: 'Evento não encontrado' })
+  approveEvent(@Param('eventId') eventId: string, @Req() req: any) {
+    return this.adminEventsService.approveEvent(req.user.id, eventId);
   }
 }
