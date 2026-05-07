@@ -431,11 +431,11 @@ export class EmailService {
       orgName: this.escapeHtml(data.orgName),
       orgAvatarUrl: data.orgAvatarUrl ? this.escapeHtml(data.orgAvatarUrl) : '',
       subject: this.escapeHtml(data.subject),
-      instagram: data.instagram ? this.escapeHtml(data.instagram) : '',
-      facebook: data.facebook ? this.escapeHtml(data.facebook) : '',
-      youtube: data.youtube ? this.escapeHtml(data.youtube) : '',
-      tiktok: data.tiktok ? this.escapeHtml(data.tiktok) : '',
-      website: data.website ? this.escapeHtml(data.website) : '',
+      instagram: data.instagram ? this.escapeHtml(this.normalizeUrl(data.instagram)) : '',
+      facebook: data.facebook ? this.escapeHtml(this.normalizeUrl(data.facebook)) : '',
+      youtube: data.youtube ? this.escapeHtml(this.normalizeUrl(data.youtube)) : '',
+      tiktok: data.tiktok ? this.escapeHtml(this.normalizeUrl(data.tiktok)) : '',
+      website: data.website ? this.escapeHtml(this.normalizeUrl(data.website)) : '',
       hasSocialLinks: hasSocialLinks ? 'true' : '',
     });
 
@@ -542,6 +542,14 @@ export class EmailService {
     });
 
     this.logger.log(`Email de evento em análise enviado para: ${data.recipientEmail} (evento: ${data.eventName})`);
+  }
+
+  /** Garante que URL tenha protocolo — sem ele o href vira relativo e não funciona */
+  private normalizeUrl(url: string): string {
+    const trimmed = url.trim();
+    if (!trimmed) return '';
+    if (/^https?:\/\//i.test(trimmed)) return trimmed;
+    return `https://${trimmed}`;
   }
 
   private escapeHtml(text: string): string {
