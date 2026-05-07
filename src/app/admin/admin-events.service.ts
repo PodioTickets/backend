@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EventStatus, Prisma } from '@prisma/client';
+import { EmailService } from '../../common/services/email.service';
 
 export interface AdminEventsQuery {
   page: number;
@@ -24,7 +25,10 @@ export interface AdminEventsQuery {
 export class AdminEventsService {
   private readonly logger = new Logger(AdminEventsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly emailService: EmailService,
+  ) {}
 
   async getEvents(query: AdminEventsQuery) {
     const {
@@ -79,7 +83,7 @@ export class AdminEventsService {
       ];
     }
 
-    // Sorting by relation aggregates requires raw ordering — use simple fields via orderBy
+    // Ordenação por agregados de relação exige SQL raw — campos simples via orderBy
     const simpleSort = sortBy === 'registrations' || sortBy === 'revenue'
       ? { createdAt: sortOrder as Prisma.SortOrder }
       : sortBy === 'name'
@@ -140,7 +144,7 @@ export class AdminEventsService {
 
     const eventIds = events.map((e) => e.id);
 
-    // groupBy does not support relation filters — use raw SQL for both aggregates
+    // groupBy não suporta filtros de relação — SQL raw para os dois agregados
     const [revenueRows, confirmedRows] = await Promise.all([
       prismaRead.$queryRaw<{ eventId: string; revenue: bigint }[]>(
         Prisma.sql`
@@ -176,7 +180,7 @@ export class AdminEventsService {
       confirmedRegistrations: confirmedByEvent.get(event.id) ?? 0,
     }));
 
-    // Apply in-memory sort for aggregate fields (registrations/revenue) after enrichment
+    // Ordenação em memória para campos de agregado (registrations/revenue) após enriquecimento
     if (sortBy === 'registrations') {
       data.sort((a, b) =>
         sortOrder === 'asc'
@@ -275,12 +279,20 @@ export class AdminEventsService {
     };
   }
 
+  /**
+   * Aprova evento em revisão: muda status REVISION → PUBLISHED, trava configurações
+   * financeiras e notifica o organizador por e-mail (fire-and-forget).
+   */
   async approveEvent(adminUserId: string, eventId: string) {
     const prismaWrite = this.prisma.getWriteClient();
 
     const event = await prismaWrite.event.findUnique({
       where: { id: eventId },
-      select: { id: true, name: true, status: true },
+      include: {
+        organization: {
+          select: { email: true, name: true, tradeName: true },
+        },
+      },
     });
 
     if (!event) throw new NotFoundException('Event not found');
@@ -288,16 +300,47 @@ export class AdminEventsService {
       throw new BadRequestException('Only REVISION events can be published by admin');
     }
 
+    const now = new Date();
+
     const updatedEvent = await prismaWrite.event.update({
       where: { id: eventId },
       data: {
         status: EventStatus.PUBLISHED,
-        financialSettingsLockedAt: new Date(),
+        financialSettingsLockedAt: now,
       },
       select: { id: true, name: true, status: true, financialSettingsLockedAt: true, updatedAt: true },
     });
 
-    this.logger.log(`Admin ${adminUserId} approved event ${eventId} (${event.name}) — status REVISION → PUBLISHED`);
+    this.logger.log(`Admin ${adminUserId} aprovou evento ${eventId} (${event.name}) — status REVISION → PUBLISHED`);
+
+    // Notifica organizador por e-mail (fire-and-forget — falha não bloqueia resposta)
+    const organizerEmail = event.organization?.email;
+    if (organizerEmail) {
+      const weekdays = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
+      const eventDt = new Date(event.eventDate);
+      const eventDateFormatted = `${eventDt.toLocaleDateString('pt-BR')} · ${weekdays[eventDt.getDay()]}`;
+      const eventLocation = [event.location, event.city].filter(Boolean).join(', ');
+
+      const submittedHH = String(now.getHours()).padStart(2, '0');
+      const submittedMM = String(now.getMinutes()).padStart(2, '0');
+      const submittedAtFormatted = `${now.toLocaleDateString('pt-BR')} · ${submittedHH}h${submittedMM}`;
+
+      const organizerName = event.organization?.tradeName ?? event.organization?.name ?? '';
+
+      this.emailService
+        .sendEventApproved({
+          recipientEmail: organizerEmail,
+          organizerName,
+          eventName: event.name,
+          eventBannerUrl: event.bannerUrl ?? '',
+          eventDate: eventDateFormatted,
+          eventLocation,
+          submittedAt: submittedAtFormatted,
+        })
+        .catch((err) =>
+          this.logger.warn(`Falha ao enviar e-mail de evento aprovado (eventId=${eventId}): ${err?.message ?? err}`),
+        );
+    }
 
     return {
       message: 'Event approved and published successfully',

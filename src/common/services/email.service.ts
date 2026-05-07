@@ -544,6 +544,43 @@ export class EmailService {
     this.logger.log(`Email de evento em análise enviado para: ${data.recipientEmail} (evento: ${data.eventName})`);
   }
 
+  async sendEventApproved(data: {
+    recipientEmail: string;
+    eventName: string;
+    eventBannerUrl: string;
+    eventDate: string;
+    eventLocation: string;
+    submittedAt: string;
+  }): Promise<void> {
+    const html = this.loadTemplate('evento-aprovado.html', {
+      eventName: this.escapeHtml(data.eventName),
+      eventBannerUrl: this.escapeHtml(data.eventBannerUrl),
+      eventDate: this.escapeHtml(data.eventDate),
+      eventLocation: this.escapeHtml(data.eventLocation),
+      submittedAt: this.escapeHtml(data.submittedAt),
+    });
+
+    const text = [
+      `Seu evento foi aprovado e está publicado — PódioTicket`,
+      '',
+      `Evento: ${data.eventName}`,
+      `Data: ${data.eventDate}`,
+      `Local: ${data.eventLocation}`,
+      '',
+      'A análise foi concluída. Seu evento já está disponível para inscrições.',
+    ].join('\n');
+
+    await this.send({
+      from: this.from,
+      to: data.recipientEmail,
+      subject: `Seu evento foi aprovado — ${data.eventName}`,
+      html,
+      text,
+    });
+
+    this.logger.log(`Email de evento aprovado enviado para: ${data.recipientEmail} (evento: ${data.eventName})`);
+  }
+
   /** Garante que URL tenha protocolo — sem ele o href vira relativo e não funciona */
   private normalizeUrl(url: string): string {
     const trimmed = url.trim();

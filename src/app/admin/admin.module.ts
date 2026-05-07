@@ -12,6 +12,7 @@ import { PrismaModule } from '../../prisma/prisma.module';
 import { UploadModule } from '../upload/upload.module';
 import { RepasseModule } from '../repasse/repasse.module';
 import { EventsModule } from '../events/events.module';
+import { EmailService } from '../../common/services/email.service';
 
 @Module({
   imports: [PrismaModule, UploadModule, RepasseModule, EventsModule],
@@ -22,6 +23,6 @@ import { EventsModule } from '../events/events.module';
     AdminOrganizationsController,
     AdminNotificationsController,
   ],
-  providers: [AdminRepasseService, AdminEventsService, AdminOrganizationsService, AdminGuard],
+  providers: [AdminRepasseService, AdminEventsService, AdminOrganizationsService, AdminGuard, EmailService],
 })
 export class AdminModule {}
