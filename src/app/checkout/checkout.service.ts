@@ -810,13 +810,11 @@ export class CheckoutService {
       }
     }
 
-    // Validar CPF list
-    if (coupon.cpfListStatus === 'ENABLED' && coupon.cpfList) {
-      const participantCpfs = participants.map((p) =>
-        p.cpf.replace(/\D/g, ''),
-      );
-      const cpfList = coupon.cpfList as string[];
-      const hasValidCpf = participantCpfs.some((cpf) => cpfList.includes(cpf));
+    // Validar CPF list — bloqueia se ENABLED independente de cpfList ser null (trata como lista vazia)
+    if (coupon.cpfListStatus === 'ENABLED') {
+      const cpfList = ((coupon.cpfList as string[] | null) ?? []).map((c) => c.replace(/\D/g, ''));
+      const participantCpfs = participants.map((p) => p.cpf.replace(/\D/g, ''));
+      const hasValidCpf = cpfList.length > 0 && participantCpfs.some((cpf) => cpfList.includes(cpf));
       if (!hasValidCpf) {
         return {
           isValid: false,
@@ -1022,13 +1020,11 @@ export class CheckoutService {
       }
     }
 
-    // Validar CPF list
-    if (voucher.cpfListStatus === 'ENABLED' && voucher.cpfList) {
-      const participantCpfs = participants.map((p) =>
-        p.cpf.replace(/\D/g, ''),
-      );
-      const cpfList = voucher.cpfList as string[];
-      const hasValidCpf = participantCpfs.some((cpf) => cpfList.includes(cpf));
+    // Validar CPF list — bloqueia se ENABLED independente de cpfList ser null (trata como lista vazia)
+    if (voucher.cpfListStatus === 'ENABLED') {
+      const cpfList = ((voucher.cpfList as string[] | null) ?? []).map((c) => c.replace(/\D/g, ''));
+      const participantCpfs = participants.map((p) => p.cpf.replace(/\D/g, ''));
+      const hasValidCpf = cpfList.length > 0 && participantCpfs.some((cpf) => cpfList.includes(cpf));
       if (!hasValidCpf) {
         return {
           isValid: false,
