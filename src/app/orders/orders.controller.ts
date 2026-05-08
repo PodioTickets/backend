@@ -212,4 +212,25 @@ export class OrdersController {
   ) {
     return this.ordersService.getPaymentStatus(req.user.id, orderId);
   }
+
+  // ── GET /orders/:orderId/3ds-token ────────────────────────────────────
+
+  @Get(':orderId/3ds-token')
+  @NoCache()
+  @ApiOperation({
+    summary: 'Obter access token 3DS para autenticação do cartão de débito',
+    description:
+      'Retorna um JWT do Braspag/Cielo para inicializar o SDK 3DS no frontend. ' +
+      'O pedido deve estar PENDING. O token tem validade de ~1h e é cacheado no servidor.',
+  })
+  @ApiParam({ name: 'orderId', type: String, format: 'uuid' })
+  @ApiResponse({ status: 200, description: 'Access token 3DS', schema: { properties: { accessToken: { type: 'string' } } } })
+  @ApiResponse({ status: 400, description: 'Pedido não está PENDING ou credenciais 3DS não configuradas' })
+  @ApiResponse({ status: 404, description: 'Order not found' })
+  async get3dsToken(
+    @Request() req: any,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+  ) {
+    return this.ordersService.get3dsToken(req.user.id, orderId);
+  }
 }

@@ -121,7 +121,6 @@ export class AdminEventsService {
               logoUrl: true,
               document: true,
               phone: true,
-              pix: true,
             },
           },
           audit: { select: { id: true, createdAt: true, retentionReleased: true } },
@@ -302,6 +301,44 @@ export class AdminEventsService {
     return {
       message: 'Event approved and published successfully',
       data: { event: updatedEvent },
+    };
+  }
+
+  async updateFinancialSettings(
+    eventId: string,
+    dto: { organizerFeePercent?: number; participantFeePercent?: number; maxInstallments?: number; totalFee?: number },
+  ) {
+    const w = this.prisma.getWriteClient();
+
+    const event = await w.event.findUnique({ where: { id: eventId }, select: { id: true } });
+    if (!event) throw new NotFoundException('Event not found');
+
+    const data: any = {};
+    if (dto.organizerFeePercent !== undefined) data.organizerFeePercent = dto.organizerFeePercent;
+    if (dto.participantFeePercent !== undefined) data.participantFeePercent = dto.participantFeePercent;
+    if (dto.maxInstallments !== undefined) data.maxInstallments = dto.maxInstallments;
+
+    const updated = await w.event.update({
+      where: { id: eventId },
+      data,
+      select: {
+        id: true,
+        organizerFeePercent: true,
+        participantFeePercent: true,
+        maxInstallments: true,
+        financialSettingsLockedAt: true,
+      },
+    });
+
+    return {
+      message: 'Financial settings updated successfully',
+      data: {
+        eventId: updated.id,
+        organizerFeePercent: updated.organizerFeePercent,
+        participantFeePercent: updated.participantFeePercent,
+        maxInstallments: updated.maxInstallments,
+        lockedAt: updated.financialSettingsLockedAt ?? null,
+      },
     };
   }
 }

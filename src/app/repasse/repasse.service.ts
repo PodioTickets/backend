@@ -161,6 +161,56 @@ export class RepasseService {
     });
   }
 
+  /**
+   * Carrega pedidos PAID e REFUNDED em uma única query e particiona em memória.
+   *
+   * Por que: duas findMany separadas leem em snapshots diferentes — um pedido em
+   * transição PAID→REFUNDED entre as queries pode aparecer em ambos ou em nenhum,
+   * causando dupla contagem ou desaparecimento no breakdown. Uma única query elimina
+   * essa janela de inconsistência.
+   *
+   * Inclui os mesmos campos que loadPaidOrders (incluindo `user` e `registrations`)
+   * para que o resultado paid possa ser usado em getPendingReleases sem refetch.
+   */
+  private async loadPaidAndRefundedOrders(
+    eventId: string,
+    prisma: any,
+  ): Promise<{ paidOrders: any[]; refundedOrders: any[] }> {
+    const orders = await prisma.order.findMany({
+      where: {
+        eventId,
+        payment: { status: { in: [PaymentStatus.PAID, PaymentStatus.REFUNDED] } },
+      },
+      include: {
+        payment: true,
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            avatarUrl: true,
+            documentNumber: true,
+          },
+        },
+        registrations: { select: { id: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const paidOrders: any[] = [];
+    const refundedOrders: any[] = [];
+    for (const order of orders) {
+      if (order.payment?.status === PaymentStatus.PAID) {
+        paidOrders.push(order);
+      } else if (order.payment?.status === PaymentStatus.REFUNDED) {
+        refundedOrders.push(order);
+      }
+    }
+    return { paidOrders, refundedOrders };
+  }
+
   private async loadAudit(eventId: string, prisma: any) {
     return prisma.eventAudit.findUnique({ where: { eventId } });
   }
@@ -327,17 +377,59 @@ export class RepasseService {
 
   // ─── Endpoints ───────────────────────────────────────────────────────────
 
+  /**
+   * Versão pública do breakdown sem verificação de acesso — usada por outros services
+   * (ex.: EventsService.getFinancial) que já fizeram sua própria autenticação.
+   * Garante que toda a UI financeira use a MESMA lógica (incluindo dedução priorizada
+   * em estornos e recuperação de saldo negativo).
+   */
+  async computeBreakdownForEvent(eventId: string) {
+    const prismaPrimary = this.prisma.getWriteClient();
+    const [event, ordersResult, audit, withdrawals] = await Promise.all([
+      this.loadEventConfig(eventId, prismaPrimary),
+      this.loadPaidAndRefundedOrders(eventId, prismaPrimary),
+      this.loadAudit(eventId, prismaPrimary),
+      this.loadWithdrawals(eventId, prismaPrimary),
+    ]);
+    const { paidOrders, refundedOrders } = ordersResult;
+
+    const committedWithdrawals = withdrawals.filter(
+      (w: any) => w.status === WithdrawalStatus.COMPLETED || w.status === WithdrawalStatus.PENDING,
+    );
+    const completedWithdrawalsTotal = withdrawals
+      .filter((w: any) => w.status === WithdrawalStatus.COMPLETED)
+      .reduce((s: number, w: any) => s + (w.netAmount ?? w.amount ?? 0), 0);
+
+    const breakdown = this.calcBreakdown(
+      paidOrders,
+      refundedOrders,
+      event.retentionRate,
+      !!audit,
+      committedWithdrawals,
+      event.organizerFeeRate,
+    );
+
+    return {
+      breakdown,
+      audit,
+      refundedOrders,
+      completedWithdrawalsTotal,
+    };
+  }
+
   async getSummary(userId: string, eventId: string) {
     await this.assertAccess(userId, eventId);
 
-    const prismaRead = this.prisma.getReadClient();
-    const [event, paidOrders, refundedOrders, audit, withdrawals] = await Promise.all([
-      this.loadEventConfig(eventId, prismaRead),
-      this.loadPaidOrders(eventId, prismaRead),
-      this.loadRefundedOrders(eventId, prismaRead),
-      this.loadAudit(eventId, prismaRead),
-      this.loadWithdrawals(eventId, prismaRead),
+    // Usa primary client para evitar lag de replicação após confirmação de pagamento.
+    // Dados financeiros precisam refletir o estado mais recente.
+    const prismaPrimary = this.prisma.getWriteClient();
+    const [event, ordersResult, audit, withdrawals] = await Promise.all([
+      this.loadEventConfig(eventId, prismaPrimary),
+      this.loadPaidAndRefundedOrders(eventId, prismaPrimary),
+      this.loadAudit(eventId, prismaPrimary),
+      this.loadWithdrawals(eventId, prismaPrimary),
     ]);
+    const { paidOrders, refundedOrders } = ordersResult;
 
     // PENDING + COMPLETED both reduce saldoParaSaque to prevent double-spend
     const committedWithdrawals = withdrawals.filter(
@@ -376,11 +468,12 @@ export class RepasseService {
   async getPendingReleases(userId: string, eventId: string, page: number, limit: number) {
     await this.assertAccess(userId, eventId);
 
-    const prismaRead = this.prisma.getReadClient();
+    // Primary client — financeiro precisa estar sempre atualizado
+    const prismaPrimary = this.prisma.getWriteClient();
     const [event, orders, audit] = await Promise.all([
-      this.loadEventConfig(eventId, prismaRead),
-      this.loadPaidOrders(eventId, prismaRead),
-      this.loadAudit(eventId, prismaRead),
+      this.loadEventConfig(eventId, prismaPrimary),
+      this.loadPaidOrders(eventId, prismaPrimary),
+      this.loadAudit(eventId, prismaPrimary),
     ]);
 
     const now = getNow();
@@ -463,11 +556,12 @@ export class RepasseService {
   async getInstallments(userId: string, eventId: string, page: number, limit: number) {
     await this.assertAccess(userId, eventId);
 
-    const prismaRead = this.prisma.getReadClient();
+    // Primary client — financeiro precisa estar sempre atualizado
+    const prismaPrimary = this.prisma.getWriteClient();
     const [event, audit, orders] = await Promise.all([
-      this.loadEventConfig(eventId, prismaRead),
-      this.loadAudit(eventId, prismaRead),
-      this.loadPaidOrders(eventId, prismaRead),
+      this.loadEventConfig(eventId, prismaPrimary),
+      this.loadAudit(eventId, prismaPrimary),
+      this.loadPaidOrders(eventId, prismaPrimary),
     ]);
 
     const now = getNow();
@@ -603,53 +697,58 @@ export class RepasseService {
       throw new BadRequestException('Amount must be greater than zero');
     }
 
-    const prismaRead = this.prisma.getReadClient();
     const prismaWrite = this.prisma.getWriteClient();
 
-    const [event, paidOrders, refundedOrders, audit, withdrawals] = await Promise.all([
-      this.loadEventConfig(eventId, prismaRead),
-      this.loadPaidOrders(eventId, prismaRead),
-      this.loadRefundedOrders(eventId, prismaRead),
-      this.loadAudit(eventId, prismaRead),
-      this.loadWithdrawals(eventId, prismaRead),
-    ]);
+    // Wrap check + create in a single transaction with an advisory lock so
+    // concurrent withdrawal requests for the same event are serialized.
+    const withdrawal = await prismaWrite.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${eventId}))`;
 
-    // PENDING + COMPLETED both reduce saldoParaSaque to prevent double-spend
-    const committedWithdrawals = withdrawals.filter(
-      (w: any) => w.status === WithdrawalStatus.COMPLETED || w.status === WithdrawalStatus.PENDING,
-    );
+      const [event, ordersResult, audit, withdrawals] = await Promise.all([
+        this.loadEventConfig(eventId, tx),
+        this.loadPaidAndRefundedOrders(eventId, tx),
+        this.loadAudit(eventId, tx),
+        this.loadWithdrawals(eventId, tx),
+      ]);
+      const { paidOrders, refundedOrders } = ordersResult;
 
-    const { saldoParaSaque } = this.calcBreakdown(
-      paidOrders,
-      refundedOrders,
-      event.retentionRate,
-      !!audit,
-      committedWithdrawals,
-      event.organizerFeeRate,
-    );
-
-    if (amount > saldoParaSaque) {
-      throw new BadRequestException(
-        `Insufficient available balance. Available: ${saldoParaSaque} cents, requested: ${amount} cents`,
+      // PENDING + COMPLETED both reduce saldoParaSaque to prevent double-spend
+      const committedWithdrawals = withdrawals.filter(
+        (w: any) => w.status === WithdrawalStatus.COMPLETED || w.status === WithdrawalStatus.PENDING,
       );
-    }
 
-    // Fee was already deducted upfront when distributing into buckets (spec step 3).
-    // saldoParaSaque is already the net amount — no additional deduction at withdrawal.
-    const withdrawal = await prismaWrite.eventWithdrawal.create({
-      data: {
-        eventId,
-        requestedById: userId,
-        amount,
-        feeRate: event.organizerFeeRate,
-        feeAmount: 0,
-        netAmount: amount,
-        status: WithdrawalStatus.PENDING,
-      },
+      const { saldoParaSaque } = this.calcBreakdown(
+        paidOrders,
+        refundedOrders,
+        event.retentionRate,
+        !!audit,
+        committedWithdrawals,
+        event.organizerFeeRate,
+      );
+
+      if (amount > saldoParaSaque) {
+        throw new BadRequestException(
+          `Insufficient available balance. Available: ${saldoParaSaque} cents, requested: ${amount} cents`,
+        );
+      }
+
+      // Fee was already deducted upfront when distributing into buckets (spec step 3).
+      // saldoParaSaque is already the net amount — no additional deduction at withdrawal.
+      return tx.eventWithdrawal.create({
+        data: {
+          eventId,
+          requestedById: userId,
+          amount,
+          feeRate: event.organizerFeeRate,
+          feeAmount: 0,
+          netAmount: amount,
+          status: WithdrawalStatus.PENDING,
+        },
+      });
     });
 
     // Fire-and-forget: send transfer requested email to organizer
-    this.loadEventWithOrg(eventId, prismaRead).then((evtOrg) => {
+    this.loadEventWithOrg(eventId, this.prisma.getReadClient()).then((evtOrg) => {
       if (!evtOrg?.organization?.email) return;
       const org = evtOrg.organization;
       const now = new Date();
@@ -805,39 +904,41 @@ export class RepasseService {
   async auditEvent(adminUserId: string, eventId: string, notes?: string) {
     await this.assertAdminOrOwner(adminUserId, eventId);
 
-    const prismaRead = this.prisma.getReadClient();
     const prismaWrite = this.prisma.getWriteClient();
 
-    const existing = await this.loadAudit(eventId, prismaRead);
-    if (existing) throw new BadRequestException('Event has already been audited');
+    const audit = await prismaWrite.$transaction(async (tx) => {
+      // Check and create within the same transaction to prevent duplicate audits
+      const existing = await this.loadAudit(eventId, tx);
+      if (existing) throw new BadRequestException('Event has already been audited');
 
-    const [event, paidOrders, refundedOrders, withdrawals] = await Promise.all([
-      this.loadEventConfig(eventId, prismaRead),
-      this.loadPaidOrders(eventId, prismaRead),
-      this.loadRefundedOrders(eventId, prismaRead),
-      this.loadWithdrawals(eventId, prismaRead),
-    ]);
+      const [event, ordersResult, withdrawals] = await Promise.all([
+        this.loadEventConfig(eventId, tx),
+        this.loadPaidAndRefundedOrders(eventId, tx),
+        this.loadWithdrawals(eventId, tx),
+      ]);
+      const { paidOrders, refundedOrders } = ordersResult;
 
-    const committedWithdrawals = withdrawals.filter(
-      (w: any) => w.status === WithdrawalStatus.COMPLETED || w.status === WithdrawalStatus.PENDING,
-    );
+      const committedWithdrawals = withdrawals.filter(
+        (w: any) => w.status === WithdrawalStatus.COMPLETED || w.status === WithdrawalStatus.PENDING,
+      );
 
-    const { valorRetido } = this.calcBreakdown(
-      paidOrders,
-      refundedOrders,
-      event.retentionRate,
-      false,
-      committedWithdrawals,
-      event.organizerFeeRate,
-    );
+      const { valorRetido } = this.calcBreakdown(
+        paidOrders,
+        refundedOrders,
+        event.retentionRate,
+        false,
+        committedWithdrawals,
+        event.organizerFeeRate,
+      );
 
-    const audit = await prismaWrite.eventAudit.create({
-      data: {
-        eventId,
-        auditedById: adminUserId,
-        retentionReleased: valorRetido,
-        notes: notes ?? null,
-      },
+      return tx.eventAudit.create({
+        data: {
+          eventId,
+          auditedById: adminUserId,
+          retentionReleased: valorRetido,
+          notes: notes ?? null,
+        },
+      });
     });
 
     return {
@@ -916,11 +1017,11 @@ export class RepasseService {
         });
       } else {
         // Pending: calculate current retained amount dynamically
-        const [paidOrders, refundedOrders, withdrawals] = await Promise.all([
-          this.loadPaidOrders(event.id, prismaRead),
-          this.loadRefundedOrders(event.id, prismaRead),
+        const [ordersResult, withdrawals] = await Promise.all([
+          this.loadPaidAndRefundedOrders(event.id, prismaRead),
           this.loadWithdrawals(event.id, prismaRead),
         ]);
+        const { paidOrders, refundedOrders } = ordersResult;
 
         const committedWithdrawals = withdrawals.filter(
           (w: any) => w.status === WithdrawalStatus.COMPLETED || w.status === WithdrawalStatus.PENDING,
@@ -983,40 +1084,43 @@ export class RepasseService {
   }
 
   async adminReleaseRetention(adminUserId: string, eventId: string, notes?: string) {
-    const prismaRead = this.prisma.getReadClient();
     const prismaWrite = this.prisma.getWriteClient();
 
-    const event = await this.loadEventConfig(eventId, prismaRead);
+    const { audit, retainedAmount } = await prismaWrite.$transaction(async (tx) => {
+      // Check and create within the same transaction to prevent duplicate releases
+      const existing = await this.loadAudit(eventId, tx);
+      if (existing) throw new BadRequestException('Event retention has already been released');
 
-    const existing = await this.loadAudit(eventId, prismaRead);
-    if (existing) throw new BadRequestException('Event retention has already been released');
+      const [event, ordersResult, withdrawals] = await Promise.all([
+        this.loadEventConfig(eventId, tx),
+        this.loadPaidAndRefundedOrders(eventId, tx),
+        this.loadWithdrawals(eventId, tx),
+      ]);
+      const { paidOrders, refundedOrders } = ordersResult;
 
-    const [paidOrders, refundedOrders, withdrawals] = await Promise.all([
-      this.loadPaidOrders(eventId, prismaRead),
-      this.loadRefundedOrders(eventId, prismaRead),
-      this.loadWithdrawals(eventId, prismaRead),
-    ]);
+      const committedWithdrawals = withdrawals.filter(
+        (w: any) => w.status === WithdrawalStatus.COMPLETED || w.status === WithdrawalStatus.PENDING,
+      );
 
-    const committedWithdrawals = withdrawals.filter(
-      (w: any) => w.status === WithdrawalStatus.COMPLETED || w.status === WithdrawalStatus.PENDING,
-    );
+      const { valorRetido } = this.calcBreakdown(
+        paidOrders,
+        refundedOrders,
+        event.retentionRate,
+        false,
+        committedWithdrawals,
+        event.organizerFeeRate,
+      );
 
-    const { valorRetido: retainedAmount } = this.calcBreakdown(
-      paidOrders,
-      refundedOrders,
-      event.retentionRate,
-      false,
-      committedWithdrawals,
-      event.organizerFeeRate,
-    );
+      const created = await tx.eventAudit.create({
+        data: {
+          eventId,
+          auditedById: adminUserId,
+          retentionReleased: valorRetido,
+          notes: notes ?? null,
+        },
+      });
 
-    const audit = await prismaWrite.eventAudit.create({
-      data: {
-        eventId,
-        auditedById: adminUserId,
-        retentionReleased: retainedAmount,
-        notes: notes ?? null,
-      },
+      return { audit: created, retainedAmount: valorRetido };
     });
 
     this.logger.log(`Retention released for event ${eventId}: ${retainedAmount} cents by admin ${adminUserId}`);

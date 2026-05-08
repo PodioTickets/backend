@@ -69,12 +69,19 @@ export class CieloService {
   private readonly merchantKey: string;
   private readonly isSandbox: boolean;
   private readonly webhookSecret: string;
+  private readonly threeDsClientId: string;
+  private readonly threeDsClientSecret: string;
+
+  // Cache simples em memória: evita chamar o Braspag a cada request
+  private threeDsTokenCache: { token: string; expiresAt: number } | null = null;
 
   constructor(private configService: ConfigService) {
     this.merchantId = this.configService.get<string>('CIELO_MERCHANT_ID') || '';
     this.merchantKey = this.configService.get<string>('CIELO_MERCHANT_KEY') || '';
     this.isSandbox = this.configService.get<string>('CIELO_ENV') !== 'production';
     this.webhookSecret = this.configService.get<string>('CIELO_WEBHOOK_SECRET') || '';
+    this.threeDsClientId = this.configService.get<string>('CIELO_3DS_CLIENT_ID') || '';
+    this.threeDsClientSecret = this.configService.get<string>('CIELO_3DS_CLIENT_SECRET') || '';
 
     const baseURL = this.isSandbox
       ? 'https://apisandbox.braspag.com.br'
@@ -742,6 +749,51 @@ export class CieloService {
         errorDetails: errorDetails || errorData,
       };
     }
+  }
+
+  /**
+   * Obtém o access token OAuth do Braspag para inicializar o SDK 3DS no frontend.
+   * O token tem validade de ~1h; mantemos em cache e renovamos com 60s de margem.
+   */
+  async get3dsAccessToken(): Promise<string> {
+    if (!this.threeDsClientId || !this.threeDsClientSecret) {
+      throw new Error('CIELO_3DS_CLIENT_ID ou CIELO_3DS_CLIENT_SECRET não configurados');
+    }
+
+    const now = Date.now();
+    if (this.threeDsTokenCache && now < this.threeDsTokenCache.expiresAt) {
+      return this.threeDsTokenCache.token;
+    }
+
+    const mpiBaseUrl = this.isSandbox
+      ? 'https://mpisandbox.braspag.com.br'
+      : 'https://mpi.braspag.com.br';
+
+    const credentials = Buffer.from(
+      `${this.threeDsClientId}:${this.threeDsClientSecret}`,
+    ).toString('base64');
+
+    const response = await axios.post<{ access_token: string; expires_in: number }>(
+      `${mpiBaseUrl}/connect/token`,
+      'grant_type=client_credentials',
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Authorization': `Basic ${credentials}`,
+        },
+        timeout: 10000,
+      },
+    );
+
+    const { access_token, expires_in } = response.data;
+    // Armazena com 60s de margem antes da expiração real
+    this.threeDsTokenCache = {
+      token: access_token,
+      expiresAt: now + (expires_in - 60) * 1000,
+    };
+
+    this.logger.debug(`3DS access token renovado (expira em ${expires_in}s)`);
+    return access_token;
   }
 
   get sandboxMode(): boolean {

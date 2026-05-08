@@ -3,9 +3,10 @@ import { TicketsController } from './tickets.controller';
 import { TicketsService } from './tickets.service';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { OrganizationsModule } from '../organizations/organizations.module';
+import { CommonModule } from '../../common/common.module';
 
 @Module({
-  imports: [PrismaModule, OrganizationsModule],
+  imports: [PrismaModule, OrganizationsModule, CommonModule],
   controllers: [TicketsController],
   providers: [TicketsService],
   exports: [TicketsService],

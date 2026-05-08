@@ -177,26 +177,37 @@ export class OrganizationsService {
     }
     const prismaRead = this.prisma.getReadClient();
     const prismaWrite = this.prisma.getWriteClient();
-    const member = await prismaRead.organizationMember.findFirst({
-      where: { userId },
-      select: { organizationId: true },
-    });
-    if (!member) {
+
+    // Combina member-lookup + dedup-lookup numa única round-trip ao Postgres.
+    // O caminho comum (mesmo usuário re-renderiza a página dentro da janela de 30min)
+    // antes fazia 2 queries serializadas; agora faz 1 e retorna early.
+    type MemberDedupeRow = {
+      organizationId: string;
+      lastRecordedAt: Date | null;
+    };
+    const rows = await prismaRead.$queryRaw<MemberDedupeRow[]>`
+      SELECT
+        m."organizationId" AS "organizationId",
+        d."lastRecordedAt" AS "lastRecordedAt"
+      FROM "OrganizationMember" m
+      LEFT JOIN "OrganizerAuditPageDedupe" d
+        ON d."organizationId" = m."organizationId"
+       AND d."actorUserId"    = m."userId"
+       AND d."pageKey"        = ${trimmed}
+      WHERE m."userId" = ${userId}::uuid
+      LIMIT 1
+    `;
+
+    const memberRow = rows[0];
+    if (!memberRow) {
       throw new ForbiddenException('Not an organization member');
     }
+    const organizationId = memberRow.organizationId;
     const now = new Date();
-    const existing = await prismaRead.organizerAuditPageDedupe.findUnique({
-      where: {
-        organizationId_actorUserId_pageKey: {
-          organizationId: member.organizationId,
-          actorUserId: userId,
-          pageKey: trimmed,
-        },
-      },
-    });
+
     if (
-      existing &&
-      now.getTime() - existing.lastRecordedAt.getTime() <
+      memberRow.lastRecordedAt &&
+      now.getTime() - new Date(memberRow.lastRecordedAt).getTime() <
         OrganizationsService.ORGANIZER_PAGE_VIEW_DEDUPE_MS
     ) {
       return {
@@ -206,14 +217,14 @@ export class OrganizationsService {
     }
     const actionLabel = await resolveOrganizerPageViewActionLabel(
       prismaRead,
-      member.organizationId,
+      organizationId,
       trimmed,
     );
 
     await prismaWrite.$transaction(async (tx) => {
       await tx.organizationAuditLog.create({
         data: {
-          organizationId: member.organizationId,
+          organizationId,
           actorUserId: userId,
           ip: clientIp ?? null,
           action: actionLabel,
@@ -226,13 +237,13 @@ export class OrganizationsService {
       await tx.organizerAuditPageDedupe.upsert({
         where: {
           organizationId_actorUserId_pageKey: {
-            organizationId: member.organizationId,
+            organizationId,
             actorUserId: userId,
             pageKey: trimmed,
           },
         },
         create: {
-          organizationId: member.organizationId,
+          organizationId,
           actorUserId: userId,
           pageKey: trimmed,
           lastRecordedAt: now,
@@ -482,7 +493,6 @@ export class OrganizationsService {
           city: createDto.city,
           state: createDto.state,
           ownerName: createDto.ownerName,
-          pix: createDto.pix,
           bankName: createDto.bankName,
           bankCode: createDto.bankCode,
           agency: createDto.agency,

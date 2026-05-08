@@ -186,14 +186,18 @@ export class RegistrationsService {
           },
         });
       } else if (appliedVoucherId) {
-        await prisma.voucher.update({
-          where: { id: appliedVoucherId },
+        // Atomic ACTIVE → USED para evitar dupla utilização do voucher
+        const r = await prisma.voucher.updateMany({
+          where: { id: appliedVoucherId, status: 'ACTIVE' },
           data: {
             status: 'USED',
             usedAt: new Date(),
             usedBy: registrationUserId,
           },
         });
+        if (r.count === 0) {
+          throw new Error(`Voucher ${appliedVoucherId} já foi utilizado`);
+        }
       }
 
       // Criar o pedido (Order) primeiro

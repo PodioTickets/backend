@@ -329,6 +329,7 @@ export class EventNotificationsService {
             name: true,
             slug: true,
             organization: { select: { id: true, name: true, tradeName: true, logoUrl: true } },
+            _count: { select: { registrations: true } },
           },
         },
         createdBy: { select: { id: true, firstName: true, lastName: true, email: true } },
@@ -337,9 +338,15 @@ export class EventNotificationsService {
 
     if (!row) throw new NotFoundException('Notification not found');
 
+    const { event, ...rest } = row;
     return {
       message: 'Notification fetched successfully',
-      data: row,
+      data: {
+        ...rest,
+        event: event
+          ? { ...event, totalRegistrations: event._count.registrations, _count: undefined }
+          : null,
+      },
     };
   }
 

@@ -117,10 +117,6 @@ export class CreateOrganizationDto {
   // Informações bancárias
   @IsOptional()
   @IsString()
-  pix?: string; // Chave PIX
-
-  @IsOptional()
-  @IsString()
   bankName?: string; // Nome do banco
 
   @IsOptional()
@@ -402,10 +398,6 @@ export class UpdateOrganizationDto {
   ownerName?: string; // Nome do responsável (owner)
 
   // Informações bancárias
-  @IsOptional()
-  @IsString()
-  pix?: string; // Chave PIX
-
   @IsOptional()
   @IsString()
   bankName?: string; // Nome do banco

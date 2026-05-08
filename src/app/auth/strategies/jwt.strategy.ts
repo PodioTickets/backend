@@ -3,12 +3,14 @@ import { PassportStrategy } from '@nestjs/passport';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { CacheRedisService } from '../../../common/services/cache-redis.service';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(
     private configService: ConfigService,
     private prisma: PrismaService,
+    private cache: CacheRedisService,
   ) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
@@ -51,6 +53,23 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     // Verificar se o accountType do token corresponde ao do banco
     if (user.accountType !== accountType) {
       throw new UnauthorizedException('Invalid account type');
+    }
+
+    // Organizadores precisam ter ao menos uma organização ativa
+    if (accountType === 'ORGANIZER') {
+      const cacheKey = `organizer_active:${payload.sub}`;
+      let hasActiveOrg = await this.cache.getJson<boolean>(cacheKey);
+      if (hasActiveOrg === null) {
+        const row = await this.prisma.organizationMember.findFirst({
+          where: { userId: payload.sub, organization: { isActive: true } },
+          select: { id: true },
+        });
+        hasActiveOrg = !!row;
+        await this.cache.setJson(cacheKey, hasActiveOrg, 300);
+      }
+      if (!hasActiveOrg) {
+        throw new UnauthorizedException('Organization is inactive');
+      }
     }
 
     return {

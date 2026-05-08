@@ -12,9 +12,11 @@ import { PrismaModule } from '../../prisma/prisma.module';
 import { UploadModule } from '../upload/upload.module';
 import { RepasseModule } from '../repasse/repasse.module';
 import { EventsModule } from '../events/events.module';
+import { OrganizationsModule } from '../organizations/organizations.module';
+import { CommonModule } from '../../common/common.module';
 
 @Module({
-  imports: [PrismaModule, UploadModule, RepasseModule, EventsModule],
+  imports: [PrismaModule, UploadModule, RepasseModule, EventsModule, OrganizationsModule, CommonModule],
   controllers: [
     AdminRepasseController,
     AdminAuthController,

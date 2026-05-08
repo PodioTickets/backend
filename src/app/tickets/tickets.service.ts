@@ -13,6 +13,7 @@ import {
   summarizeTicketUpdateForAudit,
   type TicketBeforeAudit,
 } from './ticket-audit.helpers';
+import { CacheRedisService } from '../../common/services/cache-redis.service';
 
 function resolveImageUrl(url: string | null | undefined, baseUrl: string): string | null | undefined {
   if (!url) return url;
@@ -86,7 +87,34 @@ export class TicketsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly organizationsService: OrganizationsService,
+    private readonly cache: CacheRedisService,
   ) { }
+
+  /**
+   * Cache curto em GET /tickets/events/:eventId (TTL 15s).
+   *
+   * Aceita-se uma janela de inconsistência de até 15s em vagas vendidas —
+   * o checkout tem validação atômica que rejeita reserva de lote esgotado,
+   * então o pior caso é UX (usuário vê "disponível" 15s depois de esgotar),
+   * nunca venda dupla.
+   *
+   * Sem invalidação ativa: confiamos no TTL pra evitar a complexidade de
+   * pattern matching no Redis (SCAN é caro) ou versionamento (extra round-trip
+   * por request). Para mudanças admin (CRUD de ticket/batch), o organizador
+   * pode esperar até 15s para ver o efeito — trade-off aceitável.
+   */
+  private static readonly TICKETS_LIST_CACHE_TTL_SECONDS = 15;
+  private ticketsListCacheKey(
+    eventId: string,
+    isOrganizer: boolean,
+    categoryId: string | undefined,
+    page: number,
+    limit: number,
+    includeInactive: boolean,
+    baseUrl: string | undefined,
+  ): string {
+    return `tickets:list:${eventId}:org:${isOrganizer ? 1 : 0}:cat:${categoryId ?? 'all'}:p:${page}:l:${limit}:inact:${includeInactive ? 1 : 0}:base:${baseUrl ?? ''}`;
+  }
 
   async create(userId: string, eventId: string, createTicketDto: CreateTicketDto) {
     await this.verifyOrganizerAccess(userId, eventId);
@@ -213,6 +241,22 @@ export class TicketsService {
     const skip = (page - 1) * limit;
 
     const isOrganizer = userId ? await this.isOrganizerOfEvent(userId, eventId, db) : false;
+
+    // Cache hot path (TTL 15s). Cache key inclui isOrganizer porque o que volta
+    // pode mudar (organizadores veem inativos quando filterDto.includeInactive=true).
+    // Fail-open: cache miss → query normal.
+    const cacheKey = this.ticketsListCacheKey(
+      eventId,
+      isOrganizer,
+      filterDto.categoryId,
+      page,
+      limit,
+      !!filterDto.includeInactive,
+      baseUrl,
+    );
+    const cached = await this.cache.getJson<unknown>(cacheKey);
+    if (cached) return cached as Awaited<ReturnType<TicketsService['findAll']>>;
+
     const where: any = { eventId };
     if (!filterDto.includeInactive) {
       where.isActive = true;
@@ -315,7 +359,7 @@ export class TicketsService {
 
     const totalPages = Math.ceil(total / limit);
 
-    return {
+    const response = {
       message: 'Tickets fetched successfully',
       data: {
         tickets: transformedTickets,
@@ -327,6 +371,9 @@ export class TicketsService {
         },
       },
     };
+
+    await this.cache.setJson(cacheKey, response, TicketsService.TICKETS_LIST_CACHE_TTL_SECONDS);
+    return response;
   }
 
   async findOne(id: string, baseUrl?: string) {

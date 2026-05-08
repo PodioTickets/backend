@@ -20,6 +20,7 @@ import { PayOrderDto } from './dto/pay-order.dto';
 import { PatchCouponDto } from './dto/patch-coupon.dto';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
+import { parseAppliesToArray } from '../../helpers/AppliesToHelper';
 
 // ─── helpers de formatação ────────────────────────────────────────────────────
 
@@ -209,8 +210,7 @@ function inferEffectiveUsage(
 
   let applicable = reservedTickets;
   if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-    let allowed: string[] = [];
-    try { allowed = JSON.parse(coupon.appliesTo); } catch { allowed = []; }
+    const allowed = parseAppliesToArray(coupon.appliesTo);
     applicable = reservedTickets.filter((rt) => allowed.includes(rt.ticketId));
   }
 
@@ -1139,8 +1139,7 @@ export class OrdersService {
         } else {
           let ageApplicableTickets = reservedTickets;
           if (existingCoupon.appliesTo && existingCoupon.appliesTo !== 'all') {
-            let allowed: string[] = [];
-            try { allowed = JSON.parse(existingCoupon.appliesTo); } catch { allowed = []; }
+            const allowed = parseAppliesToArray(existingCoupon.appliesTo);
             ageApplicableTickets = reservedTickets.filter((rt: any) => allowed.includes(rt.ticketId));
           }
           const ageApplicableQty = ageApplicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
@@ -1181,8 +1180,7 @@ export class OrdersService {
       for (const coupon of autoCoupons) {
         // Verificar appliesTo
         if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-          let allowed: string[] = [];
-          try { allowed = JSON.parse(coupon.appliesTo); } catch { allowed = [coupon.appliesTo]; }
+          const allowed = parseAppliesToArray(coupon.appliesTo);
           if (!ticketIds.some((id: string) => allowed.includes(id))) continue;
         }
 
@@ -1209,8 +1207,7 @@ export class OrdersService {
         {
           let autoApplicableTickets = reservedTickets;
           if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-            let allowedIds: string[] = [];
-            try { allowedIds = JSON.parse(coupon.appliesTo); } catch { allowedIds = [coupon.appliesTo]; }
+            const allowedIds = parseAppliesToArray(coupon.appliesTo);
             autoApplicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
           }
 
@@ -1435,8 +1432,7 @@ export class OrdersService {
       // Filtrar apenas os tickets aos quais o cupom se aplica
       let applicableTickets = reservedTickets;
       if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-        let allowedIds: string[] = [];
-        try { allowedIds = JSON.parse(coupon.appliesTo); } catch { allowedIds = [coupon.appliesTo]; }
+        const allowedIds = parseAppliesToArray(coupon.appliesTo);
         applicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
       }
 
@@ -1760,8 +1756,7 @@ export class OrdersService {
       if (coupon && (!coupon.expiryDate || new Date(coupon.expiryDate) > new Date())) {
         let applicableTicketsPay = reservedTickets;
         if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-          let allowedIds: string[] = [];
-          try { allowedIds = JSON.parse(coupon.appliesTo); } catch { allowedIds = [coupon.appliesTo]; }
+          const allowedIds = parseAppliesToArray(coupon.appliesTo);
           applicableTicketsPay = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
         }
         couponApplicableTicketIds = new Set(applicableTicketsPay.map((rt: any) => rt.ticketId));
@@ -1794,12 +1789,7 @@ export class OrdersService {
       for (const coupon of autoCoupons) {
         // Verificar appliesTo — se não for 'all', checar se algum ticket está na lista
         if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-          let allowedTicketIds: string[] = [];
-          try {
-            allowedTicketIds = JSON.parse(coupon.appliesTo);
-          } catch {
-            allowedTicketIds = [];
-          }
+          const allowedTicketIds = parseAppliesToArray(coupon.appliesTo);
           if (!ticketIds.some((id: string) => allowedTicketIds.includes(id))) continue;
         }
 
@@ -1831,8 +1821,7 @@ export class OrdersService {
           // AGE: aplica nos ingressos mais caros dos participantes qualificados
           let ageApplicableTickets = reservedTickets;
           if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-            let allowed: string[] = [];
-            try { allowed = JSON.parse(coupon.appliesTo); } catch { allowed = []; }
+            const allowed = parseAppliesToArray(coupon.appliesTo);
             ageApplicableTickets = reservedTickets.filter((rt: any) => allowed.includes(rt.ticketId));
           }
           const ageApplicableQty = ageApplicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
@@ -1877,6 +1866,11 @@ export class OrdersService {
     const pixDiscount = 0;
     const finalTotal = discountedTotal;
 
+    // Pedido grátis (voucher 100% ou cupom integral): não chama gateway, finaliza direto.
+    // Cielo rejeita amount=0, então qualquer cobrança aqui falharia. Pulamos o gateway,
+    // mantemos o método solicitado apenas para fins de relatório (amount=0).
+    const isFreeOrder = finalTotal <= 0;
+
     // 6.8 Prepare payment data
     const user = await r.user.findUnique({
       where: { id: userId },
@@ -1897,7 +1891,8 @@ export class OrdersService {
       | { cavv: string; eci: string; xid?: string; version?: string; referenceId?: string }
       | undefined;
 
-    if (dto.method === PaymentMethod.CREDIT_CARD) {
+    // Pedidos grátis pulam a validação de cartão — não há cobrança
+    if (!isFreeOrder && dto.method === PaymentMethod.CREDIT_CARD) {
       if (dto.cardToken) {
         cardTokenData = {
           token: dto.cardToken.token,
@@ -1919,7 +1914,7 @@ export class OrdersService {
       }
     }
 
-    if (dto.method === PaymentMethod.DEBIT_CARD) {
+    if (!isFreeOrder && dto.method === PaymentMethod.DEBIT_CARD) {
       if (!dto.card) {
         throw new AppUnprocessableException('CARD_REQUIRED', 'Card data is required for debit card payments');
       }
@@ -1941,9 +1936,19 @@ export class OrdersService {
       }
     }
 
-    // 6.9 Call Cielo
+    // 6.9 Call Cielo (skipped para pedidos grátis — Cielo rejeita amount=0)
     let cieloResult: any;
     let paymentFailed = false;
+    if (isFreeOrder) {
+      cieloResult = {
+        success: true,
+        paymentId: null,
+        cieloStatus: 'PaymentConfirmed',
+        authorizationCode: null,
+        proofOfSale: null,
+        cardBrand: null,
+      };
+    } else {
     try {
       let debitReturnUrl: string | undefined;
       if (dto.method === PaymentMethod.DEBIT_CARD && !threedsData) {
@@ -1981,6 +1986,7 @@ export class OrdersService {
       paymentFailed = true;
       cieloResult = { success: false, error: err.message };
     }
+    } // fim do else (não-free)
 
     // 6.10 Payment failed → retornar erro sem cancelar o pedido (usuário pode tentar novamente)
     if (paymentFailed) {
@@ -1993,7 +1999,8 @@ export class OrdersService {
     }
 
     // 6.11 PIX: extend expiry, create PENDING payment, return QR code
-    if (dto.method === PaymentMethod.PIX) {
+    // Para pedidos grátis pulamos o QR — vai direto pro finalize.
+    if (dto.method === PaymentMethod.PIX && !isFreeOrder) {
       const newExpiresAt = new Date(Date.now() + RESERVATION_TTL_MINUTES * 60 * 1000);
 
       await w.$transaction(async (tx: any) => {
@@ -2065,7 +2072,8 @@ export class OrdersService {
     }
 
     // 6.11.5 DEBIT_CARD: bank requested 3DS authentication — store pending payment, return redirectUrl
-    if (dto.method === PaymentMethod.DEBIT_CARD && cieloResult.authenticationUrl) {
+    // Pedidos grátis nunca passam por aqui (cieloResult.authenticationUrl é undefined no stub).
+    if (dto.method === PaymentMethod.DEBIT_CARD && cieloResult.authenticationUrl && !isFreeOrder) {
       const newExpiresAt = new Date(Date.now() + RESERVATION_TTL_MINUTES * 60 * 1000);
 
       await w.$transaction(async (tx: any) => {
@@ -2242,38 +2250,51 @@ export class OrdersService {
         },
       });
 
-      // Apply coupon usage
+      // Apply coupon usage — atomic SQL to prevent race condition on concurrent orders
       if (couponId) {
         const couponForUsage = await tx.coupon.findUnique({
           where: { id: couponId },
           select: { couponType: true, maxUsage: true, usageCount: true },
         });
         const ticketCount = reservedTickets.reduce((sum: number, rt: any) => sum + (rt.quantity ?? 1), 0);
-        let usageIncrement: number;
+
         if (couponForUsage?.couponType === 'QUANTITY') {
-          // QUANTITY: all-or-nothing — race condition protection
-          if (couponForUsage.maxUsage != null && couponForUsage.usageCount >= couponForUsage.maxUsage) {
+          // QUANTITY: all-or-nothing — atomic check-and-increment
+          const rows: any[] = await tx.$queryRaw`
+            UPDATE "Coupon"
+            SET "usageCount" = "usageCount" + 1
+            WHERE id = ${couponId}::uuid
+              AND ("maxUsage" IS NULL OR "usageCount" + 1 <= "maxUsage")
+            RETURNING id
+          `;
+          if (rows.length === 0) {
             throw new BadRequestException('Cupom esgotado. Prossiga sem desconto ou escolha outro cupom.');
           }
-          usageIncrement = 1;
         } else {
-          // DISCOUNT/AGE: uso parcial — registra apenas o que foi efetivamente aplicado
-          const remaining = couponForUsage?.maxUsage != null
-            ? Math.max(0, couponForUsage.maxUsage - couponForUsage.usageCount)
+          // DISCOUNT/AGE: cap at maxUsage atomically — never goes over even under concurrency
+          const delta = couponForUsage?.maxUsage != null
+            ? Math.min(ticketCount, Math.max(0, couponForUsage.maxUsage - couponForUsage.usageCount))
             : ticketCount;
-          usageIncrement = Math.min(remaining, ticketCount);
+          if (delta > 0) {
+            await tx.$queryRaw`
+              UPDATE "Coupon"
+              SET "usageCount" = LEAST("usageCount" + ${delta}, COALESCE("maxUsage", "usageCount" + ${delta}))
+              WHERE id = ${couponId}::uuid
+            `;
+          }
         }
-        if (usageIncrement > 0) await tx.coupon.update({
-          where: { id: couponId },
-          data: { usageCount: { increment: usageIncrement } },
-        });
       }
-      // Mark voucher as used
+      // Mark voucher as used — atomic ACTIVE → USED to evitar sobrescrita em corrida
       if (voucherId) {
-        await tx.voucher.update({
-          where: { id: voucherId },
+        const voucherResult = await tx.voucher.updateMany({
+          where: { id: voucherId, status: 'ACTIVE' },
           data: { status: 'USED', usedAt: new Date(), usedBy: userId },
         });
+        if (voucherResult.count === 0) {
+          this.logger.error(
+            `[VOUCHER-RACE] pay/CC: voucher ${voucherId} já estava USED para order ${orderId} — Cielo já autorizou, requer estorno manual`,
+          );
+        }
       }
 
       // Remove placeholder PENDING registrations criadas na reserva
@@ -2901,6 +2922,27 @@ export class OrdersService {
           data: { status: 'CANCELLED' },
         });
       });
+    }
+  }
+
+  async get3dsToken(userId: string, orderId: string): Promise<{ accessToken: string }> {
+    const order = await this.prisma.getReadClient().order.findUnique({
+      where: { id: orderId },
+      select: { id: true, userId: true, status: true },
+    });
+
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.userId !== userId) throw new NotFoundException('Order not found');
+    if (order.status !== 'PENDING') {
+      throw new BadRequestException('3DS token só pode ser obtido para pedidos PENDING');
+    }
+
+    try {
+      const accessToken = await this.cieloService.get3dsAccessToken();
+      return { accessToken };
+    } catch (err: any) {
+      this.logger.error(`Falha ao obter 3DS token para order ${orderId}: ${err.message}`);
+      throw new BadRequestException('Não foi possível obter o token 3DS. Verifique as credenciais CIELO_3DS_CLIENT_ID e CIELO_3DS_CLIENT_SECRET.');
     }
   }
 }

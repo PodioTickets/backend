@@ -11,6 +11,7 @@ import { normalizeBillingPostalCodeForStorage } from './dto/checkout-billing-add
 import { PaymentMethod, PaymentStatus, Prisma, RegistrationStatus } from '@prisma/client';
 import { CieloService } from '../payments/cielo.service';
 import { RegistrationsService } from '../registrations/registrations.service';
+import { parseAppliesToArray, parseAppliesToValue } from '../../helpers/AppliesToHelper';
 // QR Code é gerado dinamicamente no frontend/backend usando o payload salvo em qrCode
 
 interface PriceCalculation {
@@ -367,7 +368,7 @@ export class CheckoutService {
 
     // 1.4 Validar método de pagamento
     if (
-      !['PIX', 'CREDIT_CARD', 'BOLETO', 'CRYPTO'].includes(dto.paymentMethod)
+      !['PIX', 'CREDIT_CARD', 'DEBIT_CARD', 'BOLETO', 'CRYPTO'].includes(dto.paymentMethod)
     ) {
       throw new BadRequestException('Método de pagamento inválido');
     }
@@ -419,16 +420,9 @@ export class CheckoutService {
     ticketId: string,
   ): boolean {
     if (!appliesTo || appliesTo === 'all') return true;
-
-    try {
-      const parsed = JSON.parse(appliesTo);
-      if (Array.isArray(parsed)) {
-        return parsed.includes(ticketId);
-      }
-      return appliesTo === ticketId;
-    } catch {
-      return appliesTo === ticketId;
-    }
+    const allowed = parseAppliesToArray(appliesTo);
+    if (allowed.length === 0) return appliesTo === ticketId;
+    return allowed.includes(ticketId);
   }
 
   /**
@@ -757,13 +751,7 @@ export class CheckoutService {
 
     // Validar aplicabilidade aos tickets
     if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-      let appliesToValue: string | string[] | null = null;
-      try {
-        const parsed = JSON.parse(coupon.appliesTo);
-        appliesToValue = Array.isArray(parsed) ? parsed : coupon.appliesTo;
-      } catch {
-        appliesToValue = coupon.appliesTo;
-      }
+      const appliesToValue = parseAppliesToValue(coupon.appliesTo);
 
       const ticketIds = tickets.map((t) => t.ticketId);
       const appliesToArray = Array.isArray(appliesToValue)
@@ -866,8 +854,7 @@ export class CheckoutService {
     for (const coupon of autoCoupons) {
       // Verificar appliesTo
       if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-        let allowed: string[] = [];
-        try { allowed = JSON.parse(coupon.appliesTo); } catch { allowed = [coupon.appliesTo]; }
+        const allowed = parseAppliesToArray(coupon.appliesTo);
         if (!ticketIds.some((id) => allowed.includes(id))) continue;
       }
 
@@ -998,13 +985,7 @@ export class CheckoutService {
 
     // Validar aplicabilidade aos tickets
     if (voucher.appliesTo && voucher.appliesTo !== 'all') {
-      let appliesToValue: string | string[] | null = null;
-      try {
-        const parsed = JSON.parse(voucher.appliesTo);
-        appliesToValue = Array.isArray(parsed) ? parsed : voucher.appliesTo;
-      } catch {
-        appliesToValue = voucher.appliesTo;
-      }
+      const appliesToValue = parseAppliesToValue(voucher.appliesTo);
 
       const ticketIds = tickets.map((t) => t.ticketId);
       const appliesToArray = Array.isArray(appliesToValue)
@@ -1060,6 +1041,7 @@ export class CheckoutService {
     // Validar método de pagamento suportado
     if (
       paymentMethod !== PaymentMethod.CREDIT_CARD &&
+      paymentMethod !== PaymentMethod.DEBIT_CARD &&
       paymentMethod !== PaymentMethod.PIX &&
       paymentMethod !== PaymentMethod.BOLETO
     ) {
@@ -1078,6 +1060,8 @@ export class CheckoutService {
     // Prepare card data for credit card payment (raw card or pre-tokenized)
     let cardData = undefined;
     let cardTokenData = undefined;
+    let debitCardData = undefined;
+    let threedsData = undefined;
     if (paymentMethod === PaymentMethod.CREDIT_CARD) {
       if (paymentData.cardToken) {
         cardTokenData = {
@@ -1112,6 +1096,28 @@ export class CheckoutService {
       }
     }
 
+    if (paymentMethod === PaymentMethod.DEBIT_CARD) {
+      if (!paymentData.debitCard) {
+        throw new BadRequestException('Dados do cartão de débito são obrigatórios');
+      }
+      debitCardData = {
+        number: paymentData.debitCard.number,
+        holder: paymentData.debitCard.name,
+        expiry: paymentData.debitCard.expiry,
+        cvv: paymentData.debitCard.cvv,
+        installments: 1,
+      };
+      if (paymentData.threeds) {
+        threedsData = {
+          cavv: paymentData.threeds.cavv,
+          eci: paymentData.threeds.eci,
+          xid: paymentData.threeds.xid,
+          version: paymentData.threeds.version,
+          referenceId: paymentData.threeds.referenceId,
+        };
+      }
+    }
+
     // Circuit breaker: rejeitar imediatamente se o circuito estiver aberto
     if (Date.now() < this.cieloCircuitOpenUntil) {
       const retryAfterSec = Math.ceil((this.cieloCircuitOpenUntil - Date.now()) / 1000);
@@ -1132,8 +1138,9 @@ export class CheckoutService {
         identity: customerCpf,
         identityType: customerCpf ? 'CPF' : undefined,
       },
-      cardData,
+      paymentMethod === PaymentMethod.DEBIT_CARD ? debitCardData : cardData,
       cardTokenData,
+      threedsData,
     );
 
     if (!cieloResult.success) {
@@ -1184,18 +1191,18 @@ export class CheckoutService {
 
     // Determinar status do pagamento:
     // - PIX e Boleto: sempre 'pending' inicialmente (aguardam webhook para confirmação)
-    // - Cartão de crédito: 'approved' se autorizado, caso contrário 'pending'
+    // - Cartão de crédito/débito: 'approved' se autorizado, caso contrário 'pending'
     let paymentStatus: 'approved' | 'pending';
     if (paymentMethod === PaymentMethod.PIX || paymentMethod === PaymentMethod.BOLETO) {
-      // PIX e Boleto sempre começam como pending - o webhook confirma depois
       paymentStatus = 'pending';
-    } else if (paymentMethod === PaymentMethod.CREDIT_CARD) {
-      // Cartão de crédito pode ser aprovado imediatamente se autorizado
+    } else if (
+      paymentMethod === PaymentMethod.CREDIT_CARD ||
+      paymentMethod === PaymentMethod.DEBIT_CARD
+    ) {
       paymentStatus = cieloResult.cieloStatus === 'Authorized' || cieloResult.cieloStatus === 'PaymentConfirmed'
         ? 'approved'
         : 'pending';
     } else {
-      // Fallback para outros métodos
       paymentStatus = 'pending';
     }
 
@@ -1703,16 +1710,21 @@ export class CheckoutService {
       }
     }
 
-    // 5. Marcar voucher como usado
+    // 5. Marcar voucher como usado — atomic ACTIVE → USED
     if (voucherResult.voucherId) {
-      await prisma.voucher.update({
-        where: { id: voucherResult.voucherId },
+      const r = await prisma.voucher.updateMany({
+        where: { id: voucherResult.voucherId, status: 'ACTIVE' },
         data: {
           status: 'USED',
           usedAt: new Date(),
           usedBy: userId,
         },
       });
+      if (r.count === 0) {
+        // Voucher consumido por outra requisição — falha o checkout para evitar dupla utilização.
+        // Como o checkout é Serializable, esse rollback é seguro (Cielo ainda não foi chamado neste fluxo).
+        throw new Error(`Voucher ${voucherResult.voucherId} já foi utilizado`);
+      }
     }
 
     return { registrations, order };

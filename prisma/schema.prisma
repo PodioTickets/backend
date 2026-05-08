@@ -208,7 +208,6 @@ model Organization {
   ownerName String? // Nome do responsável (owner)
 
   // Informações bancárias
-  pix                   String? // Chave PIX
   bankName              String? // Nome do banco
   bankCode              String? // Código do banco (ex: 001, 237)
   agency                String? // Agência
@@ -227,11 +226,29 @@ model Organization {
   contactMessages  ContactMessage[]
   auditLogs        OrganizationAuditLog[]
   auditPageDedupes OrganizerAuditPageDedupe[]
+  pixKeys          OrganizationPixKey[]
 
   @@index([name])
   @@index([document])
   @@index([email])
   @@index([isActive])
+}
+
+model OrganizationPixKey {
+  id                     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId         String   @db.Uuid
+  key                    String
+  keyType                String   // CPF, CNPJ, EMAIL, PHONE, RANDOM
+  isDefault              Boolean  @default(false)
+  bankName               String?
+  accountHolderName      String?
+  accountHolderDocument  String?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
 }
 
 model OrganizationMember {
@@ -343,8 +360,10 @@ model Event {
   /// Percentual retido até a auditoria pós-evento (ex: 0.10 = 10%)
   retentionRate      Float       @default(0.10)
 
-  /// Percentual da taxa de 6% que o organizador absorve (0.0–6.0). O participante paga 6 - organizerFeePercent.
+  /// Percentual da taxa absorvido pelo organizador (0.0–100.0).
   organizerFeePercent         Float     @default(0.0)
+  /// Percentual da taxa repassado ao participante (0.0–100.0).
+  participantFeePercent       Float     @default(0.0)
   /// Número máximo de parcelas sem juros no cartão de crédito (1, 2 ou 3).
   maxInstallments             Int       @default(1)
   /// Preenchido ao publicar o evento. Após essa data as configurações financeiras ficam bloqueadas.

@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Param, Query, UseGuards,
+  Controller, Get, Post, Patch, Param, Query, Body, UseGuards,
   DefaultValuePipe, ParseIntPipe, Req,
 } from '@nestjs/common';
 import {
@@ -7,8 +7,8 @@ import {
   ApiQuery, ApiParam, ApiResponse,
 } from '@nestjs/swagger';
 import {
-  IsEnum, IsISO8601, IsNumberString, IsOptional,
-  IsString, IsUUID, IsIn,
+  IsEnum, IsISO8601, IsNumber, IsNumberString, IsOptional,
+  IsString, IsUUID, IsIn, IsInt, Min,
 } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { EventStatus } from '@prisma/client';
@@ -16,6 +16,13 @@ import { AdminEventsService } from './admin-events.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AdminGuard } from '../auth/guards/admin.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
+
+class AdminUpdateFinancialSettingsDto {
+  @IsOptional() @IsNumber() @Min(0) organizerFeePercent?: number;
+  @IsOptional() @IsNumber() @Min(0) participantFeePercent?: number;
+  @IsOptional() @IsInt() @Min(1) maxInstallments?: number;
+  @IsOptional() @IsNumber() @Min(0) totalFee?: number;
+}
 
 class AdminEventsQueryDto {
   @IsOptional() @IsNumberString() page?: string;
@@ -170,5 +177,17 @@ export class AdminEventsController {
   @ApiResponse({ status: 404, description: 'Evento não encontrado' })
   approveEvent(@Param('eventId') eventId: string, @Req() req: any) {
     return this.adminEventsService.approveEvent(req.user.id, eventId);
+  }
+
+  @Patch('events/:eventId/financial-settings')
+  @ApiOperation({ summary: '[Admin] Atualiza configurações financeiras do evento sem restrições' })
+  @ApiParam({ name: 'eventId', type: String, description: 'UUID do evento' })
+  @ApiResponse({ status: 200, description: 'Configurações financeiras atualizadas' })
+  @ApiResponse({ status: 404, description: 'Evento não encontrado' })
+  updateFinancialSettings(
+    @Param('eventId') eventId: string,
+    @Body() dto: AdminUpdateFinancialSettingsDto,
+  ) {
+    return this.adminEventsService.updateFinancialSettings(eventId, dto);
   }
 }

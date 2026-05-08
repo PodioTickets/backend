@@ -202,13 +202,21 @@ export class PaymentsService {
       throw new BadRequestException(cieloResult.error || 'Failed to confirm payment');
     }
 
-    // Atualizar status no banco
+    // Atualizar status no banco — guarda atômica: só avança se ainda não estiver PAID
     const updatedPayment = await prismaWrite.$transaction(async (prisma) => {
-      const paymentUpdate = await prisma.payment.update({
+      const result = await prisma.payment.updateMany({
+        where: { id: paymentId, status: { not: PaymentStatus.PAID } },
+        data: { status: PaymentStatus.PAID, paymentDate: new Date() },
+      });
+
+      if (result.count === 0) {
+        // Confirmação concorrente chegou primeiro — idempotente
+        return prisma.payment.findUnique({ where: { id: paymentId } });
+      }
+
+      await prisma.payment.update({
         where: { id: paymentId },
         data: {
-          status: PaymentStatus.PAID,
-          paymentDate: new Date(),
           metadata: {
             ...(payment.metadata as any),
             confirmedAt: new Date().toISOString(),
@@ -217,15 +225,50 @@ export class PaymentsService {
         },
       });
 
-      // Atualizar status das inscrições do pedido
-      await prisma.registration.updateMany({
-        where: { orderId: payment.orderId },
-        data: {
-          status: 'CONFIRMED',
-        },
+      await prisma.order.update({
+        where: { id: payment.orderId },
+        data: { status: 'PAID' },
       });
 
-      return paymentUpdate;
+      await prisma.registration.updateMany({
+        where: { orderId: payment.orderId },
+        data: { status: 'CONFIRMED' },
+      });
+
+      // Marcar cupom/voucher como usados
+      const paidOrder = await prisma.order.findUnique({
+        where: { id: payment.orderId },
+        select: { couponId: true, voucherId: true, userId: true, reservedTickets: true },
+      });
+      if (paidOrder?.couponId) {
+        const coupon = await prisma.coupon.findUnique({
+          where: { id: paidOrder.couponId },
+          select: { couponType: true, maxUsage: true, usageCount: true },
+        });
+        if (coupon) {
+          const tickets = (paidOrder.reservedTickets ?? []) as any[];
+          const ticketCount = tickets.reduce((s: number, rt: any) => s + (rt.quantity ?? 1), 0);
+          const remaining = coupon.maxUsage != null ? Math.max(0, coupon.maxUsage - coupon.usageCount) : ticketCount;
+          const increment = coupon.couponType === 'QUANTITY' ? 1 : Math.min(remaining, ticketCount);
+          if (increment > 0) {
+            await prisma.coupon.update({ where: { id: paidOrder.couponId }, data: { usageCount: { increment } } });
+          }
+        }
+      }
+      if (paidOrder?.voucherId) {
+        // Transição atômica ACTIVE → USED para evitar sobrescrita em corrida
+        const voucherResult = await prisma.voucher.updateMany({
+          where: { id: paidOrder.voucherId, status: 'ACTIVE' },
+          data: { status: 'USED', usedAt: new Date(), usedBy: paidOrder.userId },
+        });
+        if (voucherResult.count === 0) {
+          this.logger.error(
+            `[VOUCHER-RACE] confirmPayment: voucher ${paidOrder.voucherId} já estava USED para order ${payment.orderId} — possível dupla utilização, requer estorno manual`,
+          );
+        }
+      }
+
+      return prisma.payment.findUnique({ where: { id: paymentId } });
     });
 
     // Enviar email de confirmação fire-and-forget
@@ -276,14 +319,29 @@ export class PaymentsService {
       cieloPayment.Payment.Status,
     );
 
-    // Atualizar status no banco
+    // Atualizar status no banco — guarda atômica contra confirmação dupla
     const updatedPayment = await prismaWrite.$transaction(async (prisma) => {
-      const paymentUpdate = await prisma.payment.update({
-        where: { id: paymentId },
+      const whereCondition = paymentStatus === PaymentStatus.PAID
+        ? { id: paymentId, status: { not: PaymentStatus.PAID } }
+        : { id: paymentId };
+
+      const result = await prisma.payment.updateMany({
+        where: whereCondition,
         data: {
           status: paymentStatus,
           transactionId: cieloPayment.Payment.PaymentId,
           paymentDate: paymentStatus === PaymentStatus.PAID ? new Date() : null,
+        },
+      });
+
+      if (paymentStatus === PaymentStatus.PAID && result.count === 0) {
+        // Confirmação concorrente chegou primeiro — idempotente
+        return prisma.payment.findUnique({ where: { id: paymentId } });
+      }
+
+      await prisma.payment.update({
+        where: { id: paymentId },
+        data: {
           metadata: {
             ...(payment.metadata as any),
             ...metadata,
@@ -293,17 +351,51 @@ export class PaymentsService {
         },
       });
 
-      // Atualizar status das inscrições do pedido se pago
       if (paymentStatus === PaymentStatus.PAID) {
+        await prisma.order.update({
+          where: { id: payment.orderId },
+          data: { status: 'PAID' },
+        });
+
         await prisma.registration.updateMany({
           where: { orderId: payment.orderId },
-          data: {
-            status: 'CONFIRMED',
-          },
+          data: { status: 'CONFIRMED' },
         });
+
+        // Marcar cupom/voucher como usados
+        const paidOrder = await prisma.order.findUnique({
+          where: { id: payment.orderId },
+          select: { couponId: true, voucherId: true, userId: true, reservedTickets: true },
+        });
+        if (paidOrder?.couponId) {
+          const coupon = await prisma.coupon.findUnique({
+            where: { id: paidOrder.couponId },
+            select: { couponType: true, maxUsage: true, usageCount: true },
+          });
+          if (coupon) {
+            const tickets = (paidOrder.reservedTickets ?? []) as any[];
+            const ticketCount = tickets.reduce((s: number, rt: any) => s + (rt.quantity ?? 1), 0);
+            const remaining = coupon.maxUsage != null ? Math.max(0, coupon.maxUsage - coupon.usageCount) : ticketCount;
+            const increment = coupon.couponType === 'QUANTITY' ? 1 : Math.min(remaining, ticketCount);
+            if (increment > 0) {
+              await prisma.coupon.update({ where: { id: paidOrder.couponId }, data: { usageCount: { increment } } });
+            }
+          }
+        }
+        if (paidOrder?.voucherId) {
+          const voucherResult = await prisma.voucher.updateMany({
+            where: { id: paidOrder.voucherId, status: 'ACTIVE' },
+            data: { status: 'USED', usedAt: new Date(), usedBy: paidOrder.userId },
+          });
+          if (voucherResult.count === 0) {
+            this.logger.error(
+              `[VOUCHER-RACE] processPayment: voucher ${paidOrder.voucherId} já estava USED para order ${payment.orderId} — possível dupla utilização, requer estorno manual`,
+            );
+          }
+        }
       }
 
-      return paymentUpdate;
+      return prisma.payment.findUnique({ where: { id: paymentId } });
     });
 
     // Enviar email de confirmação fire-and-forget se pagamento confirmado
@@ -676,9 +768,41 @@ export class PaymentsService {
           couponType: true,
           type: true,
           value: true,
+          note: true,
+          appliesTo: true,
+          minCartValue: true,
+          minQuantity: true,
+          minAge: true,
+          maxAge: true,
+          maxUsage: true,
+          usageCount: true,
+          expiryDate: true,
         },
       });
     }
+
+    // Buscar voucher usado (se houver)
+    let voucher = null;
+    if (payment.order?.voucherId) {
+      voucher = await prismaRead.voucher.findUnique({
+        where: { id: payment.order.voucherId },
+        select: {
+          id: true,
+          code: true,
+          name: true,
+          status: true,
+          usedAt: true,
+          expiryDate: true,
+          appliesTo: true,
+        },
+      });
+    }
+
+    // Extrair valores de desconto do metadata (registrado no momento do checkout)
+    const discountsMeta = (metadata.discounts as any) ?? {};
+    const couponDiscountAmount: number = discountsMeta?.coupon?.discount ?? (payment.order as any)?.discount ?? 0;
+    const voucherDiscountAmount: number = discountsMeta?.voucher?.discount ?? (voucher ? (payment.order as any)?.discount ?? 0 : 0);
+    const totalDiscountAmount: number = (payment.order as any)?.discount ?? discountsMeta?.totalDiscount ?? 0;
 
     // Formatar resposta
     const buyer = payment.user;
@@ -763,10 +887,34 @@ export class PaymentsService {
         coupon: coupon ? {
           id: coupon.id,
           code: coupon.code,
-          type: coupon.type,
+          couponType: coupon.couponType,
+          discountType: coupon.type,
           discountValue: coupon.type === 'PERCENTAGE' ? null : coupon.value,
           discountPercentage: coupon.type === 'PERCENTAGE' ? coupon.value : null,
+          discountAmount: coupon ? couponDiscountAmount : null,
+          note: coupon.note ?? null,
+          appliesTo: coupon.appliesTo ?? null,
+          minCartValue: coupon.minCartValue ?? null,
+          minQuantity: coupon.minQuantity ?? null,
+          minAge: coupon.minAge ?? null,
+          maxAge: coupon.maxAge ?? null,
+          maxUsage: coupon.maxUsage ?? null,
+          usageCount: coupon.usageCount,
+          expiryDate: coupon.expiryDate ?? null,
         } : null,
+        // Voucher utilizado (se houver)
+        voucher: voucher ? {
+          id: voucher.id,
+          code: voucher.code,
+          name: voucher.name,
+          status: voucher.status,
+          usedAt: voucher.usedAt ?? null,
+          expiryDate: voucher.expiryDate ?? null,
+          appliesTo: voucher.appliesTo ?? null,
+          discountAmount: voucherDiscountAmount,
+        } : null,
+        // Total de desconto aplicado (cupom + voucher)
+        totalDiscount: totalDiscountAmount,
         // IDs
         transactionId: payment.transactionId,
         orderId: payment.orderId,
@@ -921,10 +1069,15 @@ export class PaymentsService {
         }
       }
       if (paidOrder?.voucherId) {
-        await tx.voucher.update({
-          where: { id: paidOrder.voucherId },
+        const voucherResult = await tx.voucher.updateMany({
+          where: { id: paidOrder.voucherId, status: 'ACTIVE' },
           data: { status: 'USED', usedAt: new Date(), usedBy: paidOrder.userId },
         });
+        if (voucherResult.count === 0) {
+          this.logger.error(
+            `[VOUCHER-RACE] pollPixStatus: voucher ${paidOrder.voucherId} já estava USED para order ${orderId} — possível dupla utilização, requer estorno manual`,
+          );
+        }
       }
     });
 
@@ -956,17 +1109,25 @@ export class PaymentsService {
     }
 
     await this.prisma.getWriteClient().$transaction(async (tx) => {
+      const result = await tx.payment.updateMany({
+        where: { id: payment.id, status: { not: PaymentStatus.PAID } },
+        data: { status: PaymentStatus.PAID, paymentDate: new Date() },
+      });
+      if (result.count === 0) return;
+
       await tx.payment.update({
         where: { id: payment.id },
         data: {
-          status: PaymentStatus.PAID,
-          paymentDate: new Date(),
           metadata: {
             ...(payment.metadata as object),
             simulatedAt: new Date().toISOString(),
             simulatedViaScript: true,
           } as any,
         },
+      });
+      await tx.order.update({
+        where: { id: payment.orderId },
+        data: { status: 'PAID' },
       });
       await tx.registration.updateMany({
         where: { orderId: payment.orderId },
@@ -1186,13 +1347,22 @@ export class PaymentsService {
     const buyerUser = regs.find((r: any) => r.user?.email)?.user;
     const buyerEmail: string | undefined = buyerUser?.email;
 
+    // Pipeline: PDFs ficam sequenciais (regra do projeto — yoga-layout não suporta
+    // render paralelo), mas os envios de email são despachados sem bloquear a próxima
+    // geração de PDF. Enquanto o email N viaja pela rede SMTP (~200-500ms), o PDF N+1
+    // já começa a ser renderizado. No fim, `Promise.allSettled` garante que a função
+    // só retorna depois que todos os emails foram entregues (ou falharam, com log).
+    const emailPromises: Promise<unknown>[] = [];
+
     if (buyerEmail) {
-      await this.emailService.sendRegistrationConfirmed({
-        email: buyerEmail,
-        firstName: buyerUser?.firstName || 'Participante',
-        eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
-        ticketPdf: ticketPdf as Buffer | undefined,
-      }).catch((err: any) => this.logger.warn('Email comprador falhou:', err));
+      emailPromises.push(
+        this.emailService.sendRegistrationConfirmed({
+          email: buyerEmail,
+          firstName: buyerUser?.firstName || 'Participante',
+          eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
+          ticketPdf: ticketPdf as Buffer | undefined,
+        }).catch((err: any) => this.logger.warn('Email comprador falhou:', err)),
+      );
     }
 
     // Participantes não-compradores — ingresso individual sem recibo, geração sequencial
@@ -1214,12 +1384,16 @@ export class PaymentsService {
       const individualTicketPdf = await this.ticketPdfService.generateTicketPdf(individualPdfData)
         .catch((e: any) => { this.logger.warn(`PDF individual falhou para ${participantEmail}:`, e?.message); return undefined; });
 
-      await this.emailService.sendRegistrationConfirmed({
-        email: participantEmail,
-        firstName: participantName.split(' ')[0] || 'Participante',
-        eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
-        ticketPdf: individualTicketPdf as Buffer | undefined,
-      }).catch((err: any) => this.logger.warn(`Email participante ${participantEmail} falhou:`, err));
+      emailPromises.push(
+        this.emailService.sendRegistrationConfirmed({
+          email: participantEmail,
+          firstName: participantName.split(' ')[0] || 'Participante',
+          eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
+          ticketPdf: individualTicketPdf as Buffer | undefined,
+        }).catch((err: any) => this.logger.warn(`Email participante ${participantEmail} falhou:`, err)),
+      );
     }
+
+    await Promise.allSettled(emailPromises);
   }
 }

@@ -11,6 +11,7 @@ import { AuthController } from './auth.controller';
 import { HttpModule } from '@nestjs/axios';
 import { EmailService } from '../../common/services/email.service';
 import { TurnstileGuard } from './guards/turnstile.guard';
+import { CommonModule } from '../../common/common.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { TurnstileGuard } from './guards/turnstile.guard';
     PrismaModule,
     ConfigModule,
     HttpModule,
+    CommonModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
   CreateVoucherDto,
@@ -87,86 +88,92 @@ export class VouchersService {
     const page = filterDto.page || 1;
     const limit = filterDto.limit || 20;
     const skip = (page - 1) * limit;
+    const statusFilter = filterDto.status ?? null;
 
-    const where: any = { eventId, deletedAt: null };
-    if (filterDto.status) {
-      where.status = filterDto.status;
-    }
+    // Agrupamento e paginação no Postgres em vez de carregar tudo e agrupar em JS.
+    // Usa COUNT FILTER pra contar cada status num único scan da tabela.
+    // Quando statusFilter é passado, filtra os vouchers antes do GROUP BY (semântica
+    // mantida do código anterior: groups sem voucher daquele status não aparecem,
+    // e contagens de outros statuses ficam zeradas — comportamento legado).
+    type GroupRow = {
+      name: string;
+      representativeId: string;
+      eventId: string;
+      appliesTo: string | null;
+      expiryDate: Date | null;
+      cpfListStatus: string;
+      cpfList: Prisma.JsonValue | null;
+      totalCount: number;
+      activeCount: number;
+      usedCount: number;
+      expiredCount: number;
+      inactiveCount: number;
+      firstCreatedAt: Date;
+      lastUpdatedAt: Date;
+    };
 
-    // Buscar todos os vouchers para agrupar
-    const allVouchers = await prismaRead.voucher.findMany({
-      where,
-      orderBy: { createdAt: 'desc' },
-    });
+    const eventIdParam = Prisma.sql`${eventId}::uuid`;
+    const statusCondition = statusFilter
+      ? Prisma.sql`AND status::text = ${statusFilter}`
+      : Prisma.empty;
 
-    // Agrupar vouchers por nome
-    const groupsMap = new Map<string, any>();
-    
-    allVouchers.forEach((voucher) => {
-      const name = voucher.name;
-      if (!groupsMap.has(name)) {
-        groupsMap.set(name, {
-          id: voucher.id, // id do voucher mais antigo do grupo (representante estável)
+    const [groupRows, totalRows] = await Promise.all([
+      prismaRead.$queryRaw<GroupRow[]>(Prisma.sql`
+        SELECT
           name,
-          eventId: voucher.eventId,
-          appliesTo: this.parseAppliesTo(voucher.appliesTo),
-          expiryDate: voucher.expiryDate,
-          cpfListStatus: voucher.cpfListStatus,
-          cpfList: voucher.cpfList,
-          totalCount: 0,
-          activeCount: 0,
-          usedCount: 0,
-          expiredCount: 0,
-          inactiveCount: 0,
-          createdAt: voucher.createdAt,
-          updatedAt: voucher.updatedAt,
-        });
-      }
+          (array_agg(id ORDER BY "createdAt" ASC))[1]::text       AS "representativeId",
+          "eventId",
+          (array_agg("appliesTo" ORDER BY "createdAt" ASC))[1]    AS "appliesTo",
+          (array_agg("expiryDate" ORDER BY "createdAt" ASC))[1]   AS "expiryDate",
+          (array_agg("cpfListStatus" ORDER BY "createdAt" ASC))[1]::text AS "cpfListStatus",
+          (array_agg("cpfList" ORDER BY "createdAt" ASC))[1]      AS "cpfList",
+          COUNT(*)::int                                           AS "totalCount",
+          COUNT(*) FILTER (WHERE status::text = 'ACTIVE')::int    AS "activeCount",
+          COUNT(*) FILTER (WHERE status::text = 'USED')::int      AS "usedCount",
+          COUNT(*) FILTER (WHERE status::text = 'EXPIRED')::int   AS "expiredCount",
+          COUNT(*) FILTER (WHERE status::text = 'INACTIVE')::int  AS "inactiveCount",
+          MIN("createdAt") AS "firstCreatedAt",
+          MAX("updatedAt") AS "lastUpdatedAt"
+        FROM "Voucher"
+        WHERE "eventId" = ${eventIdParam} AND "deletedAt" IS NULL
+        ${statusCondition}
+        GROUP BY name, "eventId"
+        ORDER BY MIN("createdAt") DESC
+        LIMIT ${limit} OFFSET ${skip}
+      `),
+      prismaRead.$queryRaw<{ count: bigint }[]>(Prisma.sql`
+        SELECT COUNT(DISTINCT name)::bigint AS count
+        FROM "Voucher"
+        WHERE "eventId" = ${eventIdParam} AND "deletedAt" IS NULL
+        ${statusCondition}
+      `),
+    ]);
 
-      const group = groupsMap.get(name);
-      group.totalCount++;
+    const total = Number(totalRows[0]?.count ?? 0);
 
-      switch (voucher.status) {
-        case 'ACTIVE':
-          group.activeCount++;
-          break;
-        case 'USED':
-          group.usedCount++;
-          break;
-        case 'EXPIRED':
-          group.expiredCount++;
-          break;
-        case 'INACTIVE':
-          group.inactiveCount++;
-          break;
-      }
+    const groups = groupRows.map((r) => ({
+      id: r.representativeId,
+      name: r.name,
+      eventId: r.eventId,
+      appliesTo: this.parseAppliesTo(r.appliesTo),
+      expiryDate: r.expiryDate,
+      cpfListStatus: r.cpfListStatus,
+      cpfList: r.cpfList,
+      totalCount: r.totalCount,
+      activeCount: r.activeCount,
+      usedCount: r.usedCount,
+      expiredCount: r.expiredCount,
+      inactiveCount: r.inactiveCount,
+      createdAt: r.firstCreatedAt,
+      updatedAt: r.lastUpdatedAt,
+    }));
 
-      // Atualizar id e createdAt para o voucher mais antigo do grupo
-      if (voucher.createdAt < group.createdAt) {
-        group.createdAt = voucher.createdAt;
-        group.id = voucher.id;
-      }
-
-      // Atualizar updatedAt para o mais recente
-      if (voucher.updatedAt > group.updatedAt) {
-        group.updatedAt = voucher.updatedAt;
-      }
-    });
-
-    // Converter Map para Array e ordenar por data de criação (mais recente primeiro)
-    const groups = Array.from(groupsMap.values()).sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    );
-
-    // Aplicar paginação nos grupos
-    const total = groups.length;
-    const paginatedGroups = groups.slice(skip, skip + limit);
-    const totalPages = Math.ceil(total / limit);
+    const totalPages = Math.ceil(total / limit) || 0;
 
     return {
       message: 'Voucher groups fetched successfully',
       data: {
-        groups: paginatedGroups,
+        groups,
         pagination: {
           page,
           limit,

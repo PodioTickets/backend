@@ -434,7 +434,7 @@ export class EventsController {
     @Param('eventId') eventId: string,
     @Body() dto: UpdateFinancialSettingsDto,
   ) {
-    return this.eventsService.updateFinancialSettings(req.user.id, eventId, dto);
+    return this.eventsService.updateFinancialSettings(req.user.id, eventId, dto, { bypassLock: req.user.role === 'ADMIN' });
   }
 
   @Post(':eventId/publish')

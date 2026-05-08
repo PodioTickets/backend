@@ -13,6 +13,7 @@ import { SecretRotationService } from './services/secret-rotation.service';
 import { PerformanceMonitorService } from './services/performance-monitor.service';
 import { PerformanceMonitorController } from './controllers/performance-monitor.controller';
 import { ConcurrencyRedisService } from './services/concurrency-redis.service';
+import { CacheRedisService } from './services/cache-redis.service';
 
 @Module({
   imports: [ConfigModule],
@@ -29,6 +30,7 @@ import { ConcurrencyRedisService } from './services/concurrency-redis.service';
     SecretRotationService,
     PerformanceMonitorService,
     ConcurrencyRedisService,
+    CacheRedisService,
   ],
   exports: [
     CsrfGuard,
@@ -41,6 +43,7 @@ import { ConcurrencyRedisService } from './services/concurrency-redis.service';
     SecretRotationService,
     PerformanceMonitorService,
     ConcurrencyRedisService,
+    CacheRedisService,
   ],
 })
 export class CommonModule {}

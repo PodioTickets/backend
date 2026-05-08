@@ -160,6 +160,21 @@ export class PaymentsWebhookService {
       });
 
       if (paymentStatus === PaymentStatus.PAID) {
+        // Promove Order para PAID de forma atômica e idempotente.
+        // Se já estiver PAID (entrega dupla de webhook), o UPDATE retorna 0 linhas
+        // e os efeitos colaterais abaixo não duplicam.
+        const orderRows: any[] = await prisma.$queryRaw`
+          UPDATE "Order"
+          SET "status" = 'PAID'::"OrderStatus", "updatedAt" = NOW()
+          WHERE id = ${fresh.orderId}::uuid AND "status" = 'PENDING'::"OrderStatus"
+          RETURNING id
+        `;
+
+        if (!orderRows?.length) {
+          this.logger.warn(`Webhook: Order ${fresh.orderId} not in PENDING when confirming PAID — skipping side effects`);
+          return;
+        }
+
         await prisma.registration.updateMany({
           where: { orderId: fresh.orderId },
           data: { status: 'CONFIRMED' },
@@ -195,10 +210,17 @@ export class PaymentsWebhookService {
           }
         }
         if (paidOrder?.voucherId) {
-          await prisma.voucher.update({
-            where: { id: paidOrder.voucherId },
+          // Transição atômica: só marca USED se ainda estiver ACTIVE.
+          // Evita sobrescrever usedBy/usedAt em corrida de dois pedidos com o mesmo voucher.
+          const voucherResult = await prisma.voucher.updateMany({
+            where: { id: paidOrder.voucherId, status: 'ACTIVE' },
             data: { status: 'USED', usedAt: new Date(), usedBy: paidOrder.userId },
           });
+          if (voucherResult.count === 0) {
+            this.logger.error(
+              `[VOUCHER-RACE] Webhook: voucher ${paidOrder.voucherId} já estava USED quando order ${fresh.orderId} foi confirmada — possível dupla utilização, requer estorno manual`,
+            );
+          }
         }
 
         // Captura orderId para envio de email fora da transação
@@ -306,13 +328,19 @@ export class PaymentsWebhookService {
         const buyerUser = regs.find((r: any) => r.user?.email)?.user;
         const buyerEmail: string | undefined = buyerUser?.email;
 
+        // Pipeline: PDFs sequenciais (regra do projeto), envios SMTP em paralelo —
+        // PDF N+1 começa a renderizar enquanto email N viaja pela rede.
+        const emailPromises: Promise<unknown>[] = [];
+
         if (buyerEmail) {
-          await this.emailService.sendRegistrationConfirmed({
-            email: buyerEmail,
-            firstName: buyerUser?.firstName || 'Participante',
-            eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
-            ticketPdf: ticketPdf as Buffer | undefined,
-          }).catch((err: any) => this.logger.warn('Email comprador falhou:', err));
+          emailPromises.push(
+            this.emailService.sendRegistrationConfirmed({
+              email: buyerEmail,
+              firstName: buyerUser?.firstName || 'Participante',
+              eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
+              ticketPdf: ticketPdf as Buffer | undefined,
+            }).catch((err: any) => this.logger.warn('Email comprador falhou:', err)),
+          );
         }
 
         // Participantes não-compradores — ingresso individual sem recibo, geração sequencial
@@ -334,13 +362,17 @@ export class PaymentsWebhookService {
           const individualTicketPdf = await this.ticketPdfService.generateTicketPdf(individualPdfData)
             .catch((e: any) => { this.logger.warn(`PDF individual falhou para ${participantEmail}:`, e?.message); return undefined; });
 
-          await this.emailService.sendRegistrationConfirmed({
-            email: participantEmail,
-            firstName: participantName.split(' ')[0] || 'Participante',
-            eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
-            ticketPdf: individualTicketPdf as Buffer | undefined,
-          }).catch((err: any) => this.logger.warn(`Email participante ${participantEmail} falhou:`, err));
+          emailPromises.push(
+            this.emailService.sendRegistrationConfirmed({
+              email: participantEmail,
+              firstName: participantName.split(' ')[0] || 'Participante',
+              eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
+              ticketPdf: individualTicketPdf as Buffer | undefined,
+            }).catch((err: any) => this.logger.warn(`Email participante ${participantEmail} falhou:`, err)),
+          );
         }
+
+        await Promise.allSettled(emailPromises);
       }).catch((err: any) => this.logger.warn('Failed to send registration confirmed emails:', err));
     }
   }
@@ -478,10 +510,15 @@ export class PaymentsWebhookService {
         }
       }
       if (paidOrder3ds?.voucherId) {
-        await prisma.voucher.update({
-          where: { id: paidOrder3ds.voucherId },
+        const voucherResult3ds = await prisma.voucher.updateMany({
+          where: { id: paidOrder3ds.voucherId, status: 'ACTIVE' },
           data: { status: 'USED', usedAt: new Date(), usedBy: paidOrder3ds.userId },
         });
+        if (voucherResult3ds.count === 0) {
+          this.logger.error(
+            `[VOUCHER-RACE] 3DS callback: voucher ${paidOrder3ds.voucherId} já estava USED quando order ${orderId} foi confirmada — possível dupla utilização, requer estorno manual`,
+          );
+        }
       }
 
       confirmedOrderId = orderId;
@@ -576,13 +613,18 @@ export class PaymentsWebhookService {
         const buyerUser = regs.find((r: any) => r.user?.email)?.user;
         const buyerEmail: string | undefined = buyerUser?.email;
 
+        // Pipeline: PDFs sequenciais, envios SMTP em paralelo
+        const emailPromises3ds: Promise<unknown>[] = [];
+
         if (buyerEmail) {
-          await this.emailService.sendRegistrationConfirmed({
-            email: buyerEmail,
-            firstName: buyerUser?.firstName || 'Participante',
-            eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
-            ticketPdf: ticketPdf as Buffer | undefined,
-          }).catch((err: any) => this.logger.warn('3DS buyer email failed:', err));
+          emailPromises3ds.push(
+            this.emailService.sendRegistrationConfirmed({
+              email: buyerEmail,
+              firstName: buyerUser?.firstName || 'Participante',
+              eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
+              ticketPdf: ticketPdf as Buffer | undefined,
+            }).catch((err: any) => this.logger.warn('3DS buyer email failed:', err)),
+          );
         }
 
         for (const [idx, reg] of regs.entries()) {
@@ -603,13 +645,17 @@ export class PaymentsWebhookService {
           const individualTicketPdf = await this.ticketPdfService.generateTicketPdf(individualPdfData)
             .catch((e: any) => { this.logger.warn(`3DS PDF failed for ${participantEmail}:`, e?.message); return undefined; });
 
-          await this.emailService.sendRegistrationConfirmed({
-            email: participantEmail,
-            firstName: participantName.split(' ')[0] || 'Participante',
-            eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
-            ticketPdf: individualTicketPdf as Buffer | undefined,
-          }).catch((err: any) => this.logger.warn(`3DS participant email failed for ${participantEmail}:`, err));
+          emailPromises3ds.push(
+            this.emailService.sendRegistrationConfirmed({
+              email: participantEmail,
+              firstName: participantName.split(' ')[0] || 'Participante',
+              eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
+              ticketPdf: individualTicketPdf as Buffer | undefined,
+            }).catch((err: any) => this.logger.warn(`3DS participant email failed for ${participantEmail}:`, err)),
+          );
         }
+
+        await Promise.allSettled(emailPromises3ds);
       }).catch((err: any) => this.logger.warn(`3DS email send failed for order ${oid}:`, err));
     }
 

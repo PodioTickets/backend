@@ -127,7 +127,6 @@ export class AdminRepasseService {
         city: true,
         state: true,
         ownerName: true,
-        pix: true,
         bankName: true,
         bankCode: true,
         agency: true,

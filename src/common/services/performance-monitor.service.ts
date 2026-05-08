@@ -43,7 +43,7 @@ export class PerformanceMonitorService implements OnModuleDestroy {
   }
 
   recordRequest(sample: RequestSample): void {
-    if (sample.path.startsWith('/health/performance')) return;
+    if (sample.path.startsWith('/api/v1/health/performance')) return;
 
     this.totalRequests += 1;
     this.totalDurationMs += sample.durationMs;

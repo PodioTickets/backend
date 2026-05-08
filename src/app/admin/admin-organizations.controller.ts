@@ -1,21 +1,33 @@
 import {
-  Controller, Get, Patch, Body, Param, Query,
+  Controller, Get, Patch, Post, Delete, Body, Param, Query,
   UseGuards, DefaultValuePipe, ParseIntPipe,
 } from '@nestjs/common';
 import {
   ApiTags, ApiOperation, ApiBearerAuth,
   ApiQuery, ApiParam, ApiResponse, ApiBody,
 } from '@nestjs/swagger';
-import { IsBoolean, IsOptional, IsString } from 'class-validator';
-import { Transform } from 'class-transformer';
+import { IsArray, IsBoolean, IsObject, IsOptional, IsString, ValidateNested } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
 import { AdminOrganizationsService, UpdateOrganizationDto } from './admin-organizations.service';
+import { OrganizationsService } from '../organizations/organizations.service';
+import { AddMemberDto, PatchMemberSettingsDto } from '../organizations/dto/organization.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AdminGuard } from '../auth/guards/admin.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 
+class PixKeyItemDto {
+  @IsString() key: string;
+  @IsString() keyType: string;
+  @IsOptional() @IsBoolean() isDefault?: boolean;
+  @IsOptional() @IsString() bankName?: string;
+  @IsOptional() @IsString() accountHolderName?: string;
+  @IsOptional() @IsString() accountHolderDocument?: string;
+}
+
 class UpdateOrganizationBodyDto implements UpdateOrganizationDto {
   @IsOptional() @IsString() name?: string;
   @IsOptional() @IsString() tradeName?: string;
+  @IsOptional() @IsString() document?: string;
   @IsOptional() @IsString() email?: string;
   @IsOptional() @IsString() phone?: string;
   @IsOptional() @IsString() whatsapp?: string;
@@ -30,6 +42,7 @@ class UpdateOrganizationBodyDto implements UpdateOrganizationDto {
   @IsOptional() @IsString() state?: string;
   @IsOptional() @IsString() ownerName?: string;
   @IsOptional() @IsString() pix?: string;
+  @IsOptional() @IsString() pixKeyType?: string;
   @IsOptional() @IsString() bankName?: string;
   @IsOptional() @IsString() bankCode?: string;
   @IsOptional() @IsString() agency?: string;
@@ -38,6 +51,7 @@ class UpdateOrganizationBodyDto implements UpdateOrganizationDto {
   @IsOptional() @IsString() accountHolderName?: string;
   @IsOptional() @IsString() accountHolderDocument?: string;
   @IsOptional() @IsBoolean() @Transform(({ value }) => value === 'true' || value === true) isActive?: boolean;
+  @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => PixKeyItemDto) pixKeys?: PixKeyItemDto[];
 }
 
 @ApiTags('Admin — Organizations')
@@ -45,7 +59,10 @@ class UpdateOrganizationBodyDto implements UpdateOrganizationDto {
 @UseGuards(JwtAuthGuard, AdminGuard)
 @Controller('api/v1/admin/organizations')
 export class AdminOrganizationsController {
-  constructor(private readonly adminOrganizationsService: AdminOrganizationsService) {}
+  constructor(
+    private readonly adminOrganizationsService: AdminOrganizationsService,
+    private readonly organizationsService: OrganizationsService,
+  ) {}
 
   @Get()
   @NoCache()
@@ -117,5 +134,53 @@ export class AdminOrganizationsController {
   @ApiResponse({ status: 404, description: 'Organization not found' })
   updateOrganization(@Param('id') id: string, @Body() body: UpdateOrganizationBodyDto) {
     return this.adminOrganizationsService.updateOrganization(id, body);
+  }
+
+  // ── Members ────────────────────────────────────────────────────────────────
+
+  @Get(':id/members/:memberUserId')
+  @NoCache()
+  @ApiOperation({ summary: '[Admin] Get member details' })
+  @ApiParam({ name: 'id', type: String, description: 'Organization UUID' })
+  @ApiParam({ name: 'memberUserId', type: String, description: 'User ID of the member' })
+  @ApiResponse({ status: 200, description: 'Member details' })
+  @ApiResponse({ status: 404, description: 'Member not found' })
+  getMember(@Param('id') id: string, @Param('memberUserId') memberUserId: string) {
+    return this.adminOrganizationsService.getMember(id, memberUserId);
+  }
+
+  @Post(':id/members')
+  @ApiOperation({ summary: '[Admin] Add member to organization' })
+  @ApiParam({ name: 'id', type: String, description: 'Organization UUID' })
+  @ApiBody({ type: AddMemberDto })
+  @ApiResponse({ status: 201, description: 'Member added' })
+  @ApiResponse({ status: 404, description: 'Organization not found' })
+  addMember(@Param('id') id: string, @Body() dto: AddMemberDto) {
+    return this.organizationsService.addMemberAsAdmin(id, dto);
+  }
+
+  @Patch(':id/members/:memberUserId')
+  @ApiOperation({ summary: '[Admin] Update member role/settings' })
+  @ApiParam({ name: 'id', type: String, description: 'Organization UUID' })
+  @ApiParam({ name: 'memberUserId', type: String, description: 'User ID of the member' })
+  @ApiBody({ type: PatchMemberSettingsDto })
+  @ApiResponse({ status: 200, description: 'Member updated' })
+  @ApiResponse({ status: 404, description: 'Member not found' })
+  updateMember(
+    @Param('id') id: string,
+    @Param('memberUserId') memberUserId: string,
+    @Body() dto: PatchMemberSettingsDto,
+  ) {
+    return this.adminOrganizationsService.updateMember(id, memberUserId, dto);
+  }
+
+  @Delete(':id/members/:memberUserId')
+  @ApiOperation({ summary: '[Admin] Remove member from organization' })
+  @ApiParam({ name: 'id', type: String, description: 'Organization UUID' })
+  @ApiParam({ name: 'memberUserId', type: String, description: 'User ID of the member' })
+  @ApiResponse({ status: 200, description: 'Member removed' })
+  @ApiResponse({ status: 404, description: 'Member not found' })
+  removeMember(@Param('id') id: string, @Param('memberUserId') memberUserId: string) {
+    return this.organizationsService.removeMemberAsAdmin(id, memberUserId);
   }
 }

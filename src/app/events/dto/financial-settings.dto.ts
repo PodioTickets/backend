@@ -1,28 +1,28 @@
-import { IsNumber, IsInt, Min, Max, IsIn } from 'class-validator';
+import { IsNumber, IsInt, Min, IsIn, IsOptional } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 // ──────────────── Request ────────────────
 
 export class UpdateFinancialSettingsDto {
-  @ApiProperty({
-    description: 'Percentual da taxa de 6% absorvido pelo organizador (0.0–6.0). O participante paga o complemento (6 - organizerFeePercent).',
-    example: 3.0,
-    minimum: 0,
-    maximum: 6,
-  })
+  @ApiProperty({ description: 'Percentual da taxa absorvido pelo organizador (0.0–100.0).', example: 3.0, minimum: 0 })
   @IsNumber()
   @Min(0)
-  @Max(6)
   organizerFeePercent: number;
 
-  @ApiProperty({
-    description: 'Número máximo de parcelas sem juros aceitas no cartão de crédito.',
-    example: 2,
-    enum: [1, 2, 3],
-  })
+  @ApiProperty({ description: 'Percentual da taxa repassado ao participante (0.0–100.0).', example: 3.0, minimum: 0 })
+  @IsNumber()
+  @Min(0)
+  participantFeePercent: number;
+
+  @ApiProperty({ description: 'Número máximo de parcelas sem juros aceitas no cartão de crédito.', example: 2, enum: [1, 2, 3] })
   @IsInt()
   @IsIn([1, 2, 3])
   maxInstallments: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  totalFee?: number;
 }
 
 // ──────────────── Response ────────────────
@@ -34,7 +34,7 @@ export class FinancialSettingsResponseDto {
   @ApiProperty({ description: 'Percentual da taxa absorvido pelo organizador (0.0–6.0)', example: 3.0 })
   organizerFeePercent: number;
 
-  @ApiProperty({ description: 'Percentual da taxa repassado ao participante. Calculado: 6 - organizerFeePercent.', example: 3.0 })
+  @ApiProperty({ description: 'Percentual da taxa repassado ao participante (0.0–100.0).', example: 3.0 })
   participantFeePercent: number;
 
   @ApiProperty({ description: 'Número máximo de parcelas sem juros no cartão', example: 2, enum: [1, 2, 3] })
