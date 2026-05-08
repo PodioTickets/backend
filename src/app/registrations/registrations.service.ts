@@ -1319,8 +1319,9 @@ export class RegistrationsService {
         throw new BadRequestException('User document number is required for this coupon');
       }
 
-      const cpfList = coupon.cpfList as string[] | null;
-      if (!cpfList || !cpfList.includes(user.documentNumber)) {
+      const cpfList = ((coupon.cpfList as string[] | null) ?? []).map((c) => c.replace(/\D/g, ''));
+      const userCpf = user.documentNumber.replace(/\D/g, '');
+      if (cpfList.length === 0 || !cpfList.includes(userCpf)) {
         throw new BadRequestException('Coupon is not valid for this user');
       }
     }
@@ -1430,8 +1431,9 @@ export class RegistrationsService {
         throw new BadRequestException('User document number is required for this voucher');
       }
 
-      const cpfList = voucher.cpfList as string[] | null;
-      if (!cpfList || !cpfList.includes(user.documentNumber)) {
+      const cpfList = ((voucher.cpfList as string[] | null) ?? []).map((c) => c.replace(/\D/g, ''));
+      const userCpf = user.documentNumber.replace(/\D/g, '');
+      if (cpfList.length === 0 || !cpfList.includes(userCpf)) {
         throw new BadRequestException('Voucher is not valid for this user');
       }
     }

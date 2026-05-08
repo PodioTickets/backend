@@ -301,6 +301,16 @@ export class OrganizersService {
     const owner = organization.members[0];
     const event = contactData.eventId ? organization.events[0] : undefined;
 
+    /* Buscar avatar do usuário logado, se houver.
+       avatarUrl adicionado ao schema após última geração do cliente Prisma — cast necessário */
+    let userAvatarUrl: string | undefined;
+    if (contactData.userId) {
+      const userRecord = await prismaRead.user.findUnique({
+        where: { id: contactData.userId },
+      });
+      userAvatarUrl = ((userRecord as any)?.avatarUrl as string | null) ?? undefined;
+    }
+
     // Criar mensagem no banco (já com mensagem sanitizada)
     const contactMessage = await prismaWrite.contactMessage.create({
       data: {
@@ -314,29 +324,28 @@ export class OrganizersService {
       },
     });
 
-    // Enviar email (mensagem já sanitizada)
-    try {
-      // Usa o email de atendimento do evento quando disponível, senão o email da organização
-      const recipientEmail = (event as any)?.contactEmail || organization.email;
-      await this.emailService.sendContactMessageToOrganizer({
+    // Enviar email (mensagem já sanitizada) — fire-and-forget para não bloquear a resposta HTTP
+    /* contactEmail adicionado ao schema após última geração do cliente Prisma — cast necessário */
+    const recipientEmail = (event as any)?.contactEmail || organization.email;
+    this.emailService
+      .sendContactMessageToOrganizer({
         organizerEmail: recipientEmail,
         organizerName: organization.name,
         userName: contactData.name,
         userEmail: contactData.email,
         userPhone: contactData.phone,
         userCpf: contactData.cpf,
+        userAvatarUrl,
         subject: contactData.subject,
         eventName: event?.name,
         message: cleanMessage,
-      });
-    } catch (error) {
-      this.logger.warn('Failed to send contact email:', error);
-    }
+      })
+      .catch((error) => this.logger.warn('Falha ao enviar email de contato ao organizador:', error));
 
-    // Enviar WhatsApp se disponível (mensagem já sanitizada)
+    // Enviar WhatsApp se disponível (mensagem já sanitizada) — fire-and-forget
     if (owner?.user.phone) {
-      try {
-        await this.whatsappService.sendContactMessageToOrganizer({
+      this.whatsappService
+        .sendContactMessageToOrganizer({
           organizerPhone: owner.user.phone,
           organizerName: organization.name,
           userName: contactData.name,
@@ -344,10 +353,8 @@ export class OrganizersService {
           userPhone: contactData.phone,
           eventName: event?.name,
           message: cleanMessage,
-        });
-      } catch (error) {
-        this.logger.warn('Failed to send WhatsApp:', error);
-      }
+        })
+        .catch((error) => this.logger.warn('Falha ao enviar WhatsApp ao organizador:', error));
     }
 
     return {

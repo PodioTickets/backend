@@ -19,6 +19,7 @@ import {
   TicketPdfTemplateData,
 } from './ticket-pdf.types';
 
+/* LinearGradient não exporta tipos corretos para gradientUnits/x1/y1/x2/y2 — cast necessário */
 const LinearGradient = LinearGradientBase as any;
 
 Font.registerHyphenationCallback((w) => [w]);
@@ -91,6 +92,18 @@ function fmtPhone(phone: string): string {
   return phone;
 }
 
+/**
+ * Valida que URL de imagem seja https:// antes de passar ao renderer do PDF.
+ * Previne SSRF: @react-pdf/renderer usa fetch nativo que pode acessar file:///,
+ * http://localhost etc. se URLs arbitrárias forem aceitas sem validação.
+ */
+function safeImageUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (!/^https:\/\//i.test(trimmed)) return null;
+  return trimmed;
+}
+
 const HR = () =>
   React.createElement(View, { style: { height: 1, backgroundColor: C.gray6 } });
 
@@ -111,94 +124,110 @@ const FieldItem = ({ label, value }: { label: string; value: string }) =>
     ),
   );
 
-/* Card de produto: imagem 100×100, nome 14px 600, preço 14px 700 */
+/* Card de produto: full width, 1 por linha, imagem 100×100 à esquerda, conteúdo à direita */
 const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
   React.createElement(
     View,
     {
       style: {
-        width: '48%',
-        backgroundColor: C.gray2,
-        borderRadius: 12,
-        borderWidth: 1,
-        borderColor: C.gray6,
-        borderStyle: 'solid',
+        paddingHorizontal: 16,
+        paddingVertical: 16,
+        borderBottomWidth: 1,
+        borderBottomColor: C.gray6,
+        borderBottomStyle: 'solid',
+        flexDirection: 'row',
+        gap: 12,
+        alignItems: 'center',
       },
     },
+    /* Imagem 100×100 — safeImageUrl valida https:// para prevenir SSRF */
+    safeImageUrl(product.imageUrl)
+      ? React.createElement(Image, {
+          src: safeImageUrl(product.imageUrl) as string,
+          style: {
+            width: 100,
+            height: 100,
+            borderRadius: 8,
+            borderWidth: 1,
+            borderColor: C.gray6,
+            borderStyle: 'solid',
+            objectFit: 'fill',
+          },
+        })
+      : React.createElement(View, {
+          style: {
+            width: 100,
+            height: 100,
+            borderRadius: 8,
+            backgroundColor: C.gray6,
+            borderWidth: 1,
+            borderColor: C.gray6,
+            borderStyle: 'solid',
+          },
+        }),
+    /* Coluna de conteúdo: nome+variação em cima, preço+badge embaixo */
     React.createElement(
       View,
-      {
-        style: {
-          padding: 16,
-          borderBottomWidth: 1,
-          borderBottomColor: C.gray6,
-          borderBottomStyle: 'solid',
-          flexDirection: 'row',
-          gap: 12,
-          alignItems: 'flex-start',
-        },
-      },
-      product.imageUrl
-        ? React.createElement(Image, {
-            src: product.imageUrl,
-            style: { width: 100, height: 100, borderRadius: 8, objectFit: 'fill' },
-          })
-        : React.createElement(View, {
-            style: { width: 100, height: 100, borderRadius: 8, backgroundColor: C.gray6 },
-          }),
+      { style: { flex: 1, alignSelf: 'stretch', justifyContent: 'space-between' } },
+      /* Topo: nome e variação */
       React.createElement(
         View,
-        { style: { flex: 1, gap: 6, paddingVertical: 8, justifyContent: 'space-between' } },
+        { style: { gap: 16 } },
         React.createElement(
           Text,
           { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 600, color: C.gray12 } },
           product.name,
         ),
+        product.variationName
+          ? React.createElement(
+              View,
+              { style: { flexDirection: 'row', gap: 4 } },
+              React.createElement(
+                Text,
+                { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 400, color: C.gray12 } },
+                'Tamanho: ',
+              ),
+              React.createElement(
+                Text,
+                { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 600, color: C.gray12 } },
+                product.variationName,
+              ),
+            )
+          : null,
+      ),
+      /* Rodapé: preço à esquerda, badge à direita */
+      React.createElement(
+        View,
+        { style: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' } },
         React.createElement(
           Text,
           { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 700, color: C.gray12 } },
           product.isIncluded ? 'Incluso' : fmtCurrency(product.price),
         ),
-      ),
-    ),
-    React.createElement(
-      View,
-      { style: { paddingTop: 16, paddingBottom: 12, paddingHorizontal: 16, gap: 16 } },
-      product.variationName
-        ? React.createElement(
-            View,
-            { style: { flexDirection: 'row', gap: 4 } },
-            React.createElement(
-              Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 400, color: C.gray12 } },
-              'Tamanho: ',
-            ),
-            React.createElement(
-              Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 600, color: C.gray12 } },
-              product.variationName,
-            ),
-          )
-        : null,
-      !product.isIncluded
-        ? React.createElement(
-            View,
+        React.createElement(
+          View,
+          {
+            style: {
+              paddingHorizontal: 12,
+              paddingVertical: 8,
+              backgroundColor: product.isIncluded ? C.green3 : C.blue3,
+              borderRadius: 8,
+            },
+          },
+          React.createElement(
+            Text,
             {
               style: {
-                paddingHorizontal: 12,
-                paddingVertical: 8,
-                backgroundColor: C.blue3,
-                borderRadius: 8,
-                alignSelf: 'flex-start',
+                fontFamily: 'DM Sans',
+                fontSize: 14,
+                fontWeight: 500,
+                color: product.isIncluded ? C.green12 : C.blue12,
               },
             },
-            React.createElement(
-              Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 500, color: C.blue12 } },
-              'Adicional',
-            ),
-          )
-        : null,
+            product.isIncluded ? 'Incluso' : 'Adicional',
+          ),
+        ),
+      ),
     ),
   );
 
@@ -331,7 +360,7 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
             ),
             React.createElement(
               View,
-              { style: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 } },
+              { style: { flexDirection: 'column' } },
               ...reg.products.map((p, i) =>
                 React.createElement(ProductCard, { key: i, product: p }),
               ),
@@ -444,7 +473,7 @@ function estimatePageHeight(data: TicketPdfTemplateData): number {
     if (reg.products.length > 0) {
       h += 1 + 24 + 18 + 20; // HR + padding + título + gap
       // Cada linha de produto: imagem 100 + padding top/bottom 32 + seção tamanho/badge ~90
-      h += Math.ceil(reg.products.length / 2) * 280;
+      h += reg.products.length * 132;
       h += 24;
     }
   }

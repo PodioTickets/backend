@@ -1,6 +1,6 @@
 import {
   Controller, Get, Post, Patch, Param, Query, Body, UseGuards,
-  DefaultValuePipe, ParseIntPipe, Req,
+  DefaultValuePipe, ParseIntPipe, ParseUUIDPipe, Req,
 } from '@nestjs/common';
 import {
   ApiTags, ApiOperation, ApiBearerAuth,
@@ -153,7 +153,7 @@ export class AdminEventsController {
   }
 
   @Post('events/:eventId/publish')
-  @ApiOperation({ summary: '[Admin] Aprova evento em revisão → PUBLISHED' })
+  @ApiOperation({ summary: '[Admin] Aprova evento em revisão → PUBLISHED e notifica organizador por e-mail' })
   @ApiParam({ name: 'eventId', type: String, description: 'UUID do evento' })
   @ApiResponse({
     status: 200,
@@ -175,7 +175,10 @@ export class AdminEventsController {
   })
   @ApiResponse({ status: 400, description: 'Evento não está em status REVISION' })
   @ApiResponse({ status: 404, description: 'Evento não encontrado' })
-  approveEvent(@Param('eventId') eventId: string, @Req() req: any) {
+  approveEvent(
+    @Param('eventId', ParseUUIDPipe) eventId: string,
+    @Req() req: any,
+  ) {
     return this.adminEventsService.approveEvent(req.user.id, eventId);
   }
 
