@@ -1091,7 +1091,7 @@ export class CheckoutService {
           installments: cardData.installments,
         });
       } else {
-        throw new BadRequestException('Card data or card token is required for credit card payments');
+        throw new BadRequestException('Dados do cartão ou token do cartão são obrigatórios para pagamentos com cartão de crédito');
       }
     }
 

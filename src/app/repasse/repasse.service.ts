@@ -122,7 +122,7 @@ export class RepasseService {
       where: { id: eventId },
       select: { id: true, organizerFeeRate: true, retentionRate: true },
     });
-    if (!event) throw new NotFoundException('Event not found');
+    if (!event) throw new NotFoundException('Evento não encontrado');
     return event;
   }
 
@@ -694,7 +694,7 @@ export class RepasseService {
     await this.assertAccess(userId, eventId);
 
     if (!amount || amount <= 0) {
-      throw new BadRequestException('Amount must be greater than zero');
+      throw new BadRequestException('O valor deve ser maior que zero');
     }
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -780,10 +780,10 @@ export class RepasseService {
     });
 
     if (!withdrawal || withdrawal.eventId !== eventId) {
-      throw new NotFoundException('Withdrawal not found');
+      throw new NotFoundException('Saque não encontrado');
     }
     if (withdrawal.status !== WithdrawalStatus.PENDING) {
-      throw new BadRequestException('Withdrawal is not in PENDING status');
+      throw new BadRequestException('Saque não está com status PENDENTE');
     }
 
     const updated = await prismaWrite.eventWithdrawal.update({
@@ -820,10 +820,10 @@ export class RepasseService {
     });
 
     if (!withdrawal || withdrawal.eventId !== eventId) {
-      throw new NotFoundException('Withdrawal not found');
+      throw new NotFoundException('Saque não encontrado');
     }
     if (withdrawal.status !== WithdrawalStatus.PENDING) {
-      throw new BadRequestException('Only PENDING withdrawals can be cancelled');
+      throw new BadRequestException('Somente saques pendentes podem ser cancelados');
     }
 
     const updated = await prismaWrite.eventWithdrawal.update({
@@ -909,7 +909,7 @@ export class RepasseService {
     const audit = await prismaWrite.$transaction(async (tx) => {
       // Check and create within the same transaction to prevent duplicate audits
       const existing = await this.loadAudit(eventId, tx);
-      if (existing) throw new BadRequestException('Event has already been audited');
+      if (existing) throw new BadRequestException('Evento já foi auditado');
 
       const [event, ordersResult, withdrawals] = await Promise.all([
         this.loadEventConfig(eventId, tx),
@@ -1089,7 +1089,7 @@ export class RepasseService {
     const { audit, retainedAmount } = await prismaWrite.$transaction(async (tx) => {
       // Check and create within the same transaction to prevent duplicate releases
       const existing = await this.loadAudit(eventId, tx);
-      if (existing) throw new BadRequestException('Event retention has already been released');
+      if (existing) throw new BadRequestException('Retenção do evento já foi liberada');
 
       const [event, ordersResult, withdrawals] = await Promise.all([
         this.loadEventConfig(eventId, tx),

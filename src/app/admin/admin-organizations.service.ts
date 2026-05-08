@@ -228,7 +228,7 @@ export class AdminOrganizationsService {
     const member = await r.organizationMember.findUnique({
       where: { organizationId_userId: { organizationId, userId: memberUserId } },
     });
-    if (!member) throw new NotFoundException('Member not found');
+    if (!member) throw new NotFoundException('Membro não encontrado');
 
     const data: any = {};
     if (dto.role !== undefined) data.role = dto.role;
@@ -275,7 +275,7 @@ export class AdminOrganizationsService {
       },
     });
 
-    if (!row) throw new NotFoundException('Member not found');
+    if (!row) throw new NotFoundException('Membro não encontrado');
 
     return {
       message: 'Member retrieved successfully',

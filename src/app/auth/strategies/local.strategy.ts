@@ -20,7 +20,7 @@ export class LocalStrategy extends PassportStrategy(Strategy) {
     }
 
     if (!password || typeof password !== 'string') {
-      throw new UnauthorizedException('Password is required');
+      throw new UnauthorizedException('Senha é obrigatória');
     }
 
     // Obter accountType do body (default: USER)
@@ -28,7 +28,7 @@ export class LocalStrategy extends PassportStrategy(Strategy) {
 
     const user = await this.authService.validateUser(emailOrCpf, password, accountType);
     if (!user) {
-      throw new UnauthorizedException('Invalid credentials');
+      throw new UnauthorizedException('Credenciais inválidas');
     }
     return user;
   }

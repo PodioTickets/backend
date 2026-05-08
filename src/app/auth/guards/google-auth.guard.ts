@@ -21,7 +21,7 @@ export class GoogleAuthGuard extends AuthGuard('google') {
       throw err;
     }
     if (!user) {
-      throw new Error('Google authentication failed');
+      throw new Error('Falha na autenticação com o Google');
     }
     return user;
   }

@@ -683,7 +683,7 @@ export class RegistrationsService {
     });
 
     if (!registration) {
-      throw new NotFoundException('Registration not found');
+      throw new NotFoundException('Inscrição não encontrada');
     }
 
     const reg = registration as any;
@@ -922,7 +922,7 @@ export class RegistrationsService {
     });
 
     if (!registration) {
-      throw new NotFoundException('Registration not found');
+      throw new NotFoundException('Inscrição não encontrada');
     }
 
     const currentUser = await prismaRead.user.findUnique({
@@ -936,7 +936,7 @@ export class RegistrationsService {
     const isCpfMatch = !!(currentUser?.documentNumberClean && (registration as any).participantCpfClean === currentUser.documentNumberClean);
 
     if (!isAdmin && !isParticipant && !isInviter && !isBuyer && !isCpfMatch) {
-      throw new BadRequestException('Access denied - You can only view your own registrations');
+      throw new BadRequestException('Acesso negado — você só pode visualizar suas próprias inscrições');
     }
 
     const reg = registration as any;
@@ -1233,22 +1233,22 @@ export class RegistrationsService {
     });
 
     if (!registration) {
-      throw new NotFoundException('Registration not found');
+      throw new NotFoundException('Inscrição não encontrada');
     }
 
     const isBuyerCancel = registration.order?.userId === userId;
     const isParticipantCancel = registration.userId === userId;
     const isInviterCancel = registration.invitedById === userId;
     if (!isParticipantCancel && !isInviterCancel && !isBuyerCancel && !await this.isAdminUser(userId)) {
-      throw new BadRequestException('Access denied');
+      throw new BadRequestException('Acesso negado');
     }
 
     if (registration.status === RegistrationStatus.CANCELLED) {
-      throw new BadRequestException('Registration already cancelled');
+      throw new BadRequestException('Inscrição já cancelada');
     }
 
     if (registration.order?.payment && registration.order.payment.status === 'PAID') {
-      throw new BadRequestException('Cannot cancel paid registration');
+      throw new BadRequestException('Não é possível cancelar uma inscrição paga');
     }
 
     await prismaWrite.$transaction(async (prisma) => {
@@ -1297,16 +1297,16 @@ export class RegistrationsService {
     });
 
     if (!coupon) {
-      throw new NotFoundException('Coupon not found');
+      throw new NotFoundException('Cupom não encontrado');
     }
 
     if (coupon.status !== 'ACTIVE') {
-      throw new BadRequestException('Coupon is not active');
+      throw new BadRequestException('Cupom não está ativo');
     }
 
     // Verificar expiração
     if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) {
-      throw new BadRequestException('Coupon has expired');
+      throw new BadRequestException('Cupom expirado');
     }
 
     // Verificar CPF list se habilitado
@@ -1317,13 +1317,13 @@ export class RegistrationsService {
       });
 
       if (!user || !user.documentNumber) {
-        throw new BadRequestException('User document number is required for this coupon');
+        throw new BadRequestException('CPF do usuário é obrigatório para este cupom');
       }
 
       const cpfList = ((coupon.cpfList as string[] | null) ?? []).map((c) => c.replace(/\D/g, ''));
       const userCpf = user.documentNumber.replace(/\D/g, '');
       if (cpfList.length === 0 || !cpfList.includes(userCpf)) {
-        throw new BadRequestException('Coupon is not valid for this user');
+        throw new BadRequestException('Cupom não é válido para este usuário');
       }
     }
 
@@ -1347,7 +1347,7 @@ export class RegistrationsService {
         // Verificar se pelo menos uma modalidade está na lista
         const hasMatchingModality = modalityIds.some((id) => appliesToArray.includes(id));
         if (!hasMatchingModality) {
-          throw new BadRequestException('Coupon does not apply to selected modalities');
+          throw new BadRequestException('Cupom não se aplica às modalidades selecionadas');
         }
       }
     }
@@ -1429,7 +1429,7 @@ export class RegistrationsService {
       });
 
       if (!user || !user.documentNumber) {
-        throw new BadRequestException('User document number is required for this voucher');
+        throw new BadRequestException('CPF do usuário é obrigatório para este voucher');
       }
 
       const cpfList = ((voucher.cpfList as string[] | null) ?? []).map((c) => c.replace(/\D/g, ''));

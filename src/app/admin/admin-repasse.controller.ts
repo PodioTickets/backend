@@ -124,7 +124,7 @@ export class AdminRepasseController {
       limits: { fileSize: 10 * 1024 * 1024 },
       fileFilter: (_req, file, cb) => {
         if (!RECEIPT_MIME_TYPES.includes(file.mimetype)) {
-          return cb(new BadRequestException('Only PDF or image files are allowed'), false);
+          return cb(new BadRequestException('Apenas arquivos PDF ou imagem são permitidos'), false);
         }
         cb(null, true);
       },
@@ -149,7 +149,7 @@ export class AdminRepasseController {
     @Param('id') id: string,
     @UploadedFile() file: Express.Multer.File,
   ) {
-    if (!file) throw new BadRequestException('File is required');
+    if (!file) throw new BadRequestException('Arquivo é obrigatório');
 
     const isPdf = file.mimetype === 'application/pdf';
     const receiptUrl = isPdf

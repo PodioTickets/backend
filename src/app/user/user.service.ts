@@ -102,7 +102,7 @@ export class UserService {
     });
 
     if (existingUserByEmail) {
-      throw new ConflictException('User with this email already exists');
+      throw new ConflictException('Já existe um usuário com este e-mail');
     }
 
     // Verificar se CPF já existe (se fornecido)
@@ -118,7 +118,7 @@ export class UserService {
       });
 
       if (existingUserByCpf) {
-        throw new ConflictException('User with this document number already exists');
+        throw new ConflictException('Já existe um usuário com este CPF');
       }
     }
 
@@ -157,12 +157,12 @@ export class UserService {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
         const target = error.meta?.target as string[];
         if (target?.includes('email')) {
-          throw new ConflictException('User with this email already exists');
+          throw new ConflictException('Já existe um usuário com este e-mail');
         }
         if (target?.includes('documentNumber')) {
-          throw new ConflictException('User with this document number already exists');
+          throw new ConflictException('Já existe um usuário com este CPF');
         }
-        throw new ConflictException('User already exists');
+        throw new ConflictException('Usuário já existe');
       }
 
       // Log do erro completo para debug
@@ -233,7 +233,7 @@ export class UserService {
     });
 
     if (!user) {
-      throw new NotFoundException('User not found');
+      throw new NotFoundException('Usuário não encontrado');
     }
 
     return {
@@ -274,7 +274,7 @@ export class UserService {
         select: { accountType: true },
       });
       if (!currentUser) {
-        throw new NotFoundException('User not found');
+        throw new NotFoundException('Usuário não encontrado');
       }
 
       const documentNumberClean = this.cleanDocumentNumber(updateData.documentNumber);
@@ -365,7 +365,7 @@ export class UserService {
     });
 
     if (!mainUser) {
-      throw new NotFoundException('User not found');
+      throw new NotFoundException('Usuário não encontrado');
     }
 
     const linkedProfiles = await prismaRead.linkedUser.findMany({
@@ -413,7 +413,7 @@ export class UserService {
         select: { documentNumberClean: true },
       });
       if (mainUser?.documentNumberClean && mainUser.documentNumberClean === documentNumberClean) {
-        throw new BadRequestException('Cannot add yourself as a linked user');
+        throw new BadRequestException('Não é possível adicionar você mesmo como usuário vinculado');
       }
 
       const result = await prismaWrite.linkedUser.upsert({
@@ -470,7 +470,7 @@ export class UserService {
     });
 
     if (!linked || linked.mainUserId !== mainUserId) {
-      throw new NotFoundException('Linked user not found');
+      throw new NotFoundException('Usuário vinculado não encontrado');
     }
 
     await prismaWrite.linkedUser.delete({ where: { id: linkedUserId } });

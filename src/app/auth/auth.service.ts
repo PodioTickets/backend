@@ -254,7 +254,7 @@ export class AuthService {
       });
 
       if (existingUserByEmail) {
-        throw new ConflictException('User with this email already exists');
+        throw new ConflictException('Já existe um usuário com este e-mail');
       }
 
       // Verificar se CPF já existe para conta USER (se fornecido)
@@ -336,19 +336,19 @@ export class AuthService {
       ) {
         const target = error.meta?.target as string[];
         if (target?.includes('email')) {
-          throw new ConflictException('User with this email already exists');
+          throw new ConflictException('Já existe um usuário com este e-mail');
         }
         if (target?.includes('documentNumber')) {
           throw new ConflictException(
             'User with this document number already exists',
           );
         }
-        throw new ConflictException('User already exists');
+        throw new ConflictException('Usuário já existe');
       }
 
       // Log do erro completo para debug
       console.error('Registration error:', error);
-      throw new BadRequestException(error?.message || 'Failed to create user');
+      throw new BadRequestException(error?.message || 'Falha ao criar usuário');
     }
   }
 
@@ -364,10 +364,10 @@ export class AuthService {
     return !!(user?.password && String(user.password).trim().length > 0);
   }
 
-  async login(user: any) {
+  async login(user: any, opts?: { userAgent?: string }) {
     // Se o usuário tiver 2FA ativo, emitir desafio MFA em vez de tokens reais
     if (user.mfaEnabled) {
-      await this.send2FACode(user.id, user.email);
+      await this.send2FACode(user.id, user.email, opts);
       const mfaToken = this.jwtService.sign(
         { sub: user.id, mfaPending: true, accountType: user.accountType || 'USER' },
         { expiresIn: '10m' },
@@ -524,7 +524,7 @@ export class AuthService {
       });
 
       if (!user || !user.isActive) {
-        throw new UnauthorizedException('User not found or inactive');
+        throw new UnauthorizedException('Usuário não encontrado ou inativo');
       }
 
       const payload = { 
@@ -543,7 +543,7 @@ export class AuthService {
         },
       };
     } catch (error) {
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new UnauthorizedException('Token de atualização inválido');
     }
   }
 
@@ -1251,7 +1251,7 @@ export class AuthService {
       return user;
     } catch (error) {
       console.error('Error validating Google user:', error);
-      throw new BadRequestException('Failed to authenticate with Google');
+      throw new BadRequestException('Falha ao autenticar com o Google');
     }
   }
 
@@ -1270,7 +1270,7 @@ export class AuthService {
    */
   async exchangeCodeForTokens(code: string): Promise<any> {
     if (!code) {
-      throw new BadRequestException('Authorization code is required');
+      throw new BadRequestException('Código de autorização é obrigatório');
     }
 
     // Verificar se o código tem formato válido (deve ser hex de 64 caracteres)
@@ -1314,7 +1314,7 @@ export class AuthService {
     const clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET');
 
     if (!clientId || !clientSecret) {
-      throw new BadRequestException('Google OAuth not configured');
+      throw new BadRequestException('Google OAuth não configurado');
     }
 
     try {
@@ -1332,7 +1332,7 @@ export class AuthService {
       const { access_token, id_token } = tokenResponse.data;
 
       if (!access_token) {
-        throw new BadRequestException('Failed to exchange Google code for tokens');
+        throw new BadRequestException('Falha ao trocar código Google por tokens');
       }
 
       // Obter dados do usuário usando o access_token
@@ -1379,7 +1379,11 @@ export class AuthService {
    * O rate limit só é aplicado após envio bem-sucedido para não bloquear
    * o usuário em caso de falha no envio do e-mail.
    */
-  async send2FACode(userId: string, userEmail: string): Promise<void> {
+  async send2FACode(
+    userId: string,
+    userEmail: string,
+    opts?: { userAgent?: string },
+  ): Promise<void> {
     const rateLimitKey = `2fa_rate:${userId}`;
     if (await this.cacheManager.get(rateLimitKey)) {
       throw new BadRequestException('Aguarde 1 minuto antes de solicitar um novo código.');
@@ -1390,13 +1394,26 @@ export class AuthService {
     const cacheKey = `2fa_code:${userId}`;
     const attemptsKey = `2fa_attempts:${userId}`;
 
+    // Formata data/hora do Brasil (UTC-3, sem horário de verão desde 2019)
+    const loginDate = new Intl.DateTimeFormat('pt-BR', {
+      timeZone: 'America/Sao_Paulo',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(new Date()).replace(',', ' às');
+
+    const loginDevice = this.parseDevice(opts?.userAgent);
+
     // Armazena código e zera tentativas antes de enviar
     await this.cacheManager.set(cacheKey, code, AuthService.MFA_CODE_TTL_MS);
     await this.cacheManager.del(attemptsKey);
 
     // Tenta enviar; desfaz o código armazenado se o e-mail falhar
     try {
-      await this.emailService.send2FACode(userEmail, code);
+      await this.emailService.send2FACode(userEmail, code, { loginDate, loginDevice });
     } catch (emailError) {
       await this.cacheManager.del(cacheKey);
       this.logger.error(`Falha ao enviar código 2FA para usuário ${userId}:`, emailError);

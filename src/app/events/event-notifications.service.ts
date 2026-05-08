@@ -433,14 +433,18 @@ export class EventNotificationsService {
       name: string;
       tradeName?: string | null;
       logoUrl?: string | null;
+    } | null;
+
+    const orgName = org?.tradeName || org?.name || 'Organizador';
+
+    // Redes sociais vêm da configuração do evento (não da organização)
+    const ev = event as typeof event & {
       instagram?: string | null;
       facebook?: string | null;
       youtube?: string | null;
       tiktok?: string | null;
       website?: string | null;
-    } | null;
-
-    const orgName = org?.tradeName || org?.name || 'Organizador';
+    };
 
     // Busca todas as inscrições ativas com email do participante/usuário.
     // Inclui COMPLETED (evento encerrado) além de CONFIRMED para não excluir
@@ -480,11 +484,11 @@ export class EventNotificationsService {
           orgAvatarUrl: org?.logoUrl ?? undefined,
           subject,
           messageHtml,
-          instagram: org?.instagram ?? undefined,
-          facebook: org?.facebook ?? undefined,
-          youtube: org?.youtube ?? undefined,
-          tiktok: org?.tiktok ?? undefined,
-          website: org?.website ?? undefined,
+          instagram: ev.instagram ?? undefined,
+          facebook: ev.facebook ?? undefined,
+          youtube: ev.youtube ?? undefined,
+          tiktok: ev.tiktok ?? undefined,
+          website: ev.website ?? undefined,
         })
         .catch((err) =>
           this.logger.warn(`Falha ao enviar comunicado para ${recipient.email}: ${err?.message ?? err}`),

@@ -439,11 +439,11 @@ export class EmailService {
       orgName: this.escapeHtml(data.orgName),
       orgAvatarUrl: data.orgAvatarUrl ? this.escapeHtml(data.orgAvatarUrl) : '',
       subject: this.escapeHtml(data.subject),
-      instagram: data.instagram ? this.escapeHtml(this.normalizeUrl(data.instagram)) : '',
-      facebook: data.facebook ? this.escapeHtml(this.normalizeUrl(data.facebook)) : '',
-      youtube: data.youtube ? this.escapeHtml(this.normalizeUrl(data.youtube)) : '',
-      tiktok: data.tiktok ? this.escapeHtml(this.normalizeUrl(data.tiktok)) : '',
-      website: data.website ? this.escapeHtml(this.normalizeUrl(data.website)) : '',
+      instagram: data.instagram ? this.escapeHtml(this.normalizeSocialUrl('instagram', data.instagram)) : '',
+      facebook: data.facebook ? this.escapeHtml(this.normalizeSocialUrl('facebook', data.facebook)) : '',
+      youtube: data.youtube ? this.escapeHtml(this.normalizeSocialUrl('youtube', data.youtube)) : '',
+      tiktok: data.tiktok ? this.escapeHtml(this.normalizeSocialUrl('tiktok', data.tiktok)) : '',
+      website: data.website ? this.escapeHtml(this.normalizeSocialUrl('website', data.website)) : '',
       hasSocialLinks: hasSocialLinks ? 'true' : '',
     });
 
@@ -489,24 +489,31 @@ export class EmailService {
     this.logger.log(`Email de membro adicionado enviado para: ${data.recipientEmail}`);
   }
 
-  async send2FACode(recipientEmail: string, code: string): Promise<void> {
+  async send2FACode(
+    recipientEmail: string,
+    code: string,
+    opts?: { loginDate?: string; loginDevice?: string; loginLocation?: string },
+  ): Promise<void> {
     const html = this.loadTemplate('codigo-2fa.html', {
       code: this.escapeHtml(code),
+      loginDate: this.escapeHtml(opts?.loginDate ?? ''),
+      loginDevice: this.escapeHtml(opts?.loginDevice ?? ''),
+      loginLocation: this.escapeHtml(opts?.loginLocation ?? ''),
     });
 
     const text = [
-      'Código de verificação — PódioTicket',
+      'Código de acesso — PódioTicket',
       '',
-      `Seu código de verificação é: ${code}`,
+      `Seu código de acesso é: ${code}`,
       '',
       'Este código expira em 10 minutos.',
-      'Se você não solicitou este código, ignore este e-mail.',
+      'Não foi você? Altere sua senha ou contate o suporte.',
     ].join('\n');
 
     await this.send({
       from: this.from,
       to: recipientEmail,
-      subject: 'Código de verificação de segurança — PódioTicket',
+      subject: 'Código de acesso — PódioTicket',
       html,
       text,
     });
@@ -599,6 +606,38 @@ export class EmailService {
     if (!trimmed) return '';
     if (/^https?:\/\//i.test(trimmed)) return trimmed;
     return `https://${trimmed}`;
+  }
+
+  /**
+   * Normaliza handle ou URL de rede social para URL absoluta válida.
+   * Usuários frequentemente salvam apenas o handle (ex: @podioticket) em vez da URL completa.
+   */
+  private normalizeSocialUrl(platform: 'instagram' | 'facebook' | 'youtube' | 'tiktok' | 'website', value: string): string {
+    const trimmed = value.trim().replace(/\/+$/, ''); // remove trailing slashes
+    if (!trimmed) return '';
+    // Já é URL completa
+    if (/^https?:\/\//i.test(trimmed)) return trimmed;
+
+    // Handle sem protocolo mas com domínio reconhecível (ex: instagram.com/user)
+    const withoutAt = trimmed.replace(/^@/, '');
+
+    switch (platform) {
+      case 'instagram':
+        // @handle ou handle → https://instagram.com/handle
+        return `https://instagram.com/${withoutAt}`;
+      case 'facebook':
+        // @handle ou handle → https://facebook.com/handle
+        return `https://facebook.com/${withoutAt}`;
+      case 'tiktok':
+        // @handle ou handle → https://tiktok.com/@handle
+        return `https://tiktok.com/@${withoutAt}`;
+      case 'youtube':
+        // @handle ou handle → https://youtube.com/@handle
+        return `https://youtube.com/@${withoutAt}`;
+      case 'website':
+      default:
+        return `https://${trimmed}`;
+    }
   }
 
   /**

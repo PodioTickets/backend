@@ -294,9 +294,9 @@ export class AdminEventsService {
       },
     });
 
-    if (!event) throw new NotFoundException('Event not found');
+    if (!event) throw new NotFoundException('Evento não encontrado');
     if (event.status !== EventStatus.REVISION) {
-      throw new BadRequestException('Only REVISION events can be published by admin');
+      throw new BadRequestException('Somente eventos em revisão podem ser publicados pelo admin');
     }
 
     const now = new Date();
@@ -354,7 +354,7 @@ export class AdminEventsService {
     const w = this.prisma.getWriteClient();
 
     const event = await w.event.findUnique({ where: { id: eventId }, select: { id: true } });
-    if (!event) throw new NotFoundException('Event not found');
+    if (!event) throw new NotFoundException('Evento não encontrado');
 
     const data: any = {};
     if (dto.organizerFeePercent !== undefined) data.organizerFeePercent = dto.organizerFeePercent;

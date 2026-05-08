@@ -31,7 +31,7 @@ export class CouponsService {
       });
 
       if (existingCoupon) {
-        throw new BadRequestException('Coupon code already exists for this event');
+        throw new BadRequestException('Código do cupom já existe para este evento');
       }
     }
 
@@ -143,7 +143,7 @@ export class CouponsService {
     });
 
     if (!coupon) {
-      throw new NotFoundException('Coupon not found');
+      throw new NotFoundException('Cupom não encontrado');
     }
 
     // Converter appliesTo de JSON string para array quando necessário
@@ -168,7 +168,7 @@ export class CouponsService {
     });
 
     if (!coupon || coupon.eventId !== eventId) {
-      throw new NotFoundException('Coupon not found');
+      throw new NotFoundException('Cupom não encontrado');
     }
 
     // Limite não pode ser menor que o uso atual
@@ -190,7 +190,7 @@ export class CouponsService {
       });
 
       if (existingCoupon && existingCoupon.id !== couponId) {
-        throw new BadRequestException('Coupon code already exists for this event');
+        throw new BadRequestException('Código do cupom já existe para este evento');
       }
     }
 
@@ -264,7 +264,7 @@ export class CouponsService {
     });
 
     if (!coupon || coupon.eventId !== eventId) {
-      throw new NotFoundException('Coupon not found');
+      throw new NotFoundException('Cupom não encontrado');
     }
 
     if (coupon.usageCount > 0) {
@@ -325,7 +325,7 @@ export class CouponsService {
 
     // Validar valor máximo para PERCENTAGE
     if (dto.type === 'PERCENTAGE' && dto.value && dto.value > 100) {
-      throw new BadRequestException('Percentage value cannot exceed 100');
+      throw new BadRequestException('Valor percentual não pode exceder 100');
     }
 
     // Validar campos obrigatórios para QUANTITY
@@ -385,7 +385,7 @@ export class CouponsService {
     });
 
     if (!event) {
-      throw new NotFoundException('Event not found');
+      throw new NotFoundException('Evento não encontrado');
     }
 
     // Verificar se o usuário é membro da organização do evento
@@ -399,7 +399,7 @@ export class CouponsService {
     });
 
     if (!member) {
-      throw new BadRequestException('User is not a member of this event\'s organization');
+      throw new BadRequestException('Usuário não é membro da organização deste evento');
     }
   }
 }
