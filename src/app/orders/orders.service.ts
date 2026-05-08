@@ -1401,6 +1401,15 @@ export class OrdersService {
       const voucherByCode = await r.voucher.findUnique({ where: { code: normalizedCode } });
       if (voucherByCode && voucherByCode.eventId === order.eventId && voucherByCode.status === 'ACTIVE') {
         if (!voucherByCode.expiryDate || new Date(voucherByCode.expiryDate) > new Date()) {
+          // Validar lista de CPF se habilitada
+          if (voucherByCode.cpfListStatus === 'ENABLED') {
+            const userDoc = await r.user.findUnique({ where: { id: userId }, select: { documentNumber: true } });
+            const cpfList = ((voucherByCode.cpfList as string[] | null) ?? []).map((c: string) => c.replace(/\D/g, ''));
+            const userCpf = (userDoc?.documentNumber ?? '').replace(/\D/g, '');
+            if (cpfList.length === 0 || !userCpf || !cpfList.includes(userCpf)) {
+              throw new AppUnprocessableException('VOUCHER_CPF_RESTRICTED', 'Voucher não aplicável ao CPF informado');
+            }
+          }
           discount = ticketsSubtotal;
           voucherId = voucherByCode.id;
           const finalAmountV = Math.max(0, order.totalAmount - discount);
@@ -1432,6 +1441,16 @@ export class OrdersService {
       if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) throw new AppUnprocessableException('COUPON_EXPIRED', 'Cupom expirado');
       if (coupon.minCartValue && order.totalAmount < coupon.minCartValue) {
         throw new AppUnprocessableException('COUPON_MIN_VALUE', `Valor mínimo do pedido para este cupom: R$ ${(coupon.minCartValue / 100).toFixed(2)}`);
+      }
+
+      // Validar lista de CPF se habilitada
+      if (coupon.cpfListStatus === 'ENABLED') {
+        const userDoc = await r.user.findUnique({ where: { id: userId }, select: { documentNumber: true } });
+        const cpfList = ((coupon.cpfList as string[] | null) ?? []).map((c: string) => c.replace(/\D/g, ''));
+        const userCpf = (userDoc?.documentNumber ?? '').replace(/\D/g, '');
+        if (cpfList.length === 0 || !userCpf || !cpfList.includes(userCpf)) {
+          throw new AppUnprocessableException('COUPON_CPF_RESTRICTED', 'Cupom não aplicável ao CPF informado');
+        }
       }
 
       // Filtrar apenas os tickets aos quais o cupom se aplica
@@ -1487,6 +1506,16 @@ export class OrdersService {
       }
       if (voucher.expiryDate && new Date(voucher.expiryDate) < new Date()) {
         throw new AppUnprocessableException('VOUCHER_EXPIRED', 'Voucher expirado');
+      }
+
+      // Validar lista de CPF se habilitada
+      if (voucher.cpfListStatus === 'ENABLED') {
+        const userDoc = await r.user.findUnique({ where: { id: userId }, select: { documentNumber: true } });
+        const cpfList = ((voucher.cpfList as string[] | null) ?? []).map((c: string) => c.replace(/\D/g, ''));
+        const userCpf = (userDoc?.documentNumber ?? '').replace(/\D/g, '');
+        if (cpfList.length === 0 || !userCpf || !cpfList.includes(userCpf)) {
+          throw new AppUnprocessableException('VOUCHER_CPF_RESTRICTED', 'Voucher não aplicável ao CPF informado');
+        }
       }
 
       discount = ticketsSubtotal; // voucher = 100% dos ingressos
