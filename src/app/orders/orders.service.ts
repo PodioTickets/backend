@@ -1449,7 +1449,7 @@ export class OrdersService {
         const cpfList = ((coupon.cpfList as string[] | null) ?? []).map((c: string) => c.replace(/\D/g, ''));
         const userCpf = (userDoc?.documentNumber ?? '').replace(/\D/g, '');
         if (cpfList.length === 0 || !userCpf || !cpfList.includes(userCpf)) {
-          throw new AppUnprocessableException('COUPON_CPF_RESTRICTED', 'Cupom não aplicável ao CPF informado');
+          throw new AppUnprocessableException('COUPON_CPF_RESTRICTED', 'Cupom não encontrado ou inválido');
         }
       }
 

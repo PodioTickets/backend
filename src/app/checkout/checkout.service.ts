@@ -810,7 +810,7 @@ export class CheckoutService {
         return {
           isValid: false,
           discount: 0,
-          error: 'Cupom não aplicável ao CPF informado',
+          error: 'Cupom não encontrado ou inválido',
         };
       }
     }
