@@ -533,6 +533,15 @@ export class OrganizationsService {
       return { organization, member };
     });
 
+    // Notifica o novo organizador por e-mail (fire-and-forget — falha não bloqueia resposta)
+    const ownerEmail = result.member.user.email;
+    const ownerFirstName = result.member.user.firstName;
+    this.emailService
+      .sendWelcomeOrganizer({ email: ownerEmail, firstName: ownerFirstName })
+      .catch((err) =>
+        this.logger.warn(`Falha ao enviar e-mail de boas-vindas ao organizador (org=${result.organization.id}): ${err?.message ?? err}`),
+      );
+
     return {
       message: 'Organization created successfully',
       data: {

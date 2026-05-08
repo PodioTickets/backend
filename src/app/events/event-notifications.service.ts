@@ -385,9 +385,13 @@ export class EventNotificationsService {
     this.logger.log(`Admin ${adminUserId} ${action}d notification ${notificationId} (eventId=${row.eventId})`);
 
     if (action === 'approve') {
-      this.dispatchEmailsAsync(row.eventId, row.title, row.messageHtml).catch((err) =>
-        this.logger.warn(`Falha no disparo de comunicado aprovado (notificationId=${notificationId}): ${err?.message ?? err}`),
-      );
+      this.dispatchEmailsAsync(row.eventId, row.title, row.messageHtml)
+        .then((count) =>
+          this.logger.log(`Comunicado ${notificationId} despachado para ${count} destinatário(s)`),
+        )
+        .catch((err) =>
+          this.logger.warn(`Falha no disparo de comunicado aprovado (notificationId=${notificationId}): ${err?.message ?? err}`),
+        );
     }
 
     return {
@@ -411,7 +415,7 @@ export class EventNotificationsService {
     eventId: string,
     subject: string,
     messageHtml: string,
-  ): Promise<void> {
+  ): Promise<number> {
     const prismaRead = this.prisma.getReadClient();
 
     // Busca evento com dados da organização
@@ -422,7 +426,7 @@ export class EventNotificationsService {
 
     if (!event) {
       this.logger.warn(`dispatchEmailsAsync: evento não encontrado (id=${eventId})`);
-      return;
+      return 0;
     }
 
     const org = event.organization as {
@@ -438,9 +442,11 @@ export class EventNotificationsService {
 
     const orgName = org?.tradeName || org?.name || 'Organizador';
 
-    // Busca todas as inscrições confirmadas com email do participante/usuário
+    // Busca todas as inscrições ativas com email do participante/usuário.
+    // Inclui COMPLETED (evento encerrado) além de CONFIRMED para não excluir
+    // participantes de eventos que já ocorreram.
     const registrations = await prismaRead.registration.findMany({
-      where: { eventId, status: 'CONFIRMED' },
+      where: { eventId, status: { in: ['CONFIRMED', 'COMPLETED'] } },
       select: {
         participantEmail: true,
         participantName: true,
@@ -486,5 +492,6 @@ export class EventNotificationsService {
     }
 
     this.logger.log(`Comunicado enviado com sucesso para ${recipients.length} destinatário(s) (eventId=${eventId})`);
+    return recipients.length;
   }
 }
