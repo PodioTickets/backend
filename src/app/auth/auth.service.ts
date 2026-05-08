@@ -254,7 +254,7 @@ export class AuthService {
       });
 
       if (existingUserByEmail) {
-        throw new ConflictException('User with this email already exists');
+        throw new ConflictException('Já existe um usuário com este e-mail');
       }
 
       // Verificar se CPF já existe para conta USER (se fornecido)
@@ -336,19 +336,19 @@ export class AuthService {
       ) {
         const target = error.meta?.target as string[];
         if (target?.includes('email')) {
-          throw new ConflictException('User with this email already exists');
+          throw new ConflictException('Já existe um usuário com este e-mail');
         }
         if (target?.includes('documentNumber')) {
           throw new ConflictException(
             'User with this document number already exists',
           );
         }
-        throw new ConflictException('User already exists');
+        throw new ConflictException('Usuário já existe');
       }
 
       // Log do erro completo para debug
       console.error('Registration error:', error);
-      throw new BadRequestException(error?.message || 'Failed to create user');
+      throw new BadRequestException(error?.message || 'Falha ao criar usuário');
     }
   }
 
@@ -524,7 +524,7 @@ export class AuthService {
       });
 
       if (!user || !user.isActive) {
-        throw new UnauthorizedException('User not found or inactive');
+        throw new UnauthorizedException('Usuário não encontrado ou inativo');
       }
 
       const payload = { 
@@ -543,7 +543,7 @@ export class AuthService {
         },
       };
     } catch (error) {
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new UnauthorizedException('Token de atualização inválido');
     }
   }
 
@@ -1251,7 +1251,7 @@ export class AuthService {
       return user;
     } catch (error) {
       console.error('Error validating Google user:', error);
-      throw new BadRequestException('Failed to authenticate with Google');
+      throw new BadRequestException('Falha ao autenticar com o Google');
     }
   }
 
@@ -1270,7 +1270,7 @@ export class AuthService {
    */
   async exchangeCodeForTokens(code: string): Promise<any> {
     if (!code) {
-      throw new BadRequestException('Authorization code is required');
+      throw new BadRequestException('Código de autorização é obrigatório');
     }
 
     // Verificar se o código tem formato válido (deve ser hex de 64 caracteres)
@@ -1314,7 +1314,7 @@ export class AuthService {
     const clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET');
 
     if (!clientId || !clientSecret) {
-      throw new BadRequestException('Google OAuth not configured');
+      throw new BadRequestException('Google OAuth não configurado');
     }
 
     try {
@@ -1332,7 +1332,7 @@ export class AuthService {
       const { access_token, id_token } = tokenResponse.data;
 
       if (!access_token) {
-        throw new BadRequestException('Failed to exchange Google code for tokens');
+        throw new BadRequestException('Falha ao trocar código Google por tokens');
       }
 
       // Obter dados do usuário usando o access_token

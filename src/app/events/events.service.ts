@@ -268,7 +268,7 @@ export class EventsService {
     });
 
     if (!memberships.length) {
-      throw new BadRequestException('User is not a member of any organization');
+      throw new BadRequestException('Usuário não é membro de nenhuma organização');
     }
 
     // Prefere OWNER; fallback para EMPLOYEE com create_event
@@ -1163,7 +1163,7 @@ export class EventsService {
     });
 
     if (!event) {
-      throw new NotFoundException('Event not found');
+      throw new NotFoundException('Evento não encontrado');
     }
 
     const response = {
@@ -1259,7 +1259,7 @@ export class EventsService {
     });
 
     if (!eventBase) {
-      throw new NotFoundException('Event not found');
+      throw new NotFoundException('Evento não encontrado');
     }
 
     const tickets = await prismaRead.ticket.findMany({
@@ -1584,7 +1584,7 @@ export class EventsService {
     });
 
     if (!event) {
-      throw new NotFoundException('Event not found');
+      throw new NotFoundException('Evento não encontrado');
     }
 
     await this.organizerMemberAccess.assertCanAccessEvent(
@@ -1725,7 +1725,7 @@ export class EventsService {
     });
 
     if (!event) {
-      throw new NotFoundException('Event not found');
+      throw new NotFoundException('Evento não encontrado');
     }
 
     // Verificar se o usuário é OWNER da organização do evento
@@ -1797,7 +1797,7 @@ export class EventsService {
     });
 
     if (!event) {
-      throw new NotFoundException('Event not found');
+      throw new NotFoundException('Evento não encontrado');
     }
 
     return {
@@ -1827,7 +1827,7 @@ export class EventsService {
       select: { id: true },
     });
     if (!existing) {
-      throw new NotFoundException('Event not found');
+      throw new NotFoundException('Evento não encontrado');
     }
 
     const data: Prisma.EventUpdateInput = {};
@@ -2121,7 +2121,7 @@ export class EventsService {
       select: this.financialSettingsSelect(),
     });
 
-    if (!event) throw new NotFoundException('Event not found');
+    if (!event) throw new NotFoundException('Evento não encontrado');
 
     return { data: this.buildFinancialSettingsPayload(event) };
   }
@@ -2144,7 +2144,7 @@ export class EventsService {
 
     if (opts.bypassLock) {
       const event = await prismaWrite.event.findUnique({ where: { id: eventId }, select: { id: true } });
-      if (!event) throw new NotFoundException('Event not found');
+      if (!event) throw new NotFoundException('Evento não encontrado');
       await prismaWrite.event.update({ where: { id: eventId }, data });
     } else {
       // Atualização atômica: updateMany guardado por financialSettingsLockedAt IS NULL
@@ -2160,7 +2160,7 @@ export class EventsService {
           where: { id: eventId },
           select: { id: true, financialSettingsLockedAt: true },
         });
-        if (!exists) throw new NotFoundException('Event not found');
+        if (!exists) throw new NotFoundException('Evento não encontrado');
         throw new ConflictException({
           error: 'FINANCIAL_SETTINGS_LOCKED',
           message: 'As configurações financeiras não podem ser alteradas após a publicação do evento.',
@@ -2189,7 +2189,7 @@ export class EventsService {
       },
     });
 
-    if (!event) throw new NotFoundException('Event not found');
+    if (!event) throw new NotFoundException('Evento não encontrado');
 
     if (event.status !== EventStatus.DRAFT) {
       throw new BadRequestException('Only DRAFT events can be submitted for review');
@@ -2266,7 +2266,7 @@ export class EventsService {
     });
 
     if (!event) {
-      throw new NotFoundException('Event not found');
+      throw new NotFoundException('Evento não encontrado');
     }
 
     if (event.status !== EventStatus.PUBLISHED) {
@@ -2300,7 +2300,7 @@ export class EventsService {
     });
 
     if (!event) {
-      throw new NotFoundException('Event not found');
+      throw new NotFoundException('Evento não encontrado');
     }
 
     if (event.status !== EventStatus.SUSPENDED) {

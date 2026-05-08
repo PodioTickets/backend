@@ -124,7 +124,7 @@ export class TicketsService {
 
     // Validações
     if (createTicketDto.batches.length === 0) {
-      throw new BadRequestException('Ticket must have at least one batch');
+      throw new BadRequestException('Ingresso deve ter pelo menos um lote');
     }
 
     // Validar ageLimit
@@ -138,7 +138,7 @@ export class TicketsService {
         where: { id: createTicketDto.categoryId },
       });
       if (!category || category.eventId !== eventId) {
-        throw new NotFoundException('Ticket category not found');
+        throw new NotFoundException('Categoria de ingresso não encontrada');
       }
     }
 
@@ -148,7 +148,7 @@ export class TicketsService {
         where: { id: createTicketDto.kitId },
       });
       if (!kit || kit.eventId !== eventId) {
-        throw new NotFoundException('Kit not found');
+        throw new NotFoundException('Kit não encontrado');
       }
     }
 
@@ -161,7 +161,7 @@ export class TicketsService {
         },
       });
       if (products.length !== createTicketDto.productIds.length) {
-        throw new NotFoundException('One or more products not found');
+        throw new NotFoundException('Um ou mais produtos não encontrados');
       }
     }
 
@@ -410,7 +410,7 @@ export class TicketsService {
     });
 
     if (!ticket) {
-      throw new NotFoundException('Ticket not found');
+      throw new NotFoundException('Ingresso não encontrado');
     }
 
     const batchIds = ticket.batches.map((b) => b.id);
@@ -508,12 +508,12 @@ export class TicketsService {
     });
 
     if (!ticket || ticket.eventId !== eventId) {
-      throw new NotFoundException('Ticket not found');
+      throw new NotFoundException('Ingresso não encontrado');
     }
 
     // Validações similares ao create
     if (updateTicketDto.batches && updateTicketDto.batches.length === 0) {
-      throw new BadRequestException('Ticket must have at least one batch');
+      throw new BadRequestException('Ingresso deve ter pelo menos um lote');
     }
 
     if (updateTicketDto.ageLimit && !updateTicketDto.ageLimit.min && !updateTicketDto.ageLimit.max) {
@@ -536,7 +536,7 @@ export class TicketsService {
           where: { id: updateTicketDto.categoryId },
         });
         if (!cat || cat.eventId !== eventId) {
-          throw new NotFoundException('Ticket category not found');
+          throw new NotFoundException('Categoria de ingresso não encontrada');
         }
       }
       const newCategoryId =
@@ -830,7 +830,7 @@ export class TicketsService {
     });
 
     if (!ticket || ticket.eventId !== eventId || !ticket.isActive) {
-      throw new NotFoundException('Ticket not found');
+      throw new NotFoundException('Ingresso não encontrado');
     }
 
     const hasSales = ticket.registrations.length > 0 || ticket.reservedTickets.length > 0;
@@ -867,7 +867,7 @@ export class TicketsService {
     });
 
     if (!originalTicket || originalTicket.eventId !== eventId) {
-      throw new NotFoundException('Ticket not found');
+      throw new NotFoundException('Ingresso não encontrado');
     }
 
     const lastInGroup = await prismaRead.ticket.findFirst({
@@ -973,7 +973,7 @@ export class TicketsService {
     });
 
     if (!ticket || ticket.eventId !== eventId) {
-      throw new NotFoundException('Ticket not found');
+      throw new NotFoundException('Ingresso não encontrado');
     }
 
     const currentIds = ticket.products.map((p) => p.productId);
@@ -1143,7 +1143,7 @@ export class TicketsService {
     });
 
     if (!event) {
-      throw new NotFoundException('Event not found');
+      throw new NotFoundException('Evento não encontrado');
     }
 
     // Verificar se o usuário é membro da organização do evento
@@ -1157,7 +1157,7 @@ export class TicketsService {
     });
 
     if (!member) {
-      throw new BadRequestException('User is not a member of this event\'s organization');
+      throw new BadRequestException('Usuário não é membro da organização deste evento');
     }
   }
 }

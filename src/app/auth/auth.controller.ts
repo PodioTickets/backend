@@ -59,7 +59,7 @@ export class AuthController {
   @ApiResponse({ status: 400, description: 'Missing or invalid email' })
   async checkEmailAvailability(@Query('email') email: string) {
     if (!email || !email.includes('@')) {
-      throw new BadRequestException('Invalid email address');
+      throw new BadRequestException('Endereço de e-mail inválido');
     }
     const available = await this.authService.isEmailAvailable(email.toLowerCase().trim());
     return { available };
@@ -180,7 +180,7 @@ export class AuthController {
     // Validar como organizador
     const user = await this.authService.validateUser(body.emailOrCpf, body.password, 'ORGANIZER');
     if (!user) {
-      throw new UnauthorizedException('Invalid credentials');
+      throw new UnauthorizedException('Credenciais inválidas');
     }
     return this.authService.login(user);
   }
@@ -225,11 +225,11 @@ export class AuthController {
   })
   async validateGoogleCode(@Body() body: { code: string; redirectUri: string }) {
     if (!body.code) {
-      throw new BadRequestException('Google authorization code is required');
+      throw new BadRequestException('Código de autorização do Google é obrigatório');
     }
 
     if (!body.redirectUri) {
-      throw new BadRequestException('Redirect URI is required');
+      throw new BadRequestException('URI de redirecionamento é obrigatória');
     }
 
     const result = await this.authService.validateGoogleCode(body.code, body.redirectUri);

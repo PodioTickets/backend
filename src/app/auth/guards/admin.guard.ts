@@ -13,15 +13,15 @@ export class AdminGuard {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest();
     const user = request.user;
-    if (!user) throw new UnauthorizedException('User not authenticated');
+    if (!user) throw new UnauthorizedException('Usuário não autenticado');
     const fullUser = await this.prisma.user.findUnique({
       where: { id: user.id },
       select: { id: true, isActive: true, role: true },
     });
 
-    if (!fullUser) throw new UnauthorizedException('User not found');
+    if (!fullUser) throw new UnauthorizedException('Usuário não encontrado');
     if (!fullUser.isActive) {
-      throw new ForbiddenException('User account is deactivated');
+      throw new ForbiddenException('Conta do usuário está desativada');
     }
     if (fullUser.role !== 'ADMIN' && fullUser.role !== 'PODIOGO_STAFF') {
       throw new ForbiddenException('Admin access required');

@@ -83,7 +83,7 @@ export class TicketCategoriesService {
     });
 
     if (!category || category.eventId !== eventId) {
-      throw new NotFoundException('Ticket category not found');
+      throw new NotFoundException('Categoria de ingresso não encontrada');
     }
 
     const data: Prisma.TicketCategoryUpdateInput = {};
@@ -180,12 +180,12 @@ export class TicketCategoriesService {
     });
 
     if (!category || category.eventId !== eventId) {
-      throw new NotFoundException('Ticket category not found');
+      throw new NotFoundException('Categoria de ingresso não encontrada');
     }
 
     // Validar se há ingressos associados à categoria
     if (category.tickets.length > 0) {
-      throw new BadRequestException('Cannot delete category with associated tickets');
+      throw new BadRequestException('Não é possível excluir categoria com ingressos associados');
     }
 
     await prismaWrite.ticketCategory.delete({
@@ -206,7 +206,7 @@ export class TicketCategoriesService {
     });
 
     if (!event) {
-      throw new NotFoundException('Event not found');
+      throw new NotFoundException('Evento não encontrado');
     }
 
     // Verificar se o usuário é membro da organização do evento
@@ -220,7 +220,7 @@ export class TicketCategoriesService {
     });
 
     if (!member) {
-      throw new BadRequestException('User is not a member of this event\'s organization');
+      throw new BadRequestException('Usuário não é membro da organização deste evento');
     }
   }
 }

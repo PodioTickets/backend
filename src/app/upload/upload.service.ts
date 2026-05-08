@@ -41,7 +41,7 @@ export class UploadService {
 
   async compressImage(file: any): Promise<string> {
     try {
-      if (!file || !file.buffer) throw new Error('No file uploaded or file buffer missing');
+      if (!file || !file.buffer) throw new Error('Nenhum arquivo enviado ou buffer ausente');
 
       await this.scanForMalware(file.buffer, file.originalname || 'uploaded-file');
 
@@ -60,10 +60,10 @@ export class UploadService {
 
   async uploadPdf(file: any): Promise<string> {
     try {
-      if (!file || !file.buffer) throw new Error('No file uploaded or file buffer missing');
+      if (!file || !file.buffer) throw new Error('Nenhum arquivo enviado ou buffer ausente');
 
       const fileExtension = path.extname(file.originalname || '').toLowerCase();
-      if (fileExtension !== '.pdf') throw new Error('File must be a PDF');
+      if (fileExtension !== '.pdf') throw new Error('O arquivo deve ser um PDF');
 
       await this.scanForMalware(file.buffer, file.originalname || 'uploaded-file');
 
@@ -386,7 +386,7 @@ export class UploadService {
         const scanResult = await clamscan.scanFile(tempFilePath);
         if (scanResult.isInfected) {
           console.error(`🚨 Malware detected in file: ${filename}`, { viruses: scanResult.viruses });
-          throw new Error('Malware detected in uploaded file. File rejected for security reasons.');
+          throw new Error('Malware detectado no arquivo enviado. Arquivo rejeitado por razões de segurança.');
         }
         console.log(`✅ Malware scan passed for: ${filename}`);
       } finally {

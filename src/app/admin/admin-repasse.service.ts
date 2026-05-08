@@ -156,7 +156,7 @@ export class AdminRepasseService {
       },
     });
 
-    if (!withdrawal) throw new NotFoundException('Withdrawal not found');
+    if (!withdrawal) throw new NotFoundException('Saque não encontrado');
 
     return { message: 'Withdrawal fetched successfully', data: { withdrawal } };
   }
@@ -167,7 +167,7 @@ export class AdminRepasseService {
       select: { id: true, status: true },
     });
 
-    if (!withdrawal) throw new NotFoundException('Withdrawal not found');
+    if (!withdrawal) throw new NotFoundException('Saque não encontrado');
     if (withdrawal.status !== WithdrawalStatus.PENDING) {
       throw new BadRequestException(
         `Cannot approve a withdrawal with status ${withdrawal.status}`,
@@ -195,7 +195,7 @@ export class AdminRepasseService {
       select: { id: true },
     });
 
-    if (!withdrawal) throw new NotFoundException('Withdrawal not found');
+    if (!withdrawal) throw new NotFoundException('Saque não encontrado');
 
     const updated = await this.prisma.eventWithdrawal.update({
       where: { id },
@@ -215,7 +215,7 @@ export class AdminRepasseService {
       select: { id: true, status: true },
     });
 
-    if (!withdrawal) throw new NotFoundException('Withdrawal not found');
+    if (!withdrawal) throw new NotFoundException('Saque não encontrado');
     if (withdrawal.status !== WithdrawalStatus.PENDING) {
       throw new BadRequestException(
         `Cannot reject a withdrawal with status ${withdrawal.status}`,

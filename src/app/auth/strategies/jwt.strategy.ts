@@ -47,12 +47,12 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
 
     if (!user || !user.isActive) {
-      throw new UnauthorizedException('User not found or inactive');
+      throw new UnauthorizedException('Usuário não encontrado ou inativo');
     }
 
     // Verificar se o accountType do token corresponde ao do banco
     if (user.accountType !== accountType) {
-      throw new UnauthorizedException('Invalid account type');
+      throw new UnauthorizedException('Tipo de conta inválido');
     }
 
     // Organizadores precisam ter ao menos uma organização ativa

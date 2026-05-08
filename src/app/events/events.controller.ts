@@ -564,7 +564,7 @@ export class EventsController {
     const queryDto = plainToClass(DashboardQueryDto, normalizedQuery);
     const errors = await validate(queryDto);
     if (errors.length > 0) {
-      throw new BadRequestException('Validation failed');
+      throw new BadRequestException('Falha na validação');
     }
 
     return this.eventsService.getDashboard(req.user.id, eventId, queryDto);
@@ -794,7 +794,7 @@ Example: \`fields=nome,email,cpf,status,valorPago\``,
   ): Promise<StreamableFile> {
     const { format, fields: fieldsParam } = query;
     if (!['txt', 'excel', 'pdf'].includes(format)) {
-      throw new BadRequestException('Invalid export format. Use txt, excel or pdf.');
+      throw new BadRequestException('Formato de exportação inválido. Use txt, excel ou pdf.');
     }
 
     const { registrations, eventName } = await this.eventsService.getRegistrationsForExport(
@@ -874,7 +874,7 @@ Example: \`fields=nome,email,cpf,status,valorPago\``,
     const queryDto = plainToClass(RegistrationsQueryDto, normalizedQuery);
     const errors = await validate(queryDto);
     if (errors.length > 0) {
-      throw new BadRequestException('Validation failed');
+      throw new BadRequestException('Falha na validação');
     }
 
     return this.eventsService.getRegistrations(req.user.id, eventId, queryDto);

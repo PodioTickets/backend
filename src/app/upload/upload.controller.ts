@@ -563,7 +563,7 @@ export class UploadController {
   async uploadImage(@UploadedFile() file: any) {
     try {
       if (!file) {
-        throw new BadRequestException('No file uploaded');
+        throw new BadRequestException('Nenhum arquivo enviado');
       }
       const imageUrl = await this.uploadService.compressImage(file);
       return { url: imageUrl };
@@ -599,7 +599,7 @@ export class UploadController {
   async uploadPdf(@UploadedFile() file: any) {
     try {
       if (!file) {
-        throw new BadRequestException('No file uploaded');
+        throw new BadRequestException('Nenhum arquivo enviado');
       }
       const pdfUrl = await this.uploadService.uploadPdf(file);
       return { url: pdfUrl };
