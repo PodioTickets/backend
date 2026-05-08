@@ -38,6 +38,7 @@ export class EmailService {
         headers: {
           'List-Unsubscribe': '<mailto:contato@podioticket.com.br?subject=unsubscribe>',
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+          /* SendGrid MailDataRequired não tipifica headers extras — cast necessário */
           ...((msg as any).headers ?? {}),
         },
         trackingSettings: {
@@ -87,9 +88,11 @@ export class EmailService {
     eventName?: string;
     message: string;
   }) {
-    const emailSubject = data.eventName
-      ? `Nova mensagem de ${data.userName} sobre ${data.eventName}`
-      : `Nova mensagem de ${data.userName}`;
+    const emailSubject = this.sanitizeHeader(
+      data.eventName
+        ? `Nova mensagem de ${data.userName} sobre ${data.eventName}`
+        : `Nova mensagem de ${data.userName}`,
+    );
 
     const html = this.loadTemplate('mensagem-organizador.html', {
       organizerName: this.escapeHtml(data.organizerName),
@@ -97,7 +100,8 @@ export class EmailService {
       userEmail: this.escapeHtml(data.userEmail),
       userPhone: data.userPhone ? this.escapeHtml(data.userPhone) : '',
       userCpf: data.userCpf ? this.escapeHtml(data.userCpf) : '',
-      userAvatarUrl: data.userAvatarUrl ? this.escapeHtml(data.userAvatarUrl) : '',
+      /* safeUrl valida esquema https:// antes de escapeHtml — previne javascript: em src */
+      userAvatarUrl: this.escapeHtml(this.safeUrl(data.userAvatarUrl)),
       subject: data.subject ? this.escapeHtml(data.subject) : '',
       eventName: data.eventName ? this.escapeHtml(data.eventName) : '',
       message: this.escapeHtml(data.message),
@@ -150,7 +154,7 @@ export class EmailService {
       <p style="margin:0 0 24px 0;"><strong>${this.escapeHtml(data.inviterName)}</strong> inscreveu você no evento <strong>${this.escapeHtml(data.eventName)}</strong> através da plataforma Podio Ticket.</p>
       <div style="background-color:#f5f5f5;padding:20px;border-radius:5px;margin:0 0 24px 0;text-align:center;">
         <p style="margin:0 0 16px 0;">Para visualizar sua inscrição, clique no link abaixo:</p>
-        <a href="${data.registrationLink}" style="display:inline-block;background-color:#007bff;color:#fff;padding:12px 24px;text-decoration:none;border-radius:5px;">Ver minha inscrição</a>
+        <a href="${this.escapeHtml(this.safeUrl(data.registrationLink))}" style="display:inline-block;background-color:#007bff;color:#fff;padding:12px 24px;text-decoration:none;border-radius:5px;">Ver minha inscrição</a>
       </div>
       <p style="margin:0;color:#666;font-size:12px;">Se você não esperava receber este email, pode ignorá-lo.</p>
     </td></tr>
@@ -520,7 +524,8 @@ export class EmailService {
   }): Promise<void> {
     const html = this.loadTemplate('evento-em-analise.html', {
       eventName: this.escapeHtml(data.eventName),
-      eventBannerUrl: this.escapeHtml(data.eventBannerUrl),
+      /* safeUrl valida esquema https:// — previne javascript: em atributo src da imagem */
+      eventBannerUrl: this.escapeHtml(this.safeUrl(data.eventBannerUrl)),
       eventDate: this.escapeHtml(data.eventDate),
       eventLocation: this.escapeHtml(data.eventLocation),
       submittedAt: this.escapeHtml(data.submittedAt),
@@ -558,7 +563,8 @@ export class EmailService {
   }): Promise<void> {
     const html = this.loadTemplate('evento-aprovado.html', {
       eventName: this.escapeHtml(data.eventName),
-      eventBannerUrl: this.escapeHtml(data.eventBannerUrl),
+      /* safeUrl valida esquema https:// — previne javascript: em atributo src da imagem */
+      eventBannerUrl: this.escapeHtml(this.safeUrl(data.eventBannerUrl)),
       eventDate: this.escapeHtml(data.eventDate),
       eventLocation: this.escapeHtml(data.eventLocation),
       submittedAt: this.escapeHtml(data.submittedAt),
@@ -591,6 +597,26 @@ export class EmailService {
     if (!trimmed) return '';
     if (/^https?:\/\//i.test(trimmed)) return trimmed;
     return `https://${trimmed}`;
+  }
+
+  /**
+   * Valida que URL seja exclusivamente https:// — rejeita javascript:, data:, file: etc.
+   * Usar em atributos src/href de imagens e links em emails para prevenir scheme injection.
+   * Retorna string vazia se inválida.
+   */
+  private safeUrl(url: string | undefined | null): string {
+    if (!url) return '';
+    const trimmed = url.trim();
+    if (!/^https:\/\//i.test(trimmed)) return '';
+    return trimmed;
+  }
+
+  /**
+   * Remove \r e \n de strings usadas em cabeçalhos de email (Subject, To, From).
+   * Previne email header injection.
+   */
+  private sanitizeHeader(value: string): string {
+    return value.replace(/[\r\n]+/g, ' ').trim();
   }
 
   private escapeHtml(text: string): string {

@@ -19,6 +19,7 @@ import {
   TicketPdfTemplateData,
 } from './ticket-pdf.types';
 
+/* LinearGradient não exporta tipos corretos para gradientUnits/x1/y1/x2/y2 — cast necessário */
 const LinearGradient = LinearGradientBase as any;
 
 Font.registerHyphenationCallback((w) => [w]);
@@ -91,6 +92,18 @@ function fmtPhone(phone: string): string {
   return phone;
 }
 
+/**
+ * Valida que URL de imagem seja https:// antes de passar ao renderer do PDF.
+ * Previne SSRF: @react-pdf/renderer usa fetch nativo que pode acessar file:///,
+ * http://localhost etc. se URLs arbitrárias forem aceitas sem validação.
+ */
+function safeImageUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (!/^https:\/\//i.test(trimmed)) return null;
+  return trimmed;
+}
+
 const HR = () =>
   React.createElement(View, { style: { height: 1, backgroundColor: C.gray6 } });
 
@@ -127,10 +140,10 @@ const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
         alignItems: 'center',
       },
     },
-    /* Imagem 100×100 */
-    product.imageUrl
+    /* Imagem 100×100 — safeImageUrl valida https:// para prevenir SSRF */
+    safeImageUrl(product.imageUrl)
       ? React.createElement(Image, {
-          src: product.imageUrl,
+          src: safeImageUrl(product.imageUrl) as string,
           style: {
             width: 100,
             height: 100,
