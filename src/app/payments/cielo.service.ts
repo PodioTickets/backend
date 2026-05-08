@@ -71,6 +71,9 @@ export class CieloService {
   private readonly webhookSecret: string;
   private readonly threeDsClientId: string;
   private readonly threeDsClientSecret: string;
+  private readonly threeDsEstablishmentCode: string;
+  private readonly threeDsMerchantName: string;
+  private readonly threeDsMcc: string;
 
   // Cache simples em memória: evita chamar o Braspag a cada request
   private threeDsTokenCache: { token: string; expiresAt: number } | null = null;
@@ -82,6 +85,9 @@ export class CieloService {
     this.webhookSecret = this.configService.get<string>('CIELO_WEBHOOK_SECRET') || '';
     this.threeDsClientId = this.configService.get<string>('CIELO_3DS_CLIENT_ID') || '';
     this.threeDsClientSecret = this.configService.get<string>('CIELO_3DS_CLIENT_SECRET') || '';
+    this.threeDsEstablishmentCode = this.configService.get<string>('CIELO_3DS_ESTABLISHMENT_CODE') || '';
+    this.threeDsMerchantName = this.configService.get<string>('CIELO_3DS_MERCHANT_NAME') || '';
+    this.threeDsMcc = this.configService.get<string>('CIELO_3DS_MCC') || '';
 
     const baseURL = this.isSandbox
       ? 'https://apisandbox.braspag.com.br'
@@ -752,12 +758,16 @@ export class CieloService {
   }
 
   /**
-   * Obtém o access token OAuth do Braspag para inicializar o SDK 3DS no frontend.
-   * O token tem validade de ~1h; mantemos em cache e renovamos com 60s de margem.
+   * Obtém o access token do Braspag MPI v2 para inicializar o SDK 3DS no frontend.
+   * Endpoint: POST /v2/auth/token (Basic Auth + body com dados do estabelecimento).
+   * Token tem validade de ~24h; mantemos em cache e renovamos com 60s de margem.
    */
   async get3dsAccessToken(): Promise<string> {
     if (!this.threeDsClientId || !this.threeDsClientSecret) {
       throw new Error('CIELO_3DS_CLIENT_ID ou CIELO_3DS_CLIENT_SECRET não configurados');
+    }
+    if (!this.threeDsEstablishmentCode || !this.threeDsMerchantName || !this.threeDsMcc) {
+      throw new Error('CIELO_3DS_ESTABLISHMENT_CODE, CIELO_3DS_MERCHANT_NAME ou CIELO_3DS_MCC não configurados');
     }
 
     const now = Date.now();
@@ -773,12 +783,16 @@ export class CieloService {
       `${this.threeDsClientId}:${this.threeDsClientSecret}`,
     ).toString('base64');
 
-    const response = await axios.post<{ access_token: string; expires_in: number }>(
-      `${mpiBaseUrl}/connect/token`,
-      'grant_type=client_credentials',
+    const response = await axios.post<{ access_token: string; expires_in: string | number }>(
+      `${mpiBaseUrl}/v2/auth/token`,
+      {
+        EstablishmentCode: this.threeDsEstablishmentCode,
+        MerchantName: this.threeDsMerchantName,
+        MCC: this.threeDsMcc,
+      },
       {
         headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Type': 'application/json',
           'Authorization': `Basic ${credentials}`,
         },
         timeout: 10000,
@@ -786,13 +800,14 @@ export class CieloService {
     );
 
     const { access_token, expires_in } = response.data;
+    const expiresInSeconds = typeof expires_in === 'string' ? parseInt(expires_in, 10) : expires_in;
     // Armazena com 60s de margem antes da expiração real
     this.threeDsTokenCache = {
       token: access_token,
-      expiresAt: now + (expires_in - 60) * 1000,
+      expiresAt: now + (expiresInSeconds - 60) * 1000,
     };
 
-    this.logger.debug(`3DS access token renovado (expira em ${expires_in}s)`);
+    this.logger.debug(`3DS access token renovado (expira em ${expiresInSeconds}s)`);
     return access_token;
   }
 

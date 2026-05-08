@@ -173,6 +173,13 @@ export class QuestionsService {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
+    // Admin/staff bypassa checagens de organização
+    const user = await prismaRead.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (user?.role === 'ADMIN' || user?.role === 'PODIOGO_STAFF') return;
+
     const event = await prismaRead.event.findUnique({
       where: { id: eventId },
     });

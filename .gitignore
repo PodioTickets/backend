@@ -44,3 +44,7 @@ uploads/*
 !.vscode/launch.json
 !.vscode/extensions.json
 /generated/prisma
+
+# Claude Code — notas locais do projeto
+.claude/notes/
+CLAUDE.md
