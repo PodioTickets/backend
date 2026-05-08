@@ -2567,34 +2567,30 @@ export class EventsService {
     // Calcular ticket médio (valores já estão em centavos)
     const averageTicket = uniquePaidOrderAmounts.size > 0 ? netRevenue / uniquePaidOrderAmounts.size : 0;
 
-    // Comparar com o período anterior equivalente (ex.: 15d atuais vs 15d imediatamente antes)
-    const { prevStart, prevEndExclusive } = this.getDashboardComparisonBounds(dateRange, now);
-    const previousWhere: any = {
-      eventId,
-      status: { not: RegistrationStatus.PENDING },
-      order: {
-        createdAt: {
-          gte: prevStart,
-          lt: prevEndExclusive,
-        },
-      },
-    };
-    if (ticketIds && ticketIds.length > 0) {
-      previousWhere.tickets = {
-        some: { ticketId: { in: ticketIds } },
-      };
-    }
-
-    const previousRegistrations = await prismaRead.registration.findMany({
-      where: previousWhere,
-      include: {
+    // Comparar com o período anterior equivalente
+    const comparisonBounds = this.getDashboardComparisonBounds(dateRange, now, period);
+    let previousRegistrations: any[] = [];
+    if (comparisonBounds) {
+      const previousWhere: any = {
+        eventId,
+        status: { not: RegistrationStatus.PENDING },
         order: {
-          include: {
-            payment: true,
+          createdAt: {
+            gte: comparisonBounds.prevStart,
+            lt: comparisonBounds.prevEndExclusive,
           },
         },
-      },
-    });
+      };
+      if (ticketIds && ticketIds.length > 0) {
+        previousWhere.tickets = {
+          some: { ticketId: { in: ticketIds } },
+        };
+      }
+      previousRegistrations = await prismaRead.registration.findMany({
+        where: previousWhere,
+        include: { order: { include: { payment: true } } },
+      });
+    }
 
     const previousPaid = previousRegistrations.filter(
       (r) =>
@@ -2614,15 +2610,15 @@ export class EventsService {
     const previousAverageTicket =
       previousUniquePaidOrders.size > 0 ? previousNetRevenue / previousUniquePaidOrders.size : 0;
 
-    const netRevenueChange = this.percentChangeVsPrevious(netRevenue, previousNetRevenue);
-    const totalRegistrationsChange = this.percentChangeVsPrevious(
-      totalRegistrations,
-      previousTotalRegistrations,
-    );
-    const averageTicketChange = this.percentChangeVsPrevious(
-      averageTicket,
-      previousAverageTicket,
-    );
+    const netRevenueChange = comparisonBounds
+      ? this.percentChangeVsPrevious(netRevenue, previousNetRevenue)
+      : 0;
+    const totalRegistrationsChange = comparisonBounds
+      ? this.percentChangeVsPrevious(totalRegistrations, previousTotalRegistrations)
+      : 0;
+    const averageTicketChange = comparisonBounds
+      ? this.percentChangeVsPrevious(averageTicket, previousAverageTicket)
+      : 0;
     const totalFinalized = totalRegistrations + cancellations;
     const cancellationRate = totalFinalized > 0 ? (cancellations / totalFinalized) * 100 : 0;
     const cancellationsStatus = cancellationRate > 10 ? 'Crítico' : cancellationRate > 5 ? 'Atenção' : 'Normal';
@@ -2962,25 +2958,34 @@ export class EventsService {
   }
 
   /**
-   * Intervalo usado só para métricas de comparação (%).
-   * Com filtro de data: mesma duração do período selecionado, imediatamente antes (sem sobrepor o atual).
-   * GERAL: últimos 7 dias vs os 7 dias anteriores (receita/inscrições/ticket médio só para essa comparação).
+   * Intervalo do período anterior para cálculo de variação (%).
+   * - GERAL: sem comparação — retorna null.
+   * - LAST_24H/7D/15D/2M: janela de mesma duração imediatamente anterior ao período atual.
+   * - LAST_1M: mês calendário anterior completo.
    */
   private getDashboardComparisonBounds(
     dateRange: { start: Date | null; end: Date | null },
     now: Date,
-  ): { prevStart: Date; prevEndExclusive: Date } {
+    period: DashboardPeriod,
+  ): { prevStart: Date; prevEndExclusive: Date } | null {
+    if (period === DashboardPeriod.GERAL) return null;
+
+    if (period === DashboardPeriod.LAST_1M) {
+      // Mês calendário anterior: 1º dia do mês passado → 1º dia do mês atual
+      const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const prevEndExclusive = new Date(now.getFullYear(), now.getMonth(), 1);
+      return { prevStart, prevEndExclusive };
+    }
+
+    // Demais períodos: mesma duração imediatamente antes do período atual
     if (dateRange.start && dateRange.end) {
       const durationMs = dateRange.end.getTime() - dateRange.start.getTime();
       const prevStart = new Date(dateRange.start.getTime() - durationMs);
       const prevEndExclusive = new Date(dateRange.start.getTime());
       return { prevStart, prevEndExclusive };
     }
-    const prevEndExclusive = new Date(now);
-    prevEndExclusive.setDate(prevEndExclusive.getDate() - 7);
-    const prevStart = new Date(prevEndExclusive);
-    prevStart.setDate(prevStart.getDate() - 7);
-    return { prevStart, prevEndExclusive };
+
+    return null;
   }
 
   /**

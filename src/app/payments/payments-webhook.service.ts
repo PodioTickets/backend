@@ -57,7 +57,7 @@ export class PaymentsWebhookService {
     const regTickets = await prisma.registrationTicket.findMany({
       where: {
         registration: { orderId },
-        ticketSnapshot: { equals: Prisma.JsonNull },
+        ticketSnapshot: { equals: Prisma.AnyNull },
       },
       select: {
         id: true,
