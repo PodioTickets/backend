@@ -423,6 +423,30 @@ export class VouchersService {
       data: updateData,
     });
 
+    // Propagar configurações de grupo para todos os outros vouchers do mesmo lote.
+    // cpfList, cpfListStatus, appliesTo e expiryDate são atributos do grupo inteiro —
+    // não faz sentido que vouchers do mesmo lote tenham valores divergentes.
+    const groupSyncData: Record<string, any> = {};
+    if (updateVoucherDto.cpfListStatus !== undefined) groupSyncData.cpfListStatus = updateData.cpfListStatus;
+    if (updateVoucherDto.cpfList !== undefined || 'cpfList' in updateVoucherDto) {
+      groupSyncData.cpfList = updateData.cpfList ?? null;
+    }
+    if (updateVoucherDto.appliesTo !== undefined) groupSyncData.appliesTo = updateData.appliesTo;
+    if (updateVoucherDto.expiryDate !== undefined) groupSyncData.expiryDate = updateData.expiryDate;
+
+    if (Object.keys(groupSyncData).length > 0) {
+      await prismaWrite.voucher.updateMany({
+        where: {
+          eventId,
+          name: voucher.name,
+          id: { not: voucherId },
+          deletedAt: null,
+          status: { not: VoucherStatus.USED }, // vouchers usados são imutáveis
+        },
+        data: groupSyncData,
+      });
+    }
+
     // Converter appliesTo de JSON string para array quando necessário
     const transformedVoucher = {
       ...updatedVoucher,
