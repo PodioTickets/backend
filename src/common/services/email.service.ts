@@ -555,6 +555,7 @@ export class EmailService {
 
   async sendEventApproved(data: {
     recipientEmail: string;
+    organizerName?: string;
     eventName: string;
     eventBannerUrl: string;
     eventDate: string;
@@ -562,6 +563,7 @@ export class EmailService {
     submittedAt: string;
   }): Promise<void> {
     const html = this.loadTemplate('evento-aprovado.html', {
+      organizerName: this.escapeHtml(data.organizerName ?? ''),
       eventName: this.escapeHtml(data.eventName),
       /* safeUrl valida esquema https:// — previne javascript: em atributo src da imagem */
       eventBannerUrl: this.escapeHtml(this.safeUrl(data.eventBannerUrl)),
