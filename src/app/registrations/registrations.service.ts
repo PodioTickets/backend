@@ -170,10 +170,11 @@ export class RegistrationsService {
       appliedVoucherId = voucherResult.voucherId;
     }
 
-    // Calcular taxa de serviço (exemplo: 5%) sobre o valor após desconto
-    const amountAfterDiscount = Math.max(0, totalAmount - discount);
-    const serviceFee = amountAfterDiscount * 0.05;
-    const finalAmount = amountAfterDiscount + serviceFee;
+    // Taxa de serviço calculada sobre o valor base (antes do desconto)
+    const feePercent = (event as any).participantFeePercent ?? 0;
+    const serviceFee = Math.round(totalAmount * (feePercent / 100));
+    const amountAfterDiscount = Math.max(0, totalAmount + serviceFee - discount);
+    const finalAmount = amountAfterDiscount;
 
     // Criar inscrição
     const registration = await prismaWrite.$transaction(async (prisma) => {

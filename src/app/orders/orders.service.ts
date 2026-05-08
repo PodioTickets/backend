@@ -736,6 +736,7 @@ export class OrdersService {
               location: true,
               city: true,
               state: true,
+              participantFeePercent: true,
               organization: {
                 select: { id: true, name: true, logoUrl: true, email: true, phone: true },
               },
@@ -880,7 +881,9 @@ export class OrdersService {
           pricing: {
             subtotal: order.totalAmount,
             discount: order.discount,
-            serviceFee: order.serviceFee,
+            serviceFee: order.serviceFee > 0
+              ? order.serviceFee
+              : Math.round(order.totalAmount * (((order as any).event?.participantFeePercent ?? 0) / 100)),
             total: order.finalAmount,
             currency: 'BRL',
           },
@@ -892,7 +895,9 @@ export class OrdersService {
             ? { id: order.voucher.id, code: order.voucher.code, name: order.voucher.name, status: order.voucher.status }
             : null,
         },
-        event: order.event ?? null,
+        event: order.event
+          ? (({ participantFeePercent: _fee, ...rest }) => rest)(order.event as any)
+          : null,
         payment: payment
           ? {
               id: payment.id,

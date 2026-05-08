@@ -96,11 +96,10 @@ export class CheckoutService {
         dto.eventId,
         dto.tickets,
         dto.participants,
-        0, // sem cupom
-        0, // sem voucher
+        0,
+        0,
         dto.paymentMethod,
         prismaRead,
-        0, // serviceFee calculado server-side
       );
 
       // 5. Validar e aplicar cupom
@@ -593,7 +592,6 @@ export class CheckoutService {
     voucherDiscount: number,
     paymentMethod: PaymentMethod,
     prisma: any,
-    serviceFee?: number,
   ): Promise<PriceCalculation> {
     // 1. Calcular subtotal dos tickets
     let ticketsSubtotal = 0;
@@ -664,12 +662,17 @@ export class CheckoutService {
       }
     }
 
-    // 3. Calcular taxa de serviço
-    // serviceFee já está em centavos
-    const calculatedServiceFee = serviceFee !== undefined && serviceFee !== null ? serviceFee : 0;
+    // 3. Calcular taxa de serviço usando participantFeePercent do evento
+    const eventForFee = await prisma.event.findUnique({
+      where: { id: eventId },
+      select: { participantFeePercent: true },
+    });
+    const feePercent = eventForFee?.participantFeePercent ?? 0;
+    const base = ticketsSubtotal + productsSubtotal;
+    const calculatedServiceFee = Math.round(base * (feePercent / 100));
 
     // 4. Calcular subtotal (todos em centavos)
-    const subtotal = ticketsSubtotal + productsSubtotal + calculatedServiceFee;
+    const subtotal = base + calculatedServiceFee;
 
     // 5. Aplicar descontos (já estão em centavos)
     const total = Math.max(0, subtotal - couponDiscount - voucherDiscount);
