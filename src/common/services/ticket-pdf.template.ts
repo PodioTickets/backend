@@ -644,7 +644,7 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) => 
             View,
             { style: { flexDirection: 'row', gap: 12 } },
             ...[
-              { label: 'Local', value: data.event.location },
+              { label: 'Local do evento', value: data.event.location },
               {
                 label: 'Participantes',
                 value: `${data.event.participantCount} atleta${data.event.participantCount !== 1 ? 's' : ''}`,
