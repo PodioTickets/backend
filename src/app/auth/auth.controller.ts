@@ -118,7 +118,7 @@ export class AuthController {
     },
   })
   async loginEmail(@Request() req) {
-    return this.authService.login(req.user);
+    return this.authService.login(req.user, { userAgent: req.headers?.['user-agent'] });
   }
 
   @Post('login/admin')
@@ -144,7 +144,7 @@ export class AuthController {
     if (role !== 'ADMIN' && role !== 'PODIOGO_STAFF') {
       throw new ForbiddenException('Admin access required');
     }
-    return this.authService.login(req.user);
+    return this.authService.login(req.user, { userAgent: req.headers?.['user-agent'] });
   }
 
   @Post('login/organizer')
@@ -176,13 +176,13 @@ export class AuthController {
       required: ['emailOrCpf', 'password', 'turnstileToken'],
     },
   })
-  async loginOrganizer(@Body() body: { emailOrCpf: string; password: string }) {
+  async loginOrganizer(@Request() req, @Body() body: { emailOrCpf: string; password: string }) {
     // Validar como organizador
     const user = await this.authService.validateUser(body.emailOrCpf, body.password, 'ORGANIZER');
     if (!user) {
       throw new UnauthorizedException('Credenciais inválidas');
     }
-    return this.authService.login(user);
+    return this.authService.login(user, { userAgent: req.headers?.['user-agent'] });
   }
 
   @Get('google')
@@ -404,7 +404,7 @@ export class AuthController {
   })
   @ApiResponse({ status: 401, description: 'Não autenticado' })
   async send2FACode(@Request() req) {
-    await this.authService.send2FACode(req.user.id, req.user.email);
+    await this.authService.send2FACode(req.user.id, req.user.email, { userAgent: req.headers?.['user-agent'] });
     return { message: 'Código enviado para o seu e-mail.', success: true };
   }
 

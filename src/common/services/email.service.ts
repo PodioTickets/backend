@@ -489,24 +489,31 @@ export class EmailService {
     this.logger.log(`Email de membro adicionado enviado para: ${data.recipientEmail}`);
   }
 
-  async send2FACode(recipientEmail: string, code: string): Promise<void> {
+  async send2FACode(
+    recipientEmail: string,
+    code: string,
+    opts?: { loginDate?: string; loginDevice?: string; loginLocation?: string },
+  ): Promise<void> {
     const html = this.loadTemplate('codigo-2fa.html', {
       code: this.escapeHtml(code),
+      loginDate: this.escapeHtml(opts?.loginDate ?? ''),
+      loginDevice: this.escapeHtml(opts?.loginDevice ?? ''),
+      loginLocation: this.escapeHtml(opts?.loginLocation ?? ''),
     });
 
     const text = [
-      'Código de verificação — PódioTicket',
+      'Código de acesso — PódioTicket',
       '',
-      `Seu código de verificação é: ${code}`,
+      `Seu código de acesso é: ${code}`,
       '',
       'Este código expira em 10 minutos.',
-      'Se você não solicitou este código, ignore este e-mail.',
+      'Não foi você? Altere sua senha ou contate o suporte.',
     ].join('\n');
 
     await this.send({
       from: this.from,
       to: recipientEmail,
-      subject: 'Código de verificação de segurança — PódioTicket',
+      subject: 'Código de acesso — PódioTicket',
       html,
       text,
     });
