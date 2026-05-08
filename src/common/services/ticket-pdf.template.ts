@@ -132,12 +132,14 @@ const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
       style: {
         paddingHorizontal: 16,
         paddingVertical: 16,
-        borderBottomWidth: 1,
-        borderBottomColor: C.gray6,
-        borderBottomStyle: 'solid',
+        borderWidth: 1,
+        borderColor: C.gray6,
+        borderStyle: 'solid',
+        borderRadius: 12,
         flexDirection: 'row',
         gap: 12,
         alignItems: 'center',
+        backgroundColor: C.gray1,
       },
     },
     /* Imagem 100×100 — safeImageUrl valida https:// para prevenir SSRF */
@@ -195,15 +197,17 @@ const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
             )
           : null,
       ),
-      /* Rodapé: preço à esquerda, badge à direita */
+      /* Rodapé: preço à esquerda (só se não incluso), badge à direita */
       React.createElement(
         View,
         { style: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' } },
-        React.createElement(
-          Text,
-          { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 700, color: C.gray12 } },
-          product.isIncluded ? 'Incluso' : fmtCurrency(product.price),
-        ),
+        product.isIncluded
+          ? React.createElement(View, { style: { flex: 1 } })
+          : React.createElement(
+              Text,
+              { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 700, color: C.gray12 } },
+              fmtCurrency(product.price),
+            ),
         React.createElement(
           View,
           {
@@ -360,7 +364,7 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
             ),
             React.createElement(
               View,
-              { style: { flexDirection: 'column' } },
+              { style: { flexDirection: 'column', gap: 12 } },
               ...reg.products.map((p, i) =>
                 React.createElement(ProductCard, { key: i, product: p }),
               ),
