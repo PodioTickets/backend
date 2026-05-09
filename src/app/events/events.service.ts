@@ -2931,14 +2931,8 @@ export class EventsService {
   ) {
     const prismaRead = this.prisma.getReadClient();
 
-    // Verificar acesso ao evento
-    const event = await prismaRead.event.findFirst({
-      where: { id: eventId, organizerId },
-      select: { id: true },
-    });
-    if (!event) {
-      throw new Error('Evento não encontrado ou acesso negado');
-    }
+    // Verificar acesso ao evento via sistema de permissões da organização
+    await this.verifyOrganizerAccess(organizerId, eventId, 'dashboard');
 
     const answers = await prismaRead.questionAnswer.findMany({
       where: { questionId, registration: { eventId } },
