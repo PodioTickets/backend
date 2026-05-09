@@ -577,6 +577,28 @@ export class EventsController {
     return this.eventsService.getDashboard(req.user.id, eventId, queryDto);
   }
 
+  @Get(':eventId/questions/:questionId/text-answers')
+  @NoCache()
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get text answers for a question',
+    description: 'Retrieves individual text/number answers with participant info for a specific question. Fetched lazily when the organizer opens question details.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiParam({ name: 'questionId', description: 'Question UUID' })
+  @ApiResponse({ status: 200, description: 'Text answers fetched successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can access' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  getQuestionTextAnswers(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Param('questionId') questionId: string,
+  ) {
+    return this.eventsService.getQuestionTextAnswers(req.user.id, eventId, questionId);
+  }
+
   // ========== FINANCIAL ==========
   @Get(':eventId/financial')
   @UseGuards(JwtAuthGuard)
