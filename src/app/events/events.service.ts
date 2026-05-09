@@ -2951,7 +2951,7 @@ export class EventsService {
             participantName: true,
             participantEmail: true,
             user: {
-              select: { firstName: true, lastName: true, email: true },
+              select: { firstName: true, lastName: true, email: true, avatarUrl: true },
             },
           },
         },
@@ -2966,10 +2966,12 @@ export class EventsService {
           ? `${reg.user.firstName} ${reg.user.lastName}`.trim()
           : (reg?.participantName ?? null);
         const userEmail = reg?.user?.email ?? reg?.participantEmail ?? null;
+        const userAvatarUrl = reg?.user?.avatarUrl ?? null;
         return {
           id: a.id,
           userName,
           userEmail,
+          userAvatarUrl,
           answer: a.answer,
           answeredAt: a.createdAt.toISOString(),
         };
