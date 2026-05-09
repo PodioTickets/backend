@@ -427,7 +427,7 @@ async function main() {
   console.log(`Event : ${event.name}`);
   console.log(`ID    : ${event.id}`);
   console.log(`Ticket: ${ticket.name}  |  Batch: #${batch.sortOrder + 1}  |  Price: R$ ${(batch.price / 100).toFixed(2)}`);
-  console.log(`retentionRate: ${((event.retentionRate ?? 0.1) * 100).toFixed(0)}%  |  organizerFeeRate: ${((event.organizerFeeRate ?? 0.04) * 100).toFixed(0)}%\n`);
+  console.log(`retentionRate: ${((event.retentionRate ?? 0.1) * 100).toFixed(0)}%  |  organizerFeePercent: ${(event.organizerFeePercent ?? 4).toFixed(0)}%\n`);
 
   // ── Resolve org owner ────────────────────────────────────────────────────────
 
@@ -452,7 +452,8 @@ async function main() {
   let ui = 0;
   const next = () => users[ui++ % users.length];
   const retentionRate = event.retentionRate ?? 0.1;
-  const organizerFeeRate = event.organizerFeeRate ?? 0.04;
+  // EventWithdrawal.feeRate é gravado em escala 0-1, então convertemos a partir do percent.
+  const organizerFeeRate = (event.organizerFeePercent ?? 4) / 100;
 
   console.log('─── Stage 1 + 2: Checkout → Payment confirmation ─────────────────\n');
 

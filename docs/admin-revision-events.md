@@ -56,7 +56,7 @@ Returns a paginated list of events currently in `REVISION` status, ordered by mo
         "eventDate": "2026-08-10T07:00:00.000Z",
         "registrationStartDate": "2026-05-01T00:00:00.000Z",
         "registrationEndDate": "2026-08-01T23:59:59.000Z",
-        "organizerFeeRate": 0.05,
+        "organizerFeePercent": 5.0,
         "retentionRate": 0.10,
         "createdAt": "2026-04-20T10:00:00.000Z",
         "updatedAt": "2026-05-06T12:00:00.000Z",
@@ -93,7 +93,7 @@ Returns a paginated list of events currently in `REVISION` status, ordered by mo
 | `organization` | Full organization object — name, email, document (CNPJ/CPF), logo, phone |
 | `_count.registrations` | Total registrations (will be 0 for new events) |
 | `_count.tickets` | Number of ticket types configured |
-| `organizerFeeRate` | Organizer fee percentage (e.g. `0.05` = 5%) |
+| `organizerFeePercent` | Organizer fee percentage (e.g. `5.0` = 5%) |
 | `retentionRate` | Retention percentage (e.g. `0.10` = 10%) |
 
 ---
@@ -175,4 +175,4 @@ DRAFT  ──(organizer submits)──▶  REVISION  ──(admin approves)─�
 
 - Only the organizer can move `DRAFT → REVISION` (via their "submit for review" action).
 - Only an admin can move `REVISION → PUBLISHED` (via `POST /admin/events/:id/publish`).
-- Financial settings (`organizerFeeRate`, `retentionRate`, payment config) are locked at the moment of admin approval (`financialSettingsLockedAt`).
+- Financial settings (`organizerFeePercent`, `retentionRate`, payment config) are locked at the moment of admin approval (`financialSettingsLockedAt`).

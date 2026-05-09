@@ -1128,36 +1128,8 @@ export class EventsService {
           where: { isEnabled: true },
           orderBy: { order: 'asc' },
         },
-        locations: {
-          orderBy: { createdAt: 'asc' },
-        },
-        modalities: {
-          include: {
-            template: {
-              select: {
-                id: true,
-                code: true,
-                label: true,
-                icon: true,
-              },
-            },
-          },
-          where: { isActive: true },
-          orderBy: { order: 'asc' },
-        },
-        kits: {
-          where: { isActive: true },
-          include: {
-            items: {
-              where: { isActive: true },
-            },
-          },
-        },
         questions: {
           orderBy: { order: 'asc' },
-        },
-        coupons: {
-          orderBy: { createdAt: 'desc' },
         },
       },
     });
@@ -1169,7 +1141,7 @@ export class EventsService {
     const response = {
       message: 'Event fetched successfully',
       data: {
-        event: this.stripPublicEventAdsTracking(
+        event: this.stripPublicEventForSlug(
           event as unknown as Record<string, unknown>,
         ),
       },
@@ -1213,36 +1185,8 @@ export class EventsService {
           where: { isEnabled: true },
           orderBy: { order: 'asc' },
         },
-        locations: {
-          orderBy: { createdAt: 'asc' },
-        },
-        modalities: {
-          include: {
-            template: {
-              select: {
-                id: true,
-                code: true,
-                label: true,
-                icon: true,
-              },
-            },
-          },
-          where: { isActive: true },
-          orderBy: { order: 'asc' },
-        },
-        kits: {
-          where: { isActive: true },
-          include: {
-            items: {
-              where: { isActive: true },
-            },
-          },
-        },
         questions: {
           orderBy: { order: 'asc' },
-        },
-        coupons: {
-          orderBy: { createdAt: 'desc' },
         },
         ticketCategories: {
           orderBy: { order: 'asc' },
@@ -1334,7 +1278,7 @@ export class EventsService {
       );
 
 
-    const eventPublic = this.stripPublicEventAdsTracking(
+    const eventPublic = this.stripPublicEventForSlug(
       eventToReturn as unknown as Record<string, unknown>,
     );
 
@@ -1772,6 +1716,24 @@ export class EventsService {
       metaPixelId: _mp,
       googleAnalyticsId: _ga,
       googleAdsId: _gad,
+      ...rest
+    } = event;
+    return rest as E;
+  }
+
+  /**
+   * Sanitiza o payload do evento para resposta pública por slug.
+   * Além de remover IDs de tracking de anúncios, omite configurações financeiras
+   * internas (taxas e retenção) que não devem ser expostas a consumidores públicos.
+   */
+  private stripPublicEventForSlug<E extends Record<string, unknown>>(event: E): E {
+    const {
+      metaPixelId: _mp,
+      googleAnalyticsId: _ga,
+      googleAdsId: _gad,
+      organizerFeePercent: _ofp,
+      participantFeePercent: _pfp,
+      retentionRate: _rr,
       ...rest
     } = event;
     return rest as E;
@@ -2378,7 +2340,7 @@ export class EventsService {
     const [eventConfig, registrations] = await Promise.all([
       prismaRead.event.findUnique({
         where: { id: eventId },
-        select: { organizerFeeRate: true },
+        select: { organizerFeePercent: true },
       }),
       prismaRead.registration.findMany({
         where: {
@@ -2404,15 +2366,20 @@ export class EventsService {
       }),
     ]);
 
-    const organizerFeeRate: number = eventConfig?.organizerFeeRate ?? 0;
+    const organizerFeeRate: number = (eventConfig?.organizerFeePercent ?? 0) / 100;
 
     // Deduplicate orders and apply organizer fee deduction
+    // serviceFee é da plataforma (100%) — sai antes de aplicar organizerFeePercent.
     const seenOrders = new Set<string>();
     let total = 0;
     for (const r of registrations) {
       if (r.order?.id && !seenOrders.has(r.order.id)) {
         seenOrders.add(r.order.id);
-        total += Math.round((r.order.finalAmount ?? 0) * (1 - organizerFeeRate));
+        const orgBase = Math.max(
+          0,
+          (r.order.finalAmount ?? 0) - (r.order.serviceFee ?? 0),
+        );
+        total += Math.round(orgBase * (1 - organizerFeeRate));
       }
     }
 
@@ -2434,6 +2401,8 @@ export class EventsService {
         }
 
         const entry = breakdownMap.get(modalityId)!;
+        // Estimativa por modalidade: preço cadastrado × (1 − organizerFeePercent/100).
+        // Aqui não há serviceFee para deduzir (preço da modalidade é só do ingresso).
         const modalityPrice = Math.round((modality.price ?? 0) * (1 - organizerFeeRate));
         entry.revenue += modalityPrice;
         entry.quantity += 1;
@@ -2500,7 +2469,7 @@ export class EventsService {
     const [eventConfig, registrations] = await Promise.all([
       prismaRead.event.findUnique({
         where: { id: eventId },
-        select: { organizerFeeRate: true },
+        select: { organizerFeePercent: true },
       }),
       prismaRead.registration.findMany({
         where: registrationWhere,
@@ -2540,7 +2509,7 @@ export class EventsService {
       }),
     ]);
 
-    const organizerFeeRate: number = eventConfig?.organizerFeeRate ?? 0;
+    const organizerFeeRate: number = (eventConfig?.organizerFeePercent ?? 0) / 100;
 
     // Calcular métricas principais
     const paidRegistrations = registrations.filter(
@@ -2549,12 +2518,15 @@ export class EventsService {
     const cancelledRegistrations = registrations.filter((r) => r.status === RegistrationStatus.CANCELLED);
     const refundedRegistrations = registrations.filter((r) => r.order?.payment?.status === PaymentStatus.REFUNDED);
 
-    // Deduplicate by order; apply organizer fee deduction to get net revenue (what organizer receives)
+    // Deduplicate by order; apply organizer fee deduction to get net revenue (what organizer receives).
+    // serviceFee é da plataforma (100%), sai do gross antes de aplicar a taxa do organizador.
     const uniquePaidOrderAmounts = new Map<string, number>();
     for (const r of paidRegistrations) {
       if (r.order?.id && !uniquePaidOrderAmounts.has(r.order.id)) {
         const gross = this.normalizeToCents(r.order.finalAmount);
-        const net = Math.round(gross * (1 - organizerFeeRate));
+        const fee = this.normalizeToCents(r.order.serviceFee ?? 0);
+        const orgBase = Math.max(0, gross - fee);
+        const net = Math.round(orgBase * (1 - organizerFeeRate));
         uniquePaidOrderAmounts.set(r.order.id, net);
       }
     }
@@ -2602,7 +2574,9 @@ export class EventsService {
     for (const r of previousPaid) {
       if (r.order?.id && !previousUniquePaidOrders.has(r.order.id)) {
         const gross = this.normalizeToCents(r.order.finalAmount);
-        previousUniquePaidOrders.set(r.order.id, Math.round(gross * (1 - organizerFeeRate)));
+        const fee = this.normalizeToCents(r.order.serviceFee ?? 0);
+        const orgBase = Math.max(0, gross - fee);
+        previousUniquePaidOrders.set(r.order.id, Math.round(orgBase * (1 - organizerFeeRate)));
       }
     }
     const previousNetRevenue = Array.from(previousUniquePaidOrders.values()).reduce((sum, v) => sum + v, 0);
@@ -4898,10 +4872,10 @@ export class EventsService {
         },
       }),
       prismaRead.eventAudit.findUnique({ where: { eventId } }),
-      prismaRead.event.findUnique({ where: { id: eventId }, select: { organizerFeeRate: true } }),
+      prismaRead.event.findUnique({ where: { id: eventId }, select: { organizerFeePercent: true } }),
     ]);
 
-    const organizerFeeRate: number = eventConfig?.organizerFeeRate ?? 0;
+    const organizerFeeRate: number = (eventConfig?.organizerFeePercent ?? 0) / 100;
     const isAudited = !!audit;
     const installments: any[] = [];
     let totalPending = 0;
@@ -4915,8 +4889,12 @@ export class EventsService {
       if (!count || count <= 1) continue;
 
       const paymentDate = new Date(payment.paymentDate);
-      // Apply organizer fee deduction before splitting into installments
-      const netAmount = Math.round((order.finalAmount ?? 0) * (1 - organizerFeeRate));
+      // serviceFee é da plataforma — sai antes de aplicar a taxa do organizador.
+      const orgBase = Math.max(
+        0,
+        (order.finalAmount ?? 0) - (order.serviceFee ?? 0),
+      );
+      const netAmount = Math.round(orgBase * (1 - organizerFeeRate));
       const installmentValue = Math.round(netAmount / count);
       const lastInstallmentValue = netAmount - installmentValue * (count - 1);
 
@@ -4976,9 +4954,9 @@ export class EventsService {
 
     const eventConfig = await prismaRead.event.findUnique({
       where: { id: eventId },
-      select: { organizerFeeRate: true },
+      select: { organizerFeePercent: true },
     });
-    const organizerFeeRate: number = eventConfig?.organizerFeeRate ?? 0;
+    const organizerFeeRate: number = (eventConfig?.organizerFeePercent ?? 0) / 100;
 
     // Buscar todos os pagamentos pagos do evento (agrupados por order para evitar duplicatas)
     const paidOrders = await prismaRead.order.findMany({
@@ -5028,7 +5006,11 @@ export class EventsService {
       if (releaseDate > now) {
         const daysUntilRelease = Math.ceil((releaseDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
         const isReleaseToday = releaseDate.toDateString() === today.toDateString();
-        const netAmount = Math.round((order.finalAmount || 0) * (1 - organizerFeeRate));
+        const orgBase = Math.max(
+          0,
+          (order.finalAmount || 0) - (order.serviceFee ?? 0),
+        );
+        const netAmount = Math.round(orgBase * (1 - organizerFeeRate));
 
         allPending.push({
           orderId: order.id,

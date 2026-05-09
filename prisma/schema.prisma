@@ -355,12 +355,10 @@ model Event {
   createdAt             DateTime    @default(now())
   updatedAt             DateTime    @updatedAt
 
-  /// Taxa cobrada pela Podio sobre cada saque do organizador (ex: 0.04 = 4%)
-  organizerFeeRate   Float       @default(0.04)
   /// Percentual retido até a auditoria pós-evento (ex: 0.10 = 10%)
   retentionRate      Float       @default(0.10)
 
-  /// Percentual da taxa absorvido pelo organizador (0.0–100.0).
+  /// Percentual da taxa absorvido pelo organizador (0.0–100.0). Substitui o antigo `organizerFeeRate` (escala 0-1).
   organizerFeePercent         Float     @default(0.0)
   /// Percentual da taxa repassado ao participante (0.0–100.0).
   participantFeePercent       Float     @default(0.0)

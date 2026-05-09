@@ -106,7 +106,40 @@ const ORDER_INCLUDE = {
   coupon: { select: { id: true, code: true, couponType: true, type: true, value: true, appliesTo: true, minAge: true, maxAge: true } },
   voucher: { select: { id: true, code: true, name: true, status: true } },
   payment: { select: { id: true, method: true, status: true, amount: true, transactionId: true, paymentDate: true, createdAt: true, metadata: true } },
+  // participantFeePercent é necessário para calcular serviceFee em pedidos PENDING
+  // (em que order.serviceFee ainda é 0). Não é exposto no payload — orderShape
+  // retorna apenas eventId.
+  event: { select: { participantFeePercent: true } },
 } as const;
+
+/**
+ * Taxa de serviço cobrada do participante.
+ * - Pós-pagamento: usa o valor congelado em `order.serviceFee` (representa o que foi
+ *   efetivamente cobrado, mesmo que a config do evento mude depois).
+ * - PENDING (serviceFee = 0): calcula on-the-fly a partir de `event.participantFeePercent`
+ *   sobre `totalAmount`. Requer que o caller tenha incluído `event` no select.
+ */
+function computeServiceFee(order: any): number {
+  if (order?.serviceFee && order.serviceFee > 0) return order.serviceFee;
+  const percent = order?.event?.participantFeePercent ?? 0;
+  const total = order?.totalAmount ?? 0;
+  if (!total || !percent) return 0;
+  return Math.round(total * (percent / 100));
+}
+
+/**
+ * Valor final exibido ao usuário: `totalAmount + serviceFee - discount`.
+ * - Pós-pagamento (serviceFee já gravado): confia em `order.finalAmount` da DB
+ *   (valor congelado no momento do pagamento).
+ * - PENDING: recompõe a partir do serviceFee calculado, já que o `finalAmount`
+ *   gravado na DB durante o checkout só desconta cupom/voucher e não soma a taxa.
+ */
+function computeFinalAmount(order: any, serviceFee: number): number {
+  if (order?.serviceFee && order.serviceFee > 0) return order.finalAmount ?? 0;
+  const total = order?.totalAmount ?? 0;
+  const discount = order?.discount ?? 0;
+  return Math.max(0, total + serviceFee - discount);
+}
 
 // ─── shape helpers ───────────────────────────────────────────────────────────
 
@@ -315,14 +348,21 @@ function orderShape(order: any, discountOverride?: number, extra?: Record<string
       }
     : null;
 
+  const serviceFee = computeServiceFee(order);
+  // Em PENDING, o `order.finalAmount` da DB não soma a taxa de serviço — recompomos aqui.
+  // Pós-pagamento, mantemos o valor congelado (representa o cobrado de fato).
+  const finalAmount = (order.serviceFee && order.serviceFee > 0)
+    ? (order.finalAmount ?? 0)
+    : Math.max(0, (order.totalAmount ?? 0) + serviceFee - discount);
+
   return {
     id: order.id,
     eventId: order.eventId,
     status: order.status,
     totalAmount: order.totalAmount,
-    serviceFee: order.serviceFee,
+    serviceFee,
     discount,
-    finalAmount: order.finalAmount,
+    finalAmount,
     coupon: order.coupon ?? null,
     voucher: order.voucher ?? null,
     expiresAt: order.expiresAt ?? null,
@@ -878,15 +918,16 @@ export class OrdersService {
           reservedAt: order.reservedAt ?? null,
           cancelledAt: order.cancelledAt ?? null,
           cancelledReason: order.cancelledReason ?? null,
-          pricing: {
-            subtotal: order.totalAmount,
-            discount: order.discount,
-            serviceFee: order.serviceFee > 0
-              ? order.serviceFee
-              : Math.round(order.totalAmount * (((order as any).event?.participantFeePercent ?? 0) / 100)),
-            total: order.finalAmount,
-            currency: 'BRL',
-          },
+          pricing: (() => {
+            const serviceFee = computeServiceFee(order);
+            return {
+              subtotal: order.totalAmount,
+              discount: order.discount,
+              serviceFee,
+              total: computeFinalAmount(order, serviceFee),
+              currency: 'BRL',
+            };
+          })(),
           billingAddress,
           coupon: order.coupon
             ? { id: order.coupon.id, code: order.coupon.code, type: order.coupon.type, value: order.coupon.value }
@@ -1896,7 +1937,19 @@ export class OrdersService {
       }
     }
 
-    const discountedTotal = Math.max(0, preDiscountTotal - couponDiscount - voucherDiscount);
+    // Snapshot da taxa de serviço (participantFeePercent congelado no instante do pay):
+    // se o admin alterar a config do evento depois, este pedido mantém o que foi cobrado.
+    // Base de cálculo: preDiscountTotal (antes do desconto), igual ao checkout.service.
+    const participantFeePercent: number =
+      (order as any).event?.participantFeePercent ?? 0;
+    const serviceFee = Math.round(preDiscountTotal * (participantFeePercent / 100));
+
+    // finalTotal = preDiscountTotal + serviceFee − descontos. A taxa entra na cobrança
+    // (Cielo recebe o valor completo) e é gravada em order.serviceFee como snapshot.
+    const discountedTotal = Math.max(
+      0,
+      preDiscountTotal + serviceFee - couponDiscount - voucherDiscount,
+    );
     const pixDiscount = 0;
     const finalTotal = discountedTotal;
 
@@ -2043,6 +2096,7 @@ export class OrdersService {
           data: {
             expiresAt: newExpiresAt,
             discount: couponDiscount + voucherDiscount,
+            serviceFee,
             finalAmount: finalTotal,
             totalAmount: preDiscountTotal,
             ...(couponId && { couponId }),
@@ -2116,6 +2170,7 @@ export class OrdersService {
           data: {
             expiresAt: newExpiresAt,
             discount: couponDiscount + voucherDiscount,
+            serviceFee,
             finalAmount: finalTotal,
             totalAmount: preDiscountTotal,
             ...(couponId && { couponId }),
@@ -2232,6 +2287,7 @@ export class OrdersService {
         where: { id: orderId },
         data: {
           discount: couponDiscount + voucherDiscount,
+          serviceFee,
           finalAmount: finalTotal,
           totalAmount: preDiscountTotal,
           ...(couponId && { couponId }),

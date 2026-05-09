@@ -120,7 +120,7 @@ export class RepasseService {
   private async loadEventConfig(eventId: string, prisma: any) {
     const event = await prisma.event.findUnique({
       where: { id: eventId },
-      select: { id: true, organizerFeeRate: true, retentionRate: true },
+      select: { id: true, organizerFeePercent: true, retentionRate: true },
     });
     if (!event) throw new NotFoundException('Evento não encontrado');
     return event;
@@ -250,7 +250,7 @@ export class RepasseService {
     retentionRate: number,
     isAudited: boolean,
     committedWithdrawals: any[],
-    organizerFeeRate: number,
+    organizerFeePercent: number,
   ) {
     const now = getNow();
 
@@ -267,8 +267,11 @@ export class RepasseService {
 
       const gross: number = order.finalAmount ?? 0;
       grossRevenue += gross;
-      // Deduct organizer fee upfront before distributing into buckets (spec step 3)
-      const orgNet = Math.round(gross * (1 - organizerFeeRate));
+      // A serviceFee (taxa do participante) é 100% da plataforma — sai antes da divisão.
+      // Em cima do que sobrou (parte do organizador), aplicamos organizerFeePercent.
+      const participantFeeAmount: number = order.serviceFee ?? 0;
+      const organizerBase = Math.max(0, gross - participantFeeAmount);
+      const orgNet = Math.round(organizerBase * (1 - organizerFeePercent / 100));
       const paymentDate = new Date(payment.paymentDate);
       const metadata = payment.metadata as any;
 
@@ -315,7 +318,10 @@ export class RepasseService {
       if (!payment) continue;
 
       // Same fee deduction as positive side — spec: "pegamos o valor que o organizador iria receber"
-      const orgNet = Math.round((order.finalAmount ?? 0) * (1 - organizerFeeRate));
+      const refundedGross = order.finalAmount ?? 0;
+      const refundedParticipantFee = order.serviceFee ?? 0;
+      const refundedOrganizerBase = Math.max(0, refundedGross - refundedParticipantFee);
+      const orgNet = Math.round(refundedOrganizerBase * (1 - organizerFeePercent / 100));
       const metadata = payment.metadata as any;
 
       if (isInstallment(metadata)) {
@@ -406,7 +412,7 @@ export class RepasseService {
       event.retentionRate,
       !!audit,
       committedWithdrawals,
-      event.organizerFeeRate,
+      event.organizerFeePercent,
     );
 
     return {
@@ -445,7 +451,7 @@ export class RepasseService {
       event.retentionRate,
       !!audit,
       committedWithdrawals,
-      event.organizerFeeRate,
+      event.organizerFeePercent,
     );
 
     return {
@@ -458,7 +464,7 @@ export class RepasseService {
           isAudited: !!audit,
           auditedAt: audit?.createdAt ?? null,
           retentionReleased: audit?.retentionReleased ?? 0,
-          organizerFeeRate: event.organizerFeeRate,
+          organizerFeePercent: event.organizerFeePercent,
           retentionRate: event.retentionRate,
         },
       },
@@ -492,7 +498,11 @@ export class RepasseService {
       const releaseDate = getReleaseDate(paymentDate, payment.method);
       const released = releaseDate <= now;
 
-      const netAmount = Math.round(order.finalAmount * (1 - event.organizerFeeRate));
+      const organizerBase = Math.max(
+        0,
+        (order.finalAmount ?? 0) - (order.serviceFee ?? 0),
+      );
+      const netAmount = Math.round(organizerBase * (1 - event.organizerFeePercent / 100));
 
       if (!released) {
         items.push({
@@ -578,8 +588,13 @@ export class RepasseService {
       const count: number = metadata.creditCard.installments;
       const paymentDate = new Date(payment.paymentDate);
 
-      // Deduct organizer fee first, then split 10%/90%
-      const netAmount = Math.round(order.finalAmount * (1 - event.organizerFeeRate));
+      // serviceFee é 100% da plataforma, sai antes do split. Em cima do que sobra,
+      // aplicamos organizerFeePercent, e em cima do líquido, retentionRate (10%) + 90%.
+      const organizerBase = Math.max(
+        0,
+        (order.finalAmount ?? 0) - (order.serviceFee ?? 0),
+      );
+      const netAmount = Math.round(organizerBase * (1 - event.organizerFeePercent / 100));
       const retained = Math.round(netAmount * event.retentionRate);
       const distributable = netAmount - retained;
       const baseInstallment = Math.floor(distributable / count);
@@ -723,7 +738,7 @@ export class RepasseService {
         event.retentionRate,
         !!audit,
         committedWithdrawals,
-        event.organizerFeeRate,
+        event.organizerFeePercent,
       );
 
       if (amount > saldoParaSaque) {
@@ -734,12 +749,13 @@ export class RepasseService {
 
       // Fee was already deducted upfront when distributing into buckets (spec step 3).
       // saldoParaSaque is already the net amount — no additional deduction at withdrawal.
+      // EventWithdrawal.feeRate é histórico em escala 0-1 (ex.: 0.04). Convertemos do percent.
       return tx.eventWithdrawal.create({
         data: {
           eventId,
           requestedById: userId,
           amount,
-          feeRate: event.organizerFeeRate,
+          feeRate: event.organizerFeePercent / 100,
           feeAmount: 0,
           netAmount: amount,
           status: WithdrawalStatus.PENDING,
@@ -928,7 +944,7 @@ export class RepasseService {
         event.retentionRate,
         false,
         committedWithdrawals,
-        event.organizerFeeRate,
+        event.organizerFeePercent,
       );
 
       return tx.eventAudit.create({
@@ -974,7 +990,7 @@ export class RepasseService {
           slug: true,
           logoUrl: true,
           eventDate: true,
-          organizerFeeRate: true,
+          organizerFeePercent: true,
           retentionRate: true,
           organization: {
             select: { id: true, name: true, email: true, logoUrl: true },
@@ -1033,7 +1049,7 @@ export class RepasseService {
           event.retentionRate,
           false,
           committedWithdrawals,
-          event.organizerFeeRate,
+          event.organizerFeePercent,
         );
 
         if (retainedAmount > 0) {
@@ -1108,7 +1124,7 @@ export class RepasseService {
         event.retentionRate,
         false,
         committedWithdrawals,
-        event.organizerFeeRate,
+        event.organizerFeePercent,
       );
 
       const created = await tx.eventAudit.create({
