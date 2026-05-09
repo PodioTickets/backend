@@ -2851,25 +2851,9 @@ export class EventsService {
     const answers = await prismaRead.questionAnswer.findMany({
       where: { registration: { eventId } },
       select: {
-        id: true,
         questionId: true,
         answer: true,
         registrationId: true,
-        createdAt: true,
-        registration: {
-          select: {
-            participantName: true,
-            participantEmail: true,
-            userId: true,
-            user: {
-              select: {
-                firstName: true,
-                lastName: true,
-                email: true,
-              },
-            },
-          },
-        },
         question: {
           select: { id: true, question: true, order: true, type: true, options: true, isRequired: true },
         },
@@ -2886,14 +2870,6 @@ export class EventsService {
       isRequired: boolean;
       participantCount: number;
       answersByValue: Map<string, number>;
-      // Respostas individuais para perguntas de texto livre
-      individualAnswers: Array<{
-        id: string;
-        answer: string;
-        participantName: string | null;
-        participantEmail: string | null;
-        answeredAt: string;
-      }>;
     }>();
 
     for (const a of answers) {
@@ -2910,57 +2886,25 @@ export class EventsService {
           isRequired: q.isRequired ?? false,
           participantCount: 0,
           answersByValue: new Map(),
-          individualAnswers: [],
         });
       }
       const entry = byQuestion.get(key)!;
       entry.participantCount += 1;
-
-      const isTexto = entry.type === 'text' || entry.type === 'number';
-
-      if (isTexto) {
-        // Texto livre: armazenar cada resposta individualmente com dados do participante
-        const reg = a.registration;
-        const participantName = reg?.user
-          ? `${reg.user.firstName} ${reg.user.lastName}`.trim()
-          : (reg?.participantName ?? null);
-        const participantEmail = reg?.user?.email ?? reg?.participantEmail ?? null;
-        entry.individualAnswers.push({
-          id: a.id,
-          answer: a.answer,
-          participantName,
-          participantEmail,
-          answeredAt: a.createdAt.toISOString(),
-        });
-      } else {
-        const normalized = this.normalizeQuestionAnswer(a.answer, entry.type);
-        for (const val of normalized) {
-          entry.answersByValue.set(val, (entry.answersByValue.get(val) ?? 0) + 1);
-        }
+      const normalized = this.normalizeQuestionAnswer(a.answer, entry.type);
+      for (const val of normalized) {
+        entry.answersByValue.set(val, (entry.answersByValue.get(val) ?? 0) + 1);
       }
     }
 
     const result = Array.from(byQuestion.values()).map((entry) => {
       const total = entry.participantCount;
-      const isTexto = entry.type === 'text' || entry.type === 'number';
-
-      const answersRanking = isTexto
-        ? entry.individualAnswers.map((ia) => ({
-            answer: ia.answer,
-            count: 1,
-            percentage: total > 0 ? Math.round((1 / total) * 10000) / 100 : 0,
-            participantName: ia.participantName,
-            participantEmail: ia.participantEmail,
-            answeredAt: ia.answeredAt,
-          }))
-        : Array.from(entry.answersByValue.entries())
-            .map(([answer, count]) => ({
-              answer,
-              count,
-              percentage: total > 0 ? Math.round((count / total) * 10000) / 100 : 0,
-            }))
-            .sort((x, y) => y.count - x.count);
-
+      const answersRanking = Array.from(entry.answersByValue.entries())
+        .map(([answer, count]) => ({
+          answer,
+          count,
+          percentage: total > 0 ? Math.round((count / total) * 10000) / 100 : 0,
+        }))
+        .sort((x, y) => y.count - x.count);
       return {
         questionId: entry.questionId,
         question: entry.question,
@@ -2974,6 +2918,63 @@ export class EventsService {
     });
 
     return result.sort((a, b) => b.participantCount - a.participantCount);
+  }
+
+  /**
+   * Respostas individuais de uma pergunta de texto livre, com dados do participante.
+   * Chamado apenas ao abrir o detalhe da pergunta — não incluso no dashboard geral.
+   */
+  async getQuestionTextAnswers(
+    organizerId: string,
+    eventId: string,
+    questionId: string,
+  ) {
+    const prismaRead = this.prisma.getReadClient();
+
+    // Verificar acesso ao evento
+    const event = await prismaRead.event.findFirst({
+      where: { id: eventId, organizerId },
+      select: { id: true },
+    });
+    if (!event) {
+      throw new Error('Evento não encontrado ou acesso negado');
+    }
+
+    const answers = await prismaRead.questionAnswer.findMany({
+      where: { questionId, registration: { eventId } },
+      select: {
+        id: true,
+        answer: true,
+        createdAt: true,
+        registration: {
+          select: {
+            participantName: true,
+            participantEmail: true,
+            user: {
+              select: { firstName: true, lastName: true, email: true },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return {
+      answers: answers.map((a) => {
+        const reg = a.registration;
+        const userName = reg?.user
+          ? `${reg.user.firstName} ${reg.user.lastName}`.trim()
+          : (reg?.participantName ?? null);
+        const userEmail = reg?.user?.email ?? reg?.participantEmail ?? null;
+        return {
+          id: a.id,
+          userName,
+          userEmail,
+          answer: a.answer,
+          answeredAt: a.createdAt.toISOString(),
+        };
+      }),
+    };
   }
 
   /**
