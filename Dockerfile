@@ -54,43 +54,38 @@ RUN pnpm run build:docker
 # -----------------------------
 FROM base AS production
 
-RUN apk add --no-cache openssl3 libc6-compat
-
-RUN addgroup -g 1001 -S nodejs && \
+RUN apk add --no-cache openssl3 libc6-compat && \
+    addgroup -g 1001 -S nodejs && \
     adduser -S nestjs -u 1001
 
-# Copia dependências (inclui Prisma CLI para migrações)
-COPY --from=dependencies /usr/src/app/node_modules ./node_modules
+# --chown no COPY evita RUN chown -R posterior, que duplica todos os inodes
+# de node_modules em uma nova layer enorme (principal causa de lentidão)
+COPY --chown=nestjs:nodejs --from=dependencies /usr/src/app/node_modules ./node_modules
 
 # App buildado
-COPY --from=build /usr/src/app/dist ./dist
-COPY --from=build /usr/src/app/prisma ./prisma
+COPY --chown=nestjs:nodejs --from=build /usr/src/app/dist ./dist
+COPY --chown=nestjs:nodejs --from=build /usr/src/app/prisma ./prisma
 
-# Copia Prisma Client gerado
-COPY --from=build /usr/src/app/node_modules/.pnpm/@prisma+client*/node_modules/.prisma/client ./node_modules/.prisma/client
-COPY --from=build /usr/src/app/node_modules/.pnpm/@prisma+client*/node_modules/@prisma/client ./node_modules/@prisma/client
+# Prisma Client gerado (sobrescreve o vindo de dependencies)
+COPY --chown=nestjs:nodejs --from=build /usr/src/app/node_modules/.pnpm/@prisma+client*/node_modules/.prisma/client ./node_modules/.prisma/client
+COPY --chown=nestjs:nodejs --from=build /usr/src/app/node_modules/.pnpm/@prisma+client*/node_modules/@prisma/client ./node_modules/@prisma/client
 
-# Garante que os binários do Prisma estejam executáveis
-USER root
+# Arquivos de configuração e scripts
+COPY --chown=nestjs:nodejs package.json tsconfig.json tsconfig.node.json docker-entrypoint.sh ./
+COPY --chown=nestjs:nodejs scripts ./scripts
+
+# chmod apenas nos binários do Prisma (pequeno, sem chown -R node_modules)
 RUN chmod +x node_modules/.prisma/client/libquery_engine-linux-musl* \
         node_modules/@prisma/engines/libquery_engine-linux-musl* \
         node_modules/@prisma/engines/migration-engine-linux-musl* \
         node_modules/@prisma/engines/introspection-engine-linux-musl* \
         node_modules/@prisma/engines/prisma-fmt-linux-musl* \
-        2>/dev/null || true && \
-    chown -R nestjs:nodejs /usr/src/app/node_modules
+        2>/dev/null || true
 
-# Copia arquivos de configuração
-COPY package.json docker-entrypoint.sh tsconfig.json tsconfig.node.json ./
-
-# Utility scripts (sandbox/debug tooling)
-COPY scripts ./scripts
-
-# Configura script de entrada (entrypoint roda como root para chown do volume uploads)
 RUN dos2unix docker-entrypoint.sh && \
     chmod +x docker-entrypoint.sh && \
     mkdir -p uploads logs && \
-    chown -R nestjs:nodejs /usr/src/app
+    chown nestjs:nodejs uploads logs
 
 USER root
 
