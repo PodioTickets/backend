@@ -1090,14 +1090,18 @@ export class EventsService {
     };
   }
 
-  async findOne(id: string) {
+  async findOne(id: string, userId?: string) {
     this.validateUUID(id, 'event ID');
 
     // Cache curto (30s) — invalida-se no update/delete. Reduz 39ms → ~3ms em hit.
     // Fail-open: se Redis off, cai pra query normal sem degradar.
+    // Bypass quando há userId: organizadores recebem `registrationsCount` extra que
+    // não pode vazar no cache compartilhado de anônimos.
     const cacheKey = this.eventCacheKeyById(id);
-    const cached = await this.cache.getJson<{ message: string; data: { event: Record<string, unknown> } }>(cacheKey);
-    if (cached) return cached;
+    if (!userId) {
+      const cached = await this.cache.getJson<{ message: string; data: { event: Record<string, unknown> } }>(cacheKey);
+      if (cached) return cached;
+    }
 
     // Usar read replica para query de leitura
     const prismaRead = this.prisma.getReadClient();
@@ -1138,16 +1142,81 @@ export class EventsService {
       throw new NotFoundException('Evento não encontrado');
     }
 
+    // Se autenticado, verifica se é organizador (OWNER/EMPLOYEE da org com acesso
+    // ao evento) ou admin. Em caso afirmativo, agrega `registrationsCount`.
+    // Não lança em falha — a rota é pública.
+    const isOrganizerCaller = userId
+      ? await this.isOrganizerCallerForEvent(userId, (event as any).organizationId, id)
+      : false;
+
+    let registrationsCount: number | undefined;
+    if (isOrganizerCaller) {
+      registrationsCount = await prismaRead.registration.count({
+        where: { eventId: id, status: RegistrationStatus.CONFIRMED },
+      });
+    }
+
+    const eventPublic = this.stripPublicEventForSlug(
+      event as unknown as Record<string, unknown>,
+    );
+
     const response = {
       message: 'Event fetched successfully',
       data: {
-        event: this.stripPublicEventForSlug(
-          event as unknown as Record<string, unknown>,
-        ),
+        event:
+          registrationsCount !== undefined
+            ? { ...eventPublic, registrationsCount }
+            : eventPublic,
       },
     };
-    await this.cache.setJson(cacheKey, response, EventsService.EVENT_CACHE_TTL_SECONDS);
+
+    // Só cacheia a resposta anônima — versão organizadora carrega contagem dinâmica
+    // (muda a cada inscrição) e não deve ser servida a outros consumidores.
+    if (!isOrganizerCaller) {
+      await this.cache.setJson(cacheKey, response, EventsService.EVENT_CACHE_TTL_SECONDS);
+    }
     return response;
+  }
+
+  /**
+   * True quando `userId` é admin (PODIOGO_STAFF/ADMIN) ou membro ativo da organização
+   * do evento (OWNER, ou EMPLOYEE com acesso ao evento). Não lança — pensado para
+   * decidir agregação opcional em rotas públicas.
+   */
+  private async isOrganizerCallerForEvent(
+    userId: string,
+    organizationId: string,
+    eventId: string,
+  ): Promise<boolean> {
+    const prismaRead = this.prisma.getReadClient();
+    const [user, member] = await Promise.all([
+      prismaRead.user.findUnique({
+        where: { id: userId },
+        select: { role: true },
+      }),
+      prismaRead.organizationMember.findUnique({
+        where: { organizationId_userId: { organizationId, userId } },
+        select: {
+          role: true,
+          restrictedToEvents: true,
+          eventAccesses: {
+            where: { eventId },
+            select: { eventId: true },
+            take: 1,
+          },
+        },
+      }),
+    ]);
+
+    if (user && (user.role === 'PODIOGO_STAFF' || user.role === 'ADMIN')) {
+      return true;
+    }
+    if (!member) return false;
+    if (member.role === 'OWNER') return true;
+    if (member.role !== 'EMPLOYEE') return false;
+    // EMPLOYEE: tem acesso explícito ao evento, ou não é restrito a eventos.
+    if (member.eventAccesses.length > 0) return true;
+    return !member.restrictedToEvents;
   }
 
   async findBySlug(slug: string) {

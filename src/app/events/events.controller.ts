@@ -54,6 +54,7 @@ import {
   FinancialSettingsLockedErrorDto,
 } from './dto/financial-settings.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { CacheTTL, NoCache } from 'src/common/decorators/cache.decorator';
 
 function clientIp(req: ExpressRequest): string {
@@ -179,12 +180,18 @@ export class EventsController {
 
   @Get(':id')
   @NoCache()
-  @ApiOperation({ summary: 'Get event by ID', description: 'Retrieves a single event by its ID' })
+  @UseGuards(OptionalJwtAuthGuard)
+  @ApiOperation({
+    summary: 'Get event by ID',
+    description:
+      'Retrieves a single event by its ID. Quando autenticado como organizador (OWNER/EMPLOYEE da org do evento) ou admin, retorna também `registrationsCount` (inscrições confirmadas).',
+  })
   @ApiParam({ name: 'id', description: 'Event UUID' })
   @ApiResponse({ status: 200, description: 'Event retrieved successfully' })
   @ApiResponse({ status: 404, description: 'Event not found' })
-  findOne(@Param('id') id: string) {
-    return this.eventsService.findOne(id);
+  findOne(@Request() req, @Param('id') id: string) {
+    const userId = req.user?.id;
+    return this.eventsService.findOne(id, userId);
   }
 
   @Patch(':id')
