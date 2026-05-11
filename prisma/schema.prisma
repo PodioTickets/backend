@@ -246,7 +246,8 @@ model OrganizationPixKey {
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  withdrawals  EventWithdrawal[]
 
   @@index([organizationId])
 }
@@ -705,6 +706,7 @@ model Order {
   @@index([createdAt])
   @@index([eventId, createdAt]) // Janelas por data do pedido (métricas / relatórios)
   @@index([status, expiresAt])
+  @@index([eventId, status, createdAt]) // Listagem fiscal (PAID por evento + ordenação por data)
 }
 
 model Payment {
@@ -1051,16 +1053,25 @@ model EventWithdrawal {
   notes         String?
   /// URL do documento de extrato/comprovante vinculado pelo admin
   receiptUrl    String?
+  /// Chave PIX da organização escolhida no momento do saque.
+  /// SetNull preserva o histórico se a chave for excluída — o snapshot fica intacto.
+  pixKeyId      String?          @db.Uuid
+  /// Snapshot dos dados da chave PIX no momento do saque (key, keyType, bankName,
+  /// accountHolderName, accountHolderDocument). Fonte de verdade para o admin pagar —
+  /// nunca confiar na OrganizationPixKey atual, que pode ter sido editada/excluída.
+  pixKeySnapshot Json?
   completedAt   DateTime?
   createdAt     DateTime         @default(now())
   updatedAt     DateTime         @updatedAt
 
-  event       Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  requestedBy User  @relation(fields: [requestedById], references: [id], onDelete: Cascade)
+  event       Event               @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  requestedBy User                @relation(fields: [requestedById], references: [id], onDelete: Cascade)
+  pixKey      OrganizationPixKey? @relation(fields: [pixKeyId], references: [id], onDelete: SetNull)
 
   @@index([eventId])
   @@index([eventId, status])
   @@index([eventId, createdAt])
+  @@index([pixKeyId])
 }
 
 model EventAudit {

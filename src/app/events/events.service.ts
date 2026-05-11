@@ -25,7 +25,7 @@ import {
   CreateEventLocationDto,
 } from './dto/event-topic.dto';
 import { DashboardQueryDto, DashboardPeriod } from './dto/dashboard.dto';
-import { FinancialQueryDto, FinancialPeriod } from './dto/financial.dto';
+import { FinancialQueryDto, FinancialPeriod, PaymentMethodStats } from './dto/financial.dto';
 import { RegistrationsQueryDto } from './dto/registrations.dto';
 import {
   EventStatus,
@@ -3666,9 +3666,12 @@ export class EventsService {
   async getFinancial(userId: string, eventId: string, queryDto: FinancialQueryDto) {
     await this.verifyOrganizerAccess(userId, eventId, 'financial');
 
-    const { page = 1, limit = 20 } = queryDto;
+    const { page = 1, limit = 20, period } = queryDto;
 
-    const [{ breakdown, audit, refundedOrders, completedWithdrawalsTotal }, tickets] = await Promise.all([
+    const [
+      { breakdown, audit, paidOrders, refundedOrders, completedWithdrawalsTotal, organizerFeePercent },
+      tickets,
+    ] = await Promise.all([
       this.repasseService.computeBreakdownForEvent(eventId),
       this.ticketsService.findAll(eventId, { page, limit, includeInactive: true }),
     ]);
@@ -3676,6 +3679,17 @@ export class EventsService {
     const totalRefunded = refundedOrders.reduce(
       (s: number, o: any) => s + (o.finalAmount ?? 0),
       0,
+    );
+
+    const dateRange = period
+      ? this.calculateFinancialDateRange(period)
+      : { start: null, end: null };
+
+    const paymentMethodStats = this.computePaymentMethodStats(
+      paidOrders,
+      refundedOrders,
+      organizerFeePercent,
+      dateRange,
     );
 
     return {
@@ -3693,10 +3707,83 @@ export class EventsService {
           refundedCount: refundedOrders.length,
           totalChargebacks: 0,
           isAudited: !!audit,
+          paymentMethodStats,
         },
         tickets,
       },
     };
+  }
+
+  /**
+   * Agrega vendas e receita líquida por método de pagamento (PIX/CRÉDITO/DÉBITO).
+   *
+   * - `sales`: contagem de pagamentos PAID com `paymentDate` dentro do período.
+   * - `netRevenue` (em centavos): soma do `orgNet` (mesma fórmula do `calcBreakdown`)
+   *    dos PAID no período, menos o `orgNet` dos REFUNDED cujo refund ocorreu no período
+   *    (`payment.updatedAt`, alinhado com `getFinancialRefunded`). Pode ficar negativo —
+   *    o front exibe com sinal.
+   *
+   * BOLETO/CRYPTO são ignorados (não exibidos no card; estender chaves no front quando precisar).
+   *
+   * Performance: O(n) em memória sobre as listas já carregadas pelo RepasseService —
+   * zero query adicional. Em eventos com milhares de pedidos pagos, ainda é desprezível
+   * comparado ao custo da query original.
+   */
+  private computePaymentMethodStats(
+    paidOrders: any[],
+    refundedOrders: any[],
+    organizerFeePercent: number,
+    dateRange: { start: Date | null; end: Date | null },
+  ): PaymentMethodStats {
+    const methodToKey: Partial<Record<PaymentMethod, keyof PaymentMethodStats>> = {
+      [PaymentMethod.PIX]: 'pix',
+      [PaymentMethod.CREDIT_CARD]: 'creditCard',
+      [PaymentMethod.DEBIT_CARD]: 'debitCard',
+    };
+
+    const stats: PaymentMethodStats = {
+      pix: { sales: 0, netRevenue: 0 },
+      creditCard: { sales: 0, netRevenue: 0 },
+      debitCard: { sales: 0, netRevenue: 0 },
+    };
+
+    const startMs = dateRange.start ? dateRange.start.getTime() : null;
+    const endMs = dateRange.end ? dateRange.end.getTime() : null;
+    const inRange = (d: Date | string | null | undefined) => {
+      if (!d) return false;
+      const t = new Date(d).getTime();
+      if (Number.isNaN(t)) return false;
+      if (startMs !== null && t < startMs) return false;
+      if (endMs !== null && t > endMs) return false;
+      return true;
+    };
+
+    const orgNetOf = (order: any) => {
+      const gross = order.finalAmount ?? 0;
+      const participantFee = order.serviceFee ?? 0;
+      const organizerBase = Math.max(0, gross - participantFee);
+      return Math.round(organizerBase * (1 - organizerFeePercent / 100));
+    };
+
+    for (const order of paidOrders) {
+      const method = order.payment?.method as PaymentMethod | undefined;
+      const key = method ? methodToKey[method] : undefined;
+      if (!key) continue;
+      if (!inRange(order.payment?.paymentDate)) continue;
+      stats[key].sales += 1;
+      stats[key].netRevenue += orgNetOf(order);
+    }
+
+    for (const order of refundedOrders) {
+      const method = order.payment?.method as PaymentMethod | undefined;
+      const key = method ? methodToKey[method] : undefined;
+      if (!key) continue;
+      // Data do refund = transição PAID→REFUNDED; mesma convenção do getFinancialRefunded.
+      if (!inRange(order.payment?.updatedAt)) continue;
+      stats[key].netRevenue -= orgNetOf(order);
+    }
+
+    return stats;
   }
 
   // Prazos de retenção por método de pagamento (em dias)
@@ -4895,6 +4982,8 @@ export class EventsService {
         notes: true,
         createdAt: true,
         completedAt: true,
+        pixKeyId: true,
+        pixKeySnapshot: true,
       },
     });
 
@@ -4936,6 +5025,19 @@ export class EventsService {
         receiptUrl: true,
         createdAt: true,
         completedAt: true,
+        pixKeyId: true,
+        pixKeySnapshot: true,
+        // Mantém a chave atual também (UI pode mostrar "chave foi alterada" se diferir do snapshot).
+        pixKey: {
+          select: {
+            id: true,
+            key: true,
+            keyType: true,
+            bankName: true,
+            accountHolderName: true,
+            accountHolderDocument: true,
+          },
+        },
         event: {
           select: {
             organization: {

@@ -105,6 +105,30 @@ export class RepasseService {
     });
   }
 
+  /**
+   * Extrai os campos exibíveis (chave PIX + banco) priorizando o snapshot do
+   * withdrawal. Se o snapshot não existir (registros legados pré-2026-05-11),
+   * cai pra `organization.pix`/`bankName`/`account`. Centralizado para que
+   * emails e payloads compartilhem a mesma fonte de verdade.
+   */
+  private resolvePixDestination(
+    pixKeySnapshot: any,
+    fallbackOrg: { pix?: string | null; bankName?: string | null; account?: string | null } | null | undefined,
+  ): { pixKey: string; bankAccount: string } {
+    const snap = pixKeySnapshot && typeof pixKeySnapshot === 'object' ? pixKeySnapshot : null;
+    const pixKey = snap?.key ?? fallbackOrg?.pix ?? '—';
+    const snapBank = snap?.bankName ?? null;
+    if (snapBank) {
+      // Conta corrente não é capturada no snapshot (PIX é só a chave) — usamos
+      // o nome do banco isolado quando o snapshot tem chave mas não conta.
+      return { pixKey, bankAccount: snapBank };
+    }
+    if (fallbackOrg?.bankName && fallbackOrg?.account) {
+      return { pixKey, bankAccount: `${fallbackOrg.bankName} ••• ${fallbackOrg.account.slice(-4)}` };
+    }
+    return { pixKey, bankAccount: '—' };
+  }
+
   // ─── Acesso ──────────────────────────────────────────────────────────────
 
   private async assertAccess(userId: string, eventId: string) {
@@ -418,8 +442,10 @@ export class RepasseService {
     return {
       breakdown,
       audit,
+      paidOrders,
       refundedOrders,
       completedWithdrawalsTotal,
+      organizerFeePercent: event.organizerFeePercent,
     };
   }
 
@@ -678,6 +704,19 @@ export class RepasseService {
           requestedBy: {
             select: { id: true, firstName: true, lastName: true, email: true },
           },
+          // Inclui dados atuais da chave selecionada (auxilia o admin a inspecionar)
+          // — mas o snapshot persiste mesmo se a chave for excluída/editada.
+          pixKey: {
+            select: {
+              id: true,
+              key: true,
+              keyType: true,
+              isDefault: true,
+              bankName: true,
+              accountHolderName: true,
+              accountHolderDocument: true,
+            },
+          },
         },
       }),
       prismaRead.eventWithdrawal.count({ where: { eventId } }),
@@ -705,7 +744,7 @@ export class RepasseService {
     };
   }
 
-  async requestWithdrawal(userId: string, eventId: string, amount: number) {
+  async requestWithdrawal(userId: string, eventId: string, amount: number, pixKeyId: string) {
     await this.assertAccess(userId, eventId);
 
     if (!amount || amount <= 0) {
@@ -714,10 +753,55 @@ export class RepasseService {
 
     const prismaWrite = this.prisma.getWriteClient();
 
+    // Pré-valida a chave PIX (antes do lock — leitura barata) e captura snapshot
+    // a partir da org do evento, garantindo que a chave realmente pertence a ela.
+    const pixContext = await prismaWrite.event.findUnique({
+      where: { id: eventId },
+      select: {
+        organizationId: true,
+        organization: {
+          select: {
+            pixKeys: {
+              where: { id: pixKeyId },
+              select: {
+                id: true,
+                key: true,
+                keyType: true,
+                bankName: true,
+                accountHolderName: true,
+                accountHolderDocument: true,
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!pixContext) {
+      throw new NotFoundException('Evento não encontrado');
+    }
+    const selectedKey = pixContext.organization?.pixKeys?.[0];
+    if (!selectedKey) {
+      // 400 e não 404 — input do usuário inválido (defense in depth contra IDOR).
+      throw new BadRequestException(
+        'Chave PIX inválida ou não pertence à organização deste evento',
+      );
+    }
+
+    const pixKeySnapshot = {
+      key: selectedKey.key,
+      keyType: selectedKey.keyType,
+      bankName: selectedKey.bankName ?? null,
+      accountHolderName: selectedKey.accountHolderName ?? null,
+      accountHolderDocument: selectedKey.accountHolderDocument ?? null,
+    } as const;
+
     // Wrap check + create in a single transaction with an advisory lock so
     // concurrent withdrawal requests for the same event are serialized.
     const withdrawal = await prismaWrite.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${eventId}))`;
+      // $executeRaw em vez de $queryRaw: pg_advisory_xact_lock retorna `void`,
+      // e o Prisma 6.18+ falha ao deserializar o resultset vazio. executeRaw
+      // ignora o retorno e só serializa a contagem de linhas afetadas.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${eventId}))`;
 
       const [event, ordersResult, audit, withdrawals] = await Promise.all([
         this.loadEventConfig(eventId, tx),
@@ -759,6 +843,8 @@ export class RepasseService {
           feeAmount: 0,
           netAmount: amount,
           status: WithdrawalStatus.PENDING,
+          pixKeyId: selectedKey.id,
+          pixKeySnapshot,
         },
       });
     });
@@ -768,14 +854,15 @@ export class RepasseService {
       if (!evtOrg?.organization?.email) return;
       const org = evtOrg.organization;
       const now = new Date();
+      const { pixKey, bankAccount } = this.resolvePixDestination(pixKeySnapshot, org);
       return this.emailService.sendTransferRequested({
         email: org.email,
         eventName: evtOrg.name,
         amount: this.formatBRL(withdrawal.netAmount),
         transferId: `REP-${withdrawal.id.split('-')[0].toUpperCase()}`,
         orgName: org.name ?? org.email,
-        bankAccount: org.bankName && org.account ? `${org.bankName} ••• ${org.account.slice(-4)}` : '—',
-        pixKey: org.pix ?? '—',
+        bankAccount,
+        pixKey,
         requestDate: this.formatDateBR(now),
         sentDate: this.formatDateTimeBR(now),
       });
@@ -811,13 +898,17 @@ export class RepasseService {
     this.loadEventWithOrg(eventId, prismaWrite).then((evtOrg) => {
       if (!evtOrg?.organization?.email) return;
       const org = evtOrg.organization;
+      const { pixKey, bankAccount } = this.resolvePixDestination(
+        (updated as any).pixKeySnapshot,
+        org,
+      );
       return this.emailService.sendTransferConfirmed({
         email: org.email,
         amount: this.formatBRL(updated.netAmount),
         transferId: `REP-${updated.id.split('-')[0].toUpperCase()}`,
         orgName: org.name ?? org.email,
-        bankAccount: org.bankName && org.account ? `${org.bankName} ••• ${org.account.slice(-4)}` : '—',
-        pixKey: org.pix ?? '—',
+        bankAccount,
+        pixKey,
         requestDate: this.formatDateBR(withdrawal.createdAt),
         sentDate: this.formatDateTimeBR(updated.completedAt ?? new Date()),
         approvedDate: this.formatDateTimeBR(updated.completedAt ?? new Date()),

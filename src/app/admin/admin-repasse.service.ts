@@ -66,6 +66,20 @@ export class AdminRepasseService {
               email: true,
             },
           },
+          // Dados atuais da chave + o snapshot são cruciais para o admin
+          // executar o pagamento na conta correta (snapshot é a fonte de verdade
+          // — preserva o estado da chave mesmo se for excluída/editada depois).
+          pixKey: {
+            select: {
+              id: true,
+              key: true,
+              keyType: true,
+              isDefault: true,
+              bankName: true,
+              accountHolderName: true,
+              accountHolderDocument: true,
+            },
+          },
         },
       }),
       prismaRead.eventWithdrawal.count({ where }),
@@ -145,6 +159,16 @@ export class AdminRepasseService {
     email: true,
   };
 
+  private readonly WITHDRAWAL_PIX_KEY_SELECT = {
+    id: true,
+    key: true,
+    keyType: true,
+    isDefault: true,
+    bankName: true,
+    accountHolderName: true,
+    accountHolderDocument: true,
+  };
+
   async getWithdrawal(id: string) {
     const prismaRead = this.prisma.getReadClient();
 
@@ -153,6 +177,7 @@ export class AdminRepasseService {
       include: {
         event: { select: this.WITHDRAWAL_EVENT_SELECT_FULL },
         requestedBy: { select: this.WITHDRAWAL_REQUESTER_SELECT },
+        pixKey: { select: this.WITHDRAWAL_PIX_KEY_SELECT },
       },
     });
 
@@ -183,6 +208,7 @@ export class AdminRepasseService {
       include: {
         event: { select: this.WITHDRAWAL_EVENT_SELECT_SUMMARY },
         requestedBy: { select: this.WITHDRAWAL_REQUESTER_SELECT },
+        pixKey: { select: this.WITHDRAWAL_PIX_KEY_SELECT },
       },
     });
 
@@ -203,6 +229,7 @@ export class AdminRepasseService {
       include: {
         event: { select: this.WITHDRAWAL_EVENT_SELECT_SUMMARY },
         requestedBy: { select: this.WITHDRAWAL_REQUESTER_SELECT },
+        pixKey: { select: this.WITHDRAWAL_PIX_KEY_SELECT },
       },
     });
 
@@ -231,6 +258,7 @@ export class AdminRepasseService {
       include: {
         event: { select: this.WITHDRAWAL_EVENT_SELECT_SUMMARY },
         requestedBy: { select: this.WITHDRAWAL_REQUESTER_SELECT },
+        pixKey: { select: this.WITHDRAWAL_PIX_KEY_SELECT },
       },
     });
 

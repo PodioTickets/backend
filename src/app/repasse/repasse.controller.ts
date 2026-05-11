@@ -6,7 +6,7 @@ import {
   ApiTags, ApiOperation, ApiBearerAuth, ApiParam,
   ApiQuery, ApiResponse,
 } from '@nestjs/swagger';
-import { IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { IsInt, IsOptional, IsString, IsUUID, Min } from 'class-validator';
 import { Type } from 'class-transformer';
 import { RepasseService } from './repasse.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -16,6 +16,14 @@ class RequestWithdrawalDto {
   @Min(1)
   @Type(() => Number)
   amount: number; // centavos
+
+  /**
+   * Chave PIX da organização selecionada pelo organizador para receber o saque.
+   * Obrigatório — o admin precisa do snapshot para executar o pagamento na
+   * conta correta. Valida em runtime que pertence à org do evento.
+   */
+  @IsUUID()
+  pixKeyId: string;
 
   @IsOptional()
   @IsString()
@@ -98,7 +106,7 @@ export class RepasseController {
     @Param('eventId') eventId: string,
     @Body() dto: RequestWithdrawalDto,
   ) {
-    return this.repasseService.requestWithdrawal(req.user.id, eventId, dto.amount);
+    return this.repasseService.requestWithdrawal(req.user.id, eventId, dto.amount, dto.pixKeyId);
   }
 
   @Patch('withdrawals/:withdrawalId/complete')

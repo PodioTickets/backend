@@ -29,6 +29,12 @@ import {
 import { plainToClass } from 'class-transformer';
 import { validate } from 'class-validator';
 import { EventsService } from './events.service';
+import { FiscalExportService } from './fiscal-export.service';
+import {
+  FiscalExportQueryDto,
+  FiscalOrdersQueryDto,
+} from './dto/fiscal-export.dto';
+import { Throttle } from '@nestjs/throttler';
 import {
   CreateEventDto,
   UpdateEventDto,
@@ -80,6 +86,7 @@ export class EventsController {
   constructor(
     private readonly eventsService: EventsService,
     private readonly exportService: ExportRegistrationsService,
+    private readonly fiscalExportService: FiscalExportService,
   ) { }
 
   @Post()
@@ -785,6 +792,73 @@ export class EventsController {
     @Query('limit') limit?: number,
   ) {
     return this.eventsService.getFinancialChargebacks(req.user.id, eventId, page || 1, limit || 20);
+  }
+
+  // ========== FISCAL EXPORT ==========
+  @Get(':eventId/financial/fiscal-orders')
+  @UseGuards(JwtAuthGuard)
+  @NoCache()
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'List fiscal orders (paid)',
+    description: 'Paginated list of PAID orders for the fiscal export drawer. Requires financial permission.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max 50.' })
+  @ApiQuery({ name: 'search', required: false, type: String, description: 'Order ID prefix, buyer name or CPF (masked or unmasked).' })
+  @ApiQuery({ name: 'period', required: false, enum: ['7d', '15d', '30d', '60d', 'all'] })
+  @ApiQuery({ name: 'valueRange', required: false, enum: ['all', 'lt100', '100to500', '500to1000', 'gt1000'] })
+  @ApiResponse({ status: 200, description: 'Fiscal orders fetched successfully' })
+  @ApiResponse({ status: 403, description: 'Forbidden — financial permission required' })
+  getFiscalOrders(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Query() queryDto: FiscalOrdersQueryDto,
+  ) {
+    return this.fiscalExportService.getFiscalOrders(req.user.id, eventId, queryDto);
+  }
+
+  @Get(':eventId/financial/fiscal-export')
+  @UseGuards(JwtAuthGuard)
+  @NoCache()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Export fiscal data (txt/xlsx/pdf)',
+    description: 'Generates a downloadable file with selected columns for the fiscal export. Rate limited to 5/min/user.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiQuery({ name: 'format', required: false, enum: ['txt', 'xlsx', 'pdf'], description: 'Default: txt' })
+  @ApiQuery({ name: 'fields', required: false, type: String, description: 'CSV of fields (whitelist validated)' })
+  @ApiQuery({ name: 'orderIds', required: false, type: String, description: 'CSV of order UUIDs (overrides other filters)' })
+  @ApiQuery({ name: 'search', required: false, type: String })
+  @ApiQuery({ name: 'period', required: false, enum: ['7d', '15d', '30d', '60d', 'all'] })
+  @ApiQuery({ name: 'valueRange', required: false, enum: ['all', 'lt100', '100to500', '500to1000', 'gt1000'] })
+  @ApiProduces('text/csv', 'application/pdf', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @ApiResponse({ status: 200, description: 'File generated successfully' })
+  @ApiResponse({ status: 403, description: 'Forbidden — financial permission required' })
+  @ApiResponse({ status: 413, description: 'Payload Too Large — refine filters (>100k rows)' })
+  @ApiResponse({ status: 429, description: 'Too Many Requests — limite 5/min' })
+  async exportFiscalData(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('eventId') eventId: string,
+    @Query() queryDto: FiscalExportQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const result = await this.fiscalExportService.exportFiscalData(
+      req.user.id,
+      eventId,
+      queryDto,
+      clientIp(req),
+    );
+    res.setHeader('Content-Type', result.contentType);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${result.filename}"`,
+    );
+    res.setHeader('Content-Length', String(result.buffer.length));
+    return new StreamableFile(result.buffer);
   }
 
   // ========== ORDERS (organizador) ==========

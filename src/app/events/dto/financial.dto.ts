@@ -9,6 +9,21 @@ export enum FinancialPeriod {
   LAST_2M = '2m',
 }
 
+/**
+ * Breakdown por método de pagamento exibido no PaymentMethodsCard do organizador.
+ * Unidade: centavos (consistente com grossRevenue/availableBalance).
+ */
+export interface PaymentMethodBreakdown {
+  sales: number;
+  netRevenue: number;
+}
+
+export interface PaymentMethodStats {
+  pix: PaymentMethodBreakdown;
+  creditCard: PaymentMethodBreakdown;
+  debitCard: PaymentMethodBreakdown;
+}
+
 export class FinancialQueryDto {
   @IsOptional()
   @IsEnum(FinancialPeriod)
