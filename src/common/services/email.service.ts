@@ -214,7 +214,7 @@ export class EmailService {
     eventDate?: string;
     eventAddress?: string;
     eventBannerUrl: string;
-    ticketPdf?: Buffer;
+    ticketPdfs?: Array<{ buffer: Buffer; participantName: string }>;
   }) {
     const html = this.loadTemplate('inscricao-confirmada.html', {
       firstName: this.escapeHtml(data.firstName),
@@ -238,20 +238,20 @@ export class EmailService {
     };
 
     const safeName = data.eventName.replace(/[^a-zA-Z0-9À-ÿ _-]/g, '').trim().replace(/\s+/g, '_');
-    const attachments: any[] = [];
-
-    if (data.ticketPdf) {
-      attachments.push({
-        content: data.ticketPdf.toString('base64'),
-        filename: `ingresso_${safeName}.pdf`,
+    const attachments: any[] = (data.ticketPdfs ?? []).map(tp => {
+      const safeParticipant = tp.participantName.replace(/[^a-zA-Z0-9À-ÿ _-]/g, '').trim().replace(/\s+/g, '_');
+      return {
+        content: tp.buffer.toString('base64'),
+        filename: `ingresso_${safeName}_${safeParticipant}.pdf`,
         type: 'application/pdf',
         disposition: 'attachment',
-      });
-    }
+      };
+    });
+
     if (attachments.length > 0) msg.attachments = attachments;
 
     await this.send(msg);
-    this.logger.log(`Registration confirmed email sent to: ${data.email}${data.ticketPdf ? ' (ticket PDF)' : ''}`);
+    this.logger.log(`Registration confirmed email sent to: ${data.email}${attachments.length ? ` (${attachments.length} ticket PDF(s))` : ''}`);
   }
 
   async sendTransferRequested(data: {
