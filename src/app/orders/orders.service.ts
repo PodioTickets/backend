@@ -114,31 +114,39 @@ const ORDER_INCLUDE = {
 
 /**
  * Taxa de serviço cobrada do participante.
+ *
+ * Fórmula aplicada: taxa incide sobre `(totalAmount - discount)`, em linha com
+ *   ((ingresso - cupom/voucher) + produto adicional) + % taxa de serviço.
+ * Como o desconto é construído para abater apenas o ingresso (clampado em
+ * `ticketsSubtotal` no checkout), `total - discount` equivale a
+ * `(ingresso_pós_desconto + produto)` sem precisar separar os subtotais aqui.
+ *
  * - Pós-pagamento: usa o valor congelado em `order.serviceFee` (representa o que foi
  *   efetivamente cobrado, mesmo que a config do evento mude depois).
- * - PENDING (serviceFee = 0): calcula on-the-fly a partir de `event.participantFeePercent`
- *   sobre `totalAmount`. Requer que o caller tenha incluído `event` no select.
+ * - PENDING (serviceFee = 0): calcula on-the-fly a partir de `event.participantFeePercent`.
+ *   Requer que o caller tenha incluído `event` no select.
  */
 function computeServiceFee(order: any): number {
   if (order?.serviceFee && order.serviceFee > 0) return order.serviceFee;
   const percent = order?.event?.participantFeePercent ?? 0;
   const total = order?.totalAmount ?? 0;
+  const discount = order?.discount ?? 0;
   if (!total || !percent) return 0;
-  return Math.round(total * (percent / 100));
+  const base = Math.max(0, total - discount);
+  return Math.round(base * (percent / 100));
 }
 
 /**
- * Valor final exibido ao usuário: `totalAmount + serviceFee - discount`.
+ * Valor final exibido ao usuário: `(totalAmount - discount) + serviceFee`.
  * - Pós-pagamento (serviceFee já gravado): confia em `order.finalAmount` da DB
  *   (valor congelado no momento do pagamento).
- * - PENDING: recompõe a partir do serviceFee calculado, já que o `finalAmount`
- *   gravado na DB durante o checkout só desconta cupom/voucher e não soma a taxa.
+ * - PENDING: recompõe a partir do serviceFee calculado.
  */
 function computeFinalAmount(order: any, serviceFee: number): number {
   if (order?.serviceFee && order.serviceFee > 0) return order.finalAmount ?? 0;
   const total = order?.totalAmount ?? 0;
   const discount = order?.discount ?? 0;
-  return Math.max(0, total + serviceFee - discount);
+  return Math.max(0, total - discount) + serviceFee;
 }
 
 // ─── shape helpers ───────────────────────────────────────────────────────────

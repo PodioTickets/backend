@@ -28,7 +28,11 @@
       "Bash(npx ts-node -e ' *)",
       "Bash(Get-ChildItem \"C:\\\\Users\\\\muril\\\\Projects\\\\PodioTickets\\\\server\\\\prisma\\\\migrations\")",
       "Bash(Sort-Object Name)",
-      "Bash(Select-Object -Last 5 -ExpandProperty Name)"
+      "Bash(Select-Object -Last 5 -ExpandProperty Name)",
+      "Bash(git stash *)",
+      "Bash(git rm *)",
+      "PowerShell($path = \"src/app/payments/payments.service.ts\"; $raw = [System.IO.File]::ReadAllText\\($path\\); $lines = $raw -split \"`r`n\"; \"Total lines: $\\($lines.Length\\)\"; \"Line 63 \\(should be blank\\): '$\\($lines[62]\\)'\"; \"Line 64 \\(should be create\\): '$\\($lines[63]\\)'\"; \"Line 167 \\(should close create\\): '$\\($lines[166]\\)'\"; \"Line 411 \\(should close processPayment\\): '$\\($lines[410]\\)'\"; \"Line 412 \\(should be blank\\): '$\\($lines[411]\\)'\"; \"Line 413 \\(should be findOne\\): '$\\($lines[412]\\)'\")",
+      "mcp__ide__getDiagnostics"
     ]
   }
 }

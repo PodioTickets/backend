@@ -9,11 +9,12 @@ import { EmailService } from '../../common/services/email.service';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { OrganizationsModule } from '../organizations/organizations.module';
 import { TicketsModule } from '../tickets/tickets.module';
+import { TicketCategoriesModule } from '../ticket-categories/ticket-categories.module';
 import { RepasseModule } from '../repasse/repasse.module';
 import { CommonModule } from '../../common/common.module';
 
 @Module({
-  imports: [PrismaModule, OrganizationsModule, TicketsModule, ConfigModule, RepasseModule, CommonModule],
+  imports: [PrismaModule, OrganizationsModule, TicketsModule, TicketCategoriesModule, ConfigModule, RepasseModule, CommonModule],
   controllers: [EventsController, OrganizerEventNotificationsController],
   providers: [EventsService, EventNotificationsService, ExportRegistrationsService, EmailService],
   exports: [EventsService, EventNotificationsService, ExportRegistrationsService],

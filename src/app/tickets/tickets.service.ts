@@ -91,17 +91,19 @@ export class TicketsService {
   ) { }
 
   /**
-   * Cache curto em GET /tickets/events/:eventId (TTL 15s).
+   * Cache curto em GET /tickets/events/:eventId (TTL 15s) — **apenas para
+   * leitores não-organizadores** (público / visitantes).
    *
    * Aceita-se uma janela de inconsistência de até 15s em vagas vendidas —
    * o checkout tem validação atômica que rejeita reserva de lote esgotado,
    * então o pior caso é UX (usuário vê "disponível" 15s depois de esgotar),
    * nunca venda dupla.
    *
-   * Sem invalidação ativa: confiamos no TTL pra evitar a complexidade de
-   * pattern matching no Redis (SCAN é caro) ou versionamento (extra round-trip
-   * por request). Para mudanças admin (CRUD de ticket/batch), o organizador
-   * pode esperar até 15s para ver o efeito — trade-off aceitável.
+   * Organizer bypassa o cache: precisa ver mudanças (criar/editar/deletar/
+   * duplicar/reordenar tickets) imediatamente após a ação, sem aguardar TTL.
+   * Como o `findAll` recebe `userId` e calcula `isOrganizer`, basta pular
+   * `getJson`/`setJson` quando `isOrganizer === true` — sem necessidade de
+   * SCAN ou versionamento.
    */
   private static readonly TICKETS_LIST_CACHE_TTL_SECONDS = 15;
   private ticketsListCacheKey(
@@ -242,20 +244,25 @@ export class TicketsService {
 
     const isOrganizer = userId ? await this.isOrganizerOfEvent(userId, eventId, db) : false;
 
-    // Cache hot path (TTL 15s). Cache key inclui isOrganizer porque o que volta
-    // pode mudar (organizadores veem inativos quando filterDto.includeInactive=true).
+    // Cache hot path (TTL 15s) apenas para leitores não-organizadores.
+    // Organizer bypassa: precisa ver mudanças (criar/editar/deletar/duplicar)
+    // imediatamente, sem aguardar o TTL expirar.
     // Fail-open: cache miss → query normal.
-    const cacheKey = this.ticketsListCacheKey(
-      eventId,
-      isOrganizer,
-      filterDto.categoryId,
-      page,
-      limit,
-      !!filterDto.includeInactive,
-      baseUrl,
-    );
-    const cached = await this.cache.getJson<unknown>(cacheKey);
-    if (cached) return cached as Awaited<ReturnType<TicketsService['findAll']>>;
+    const cacheKey = !isOrganizer
+      ? this.ticketsListCacheKey(
+          eventId,
+          isOrganizer,
+          filterDto.categoryId,
+          page,
+          limit,
+          !!filterDto.includeInactive,
+          baseUrl,
+        )
+      : null;
+    if (cacheKey) {
+      const cached = await this.cache.getJson<unknown>(cacheKey);
+      if (cached) return cached as Awaited<ReturnType<TicketsService['findAll']>>;
+    }
 
     const where: any = { eventId };
     if (!filterDto.includeInactive) {
@@ -372,7 +379,9 @@ export class TicketsService {
       },
     };
 
-    await this.cache.setJson(cacheKey, response, TicketsService.TICKETS_LIST_CACHE_TTL_SECONDS);
+    if (cacheKey) {
+      await this.cache.setJson(cacheKey, response, TicketsService.TICKETS_LIST_CACHE_TTL_SECONDS);
+    }
     return response;
   }
 
@@ -931,6 +940,9 @@ export class TicketsService {
 
     const transformed = {
       ...duplicatedTicket,
+      // Explícito para garantir o campo no payload mesmo após spread.
+      // `categoryId` é null quando o ticket é avulso (sem categoria).
+      categoryId: duplicatedTicket.categoryId,
       ageLimit: {
         min: duplicatedTicket.ageLimitMin,
         max: duplicatedTicket.ageLimitMax,

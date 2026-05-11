@@ -28,7 +28,6 @@ import { VouchersModule } from './app/vouchers/vouchers.module';
 import { TicketCategoriesModule } from './app/ticket-categories/ticket-categories.module';
 import { TicketsModule } from './app/tickets/tickets.module';
 import { ProductsModule } from './app/products/products.module';
-import { CheckoutModule } from './app/checkout/checkout.module';
 import { OrdersModule } from './app/orders/orders.module';
 import { RepasseModule } from './app/repasse/repasse.module';
 import { AdminModule } from './app/admin/admin.module';
@@ -65,7 +64,6 @@ import { AdminModule } from './app/admin/admin.module';
     TicketCategoriesModule,
     TicketsModule,
     ProductsModule,
-    CheckoutModule,
     OrdersModule,
     RepasseModule,
     AdminModule,

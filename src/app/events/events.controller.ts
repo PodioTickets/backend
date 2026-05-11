@@ -68,6 +68,12 @@ function clientIp(req: ExpressRequest): string {
   return (req as ExpressRequest & { ip?: string }).ip || '';
 }
 
+function baseUrl(req: ExpressRequest): string {
+  const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+  const host = (req.headers['x-forwarded-host'] as string) || req.get('host') || '';
+  return `${proto}://${host}`;
+}
+
 @ApiTags('Events')
 @Controller('api/v1/events')
 export class EventsController {
@@ -228,6 +234,44 @@ export class EventsController {
   @ApiResponse({ status: 404, description: 'Event not found' })
   remove(@Request() req, @Param('id') id: string) {
     return this.eventsService.remove(req.user.id, id);
+  }
+
+  // ── GET /events/:eventId/tickets-management ───────────────────────────────
+  // Bundle agregado que substitui (event + categories + tickets) em 1 round-trip.
+  // Consumido pela página /organizer/events/:eventId/edit/tickets do frontend.
+  @Get(':eventId/tickets-management')
+  @UseGuards(JwtAuthGuard)
+  @NoCache()
+  @ApiBearerAuth()
+  @Header('Cache-Control', 'private, max-age=10')
+  @ApiOperation({
+    summary: 'Tickets management bundle',
+    description:
+      'Retorna evento (subset), categorias e tickets em uma única chamada. ' +
+      'Requer permissão edit_event sobre o evento. Inclui tickets inativos.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiQuery({ name: 'ticketsPage', required: false, type: Number, description: 'Página (default 1)' })
+  @ApiQuery({ name: 'ticketsLimit', required: false, type: Number, description: 'Itens por página (default 500)' })
+  @ApiResponse({ status: 200, description: 'Bundle retornado com sucesso' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden — sem permissão sobre o evento' })
+  @ApiResponse({ status: 404, description: 'Evento não encontrado' })
+  getTicketsManagementBundle(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Param('eventId') eventId: string,
+    @Query('ticketsPage') ticketsPage?: string,
+    @Query('ticketsLimit') ticketsLimit?: string,
+  ) {
+    const pageNum = ticketsPage ? Math.max(1, Number.parseInt(ticketsPage, 10) || 1) : 1;
+    const limitNum = ticketsLimit
+      ? Math.min(500, Math.max(1, Number.parseInt(ticketsLimit, 10) || 500))
+      : 500;
+    return this.eventsService.getTicketsManagementBundle(req.user.id, eventId, {
+      ticketsPage: pageNum,
+      ticketsLimit: limitNum,
+      baseUrl: baseUrl(req),
+    });
   }
 
   @Get(':eventId/tracking')

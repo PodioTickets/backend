@@ -44,6 +44,7 @@ import {
 } from './dto/kit-selection-display.dto';
 import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
 import { TicketsService } from '../tickets/tickets.service';
+import { TicketCategoriesService } from '../ticket-categories/ticket-categories.service';
 import { EmailService } from '../../common/services/email.service';
 import { RepasseService } from '../repasse/repasse.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
@@ -57,6 +58,7 @@ export class EventsService {
     private readonly organizerMemberAccess: OrganizerMemberAccessService,
     private readonly organizationsService: OrganizationsService,
     private readonly ticketsService: TicketsService,
+    private readonly ticketCategoriesService: TicketCategoriesService,
     private readonly emailService: EmailService,
     private readonly repasseService: RepasseService,
     private readonly cache: CacheRedisService,
@@ -5655,5 +5657,88 @@ export class EventsService {
     });
 
     return { registrations: mapped, eventName };
+  }
+
+  /**
+   * Bundle agregado para a página de gerenciamento de ingressos:
+   *   GET /api/v1/events/:eventId/tickets-management
+   *
+   * Substitui 3 round-trips HTTP (event + categories + tickets) por 1.
+   * Reaproveita 100% da lógica existente em `TicketsService.findAll`
+   * (cálculo de activeBatch, produtos, ageLimit, soldOut, etc.) e
+   * `TicketCategoriesService.findAll`.
+   *
+   * Auth: requer permissão `edit_event` sobre o evento (admin bypassa).
+   * As 3 leituras rodam em paralelo via `Promise.all` — o tempo total é o
+   * da mais lenta. O TicketsService.findAll já tem cache Redis (TTL 15s).
+   */
+  async getTicketsManagementBundle(
+    userId: string,
+    eventId: string,
+    opts: { ticketsPage?: number; ticketsLimit?: number; baseUrl?: string } = {},
+  ) {
+    // 1. Permissão — lança 404 se evento não existir, 403 se sem acesso.
+    await this.organizerMemberAccess.assertCanAccessEvent(
+      userId,
+      eventId,
+      'edit_event',
+    );
+
+    const prismaRead = this.prisma.getReadClient();
+    const ticketsPage = opts.ticketsPage ?? 1;
+    const ticketsLimit = opts.ticketsLimit ?? 500;
+
+    // 2. Despachar as 3 leituras em paralelo.
+    const [event, categoriesResp, ticketsResp] = await Promise.all([
+      prismaRead.event.findUnique({
+        where: { id: eventId },
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          kitSelectionDisplay: true,
+        },
+      }),
+      this.ticketCategoriesService.findAll(eventId),
+      this.ticketsService.findAll(
+        eventId,
+        {
+          page: ticketsPage,
+          limit: ticketsLimit,
+          includeInactive: true, // organizador precisa ver inativos para gerenciar
+        },
+        opts.baseUrl,
+        userId,
+      ),
+    ]);
+
+    // 3. Defesa extra — `assertCanAccessEvent` já joga 404, mas se houver
+    // race de delete entre o assert e a leitura, falhamos limpo.
+    if (!event) {
+      throw new NotFoundException('Evento não encontrado');
+    }
+
+    // 4. Reordenar tickets pra `categoryId NULLS LAST, sortOrder, createdAt`.
+    // TicketsService.findAll já ordena por `[sortOrder, createdAt]`; aqui só
+    // empurramos os categoryId=null pro final. Array.prototype.sort é estável
+    // no V8, então a ordem secundária (sortOrder/createdAt) é preservada.
+    const tickets = [...(ticketsResp.data.tickets as Array<{ categoryId: string | null }>)].sort(
+      (a, b) => {
+        const aNull = a.categoryId === null ? 1 : 0;
+        const bNull = b.categoryId === null ? 1 : 0;
+        return aNull - bNull;
+      },
+    );
+
+    return {
+      data: {
+        event,
+        categories: categoriesResp.data.categories,
+        tickets,
+        pagination: {
+          tickets: ticketsResp.data.pagination,
+        },
+      },
+    };
   }
 }

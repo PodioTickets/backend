@@ -1,17 +1,15 @@
-import { Controller, Get, Post, Body, Param, UseGuards, Request, Headers, RawBodyRequest, Req, Query, Redirect } from '@nestjs/common';
+import { Controller, Get, Post, Param, UseGuards, Request, Headers, RawBodyRequest, Req, Body, Query, Redirect } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
   ApiResponse,
   ApiBearerAuth,
   ApiParam,
-  ApiBody,
   ApiHeader,
   ApiQuery,
 } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { PaymentsService } from './payments.service';
-import { CreatePaymentDto, ProcessPaymentDto, ConfirmPaymentDto } from './dto/create-payment.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CieloService } from './cielo.service';
 import { PaymentsWebhookService } from './payments-webhook.service';
@@ -24,45 +22,6 @@ export class PaymentsController {
     private readonly cieloService: CieloService,
     private readonly webhookService: PaymentsWebhookService,
   ) { }
-
-  @Post()
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Create payment', description: 'Creates a new payment intent for a registration' })
-  @ApiBody({ type: CreatePaymentDto })
-  @ApiResponse({ status: 201, description: 'Payment created successfully' })
-  @ApiResponse({ status: 400, description: 'Bad request - Invalid payment data' })
-  @ApiResponse({ status: 401, description: 'Unauthorized' })
-  @ApiResponse({ status: 404, description: 'Registration not found' })
-  create(@Request() req, @Body() createPaymentDto: CreatePaymentDto) {
-    return this.paymentsService.create(req.user.id, createPaymentDto);
-  }
-
-  @Post('confirm')
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Confirm payment', description: 'Confirms a payment after processing' })
-  @ApiBody({ type: ConfirmPaymentDto })
-  @ApiResponse({ status: 200, description: 'Payment confirmed successfully' })
-  @ApiResponse({ status: 400, description: 'Bad request - Invalid confirmation data' })
-  @ApiResponse({ status: 401, description: 'Unauthorized' })
-  @ApiResponse({ status: 404, description: 'Payment not found' })
-  confirmPayment(@Request() req, @Body() confirmPaymentDto: ConfirmPaymentDto) {
-    return this.paymentsService.confirmPayment(req.user.id, confirmPaymentDto);
-  }
-
-  @Post('process')
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Process payment', description: 'Processes a payment using the selected payment method (PIX, Card, Boleto, Crypto)' })
-  @ApiBody({ type: ProcessPaymentDto })
-  @ApiResponse({ status: 200, description: 'Payment processed successfully' })
-  @ApiResponse({ status: 400, description: 'Bad request - Invalid payment data' })
-  @ApiResponse({ status: 401, description: 'Unauthorized' })
-  @ApiResponse({ status: 404, description: 'Payment not found' })
-  processPayment(@Request() req, @Body() processPaymentDto: ProcessPaymentDto) {
-    return this.paymentsService.processPayment(req.user.id, processPaymentDto);
-  }
 
   @Post('webhook')
   @Throttle({ short: { limit: 60, ttl: 60000 } })

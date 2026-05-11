@@ -170,11 +170,13 @@ export class RegistrationsService {
       appliedVoucherId = voucherResult.voucherId;
     }
 
-    // Taxa de serviço calculada sobre o valor base (antes do desconto)
+    // Aplica fórmula: ((modalidade - cupom/voucher) + 0) + % taxa de serviço.
+    // Desconto abate apenas o valor base; taxa incide sobre o valor já com desconto.
     const feePercent = (event as any).participantFeePercent ?? 0;
-    const serviceFee = Math.round(totalAmount * (feePercent / 100));
-    const amountAfterDiscount = Math.max(0, totalAmount + serviceFee - discount);
-    const finalAmount = amountAfterDiscount;
+    const effectiveDiscount = Math.min(discount, totalAmount);
+    const baseAfterDiscount = totalAmount - effectiveDiscount;
+    const serviceFee = Math.round(baseAfterDiscount * (feePercent / 100));
+    const finalAmount = baseAfterDiscount + serviceFee;
 
     // Criar inscrição
     const registration = await prismaWrite.$transaction(async (prisma) => {
