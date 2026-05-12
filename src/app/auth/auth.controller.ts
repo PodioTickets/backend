@@ -494,6 +494,21 @@ export class AuthController {
     return this.authService.verifyLoginMfa(dto.mfaToken, dto.code);
   }
 
+  @Post('2fa/resend-login-code')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Reenvia o código MFA durante o fluxo de login',
+    description:
+      'Aceita o mfaToken temporário como autenticação e reenvia o código OTP. ' +
+      'Sujeito ao rate limit de 1 reenvio por minuto.',
+  })
+  @ApiResponse({ status: 200, schema: { example: { message: 'Código reenviado para o seu e-mail.', success: true } } })
+  @ApiResponse({ status: 400, description: 'Rate limit ativo — aguarde 1 minuto' })
+  @ApiResponse({ status: 401, description: 'Token MFA inválido ou expirado' })
+  async resendLoginMfaCode(@Body() dto: { mfaToken: string }) {
+    return this.authService.resendLoginMfaCode(dto.mfaToken);
+  }
+
   @Get('csrf-token')
   @ApiOperation({
     summary: 'Obter token CSRF para requisições da API',

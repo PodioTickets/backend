@@ -14,7 +14,7 @@ export class EmailService {
 
   constructor(private configService: ConfigService) {
     const apiKey = this.configService.get<string>('SEND_GRID');
-    this.from = this.configService.get<string>('SMTP_FROM', 'no-reply@podioticket.com.br');
+    this.from = this.configService.get<string>('SMTP_FROM', 'PódioTicket <no-reply@podioticket.com.br>');
 
     if (!apiKey) {
       this.logger.warn('SEND_GRID API key not configured. Email service will be disabled.');
