@@ -841,6 +841,17 @@ export class CieloService {
     }
   }
 
+  /**
+   * Cancela ou estorna um pagamento via endpoint `/void` da Cielo.
+   *
+   * A própria Cielo decide entre void (pré-captura/liquidação) e refund (pós) com base
+   * no status atual da transação. Os retornos possíveis são:
+   *   - Status 10 (Voided)   — cancelamento concluído na hora (crédito não capturado, débito, etc.)
+   *   - Status 11 (Refunded) — estorno concluído (PIX devolvido, crédito liquidado)
+   *   - Status 12 (Pending)  — operação aceita mas será confirmada por webhook
+   *
+   * `amount` em centavos habilita estorno parcial; omitir = estorno total.
+   */
   async cancelPayment(paymentId: string, amount?: number): Promise<CieloPaymentResult> {
     if (!this.axiosInstance) {
       throw new Error('Cielo is not configured');
@@ -852,17 +863,32 @@ export class CieloService {
       const requestBody = amount ? { Amount: amount } : {};
 
       const response = await this.axiosInstance.put<any>(url, requestBody);
+      const status = response.data.Status;
+      const isReversed = status === 10 || status === 11; // Voided ou Refunded
+      const isPending = status === 12; // Aguardando confirmação assíncrona
 
       return {
-        success: response.data.Status === 11 || response.data.Status === 12, // 11 = Voided, 12 = Pending Void
+        success: isReversed || isPending,
         paymentId: response.data.PaymentId,
-        cieloStatus: this.mapCieloStatusToString(response.data.Status),
+        cieloStatus: this.mapCieloStatusToString(status),
+        returnCode: response.data.ReturnCode?.toString(),
+        returnMessage: response.data.ReturnMessage,
       };
     } catch (error: any) {
       this.logger.error('Error canceling Cielo payment:', error.response?.data || error.message);
+      const errorData = error.response?.data;
+      let errorMessage = 'Failed to cancel payment';
+      if (Array.isArray(errorData) && errorData[0]?.Message) {
+        errorMessage = errorData[0].Message;
+      } else if (errorData?.Message) {
+        errorMessage = errorData.Message;
+      } else if (error.message) {
+        errorMessage = error.message;
+      }
       return {
         success: false,
-        error: error.response?.data?.Message || error.message || 'Failed to cancel payment',
+        error: errorMessage,
+        errorDetails: errorData,
       };
     }
   }

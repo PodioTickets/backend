@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsString,
   IsEmail,
@@ -7,13 +7,44 @@ import {
   IsUrl,
   IsObject,
   IsArray,
+  IsBoolean,
   IsUUID,
   IsInt,
   Min,
   Max,
+  ValidateNested,
 } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { OrganizationMemberRole } from '@prisma/client';
+
+/**
+ * Item de chave PIX. Compartilhado entre criação e edição de organização —
+ * tanto o admin (POST/PATCH /api/v1/admin/organizations) quanto o próprio organizador
+ * usam essa mesma forma.
+ */
+export class PixKeyItemDto {
+  @IsString()
+  key: string;
+
+  @IsString()
+  keyType: string; // CPF, CNPJ, EMAIL, PHONE, RANDOM
+
+  @IsOptional()
+  @IsBoolean()
+  isDefault?: boolean;
+
+  @IsOptional()
+  @IsString()
+  bankName?: string;
+
+  @IsOptional()
+  @IsString()
+  accountHolderName?: string;
+
+  @IsOptional()
+  @IsString()
+  accountHolderDocument?: string;
+}
 
 export class CreateOrganizationDto {
   // Opção 1: Usar usuário existente (userId)
@@ -72,7 +103,10 @@ export class CreateOrganizationDto {
   @IsString()
   whatsapp?: string;
 
+  // Trata "" como ausência: @IsOptional() ignora apenas null/undefined,
+  // então convertemos string vazia para undefined antes do @IsUrl rodar.
   @IsOptional()
+  @Transform(({ value }) => (value === '' ? undefined : value))
   @IsUrl()
   siteUrl?: string;
 
@@ -142,6 +176,15 @@ export class CreateOrganizationDto {
   @IsOptional()
   @IsString()
   accountHolderDocument?: string; // CPF/CNPJ do titular
+
+  // Chaves PIX iniciais da organização (idêntico ao UPDATE).
+  // Se enviado, as chaves são criadas na mesma transação da organização.
+  // Se nenhuma vier marcada como `isDefault`, a primeira é promovida automaticamente.
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => PixKeyItemDto)
+  pixKeys?: PixKeyItemDto[];
 }
 
 export class AddMemberDto {
@@ -355,7 +398,10 @@ export class UpdateOrganizationDto {
   @IsString()
   whatsapp?: string;
 
+  // Trata "" como ausência: @IsOptional() ignora apenas null/undefined,
+  // então convertemos string vazia para undefined antes do @IsUrl rodar.
   @IsOptional()
+  @Transform(({ value }) => (value === '' ? undefined : value))
   @IsUrl()
   siteUrl?: string;
 

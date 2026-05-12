@@ -760,8 +760,11 @@ export class EventsService {
       where.status = statusFilter;
     }
 
-    // Retornar todos os eventos (futuros e passados). Eventos passados são exibidos com status COMPLETED.
-    // includePast é mantido por compatibilidade mas não filtra mais; includeDraft+userId ainda controla drafts do organizador.
+    // Retornar todos os eventos (futuros e passados recentes). Eventos cuja realização
+    // passou de 1 mês são ocultados do catálogo público (sem valor para o usuário e
+    // sem inscrições). A condição é injetada no `whereFinal` (AND de topo) mais abaixo
+    // para coexistir de forma segura com filtros opcionais de janela
+    // (thisWeek/thisMonth/startDate-endDate) que reescrevem `where.eventDate`/`where.AND`.
 
     if (country) {
       where.country = country;
@@ -851,8 +854,16 @@ export class EventsService {
       }
     }
 
+    // Cutoff: oculta eventos cuja realização passou de 1 mês (regra do catálogo público).
+    const eventDateCutoff = new Date();
+    eventDateCutoff.setMonth(eventDateCutoff.getMonth() - 1);
+
     const whereFinal: Prisma.EventWhereInput = {
-      AND: [{ status: { not: EventStatus.SUSPENDED } }, where],
+      AND: [
+        { status: { not: EventStatus.SUSPENDED } },
+        { eventDate: { gte: eventDateCutoff } },
+        where,
+      ],
     };
 
     // Usar read client para operações de leitura

@@ -7,23 +7,34 @@ import { AdminEventsController } from './admin-events.controller';
 import { AdminOrganizationsService } from './admin-organizations.service';
 import { AdminOrganizationsController } from './admin-organizations.controller';
 import { AdminNotificationsController } from './admin-notifications.controller';
+import { AdminOrdersController } from './admin-orders.controller';
 import { AdminGuard } from '../auth/guards/admin.guard';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { UploadModule } from '../upload/upload.module';
 import { RepasseModule } from '../repasse/repasse.module';
 import { EventsModule } from '../events/events.module';
+import { PaymentsModule } from '../payments/payments.module';
 import { EmailService } from '../../common/services/email.service';
 import { OrganizationsModule } from '../organizations/organizations.module';
 import { CommonModule } from '../../common/common.module';
 
 @Module({
-  imports: [PrismaModule, UploadModule, RepasseModule, EventsModule, OrganizationsModule, CommonModule],
+  imports: [
+    PrismaModule,
+    UploadModule,
+    RepasseModule,
+    EventsModule,
+    OrganizationsModule,
+    CommonModule,
+    PaymentsModule,
+  ],
   controllers: [
     AdminRepasseController,
     AdminAuthController,
     AdminEventsController,
     AdminOrganizationsController,
     AdminNotificationsController,
+    AdminOrdersController,
   ],
   providers: [AdminRepasseService, AdminEventsService, AdminOrganizationsService, AdminGuard, EmailService],
 })

@@ -364,107 +364,78 @@ export class OrganizationsService {
   }
 
   /**
-   * Cria uma organização e atribui um usuário como OWNER
-   * Se userId não for fornecido, cria um novo usuário com os dados fornecidos
+   * Cria uma organização.
+   *
+   * Owner é opcional:
+   *   - `userId` fornecido        → promove usuário existente a OWNER.
+   *   - dados de owner fornecidos → cria um novo usuário ORGANIZER e o atribui como OWNER.
+   *   - nenhum dos dois           → cria a organização "vazia"; owner pode ser adicionado depois
+   *                                 via POST /api/v1/admin/organizations/:id/members.
    */
   async createOrganization(createDto: CreateOrganizationDto) {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
-    // Se userId não foi fornecido, validar dados do owner
-    if (!createDto.userId) {
-      // Validar que os dados do owner foram fornecidos
-      if (!createDto.ownerEmail || !createDto.ownerPassword || !createDto.ownerFirstName || !createDto.ownerLastName) {
-        throw new BadRequestException('Either userId or owner data (email, password, firstName, lastName) is required');
-      }
+    // Detecta se há intenção de criar/vincular owner nesta chamada.
+    const hasOwnerEmailData = !!(createDto.ownerEmail || createDto.ownerPassword || createDto.ownerFirstName || createDto.ownerLastName);
+    const provisionOwner = !!createDto.userId || hasOwnerEmailData;
 
-      // Verificar se email já existe (conta ORGANIZER)
-      const existingUserByEmail = await prismaRead.user.findUnique({
-        where: { 
-          email_accountType: {
-            email: createDto.ownerEmail,
-            accountType: 'ORGANIZER',
-          }
-        },
-      });
-
-      if (existingUserByEmail) {
-        throw new ConflictException('User with this email already exists');
-      }
-
-      // Verificar se CPF já existe (se fornecido)
-      if (createDto.ownerDocumentNumber) {
-        const documentNumberClean = this.cleanDocumentNumber(createDto.ownerDocumentNumber);
-        if (documentNumberClean) {
-          const existingUserByCpf = await prismaRead.user.findUnique({
-            where: { 
-              documentNumberClean_accountType: {
-                documentNumberClean,
-                accountType: 'ORGANIZER',
-              }
-            },
-          });
-
-          if (existingUserByCpf) {
-            throw new ConflictException('User with this document number already exists');
-          }
-        }
-      }
-    } else {
-      // Verificar se o usuário existe
-      const user = await prismaRead.user.findUnique({
-        where: { id: createDto.userId },
-      });
-
-      if (!user) {
-        throw new NotFoundException('User not found');
-      }
-
-      // Verificar se o usuário já é OWNER de alguma organização
-      const existingMember = await prismaRead.organizationMember.findFirst({
-        where: {
-          userId: createDto.userId,
-          role: 'OWNER',
-        },
-      });
-
-      if (existingMember) {
-        throw new BadRequestException('User is already an owner of an organization');
-      }
-    }
-
-    // Criar organização, usuário (se necessário) e membro OWNER em uma transação
-    const result = await prismaWrite.$transaction(async (tx) => {
-      let userId: string;
-
-      // Se userId não foi fornecido, criar novo usuário dentro da transação
+    if (provisionOwner) {
       if (!createDto.userId) {
-        const hashedPassword = await bcrypt.hash(createDto.ownerPassword!, 12);
-        const documentNumberClean = createDto.ownerDocumentNumber 
-          ? this.cleanDocumentNumber(createDto.ownerDocumentNumber)
-          : null;
+        // Caminho "criar usuário": todos os 4 campos são obrigatórios juntos.
+        if (!createDto.ownerEmail || !createDto.ownerPassword || !createDto.ownerFirstName || !createDto.ownerLastName) {
+          throw new BadRequestException(
+            'Para criar um novo owner, forneça email, password, firstName e lastName. ' +
+            'Para promover um usuário existente, forneça userId. ' +
+            'Para criar a organização sem owner, omita todos esses campos.',
+          );
+        }
 
-        const newUser = await tx.user.create({
-          data: {
-            email: createDto.ownerEmail!,
-            accountType: 'ORGANIZER', // Conta de organizador
-            password: hashedPassword,
-            firstName: createDto.ownerFirstName!,
-            lastName: createDto.ownerLastName!,
-            phone: createDto.ownerPhone,
-            documentNumber: createDto.ownerDocumentNumber,
-            documentNumberClean,
+        // Verificar se email já existe (conta ORGANIZER)
+        const existingUserByEmail = await prismaRead.user.findUnique({
+          where: {
+            email_accountType: {
+              email: createDto.ownerEmail,
+              accountType: 'ORGANIZER',
+            },
           },
         });
 
-        userId = newUser.id;
-      } else {
-        userId = createDto.userId;
+        if (existingUserByEmail) {
+          throw new ConflictException('User with this email already exists');
+        }
 
-        // Verificar novamente dentro da transação se o usuário já é OWNER
-        const existingMember = await tx.organizationMember.findFirst({
+        // Verificar se CPF já existe (se fornecido)
+        if (createDto.ownerDocumentNumber) {
+          const documentNumberClean = this.cleanDocumentNumber(createDto.ownerDocumentNumber);
+          if (documentNumberClean) {
+            const existingUserByCpf = await prismaRead.user.findUnique({
+              where: {
+                documentNumberClean_accountType: {
+                  documentNumberClean,
+                  accountType: 'ORGANIZER',
+                },
+              },
+            });
+
+            if (existingUserByCpf) {
+              throw new ConflictException('User with this document number already exists');
+            }
+          }
+        }
+      } else {
+        // Caminho "promover usuário existente"
+        const user = await prismaRead.user.findUnique({
+          where: { id: createDto.userId },
+        });
+
+        if (!user) {
+          throw new NotFoundException('User not found');
+        }
+
+        const existingMember = await prismaRead.organizationMember.findFirst({
           where: {
-            userId,
+            userId: createDto.userId,
             role: 'OWNER',
           },
         });
@@ -473,6 +444,47 @@ export class OrganizationsService {
           throw new BadRequestException('User is already an owner of an organization');
         }
       }
+    }
+
+    // Criar organização (e opcionalmente usuário + membro OWNER) em uma transação
+    const result = await prismaWrite.$transaction(async (tx) => {
+      let userId: string | null = null;
+
+      if (provisionOwner) {
+        if (!createDto.userId) {
+          const hashedPassword = await bcrypt.hash(createDto.ownerPassword!, 12);
+          const documentNumberClean = createDto.ownerDocumentNumber
+            ? this.cleanDocumentNumber(createDto.ownerDocumentNumber)
+            : null;
+
+          const newUser = await tx.user.create({
+            data: {
+              email: createDto.ownerEmail!,
+              accountType: 'ORGANIZER',
+              password: hashedPassword,
+              firstName: createDto.ownerFirstName!,
+              lastName: createDto.ownerLastName!,
+              phone: createDto.ownerPhone,
+              documentNumber: createDto.ownerDocumentNumber,
+              documentNumberClean,
+            },
+          });
+
+          userId = newUser.id;
+        } else {
+          userId = createDto.userId;
+
+          // Re-check dentro da transação (defende contra race condition).
+          const existingMember = await tx.organizationMember.findFirst({
+            where: { userId, role: 'OWNER' },
+          });
+
+          if (existingMember) {
+            throw new BadRequestException('User is already an owner of an organization');
+          }
+        }
+      }
+
       // Criar a organização
       const organization = await tx.organization.create({
         data: {
@@ -503,49 +515,82 @@ export class OrganizationsService {
         },
       });
 
-      // Criar o membro da organização com role OWNER
-      const member = await tx.organizationMember.create({
-        data: {
-          organizationId: organization.id,
-          userId,
-          role: 'OWNER',
-        },
-        include: {
-          user: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              email: true,
-              phone: true,
-            },
+      let member: any = null;
+      if (userId) {
+        member = await tx.organizationMember.create({
+          data: {
+            organizationId: organization.id,
+            userId,
+            role: 'OWNER',
           },
-          organization: true,
-        },
-      });
+          include: {
+            user: {
+              select: { id: true, firstName: true, lastName: true, email: true, phone: true },
+            },
+            organization: true,
+          },
+        });
 
-      // Atualizar role e accountType do usuário (accountType é usado no login/organizer)
-      await tx.user.update({
-        where: { id: userId },
-        data: { role: 'ORGANIZER', accountType: 'ORGANIZER' },
-      });
+        await tx.user.update({
+          where: { id: userId },
+          data: { role: 'ORGANIZER', accountType: 'ORGANIZER' },
+        });
+      }
+
+      // Criar chaves PIX iniciais, se enviadas. Mesma semântica do update:
+      // se nenhuma vier marcada como default, a primeira é promovida.
+      const incomingPixKeys = createDto.pixKeys ?? [];
+      if (incomingPixKeys.length > 0) {
+        const hasDefault = incomingPixKeys.some((k) => k.isDefault);
+        await tx.organizationPixKey.createMany({
+          data: incomingPixKeys.map((k, i) => ({
+            organizationId: organization.id,
+            key: k.key,
+            keyType: k.keyType,
+            isDefault: hasDefault ? !!k.isDefault : i === 0,
+            bankName: k.bankName ?? null,
+            accountHolderName: k.accountHolderName ?? null,
+            accountHolderDocument: k.accountHolderDocument ?? null,
+          })),
+        });
+      }
 
       return { organization, member };
     });
 
-    // Notifica o novo organizador por e-mail (fire-and-forget — falha não bloqueia resposta)
-    const ownerEmail = result.member.user.email;
-    const ownerFirstName = result.member.user.firstName;
-    this.emailService
-      .sendWelcomeOrganizer({ email: ownerEmail, firstName: ownerFirstName })
-      .catch((err) =>
-        this.logger.warn(`Falha ao enviar e-mail de boas-vindas ao organizador (org=${result.organization.id}): ${err?.message ?? err}`),
-      );
+    // Notifica o novo organizador por e-mail apenas se um member foi criado.
+    if (result.member) {
+      const ownerEmail = result.member.user.email;
+      const ownerFirstName = result.member.user.firstName;
+      this.emailService
+        .sendWelcomeOrganizer({ email: ownerEmail, firstName: ownerFirstName })
+        .catch((err) =>
+          this.logger.warn(
+            `Falha ao enviar e-mail de boas-vindas ao organizador (org=${result.organization.id}): ${err?.message ?? err}`,
+          ),
+        );
+    }
+
+    // Carrega as chaves PIX recém-criadas para incluir no payload de resposta (paridade com PATCH).
+    const pixKeys = await this.prisma.getReadClient().organizationPixKey.findMany({
+      where: { organizationId: result.organization.id },
+      select: {
+        id: true,
+        key: true,
+        keyType: true,
+        isDefault: true,
+        bankName: true,
+        accountHolderName: true,
+        accountHolderDocument: true,
+        createdAt: true,
+      },
+      orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+    });
 
     return {
       message: 'Organization created successfully',
       data: {
-        organization: result.organization,
+        organization: { ...result.organization, pixKeys },
         member: result.member,
       },
     };

@@ -10,19 +10,15 @@ import { IsArray, IsBoolean, IsObject, IsOptional, IsString, ValidateNested } fr
 import { Transform, Type } from 'class-transformer';
 import { AdminOrganizationsService, UpdateOrganizationDto } from './admin-organizations.service';
 import { OrganizationsService } from '../organizations/organizations.service';
-import { AddMemberDto, PatchMemberSettingsDto } from '../organizations/dto/organization.dto';
+import {
+  AddMemberDto,
+  CreateOrganizationDto,
+  PatchMemberSettingsDto,
+  PixKeyItemDto,
+} from '../organizations/dto/organization.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AdminGuard } from '../auth/guards/admin.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
-
-class PixKeyItemDto {
-  @IsString() key: string;
-  @IsString() keyType: string;
-  @IsOptional() @IsBoolean() isDefault?: boolean;
-  @IsOptional() @IsString() bankName?: string;
-  @IsOptional() @IsString() accountHolderName?: string;
-  @IsOptional() @IsString() accountHolderDocument?: string;
-}
 
 class UpdateOrganizationBodyDto implements UpdateOrganizationDto {
   @IsOptional() @IsString() name?: string;
@@ -111,6 +107,25 @@ export class AdminOrganizationsController {
       search,
       isActive: isActiveParsed,
     });
+  }
+
+  @Post()
+  @ApiOperation({
+    summary: '[Admin] Create a new organization',
+    description:
+      'Cria uma organização e atribui um usuário como OWNER. Permite duas formas: ' +
+      '(1) `userId` de um usuário existente — promove o usuário a OWNER; ' +
+      '(2) dados do owner (`ownerEmail`, `ownerPassword`, `ownerFirstName`, `ownerLastName` ' +
+      'e opcionalmente `ownerPhone`/`ownerDocumentNumber`) — cria um novo usuário ORGANIZER ' +
+      'e o atribui como OWNER. Tudo em uma única transação.',
+  })
+  @ApiBody({ type: CreateOrganizationDto })
+  @ApiResponse({ status: 201, description: 'Organization created successfully' })
+  @ApiResponse({ status: 400, description: 'Missing owner data, or user is already an owner of another organization' })
+  @ApiResponse({ status: 404, description: 'User not found (when userId is provided)' })
+  @ApiResponse({ status: 409, description: 'Email or document already in use by another ORGANIZER account' })
+  createOrganization(@Body() dto: CreateOrganizationDto) {
+    return this.organizationsService.createOrganization(dto);
   }
 
   @Get(':id')
