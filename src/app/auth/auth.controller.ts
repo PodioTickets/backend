@@ -505,8 +505,8 @@ export class AuthController {
   @ApiResponse({ status: 200, schema: { example: { message: 'Código reenviado para o seu e-mail.', success: true } } })
   @ApiResponse({ status: 400, description: 'Rate limit ativo — aguarde 1 minuto' })
   @ApiResponse({ status: 401, description: 'Token MFA inválido ou expirado' })
-  async resendLoginMfaCode(@Body() dto: { mfaToken: string }) {
-    return this.authService.resendLoginMfaCode(dto.mfaToken);
+  async resendLoginMfaCode(@Body() dto: { mfaToken: string }, @Request() req) {
+    return this.authService.resendLoginMfaCode(dto.mfaToken, { userAgent: req.headers?.['user-agent'] });
   }
 
   @Get('csrf-token')

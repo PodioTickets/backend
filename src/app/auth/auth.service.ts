@@ -500,7 +500,7 @@ export class AuthService {
    * Reenvia o código MFA durante o fluxo de login.
    * Aceita o mfaToken temporário (emitido em login com 2FA ativo) como autenticação.
    */
-  async resendLoginMfaCode(mfaToken: string): Promise<{ message: string; success: boolean }> {
+  async resendLoginMfaCode(mfaToken: string, opts?: { userAgent?: string }): Promise<{ message: string; success: boolean }> {
     let payload: any;
     try {
       payload = this.jwtService.verify(mfaToken);
@@ -523,7 +523,7 @@ export class AuthService {
       throw new UnauthorizedException('Usuário não encontrado.');
     }
 
-    await this.send2FACode(userId, user.email);
+    await this.send2FACode(userId, user.email, opts);
     return { message: 'Código reenviado para o seu e-mail.', success: true };
   }
 
