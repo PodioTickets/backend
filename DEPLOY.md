@@ -485,6 +485,102 @@ docker compose up -d backend
 docker compose logs -f backend
 ```
 
+## Drift entre banco e `_prisma_migrations` (após restore de dump)
+
+**Sintoma**: `prisma migrate deploy` reporta "No pending migrations to apply", mas operações no app falham com erros estranhos do tipo:
+- `Unique constraint failed on the constraint "User_email_key"` (mesmo o schema usar `@@unique([email, accountType])`)
+- `column "X" does not exist`
+- Erros ao criar membro de organização / pedido / pagamento
+
+**Causa raiz**: o banco foi populado via `pg_restore` de um dump antigo, e a tabela `_prisma_migrations` veio junto. O Prisma vê todas as migrations como aplicadas, mas o estado físico do schema corresponde ao snapshot anterior. Ou alguém marcou migrations como aplicadas (`migrate resolve --applied`) sem rodá-las.
+
+### Diagnóstico
+
+```bash
+# 1. Verifica drift entre o que o schema espera e o que o banco tem
+docker compose exec backend npx prisma migrate diff \
+  --from-schema-datasource prisma/schema.prisma \
+  --to-schema-datamodel prisma/schema.prisma \
+  --script
+```
+
+Se sair MUITO SQL (ALTER TABLE, DROP/CREATE INDEX, AddForeignKey em várias tabelas), você tem drift real. Saídas pequenas e cosméticas (índices DESC, partial indexes com `WHERE`, `DROP DEFAULT` em colunas timestamp) são falsos positivos do `migrate diff` e podem ser ignoradas.
+
+**Itens cosméticos esperados** (mesmo num banco em dia):
+- `Order_eventId_status_createdAt_idx` drop+create (DESC vs ASC — Prisma não modela ordenação de índice)
+- `*_updatedAt ALTER COLUMN DROP DEFAULT` (Prisma vs default no Postgres)
+- `Product images ALTER COLUMN DROP DEFAULT` (array default)
+- `Organization DROP COLUMN "pix"` (legacy intencional)
+- `User_*_accountType_key` partial vs full index (funcionalmente equivalentes para uniques de coluna nullable)
+
+### Resolver drift manualmente (recomendado pra prod)
+
+Em vez de "resetar" tudo, aplica só o SQL necessário com salvaguardas (`IF EXISTS`/`IF NOT EXISTS`):
+
+1. **Validar pré-condições** (duplicatas que iriam quebrar `CREATE UNIQUE INDEX`, NULLs em colunas que viram `NOT NULL`).
+2. **Backup** do banco.
+3. **Aplicar SQL idempotente** dentro de `BEGIN/COMMIT` com `psql -v ON_ERROR_STOP=1`.
+4. **Re-rodar `migrate diff`** pra confirmar que sobrou só ruído cosmético.
+
+Veja `prisma/migrations/manual-fix-homolog-drift.sql` como exemplo do tipo de script que aplica esse fix (gerado para a homologação em 2026-05-12).
+
+#### Como rodar `psql` quando o container backend é Alpine
+
+```bash
+# Instala postgresql-client no container (temporário)
+docker compose exec backend sh -c 'apk add --no-cache postgresql-client'
+
+# O DATABASE_URL do Prisma tem params (schema, connection_limit) que o libpq nao aceita.
+# Limpa via Node antes de passar pro psql:
+docker compose exec backend sh -c '
+DB_URL=$(node -e "const u=new URL(process.env.DATABASE_URL);u.search=\"\";console.log(u.toString())")
+psql "$DB_URL" -v ON_ERROR_STOP=1 -f /tmp/fix.sql
+'
+```
+
+### Evitar o problema em restores futuros
+
+**Ao restaurar um dump pra um ambiente novo (homolog/staging/etc.):**
+
+1. **Excluir `_prisma_migrations` do dump:**
+   ```bash
+   pg_dump --exclude-table=_prisma_migrations -U <user> <db> > dump.sql
+   ```
+   Ou, se restaurando dump pronto que já tem a tabela: depois do restore, recriar do zero:
+   ```bash
+   docker compose exec backend sh -c '
+   DB_URL=$(node -e "const u=new URL(process.env.DATABASE_URL);u.search=\"\";console.log(u.toString())")
+   psql "$DB_URL" -c "TRUNCATE TABLE \"_prisma_migrations\";"
+   '
+   ```
+
+2. **Alinhar o ponteiro** das migrations aplicadas. Você tem duas opções:
+
+   **Opção A — Tudo já está aplicado**: marca todas as migrations existentes como aplicadas sem rodar (cuidado: só faz isso se você TEM CERTEZA de que o schema do dump está consistente com a migration mais recente do repo):
+   ```bash
+   docker compose exec backend sh -c '
+   for m in $(ls prisma/migrations | grep -v migration_lock); do
+     npx prisma migrate resolve --applied "$m"
+   done
+   '
+   ```
+
+   **Opção B — Dump é antigo, faltam migrations**: rodar `migrate deploy` normal — ele vai aplicar tudo o que falta:
+   ```bash
+   docker compose exec backend npx prisma migrate deploy
+   ```
+
+3. **Validar**: roda o `migrate diff` (comando da seção de diagnóstico acima) e confirma que sobrou só ruído cosmético.
+
+### Por que não usar `prisma db push`
+
+`db push` força o schema no banco sem registrar em `_prisma_migrations`. Funciona em dev, mas em prod/homolog:
+- Perde histórico (impossível rollback granular).
+- Cria drift permanente — qualquer `migrate deploy` futuro vai falhar.
+- Pode dropar dados (em alterações destrutivas) sem prompt.
+
+**Use apenas em dev.** Em ambientes compartilhados/produção, sempre `migrate deploy` + scripts manuais idempotentes para drift residual.
+
 ## Monitoramento (Opcional)
 
 Considere adicionar:

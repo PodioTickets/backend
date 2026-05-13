@@ -390,6 +390,10 @@ export class PaymentsService {
 
     const metadata = payment.metadata as any || {};
     const creditCardInfo = metadata.creditCard || {};
+    const debitCardInfo = metadata.debitCard || {};
+    // DEBIT_CARD persiste em metadata.debitCard; CREDIT_CARD em metadata.creditCard.
+    // Para os campos comuns (brand/last4Digits/holder), resolve baseado no método.
+    const cardInfo = payment.method === 'DEBIT_CARD' ? debitCardInfo : creditCardInfo;
     const pixInfo = metadata.pix || {};
     const boletoInfo = metadata.boleto || {};
     const orderRow = payment.order as any;
@@ -498,10 +502,10 @@ export class PaymentsService {
           installmentValue: creditCardInfo.installmentValue
             ? this.normalizeToCents(creditCardInfo.installmentValue)
             : null,
-          // Informações do cartão de crédito (se aplicável)
-          cardBrand: creditCardInfo.brand || null,
-          last4Digits: creditCardInfo.last4Digits || null,
-          cardHolder: creditCardInfo.holder || null,
+          // Informações do cartão (crédito ou débito — cardInfo resolve pelo método).
+          cardBrand: cardInfo.brand || null,
+          last4Digits: cardInfo.last4Digits || null,
+          cardHolder: cardInfo.holder || null,
           // Informações adicionais do pagamento
           returnCode: metadata.returnCode || null,
           returnMessage: metadata.returnMessage || null,
