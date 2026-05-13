@@ -496,6 +496,37 @@ export class AuthService {
     };
   }
 
+  /**
+   * Reenvia o código MFA durante o fluxo de login.
+   * Aceita o mfaToken temporário (emitido em login com 2FA ativo) como autenticação.
+   */
+  async resendLoginMfaCode(mfaToken: string): Promise<{ message: string; success: boolean }> {
+    let payload: any;
+    try {
+      payload = this.jwtService.verify(mfaToken);
+    } catch {
+      throw new UnauthorizedException('Token MFA inválido ou expirado.');
+    }
+
+    if (!payload?.mfaPending || !payload?.sub) {
+      throw new UnauthorizedException('Token MFA inválido.');
+    }
+
+    const userId = payload.sub as string;
+    const prismaRead = this.prisma.getReadClient();
+    const user = await prismaRead.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('Usuário não encontrado.');
+    }
+
+    await this.send2FACode(userId, user.email);
+    return { message: 'Código reenviado para o seu e-mail.', success: true };
+  }
+
   async refreshToken(refreshTokenDto: RefreshTokenDto) {
     try {
       const { refreshToken } = refreshTokenDto;
