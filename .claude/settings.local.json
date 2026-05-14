@@ -34,7 +34,14 @@
       "PowerShell($path = \"src/app/payments/payments.service.ts\"; $raw = [System.IO.File]::ReadAllText\\($path\\); $lines = $raw -split \"`r`n\"; \"Total lines: $\\($lines.Length\\)\"; \"Line 63 \\(should be blank\\): '$\\($lines[62]\\)'\"; \"Line 64 \\(should be create\\): '$\\($lines[63]\\)'\"; \"Line 167 \\(should close create\\): '$\\($lines[166]\\)'\"; \"Line 411 \\(should close processPayment\\): '$\\($lines[410]\\)'\"; \"Line 412 \\(should be blank\\): '$\\($lines[411]\\)'\"; \"Line 413 \\(should be findOne\\): '$\\($lines[412]\\)'\")",
       "mcp__ide__getDiagnostics",
       "Bash(echo \"EXIT=$?\")",
-      "Bash(echo \"EXITCODE=$?\")"
+      "Bash(echo \"EXITCODE=$?\")",
+      "Bash(curl -s \"https://api.podioticket.com.br/api/v1/tickets/events/bc0c2dda-cfe6-4da1-89a6-48e0df8ddb0a?page=1&limit=500\")",
+      "Bash(python3 -c \"import sys, json; d=json.load\\(sys.stdin\\); print\\('tickets:', len\\(d['data']['tickets']\\)\\); print\\('pagination:', d['data']['pagination']\\)\")",
+      "Bash(curl -s \"https://api.podioticket.com.br/api/v1/tickets/events/bc0c2dda-cfe6-4da1-89a6-48e0df8ddb0a?page=1&limit=500&includeInactive=true\")",
+      "Bash(python3 -c \"import sys, json; d=json.load\\(sys.stdin\\); print\\('tickets:', len\\(d['data']['tickets']\\)\\); print\\('pagination:', d['data']['pagination']\\); print\\('names:', [t['name'] for t in d['data']['tickets']]\\)\")",
+      "Bash(pnpm exec *)",
+      "Bash(curl -s \"https://api.podioticket.com.br/api/v1/events/search?page=1&limit=20\")",
+      "Bash(python3 -c ' *)"
     ]
   }
 }

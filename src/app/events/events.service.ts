@@ -591,7 +591,19 @@ export class EventsService {
       }
     }
 
-    return where;
+    // Catálogo público: oculta eventos cuja realização passou de 1 mês — mesma
+    // regra de `findAll`. Aplicado via AND para sobrepor qualquer startDate
+    // anterior ao cutoff (includePast=true ou janela customizada não devem
+    // burlar a regra).
+    const eventDateCutoff = new Date();
+    eventDateCutoff.setMonth(eventDateCutoff.getMonth() - 1);
+
+    return {
+      AND: [
+        { eventDate: { gte: eventDateCutoff } },
+        where,
+      ],
+    };
   }
 
   async searchLocationFacets(dto: SearchEventLocationsDto) {
