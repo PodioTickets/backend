@@ -887,7 +887,7 @@ export class AuthService {
 
   private generateCode(): { raw: string; display: string } {
     const raw = Math.floor(100000 + Math.random() * 900000).toString();
-    return { raw, display: `${raw.slice(0, 3)}-${raw.slice(3)}` };
+    return { raw, display: raw };
   }
 
   private formatDateTimePtBR(date: Date): string {
