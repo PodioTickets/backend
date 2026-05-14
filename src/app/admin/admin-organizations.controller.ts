@@ -30,6 +30,7 @@ class UpdateOrganizationBodyDto implements UpdateOrganizationDto {
   @IsOptional() @IsString() siteUrl?: string;
   @IsOptional() @IsString() instagram?: string;
   @IsOptional() @IsString() description?: string;
+  @IsOptional() @IsString() fiscalEmail?: string;
   @IsOptional() @IsString() zipCode?: string;
   @IsOptional() @IsString() street?: string;
   @IsOptional() @IsString() number?: string;
@@ -37,6 +38,7 @@ class UpdateOrganizationBodyDto implements UpdateOrganizationDto {
   @IsOptional() @IsString() city?: string;
   @IsOptional() @IsString() state?: string;
   @IsOptional() @IsString() ownerName?: string;
+  @IsOptional() @IsString() ownerDocument?: string;
   @IsOptional() @IsString() pix?: string;
   @IsOptional() @IsString() pixKeyType?: string;
   @IsOptional() @IsString() bankName?: string;

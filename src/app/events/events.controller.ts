@@ -255,7 +255,7 @@ export class EventsController {
     summary: 'Tickets management bundle',
     description:
       'Retorna evento (subset), categorias e tickets em uma única chamada. ' +
-      'Requer permissão edit_event sobre o evento. Inclui tickets inativos.',
+      'Requer permissão edit_event sobre o evento.',
   })
   @ApiParam({ name: 'eventId', description: 'Event UUID' })
   @ApiQuery({ name: 'ticketsPage', required: false, type: Number, description: 'Página (default 1)' })

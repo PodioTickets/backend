@@ -195,6 +195,7 @@ model Organization {
   siteUrl     String?
   instagram   String?
   description String?
+  fiscalEmail String? // E-mail fiscal (notas fiscais, repasses, etc.)
 
   // Endereço
   zipCode      String? // CEP
@@ -204,8 +205,9 @@ model Organization {
   city         String? // Cidade
   state        String? // Estado
 
-  // Nome do responsável (owner)
-  ownerName String? // Nome do responsável (owner)
+  // Responsável (owner)
+  ownerName     String? // Nome do responsável
+  ownerDocument String? // CPF do responsável (apenas números)
 
   // Informações bancárias
   bankName              String? // Nome do banco

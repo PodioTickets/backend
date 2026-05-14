@@ -5070,8 +5070,10 @@ export class EventsService {
                 tradeName: true,
                 document: true,
                 email: true,
+                fiscalEmail: true,
                 phone: true,
                 ownerName: true,
+                ownerDocument: true,
                 bankName: true,
                 bankCode: true,
                 agency: true,
@@ -5830,7 +5832,6 @@ export class EventsService {
         {
           page: ticketsPage,
           limit: ticketsLimit,
-          includeInactive: true, // organizador precisa ver inativos para gerenciar
         },
         opts.baseUrl,
         userId,

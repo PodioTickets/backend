@@ -146,6 +146,7 @@ export class AdminOrganizationsService {
           name: true,
           tradeName: true,
           email: true,
+          fiscalEmail: true,
           logoUrl: true,
           document: true,
           phone: true,
@@ -160,6 +161,7 @@ export class AdminOrganizationsService {
           city: true,
           state: true,
           ownerName: true,
+          ownerDocument: true,
           bankName: true,
           bankCode: true,
           agency: true,
@@ -287,7 +289,9 @@ export class AdminOrganizationsService {
 export interface UpdateOrganizationDto {
   name?: string;
   tradeName?: string;
+  document?: string;
   email?: string;
+  fiscalEmail?: string;
   phone?: string;
   whatsapp?: string;
   siteUrl?: string;
@@ -300,6 +304,7 @@ export interface UpdateOrganizationDto {
   city?: string;
   state?: string;
   ownerName?: string;
+  ownerDocument?: string;
   bankName?: string;
   bankCode?: string;
   agency?: string;

@@ -118,6 +118,10 @@ export class CreateOrganizationDto {
   @IsString()
   description?: string;
 
+  @IsOptional()
+  @IsEmail()
+  fiscalEmail?: string; // E-mail fiscal
+
   // Endereço
   @IsOptional()
   @IsString()
@@ -143,10 +147,14 @@ export class CreateOrganizationDto {
   @IsString()
   state?: string; // Estado
 
-  // Nome do responsável (owner)
+  // Responsável (owner)
   @IsOptional()
   @IsString()
-  ownerName?: string; // Nome do responsável (owner)
+  ownerName?: string; // Nome do responsável
+
+  @IsOptional()
+  @IsString()
+  ownerDocument?: string; // CPF do responsável (apenas números)
 
   // Informações bancárias
   @IsOptional()
@@ -413,6 +421,10 @@ export class UpdateOrganizationDto {
   @IsString()
   description?: string;
 
+  @IsOptional()
+  @IsEmail()
+  fiscalEmail?: string; // E-mail fiscal
+
   // Endereço
   @IsOptional()
   @IsString()
@@ -438,10 +450,14 @@ export class UpdateOrganizationDto {
   @IsString()
   state?: string; // Estado
 
-  // Nome do responsável (owner)
+  // Responsável (owner)
   @IsOptional()
   @IsString()
-  ownerName?: string; // Nome do responsável (owner)
+  ownerName?: string; // Nome do responsável
+
+  @IsOptional()
+  @IsString()
+  ownerDocument?: string; // CPF do responsável (apenas números)
 
   // Informações bancárias
   @IsOptional()
