@@ -2301,6 +2301,27 @@ export class OrganizationsService {
       });
     }
 
+    // Dispara email de boas-vindas ao novo membro (fire-and-forget)
+    const registeredAt = new Intl.DateTimeFormat('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: 'America/Sao_Paulo',
+    }).format(new Date()).replace(',', ' ·');
+
+    this.emailService
+      .sendMemberAdded({
+        recipientEmail: member.user.email,
+        firstName: member.user.firstName ?? member.user.email,
+        orgName: member.organization.name,
+        registeredAt,
+      })
+      .catch((err: any) =>
+        this.logger.warn(`Falha ao enviar email de boas-vindas ao membro (userId=${member.userId}): ${err?.message ?? err}`),
+      );
+
     return {
       message: 'Member added successfully',
       data: { member },
