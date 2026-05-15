@@ -722,7 +722,7 @@ export class AuthService {
     };
   }
 
-  async resetPassword(resetPasswordDto: ResetPasswordDto) {
+  async resetPassword(resetPasswordDto: ResetPasswordDto, userAgent?: string, ip?: string) {
     const { token, password } = resetPasswordDto;
 
     if (password.length < 8) {
@@ -743,7 +743,7 @@ export class AuthService {
       typeof trimmedToken === 'string' && trimmedToken.split('.').length === 3;
 
     if (!looksLikeJwt) {
-      return this.resetPasswordWithOpaqueToken(trimmedToken, password);
+      return this.resetPasswordWithOpaqueToken(trimmedToken, password, userAgent, ip);
     }
 
     let decoded: { type?: string; email?: string; accountType?: string; userId?: string };
@@ -796,13 +796,25 @@ export class AuthService {
 
     await this.invalidatePasswordResetArtifactsForUser(user.id, email, accountType);
 
+    const changedAt = this.formatDateTimePtBR(new Date());
+    const device = this.parseDevice(userAgent);
+    this.parseLocation(ip ?? '').then((location) =>
+      this.emailService.sendPasswordChangedNotification({
+        email: user.email,
+        firstName: user.firstName,
+        changedAt,
+        location,
+        device,
+      }),
+    ).catch((err) => this.logger.warn('Falha ao enviar email de senha redefinida:', err));
+
     return {
       success: true,
       message: 'Senha redefinida com sucesso',
     };
   }
 
-  private async resetPasswordWithOpaqueToken(token: string, password: string) {
+  private async resetPasswordWithOpaqueToken(token: string, password: string, userAgent?: string, ip?: string) {
     const cached = await this.cacheManager.get<PasswordResetLinkPayload>(
       `password_reset_link:${token}`,
     );
@@ -846,6 +858,18 @@ export class AuthService {
     });
 
     await this.invalidatePasswordResetArtifactsForUser(user.id, email, accountType);
+
+    const changedAt = this.formatDateTimePtBR(new Date());
+    const device = this.parseDevice(userAgent);
+    this.parseLocation(ip ?? '').then((location) =>
+      this.emailService.sendPasswordChangedNotification({
+        email: user.email,
+        firstName: user.firstName,
+        changedAt,
+        location,
+        device,
+      }),
+    ).catch((err) => this.logger.warn('Falha ao enviar email de senha redefinida (opaque):', err));
 
     return {
       success: true,

@@ -421,7 +421,7 @@ export class EmailService {
 
   async sendPasswordChangedNotification(data: {
     email: string;
-    firstName: string;
+    firstName?: string | null;
     changedAt: string;
     location: string;
     device: string;

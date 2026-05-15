@@ -314,8 +314,12 @@ export class AuthController {
   })
   @ApiResponse({ status: 200, description: 'Senha redefinida' })
   @ApiResponse({ status: 400, description: 'Token ou senha inválidos' })
-  async resetPassword(@Body() resetPasswordDto: ResetPasswordDto) {
-    return this.authService.resetPassword(resetPasswordDto);
+  async resetPassword(@Request() req, @Body() resetPasswordDto: ResetPasswordDto) {
+    return this.authService.resetPassword(
+      resetPasswordDto,
+      req.headers?.['user-agent'],
+      req.headers?.['x-forwarded-for']?.split(',')[0]?.trim() || req.ip,
+    );
   }
 
   @Post('change-password')
