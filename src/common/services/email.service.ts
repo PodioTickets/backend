@@ -156,6 +156,7 @@ export class EmailService {
       eventName: data.eventName ? this.escapeHtml(data.eventName) : '',
       organizerName: this.escapeHtml(data.organizerName),
       organizerAvatarUrl: this.escapeHtml(this.safeUrl(data.organizerAvatarUrl)),
+      organizerInitial: this.escapeHtml(data.organizerName.charAt(0).toUpperCase()),
     });
 
     const textParts = [
