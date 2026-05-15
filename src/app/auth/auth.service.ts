@@ -1134,6 +1134,8 @@ export class AuthService {
         code: raw,
         attempts: 0,
         expiresAt: new Date(Date.now() + ttl).toISOString(),
+        ip: ip ?? '',
+        userAgent: userAgent ?? '',
       },
       ttl,
     );
@@ -1162,6 +1164,8 @@ export class AuthService {
       code: string;
       attempts: number;
       expiresAt: string;
+      ip?: string;
+      userAgent?: string;
     }>(cacheKey);
 
     if (!cached) throw new BadRequestException('Código inválido ou expirado');
@@ -1183,6 +1187,19 @@ export class AuthService {
     });
 
     await this.cacheManager.del(cacheKey);
+
+    // Notificar email antigo — fire-and-forget
+    const changedAt = this.formatDateTimePtBR(new Date());
+    this.parseLocation(cached.ip ?? '').then((location) =>
+      this.emailService.sendEmailChangedNotification({
+        oldEmail: cached.oldEmail,
+        newEmail: cached.newEmail,
+        firstName: cached.firstName,
+        changedAt,
+        location,
+        device: this.parseDevice(cached.userAgent),
+      }),
+    ).catch((err) => this.logger.warn('Falha ao enviar notificação de email alterado:', err));
 
     return { success: true, message: 'E-mail alterado com sucesso.' };
   }

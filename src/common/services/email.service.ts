@@ -443,32 +443,46 @@ export class EmailService {
     this.logger.log(`Password changed notification sent to: ${data.email}`);
   }
 
-  async sendEmailChangedNotification(data: { oldEmail: string; newEmail: string; firstName: string }) {
-    const safeName = this.escapeHtml(data.firstName || 'usuário');
-    const html = `<!DOCTYPE html>
-<html lang="pt-BR">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
-<body style="margin:0;padding:20px;font-family:Arial,sans-serif;line-height:1.6;color:#333;background-color:#f0f0f0;">
-  <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center">
-  <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;background-color:#fff;border-radius:8px;padding:32px;">
-    <tr><td>
-      <h2 style="margin:0 0 16px 0;color:#202020;">E-mail da conta alterado</h2>
-      <p style="margin:0 0 16px 0;">Olá ${safeName},</p>
-      <p style="margin:0 0 16px 0;">O e-mail da sua conta Podio Ticket foi alterado para <strong>${this.escapeHtml(data.newEmail)}</strong>.</p>
-      <p style="margin:0 0 24px 0;">Se você não realizou esta alteração, entre em contato com o suporte imediatamente.</p>
-      <p style="margin:0;color:#666;font-size:12px;">Podio Ticket — este é um e-mail automático, não responda.</p>
-    </td></tr>
-  </table>
-  </td></tr></table>
-</body>
-</html>`;
-    const text = `Olá ${data.firstName || 'usuário'},\n\nO e-mail da sua conta PodioTicket foi alterado para ${data.newEmail}.\n\nSe você não realizou esta alteração, entre em contato com o suporte imediatamente.\n\nPodioTicket — podioticket.com.br`;
-    // Notifica o email antigo (segurança) e o novo (confirmação)
-    await Promise.all([
-      this.send({ from: this.from, to: data.oldEmail, subject: 'E-mail da conta alterado — Podio Ticket', html, text }),
-      this.send({ from: this.from, to: data.newEmail, subject: 'Bem-vindo ao novo e-mail — Podio Ticket', html, text }),
-    ]);
-    this.logger.log(`Email changed notification sent: ${data.oldEmail} → ${data.newEmail}`);
+  async sendEmailChangedNotification(data: {
+    oldEmail: string;
+    newEmail: string;
+    firstName: string;
+    changedAt: string;
+    location: string;
+    device: string;
+  }) {
+    const html = this.loadTemplate('email-alterado.html', {
+      oldEmail: this.escapeHtml(data.oldEmail),
+      newEmail: this.escapeHtml(data.newEmail),
+      changedAt: this.escapeHtml(data.changedAt),
+      location: this.escapeHtml(data.location),
+      device: this.escapeHtml(data.device),
+    });
+
+    const text = [
+      'E-mail alterado com sucesso! — PódioTicket',
+      '',
+      `De: ${data.oldEmail}`,
+      `Para: ${data.newEmail}`,
+      '',
+      `Alterado em: ${data.changedAt}`,
+      `Local aproximado: ${data.location}`,
+      `Dispositivo: ${data.device}`,
+      '',
+      'Não foi você? Altere sua senha ou contate o suporte.',
+      '',
+      'PódioTicket — podioticket.com.br',
+    ].join('\n');
+
+    await this.send({
+      from: this.from,
+      to: data.oldEmail,
+      subject: 'E-mail da conta alterado — PódioTicket',
+      html,
+      text,
+    });
+
+    this.logger.log(`Email alterado: notificação enviada para ${data.oldEmail}`);
   }
 
   async sendOrganizerCommunication(data: {
