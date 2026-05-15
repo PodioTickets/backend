@@ -902,14 +902,15 @@ export class AuthService {
     const cleanIp = ip.replace(/^::ffff:/, '');
 
     try {
+      const token = this.configService.get<string>('IPINFO_TOKEN', 'f5f7bc542bbe40');
       const resp = await firstValueFrom(
         this.httpService.get(
-          `http://ip-api.com/json/${cleanIp}?fields=status,city,region,country`,
+          `https://ipinfo.io/${cleanIp}/json?token=${token}`,
           { timeout: 3000 } as any,
         ),
       );
       const d = resp.data;
-      if (d?.status === 'success') {
+      if (d && !d.bogon) {
         if (d.city && d.region) return `${d.city}, ${d.region}`;
         if (d.city) return d.city;
         if (d.country) return d.country;
