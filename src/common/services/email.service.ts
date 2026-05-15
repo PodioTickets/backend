@@ -144,6 +144,7 @@ export class EmailService {
     message: string;
     eventName?: string;
     organizerName: string;
+    organizerAvatarUrl?: string;
   }) {
     const html = this.loadTemplate('confirmacao-mensagem-organizador.html', {
       userName: this.escapeHtml(data.userName),
@@ -154,6 +155,7 @@ export class EmailService {
       message: this.escapeHtml(data.message),
       eventName: data.eventName ? this.escapeHtml(data.eventName) : '',
       organizerName: this.escapeHtml(data.organizerName),
+      organizerAvatarUrl: this.escapeHtml(this.safeUrl(data.organizerAvatarUrl)),
     });
 
     const textParts = [

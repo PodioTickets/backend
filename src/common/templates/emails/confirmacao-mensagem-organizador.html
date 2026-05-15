@@ -110,9 +110,16 @@
                       <td style="vertical-align:middle;padding-right:12px;">
                         <table cellpadding="0" cellspacing="0" border="0">
                           <tr>
+                            {{#organizerAvatarUrl}}
+                            <td width="56" height="56" align="center" valign="middle" style="width:56px;height:56px;border-radius:28px;border:1px solid #46A758;overflow:hidden;">
+                              <img src="{{organizerAvatarUrl}}" alt="{{organizerName}}" width="56" height="56" style="display:block;border-radius:28px;">
+                            </td>
+                            {{/organizerAvatarUrl}}
+                            {{^organizerAvatarUrl}}
                             <td width="56" height="56" align="center" valign="middle" style="width:56px;height:56px;background-color:#193B30;border-radius:28px;border:1px solid #46A758;">
                               <img src="https://www.podioticket.com.br/images/image-rectangle.svg" alt="" width="24" height="24">
                             </td>
+                            {{/organizerAvatarUrl}}
                           </tr>
                         </table>
                       </td>

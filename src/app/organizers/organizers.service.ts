@@ -354,6 +354,7 @@ export class OrganizersService {
         message: cleanMessage,
         eventName: event?.name,
         organizerName: organization.name,
+        organizerAvatarUrl: organization.logoUrl ?? undefined,
       })
       .catch((error) => this.logger.warn('Falha ao enviar confirmação de mensagem ao remetente:', error));
 
