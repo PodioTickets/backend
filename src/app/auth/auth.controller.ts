@@ -331,7 +331,12 @@ export class AuthController {
   @ApiResponse({ status: 400, description: 'Dados inválidos ou nova senha igual à atual' })
   @ApiResponse({ status: 401, description: 'Não autenticado ou senha atual incorreta' })
   async changePassword(@Request() req, @Body() changePasswordDto: ChangePasswordDto) {
-    return this.authService.changePassword(req.user.id, changePasswordDto);
+    return this.authService.changePassword(
+      req.user.id,
+      changePasswordDto,
+      req.headers?.['user-agent'],
+      req.headers?.['x-forwarded-for']?.split(',')[0]?.trim() || req.ip,
+    );
   }
 
   @Patch('change-email')

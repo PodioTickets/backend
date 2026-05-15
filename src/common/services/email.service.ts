@@ -419,27 +419,41 @@ export class EmailService {
     this.logger.log(`Password reset email sent to: ${data.email}`);
   }
 
-  async sendPasswordChangedNotification(data: { email: string; firstName: string }) {
-    const safeName = this.escapeHtml(data.firstName || 'usuário');
-    const html = `<!DOCTYPE html>
-<html lang="pt-BR">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
-<body style="margin:0;padding:20px;font-family:Arial,sans-serif;line-height:1.6;color:#333;background-color:#f0f0f0;">
-  <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center">
-  <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;background-color:#fff;border-radius:8px;padding:32px;">
-    <tr><td>
-      <h2 style="margin:0 0 16px 0;color:#202020;">Sua senha foi alterada</h2>
-      <p style="margin:0 0 16px 0;">Olá ${safeName},</p>
-      <p style="margin:0 0 16px 0;">A senha da sua conta Podio Ticket foi alterada com sucesso.</p>
-      <p style="margin:0 0 24px 0;">Se você não realizou esta alteração, entre em contato com o suporte imediatamente.</p>
-      <p style="margin:0;color:#666;font-size:12px;">Podio Ticket — este é um e-mail automático, não responda.</p>
-    </td></tr>
-  </table>
-  </td></tr></table>
-</body>
-</html>`;
-    const text = `Olá ${data.firstName || 'usuário'},\n\nA senha da sua conta PodioTicket foi alterada com sucesso.\n\nSe você não realizou esta alteração, entre em contato com o suporte imediatamente.\n\nPodioTicket — podioticket.com.br`;
-    await this.send({ from: this.from, to: data.email, subject: 'Sua senha foi alterada', html, text });
+  async sendPasswordChangedNotification(data: {
+    email: string;
+    firstName: string;
+    changedAt: string;
+    location: string;
+    device: string;
+  }) {
+    const html = this.loadTemplate('senha-alterada.html', {
+      changedAt: this.escapeHtml(data.changedAt),
+      location: this.escapeHtml(data.location),
+      device: this.escapeHtml(data.device),
+    });
+
+    const text = [
+      'Senha alterada com sucesso — PódioTicket',
+      '',
+      'Sua nova senha já está ativa.',
+      '',
+      `Alterado em: ${data.changedAt}`,
+      `Local aproximado: ${data.location}`,
+      `Dispositivo: ${data.device}`,
+      '',
+      'Não foi você? Altere sua senha ou contate o suporte.',
+      '',
+      'PódioTicket — podioticket.com.br',
+    ].join('\n');
+
+    await this.send({
+      from: this.from,
+      to: data.email,
+      subject: 'Senha alterada com sucesso — PódioTicket',
+      html,
+      text,
+    });
+
     this.logger.log(`Password changed notification sent to: ${data.email}`);
   }
 

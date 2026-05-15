@@ -1015,7 +1015,7 @@ export class AuthService {
   /**
    * Troca a senha do usuário logado. Se já tiver senha, exige currentPassword. Se não tiver (ex.: só Google), só newPassword.
    */
-  async changePassword(userId: string, dto: ChangePasswordDto) {
+  async changePassword(userId: string, dto: ChangePasswordDto, userAgent?: string, ip?: string) {
     const { currentPassword, newPassword } = dto;
 
     if (newPassword.length < 8) {
@@ -1076,10 +1076,17 @@ export class AuthService {
       user.accountType as 'USER' | 'ORGANIZER',
     );
 
-    this.emailService.sendPasswordChangedNotification({
-      email: updatedUser.email,
-      firstName: updatedUser.firstName,
-    }).catch((err) => this.logger.warn('Failed to send password changed email:', err));
+    const changedAt = this.formatDateTimePtBR(new Date());
+    const device = this.parseDevice(userAgent);
+    this.parseLocation(ip ?? '').then((location) =>
+      this.emailService.sendPasswordChangedNotification({
+        email: updatedUser.email,
+        firstName: updatedUser.firstName,
+        changedAt,
+        location,
+        device,
+      }),
+    ).catch((err) => this.logger.warn('Failed to send password changed email:', err));
 
     return {
       success: true,
