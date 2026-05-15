@@ -342,6 +342,21 @@ export class OrganizersService {
       })
       .catch((error) => this.logger.warn('Falha ao enviar email de contato ao organizador:', error));
 
+    // Enviar confirmação ao remetente — fire-and-forget
+    this.emailService
+      .sendContactMessageConfirmation({
+        recipientEmail: contactData.email,
+        userName: contactData.name,
+        userEmail: contactData.email,
+        userCpf: contactData.cpf,
+        userPhone: contactData.phone,
+        subject: contactData.subject,
+        message: cleanMessage,
+        eventName: event?.name,
+        organizerName: organization.name,
+      })
+      .catch((error) => this.logger.warn('Falha ao enviar confirmação de mensagem ao remetente:', error));
+
     // Enviar WhatsApp se disponível (mensagem já sanitizada) — fire-and-forget
     if (owner?.user.phone) {
       this.whatsappService

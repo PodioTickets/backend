@@ -134,6 +134,57 @@ export class EmailService {
     this.logger.log(`Contact email sent to organizer: ${data.organizerEmail}`);
   }
 
+  async sendContactMessageConfirmation(data: {
+    recipientEmail: string;
+    userName: string;
+    userEmail: string;
+    userCpf?: string;
+    userPhone?: string;
+    subject?: string;
+    message: string;
+    eventName?: string;
+    organizerName: string;
+  }) {
+    const html = this.loadTemplate('confirmacao-mensagem-organizador.html', {
+      userName: this.escapeHtml(data.userName),
+      userEmail: this.escapeHtml(data.userEmail),
+      userCpf: data.userCpf ? this.escapeHtml(data.userCpf) : '',
+      userPhone: data.userPhone ? this.escapeHtml(data.userPhone) : '',
+      subject: data.subject ? this.escapeHtml(data.subject) : '',
+      message: this.escapeHtml(data.message),
+      eventName: data.eventName ? this.escapeHtml(data.eventName) : '',
+      organizerName: this.escapeHtml(data.organizerName),
+    });
+
+    const textParts = [
+      'Mensagem enviada',
+      '',
+      `Sua mensagem foi entregue ao organizador ${data.organizerName}. Você receberá a resposta neste mesmo e-mail.`,
+      '',
+      data.eventName ? `Evento: ${data.eventName}` : null,
+      `Nome: ${data.userName}`,
+      `E-mail: ${data.userEmail}`,
+      data.userCpf ? `CPF: ${data.userCpf}` : null,
+      data.userPhone ? `Telefone: ${data.userPhone}` : null,
+      data.subject ? `Assunto: ${data.subject}` : null,
+      '',
+      'Mensagem:',
+      data.message,
+      '',
+      'PódioTicket — podioticket.com.br',
+    ].filter((l) => l !== null);
+
+    await this.send({
+      from: this.from,
+      to: data.recipientEmail,
+      subject: 'Mensagem enviada — PódioTicket',
+      html,
+      text: textParts.join('\n'),
+    });
+
+    this.logger.log(`Confirmação de mensagem ao organizador enviada para: ${data.recipientEmail}`);
+  }
+
   async sendInvitationEmail(data: {
     email: string;
     firstName: string;
