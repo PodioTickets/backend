@@ -518,6 +518,15 @@ export class RegistrationsService {
           },
           registrations: {
             select: {
+              userId: true,
+              invitedById: true,
+              invitedBy: {
+                select: {
+                  id: true,
+                  firstName: true,
+                  lastName: true,
+                },
+              },
               tickets: {
                 select: {
                   ticket: {
@@ -541,9 +550,17 @@ export class RegistrationsService {
 
     const formattedOrders = orders.map((order: any) => {
       const modalitySet = new Set<string>();
+      let invitedBy: { id: string; fullName: string } | null = null;
       for (const reg of order.registrations ?? []) {
         for (const rt of reg.tickets ?? []) {
           if (rt.ticket?.modality) modalitySet.add(rt.ticket.modality);
+        }
+        // only show badge when THIS user is the participant and someone else bought it
+        if (!invitedBy && reg.userId === userId && reg.invitedBy) {
+          invitedBy = {
+            id: reg.invitedBy.id,
+            fullName: `${reg.invitedBy.firstName} ${reg.invitedBy.lastName}`.trim(),
+          };
         }
       }
       return {
@@ -552,6 +569,7 @@ export class RegistrationsService {
         createdAt: order.createdAt,
         event: order.event,
         modalities: Array.from(modalitySet),
+        invitedBy,
       };
     });
 

@@ -10,15 +10,16 @@ import { WhatsAppService } from '../../common/services/whatsapp.service';
  */
 function sanitizeMessage(text: string): string {
   // 1. URLs com protocolo explícito (http, https, ftp, ws, wss)
-  let s = text.replace(/(?:https?|ftp|wss?):\/\/[^\s\])"'>]+/gi, '[link removido]');
+  let s = text.replace(/(?:https?|ftp|wss?):\/\/[^\s\])"'>]+/gi, '');
   // 2. Domínios com www.
-  s = s.replace(/\bwww\.[a-zA-Z0-9][a-zA-Z0-9\-.]{1,61}[a-zA-Z]{2,7}(?:\/[^\s]*)?\b/gi, '[link removido]');
+  s = s.replace(/\bwww\.[a-zA-Z0-9][a-zA-Z0-9\-.]{1,61}[a-zA-Z]{2,7}(?:\/[^\s]*)?\b/gi, '');
   // 3. Domínios simples com TLDs comuns (ex: site.com, meusite.com.br)
   const tlds = 'com|net|org|br|io|co|app|dev|site|online|me|info|biz|tv|gg|us|uk|pt|mobi|shop|store|digital|tech|club|live|news|link|vc|ai|zip|mov';
   s = s.replace(
     new RegExp(`\\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?\\.)+(?:${tlds})(?:\\/[^\\s]*)?\\b`, 'gi'),
-    '[link removido]',
+    '',
   );
+  s = s.replace(/\s{2,}/g, ' ').trim();
   return s;
 }
 
