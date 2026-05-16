@@ -555,8 +555,8 @@ export class RegistrationsService {
         for (const rt of reg.tickets ?? []) {
           if (rt.ticket?.modality) modalitySet.add(rt.ticket.modality);
         }
-        // pick invitedBy from first registration that has it
-        if (!invitedBy && reg.invitedBy) {
+        // only show badge when THIS user is the participant and someone else bought it
+        if (!invitedBy && reg.userId === userId && reg.invitedBy) {
           invitedBy = {
             id: reg.invitedBy.id,
             fullName: `${reg.invitedBy.firstName} ${reg.invitedBy.lastName}`.trim(),
