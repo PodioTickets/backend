@@ -103,14 +103,46 @@ const MAX_TICKETS_PER_ORDER = 20;
 
 const ORDER_INCLUDE = {
   reservedTickets: true,
-  coupon: { select: { id: true, code: true, couponType: true, type: true, value: true, appliesTo: true, minAge: true, maxAge: true } },
+  coupon: { select: { id: true, code: true, couponType: true, type: true, value: true, appliesTo: true, minAge: true, maxAge: true, applyToProducts: true } },
   voucher: { select: { id: true, code: true, name: true, status: true } },
   payment: { select: { id: true, method: true, status: true, amount: true, transactionId: true, paymentDate: true, createdAt: true, metadata: true } },
   // participantFeePercent é necessário para calcular serviceFee em pedidos PENDING
-  // (em que order.serviceFee ainda é 0). Não é exposto no payload — orderShape
-  // retorna apenas eventId.
-  event: { select: { participantFeePercent: true } },
+  // (em que order.serviceFee ainda é 0). eventDate é usado como referência para validar
+  // cupons AGE — a idade do participante é calculada na data do evento, não na atual.
+  // Nada disso é exposto no payload — orderShape retorna apenas eventId.
+  event: { select: { participantFeePercent: true, eventDate: true } },
 } as const;
+
+/**
+ * Idade do participante em uma data de referência (aniversário-aware).
+ *
+ * Usada na validação de cupons AGE: a idade considera a data do evento, não a
+ * data atual. Ex.: cupom min=60 + evento daqui 2 meses + participante que
+ * completa 60 anos antes do evento → cupom é aplicado.
+ *
+ * Cálculo por (ano/mês/dia) em vez de dias/365.25 evita erro de ±1 perto do
+ * aniversário (a aproximação por 365.25 antecipa a virada em até ~6 horas/ano).
+ */
+function computeAgeAt(birthDate: Date | string, referenceDate: Date): number {
+  const birth = birthDate instanceof Date ? birthDate : new Date(birthDate);
+  if (isNaN(birth.getTime())) return -1;
+  let age = referenceDate.getFullYear() - birth.getFullYear();
+  const monthDiff = referenceDate.getMonth() - birth.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && referenceDate.getDate() < birth.getDate())) {
+    age--;
+  }
+  return age;
+}
+
+/**
+ * Resolve a data de referência para validação de cupons AGE.
+ * Usa eventDate quando disponível (fonte da verdade); fallback para "agora"
+ * preserva comportamento em pedidos cujo include não trouxe o evento.
+ */
+function resolveAgeReferenceDate(order: any): Date {
+  const ed = order?.event?.eventDate;
+  return ed ? new Date(ed) : new Date();
+}
 
 /**
  * Taxa de serviço cobrada do participante.
@@ -195,20 +227,33 @@ function distributeDiscount(
     }
 
     if (fixedPerUnit !== undefined && fixedPerUnit > 0) {
+      // FIXED: clampa o desconto por slot em unitPrice (evita finalUnitPrice negativo
+      // quando o cupom é maior que o preço do ingresso — ex.: cupom FIXED grande com
+      // applyToProducts=true cobrindo também produtos adicionais).
       for (let i = 0; i < coveredQty; i++) {
-        units[sorted[i]].discount = fixedPerUnit;
+        const slotIdx = sorted[i];
+        units[slotIdx].discount = Math.min(fixedPerUnit, units[slotIdx].rt.unitPrice);
       }
     } else {
-      // PERCENTAGE: distribute totalDiscount proportionally among covered slots
+      // PERCENTAGE: distribui totalDiscount proporcional ao unitPrice entre os slots cobertos.
+      // Quando totalDiscount > subtotal dos ingressos cobertos (cupom com applyToProducts=true),
+      // só a porção que cabe nos ingressos é distribuída por slot — o excedente fica implícito
+      // em order.discount (finalAmount segue correto via order.discount agregado).
       const coveredSubtotal = sorted.slice(0, coveredQty).reduce((s, i) => s + units[i].rt.unitPrice, 0);
+      const ticketsPortion = Math.min(totalDiscount, coveredSubtotal);
       let distrib = 0;
       for (let i = 0; i < coveredQty; i++) {
         const isLast = i === coveredQty - 1;
         const slotIdx = sorted[i];
-        units[slotIdx].discount = isLast
-          ? totalDiscount - distrib
-          : Math.round(totalDiscount * (units[slotIdx].rt.unitPrice / coveredSubtotal));
-        distrib += units[slotIdx].discount;
+        const unitPrice = units[slotIdx].rt.unitPrice;
+        let allocated = isLast
+          ? ticketsPortion - distrib
+          : coveredSubtotal > 0
+            ? Math.round(ticketsPortion * (unitPrice / coveredSubtotal))
+            : 0;
+        allocated = Math.min(allocated, unitPrice);
+        units[slotIdx].discount = allocated;
+        distrib += allocated;
       }
     }
   }
@@ -224,22 +269,47 @@ function distributeDiscount(
   }));
 }
 
+/**
+ * Desconto total do cupom (em centavos), considerando os N melhores slots de ingresso
+ * cobertos (`effectiveUsage`).
+ *
+ * `productsBaseExtra` — valor extra que entra na base de cálculo quando o cupom tem
+ * `applyToProducts=true`. Deve ser passado pelos callers como o subtotal dos produtos
+ * adicionais aplicáveis (ou 0 quando o flag está desligado). Para PERCENTAGE, soma à
+ * base do cálculo; para FIXED, amplia o cap do desconto.
+ */
 function computePartialCouponDiscount(
   reservedTickets: any[],
   couponValueType: string,
   couponValue: number,
   effectiveUsage: number,
+  productsBaseExtra: number = 0,
 ): number {
   if (effectiveUsage <= 0) return 0;
   const units = reservedTickets
     .flatMap((rt: any) => Array(rt.quantity).fill(rt.unitPrice))
     .sort((a: number, b: number) => b - a)
     .slice(0, effectiveUsage);
+  const ticketsBase = units.reduce((s: number, p: number) => s + p, 0);
+  const combinedBase = ticketsBase + Math.max(0, productsBaseExtra);
   if (couponValueType === 'PERCENTAGE') {
-    const base = units.reduce((s: number, p: number) => s + p, 0);
-    return Math.floor(base * (couponValue / 100));
+    return Math.floor(combinedBase * (couponValue / 100));
   }
-  return effectiveUsage * couponValue;
+  // FIXED: valor por uso, com cap no subtotal combinado (ingressos cobertos + produtos
+  // aplicáveis quando applyToProducts=true). Sem o flag, productsBaseExtra=0 e o cap
+  // reduz para ticketsBase — preserva clamp implícito de antes.
+  return Math.min(effectiveUsage * couponValue, combinedBase);
+}
+
+/**
+ * Subtotal (centavos) dos produtos adicionais no carrinho do pedido (PENDING).
+ * Lê `order.pendingProducts` (Json) — formato `{ productId, variationId?, quantity, unitPrice }`.
+ */
+function computePendingProductsSubtotal(order: any): number {
+  return ((order?.pendingProducts as any[] | null) ?? []).reduce(
+    (s: number, p: any) => s + (p?.unitPrice ?? 0) * (p?.quantity ?? 1),
+    0,
+  );
 }
 
 function inferEffectiveUsage(
@@ -291,12 +361,12 @@ function orderShape(order: any, discountOverride?: number, extra?: Record<string
     const participants = order.pendingParticipants as any[];
     const min: number = coupon.minAge ?? 0;
     const max: number = coupon.maxAge ?? Infinity;
-    const now = new Date();
+    const refDate = resolveAgeReferenceDate(order);
     const totalUnits = (order.reservedTickets ?? []).reduce((s: number, rt: any) => s + (rt.quantity ?? 1), 0);
     const derived = participants
       .map((p: any, i: number) => {
         if (!p.birthDate || i >= totalUnits) return -1;
-        const age = Math.floor((now.getTime() - new Date(p.birthDate).getTime()) / (365.25 * 24 * 60 * 60 * 1000));
+        const age = computeAgeAt(p.birthDate, refDate);
         return age >= min && age <= max ? i : -1;
       })
       .filter(i => i >= 0);
@@ -312,7 +382,8 @@ function orderShape(order: any, discountOverride?: number, extra?: Record<string
   if (discountOverride !== undefined) {
     discount = discountOverride;
   } else if (resolvedEffectiveUsage !== undefined && effectiveUsage === undefined && coupon?.couponType === 'AGE') {
-    discount = computePartialCouponDiscount(order.reservedTickets ?? [], coupon.type, coupon.value, resolvedEffectiveUsage);
+    const productsExtra = coupon.applyToProducts ? computePendingProductsSubtotal(order) : 0;
+    discount = computePartialCouponDiscount(order.reservedTickets ?? [], coupon.type, coupon.value, resolvedEffectiveUsage, productsExtra);
   } else {
     discount = order.discount ?? 0;
   }
@@ -928,7 +999,17 @@ export class OrdersService {
           cancelledReason: order.cancelledReason ?? null,
           pricing: (() => {
             const serviceFee = computeServiceFee(order);
+            // ticketsSubtotal vem dos reservedTickets; productsSubtotal é derivado
+            // de (totalAmount − ticketsSubtotal) — invariante garantido pelo checkout
+            // (vale tanto em PENDING quanto após o pagamento).
+            const ticketsSubtotal = ((order.reservedTickets as any[]) ?? []).reduce(
+              (s: number, rt: any) => s + (rt.unitPrice ?? 0) * (rt.quantity ?? 0),
+              0,
+            );
+            const productsSubtotal = Math.max(0, (order.totalAmount ?? 0) - ticketsSubtotal);
             return {
+              ticketsSubtotal,
+              productsSubtotal,
               subtotal: order.totalAmount,
               discount: order.discount,
               serviceFee,
@@ -1176,15 +1257,15 @@ export class OrdersService {
     if (order.couponId && !order.voucherId) {
       const existingCoupon = await r.coupon.findUnique({
         where: { id: order.couponId },
-        select: { id: true, couponType: true, type: true, value: true, minAge: true, maxAge: true, maxUsage: true, usageCount: true, appliesTo: true },
+        select: { id: true, couponType: true, type: true, value: true, minAge: true, maxAge: true, maxUsage: true, usageCount: true, appliesTo: true, applyToProducts: true },
       });
       if (existingCoupon?.couponType === 'AGE') {
-        const now = new Date();
+        const refDate = resolveAgeReferenceDate(order);
         const min = existingCoupon.minAge ?? 0;
         const max = existingCoupon.maxAge ?? Infinity;
         const ageMatchCount = participants.filter((p: any) => {
           if (!p.birthDate) return false;
-          const age = Math.floor((now.getTime() - new Date(p.birthDate).getTime()) / (365.25 * 24 * 60 * 60 * 1000));
+          const age = computeAgeAt(p.birthDate, refDate);
           return age >= min && age <= max;
         }).length;
 
@@ -1205,12 +1286,13 @@ export class OrdersService {
           ageQualifyingSlots = participants
             .map((p: any, i: number) => {
               if (!p.birthDate || i >= totalUnits) return -1;
-              const age = Math.floor((now.getTime() - new Date(p.birthDate).getTime()) / (365.25 * 24 * 60 * 60 * 1000));
+              const age = computeAgeAt(p.birthDate, refDate);
               return (age >= min && age <= max) ? i : -1;
             })
             .filter((i: number) => i >= 0);
           autoCouponId = existingCoupon.id;
-          autoDiscount = computePartialCouponDiscount(ageApplicableTickets, existingCoupon.type, existingCoupon.value, effectiveUsage);
+          const productsExtra = existingCoupon.applyToProducts ? computePendingProductsSubtotal(order) : 0;
+          autoDiscount = computePartialCouponDiscount(ageApplicableTickets, existingCoupon.type, existingCoupon.value, effectiveUsage, productsExtra);
           autoEffectiveUsage = effectiveUsage;
         }
       }
@@ -1245,12 +1327,12 @@ export class OrdersService {
           // QUANTITY: all-or-nothing — se esgotado, não aplica
           if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) continue;
         } else if (coupon.couponType === 'AGE') {
-          const now = new Date();
+          const refDate = resolveAgeReferenceDate(order);
           const min = coupon.minAge ?? 0;
           const max = coupon.maxAge ?? Infinity;
           const ageMatchCount = participants.filter((p: any) => {
             if (!p.birthDate) return false;
-            const age = Math.floor((now.getTime() - new Date(p.birthDate).getTime()) / (365.25 * 24 * 60 * 60 * 1000));
+            const age = computeAgeAt(p.birthDate, refDate);
             return age >= min && age <= max;
           }).length;
           if (ageMatchCount <= 0) continue;
@@ -1266,21 +1348,22 @@ export class OrdersService {
           }
 
           if (coupon.couponType === 'QUANTITY') {
-            // QUANTITY: desconto sobre todo o pedido (all-or-nothing)
+            // QUANTITY: desconto sobre todo o pedido (all-or-nothing).
+            // Produtos adicionais entram na base apenas quando applyToProducts=true
+            // (cupons QUANTITY pré-existentes têm o flag setado via backfill na migration).
             const autoApplicableSubtotal = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0);
             const autoApplicableQty = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
-            const existingProductsSubtotal = ((order.pendingProducts as any[] | null) ?? []).reduce(
-              (sum: number, p: any) => sum + (p.unitPrice ?? 0) * (p.quantity ?? 1),
-              0,
-            );
+            const totalProductsSubtotal = computePendingProductsSubtotal(order);
+            const productsContribution = coupon.applyToProducts ? totalProductsSubtotal : 0;
             if (coupon.type === 'PERCENTAGE') {
               const applicableRatio = ticketsSubtotal > 0 ? autoApplicableSubtotal / ticketsSubtotal : 1;
-              const applicableBase = autoApplicableSubtotal + Math.round(existingProductsSubtotal * applicableRatio);
+              const applicableBase = autoApplicableSubtotal + Math.round(productsContribution * applicableRatio);
               autoDiscount = Math.floor(applicableBase * (coupon.value / 100));
             } else {
+              // FIXED: valor por unidade aplicável (semântica histórica); cap definido abaixo.
               autoDiscount = autoApplicableQty * coupon.value;
             }
-            autoDiscount = Math.min(autoDiscount, ticketsSubtotal + existingProductsSubtotal);
+            autoDiscount = Math.min(autoDiscount, autoApplicableSubtotal + productsContribution);
           } else {
             // AGE: desconto apenas nos ingressos dos participantes que passaram no critério de idade
             const ageMatchCount: number = (coupon as any)._ageMatchCount ?? 0;
@@ -1290,17 +1373,18 @@ export class OrdersService {
               : ageMatchCount;
             const effectiveUsage = Math.min(remaining, ageMatchCount, autoApplicableQty);
             if (effectiveUsage <= 0) continue;
-            autoDiscount = computePartialCouponDiscount(autoApplicableTickets, coupon.type, coupon.value, effectiveUsage);
+            const productsExtra = coupon.applyToProducts ? computePendingProductsSubtotal(order) : 0;
+            autoDiscount = computePartialCouponDiscount(autoApplicableTickets, coupon.type, coupon.value, effectiveUsage, productsExtra);
             autoEffectiveUsage = effectiveUsage;
             // Track which participant positions qualify for position-aware discount display
-            const _ageNow = new Date();
+            const _ageRefDate = resolveAgeReferenceDate(order);
             const _ageMin = coupon.minAge ?? 0;
             const _ageMax = coupon.maxAge ?? Infinity;
             const _totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
             ageQualifyingSlots = participants
               .map((p: any, i: number) => {
                 if (!p.birthDate || i >= _totalUnits) return -1;
-                const age = Math.floor((_ageNow.getTime() - new Date(p.birthDate).getTime()) / (365.25 * 24 * 60 * 60 * 1000));
+                const age = computeAgeAt(p.birthDate, _ageRefDate);
                 return (age >= _ageMin && age <= _ageMax) ? i : -1;
               })
               .filter((i: number) => i >= 0);
@@ -1516,7 +1600,8 @@ export class OrdersService {
         : applicableQuantity;
       if (remaining <= 0) throw new AppUnprocessableException('COUPON_EXHAUSTED', 'Cupom esgotado');
       couponEffectiveUsage = Math.min(remaining, applicableQuantity);
-      discount = computePartialCouponDiscount(applicableTickets, coupon.type, coupon.value, couponEffectiveUsage);
+      const couponProductsExtra = coupon.applyToProducts ? productsSubtotal : 0;
+      discount = computePartialCouponDiscount(applicableTickets, coupon.type, coupon.value, couponEffectiveUsage, couponProductsExtra);
       couponId = coupon.id;
       if (coupon.type === 'FIXED') couponFixedPerUnit = coupon.value;
 
@@ -1849,7 +1934,8 @@ export class OrdersService {
           ? Math.max(0, coupon.maxUsage - coupon.usageCount)
           : applicableQty;
         const effectiveUsage = Math.min(remaining, applicableQty);
-        couponDiscount = computePartialCouponDiscount(applicableTicketsPay, coupon.type, coupon.value, effectiveUsage);
+        const productsExtraPay = coupon.applyToProducts ? productsSubtotal : 0;
+        couponDiscount = computePartialCouponDiscount(applicableTicketsPay, coupon.type, coupon.value, effectiveUsage, productsExtraPay);
         couponId = coupon.id;
       }
     }
@@ -1881,21 +1967,25 @@ export class OrdersService {
           // QUANTITY: all-or-nothing — se esgotado, não aplica
           if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) continue;
 
-          // Aplica sobre todo o pedido
+          // Base de cálculo respeita applyToProducts: sem flag = só ingressos; com flag =
+          // ingressos + produtos. Cap final é a própria base (não pode descontar mais do
+          // que o subtotal coberto).
+          const quantityBase = coupon.applyToProducts ? preDiscountTotal : ticketsSubtotal;
           couponDiscount =
             coupon.type === 'PERCENTAGE'
-              ? Math.floor(preDiscountTotal * (coupon.value / 100))
-              : Math.min(coupon.value, preDiscountTotal);
+              ? Math.floor(quantityBase * (coupon.value / 100))
+              : Math.min(coupon.value, quantityBase);
           couponId = coupon.id;
           break;
         } else if (coupon.couponType === 'AGE') {
-          // Validar idade dos participantes — aplica apenas nos que passam no critério
-          const now = new Date();
+          // Validar idade dos participantes na data do evento — aplica apenas
+          // nos que passam no critério (ver computeAgeAt/resolveAgeReferenceDate).
+          const refDate = resolveAgeReferenceDate(order);
           const minAge = coupon.minAge ?? 0;
           const maxAge = coupon.maxAge ?? Infinity;
           const ageMatchCount = participants.filter((p: any) => {
             if (!p.birthDate) return false;
-            const age = Math.floor((now.getTime() - new Date(p.birthDate).getTime()) / (365.25 * 24 * 60 * 60 * 1000));
+            const age = computeAgeAt(p.birthDate, refDate);
             return age >= minAge && age <= maxAge;
           }).length;
 
@@ -1913,7 +2003,8 @@ export class OrdersService {
             : ageMatchCount;
           const effectiveUsage = Math.min(remaining, ageMatchCount, ageApplicableQty);
           if (effectiveUsage <= 0) continue;
-          couponDiscount = computePartialCouponDiscount(ageApplicableTickets, coupon.type, coupon.value, effectiveUsage);
+          const ageProductsExtra = coupon.applyToProducts ? productsSubtotal : 0;
+          couponDiscount = computePartialCouponDiscount(ageApplicableTickets, coupon.type, coupon.value, effectiveUsage, ageProductsExtra);
           couponId = coupon.id;
           break;
         }
@@ -1947,17 +2038,17 @@ export class OrdersService {
 
     // Snapshot da taxa de serviço (participantFeePercent congelado no instante do pay):
     // se o admin alterar a config do evento depois, este pedido mantém o que foi cobrado.
-    // Base de cálculo: preDiscountTotal (antes do desconto), igual ao checkout.service.
+    // Base de cálculo: (preDiscountTotal − descontos), em linha com a fórmula acordada
+    //   ((ingresso − cupom/voucher) + produto) + % taxa de serviço
+    // (ver computeServiceFee, computeFinalAmount e sessão 2026-05-11).
     const participantFeePercent: number =
       (order as any).event?.participantFeePercent ?? 0;
-    const serviceFee = Math.round(preDiscountTotal * (participantFeePercent / 100));
+    const feeBase = Math.max(0, preDiscountTotal - couponDiscount - voucherDiscount);
+    const serviceFee = Math.round(feeBase * (participantFeePercent / 100));
 
-    // finalTotal = preDiscountTotal + serviceFee − descontos. A taxa entra na cobrança
+    // finalTotal = (preDiscountTotal − descontos) + serviceFee. A taxa entra na cobrança
     // (Cielo recebe o valor completo) e é gravada em order.serviceFee como snapshot.
-    const discountedTotal = Math.max(
-      0,
-      preDiscountTotal + serviceFee - couponDiscount - voucherDiscount,
-    );
+    const discountedTotal = feeBase + serviceFee;
     const pixDiscount = 0;
     const finalTotal = discountedTotal;
 

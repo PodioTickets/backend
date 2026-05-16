@@ -430,6 +430,7 @@ export class PaymentsService {
           maxAge: true,
           maxUsage: true,
           usageCount: true,
+          applyToProducts: true,
           expiryDate: true,
         },
       });
@@ -554,6 +555,7 @@ export class PaymentsService {
           maxAge: coupon.maxAge ?? null,
           maxUsage: coupon.maxUsage ?? null,
           usageCount: coupon.usageCount,
+          applyToProducts: coupon.applyToProducts ?? false,
           expiryDate: coupon.expiryDate ?? null,
         } : null,
         // Voucher utilizado (se houver)

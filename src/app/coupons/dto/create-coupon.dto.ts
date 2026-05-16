@@ -7,6 +7,7 @@ import {
   Max,
   IsEnum,
   IsArray,
+  IsBoolean,
   Matches,
   MaxLength,
   ValidateIf,
@@ -196,6 +197,14 @@ export class CreateCouponDto {
   })
   @Type(() => Number)
   maxUsage?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  @ApiPropertyOptional({
+    description: 'Se true, o desconto também incide sobre os produtos adicionais (kits/extras) do pedido. Default: false.',
+    default: false,
+  })
+  applyToProducts?: boolean;
 }
 
 export class UpdateCouponDto {
@@ -284,6 +293,10 @@ export class UpdateCouponDto {
   @IsPositive()
   @Type(() => Number)
   maxUsage?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  applyToProducts?: boolean;
 }
 
 export class FilterCouponsDto {

@@ -818,6 +818,7 @@ model Coupon {
   status        CouponStatus       @default(ACTIVE)
   usageCount    Int                @default(0)
   maxUsage      Int?               // Limite máximo de usos do cupom
+  applyToProducts Boolean          @default(false) // Inclui produtos adicionais (kits/extras) na base de cálculo do desconto
   deletedAt     DateTime?          // Soft delete — cupom removido após uso
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt

@@ -2617,11 +2617,7 @@ export class EventsService {
     const uniquePaidOrderAmounts = new Map<string, number>();
     for (const r of paidRegistrations) {
       if (r.order?.id && !uniquePaidOrderAmounts.has(r.order.id)) {
-        const gross = this.normalizeToCents(r.order.finalAmount);
-        const fee = this.normalizeToCents(r.order.serviceFee ?? 0);
-        const orgBase = Math.max(0, gross - fee);
-        const net = Math.round(orgBase * (1 - organizerFeeRate));
-        uniquePaidOrderAmounts.set(r.order.id, net);
+        uniquePaidOrderAmounts.set(r.order.id, this.computeOrderNetCents(r.order, organizerFeeRate));
       }
     }
     const netRevenue = Array.from(uniquePaidOrderAmounts.values()).reduce((sum, v) => sum + v, 0);
@@ -2667,10 +2663,7 @@ export class EventsService {
     const previousUniquePaidOrders = new Map<string, number>();
     for (const r of previousPaid) {
       if (r.order?.id && !previousUniquePaidOrders.has(r.order.id)) {
-        const gross = this.normalizeToCents(r.order.finalAmount);
-        const fee = this.normalizeToCents(r.order.serviceFee ?? 0);
-        const orgBase = Math.max(0, gross - fee);
-        previousUniquePaidOrders.set(r.order.id, Math.round(orgBase * (1 - organizerFeeRate)));
+        previousUniquePaidOrders.set(r.order.id, this.computeOrderNetCents(r.order, organizerFeeRate));
       }
     }
     const previousNetRevenue = Array.from(previousUniquePaidOrders.values()).reduce((sum, v) => sum + v, 0);
@@ -2692,13 +2685,13 @@ export class EventsService {
     const cancellationsStatus = cancellationRate > 10 ? 'Crítico' : cancellationRate > 5 ? 'Atenção' : 'Normal';
     const refundRate = totalFinalized > 0 ? (refunds / totalFinalized) * 100 : 0;
     const refundsStatus = refundRate > 5 ? 'Crítico' : refundRate > 2 ? 'Atenção' : 'Normal';
-    const chartData = this.buildChartData(registrations, dateRange, period);
-    const ticketRanking = this.buildTicketRanking(registrations, page, limit);
+    const chartData = this.buildChartData(registrations, dateRange, organizerFeeRate, period);
+    const ticketRanking = this.buildTicketRanking(registrations, page, limit, organizerFeeRate);
     const topCities = this.buildTopCities(registrations);
     const lotsNearDepletion = await this.buildLotsNearDepletion(prismaRead, eventId);
     const salesHeatmap = this.buildSalesHeatmap(registrations);
     const paidRegistrationIds = paidRegistrations.map((r) => r.id);
-    const topProductVariations = await this.buildTopProductVariations(prismaRead, eventId, paidRegistrationIds);
+    const topProductVariations = await this.buildTopProductVariations(prismaRead, eventId, paidRegistrationIds, organizerFeeRate);
     const mostAnsweredQuestions = await this.buildMostAnsweredQuestions(prismaRead, eventId);
 
     const ticketMapForPagination = new Map<string, boolean>();
@@ -2769,6 +2762,7 @@ export class EventsService {
     prismaRead: ReturnType<PrismaService['getReadClient']>,
     eventId: string,
     paidRegistrationIds: string[],
+    organizerFeeRate: number,
   ) {
     if (paidRegistrationIds.length === 0) {
       return [];
@@ -2782,6 +2776,13 @@ export class EventsService {
         totalPrice: true,
         product: { select: { id: true, name: true, image: true } },
         variation: { select: { id: true, name: true, stock: true } },
+        // order é necessário para ratear o totalSoldAmount pelo líquido da order
+        // (`(finalAmount - serviceFee) * (1 - organizerFeeRate)` ÷ `finalAmount`).
+        registration: {
+          select: {
+            order: { select: { finalAmount: true, serviceFee: true } },
+          },
+        },
       },
     });
 
@@ -2805,7 +2806,14 @@ export class EventsService {
         });
       }
       const entry = salesByProduct.get(key)!;
-      entry.totalSoldAmount += r.totalPrice ?? 0;
+      // Líquido por produto: rateia o totalPrice pela razão (orderNet / orderGross)
+      // — assim a taxa do participante e a do organizador caem proporcional ao item.
+      // Em order com finalAmount=0 (cortesia 100%), netRatio=0.
+      const orderRef = (r as any).registration?.order;
+      const orderGross = this.normalizeToCents(orderRef?.finalAmount ?? 0);
+      const orderNet = this.computeOrderNetCents(orderRef, organizerFeeRate);
+      const netRatio = orderGross > 0 ? orderNet / orderGross : 0;
+      entry.totalSoldAmount += Math.round((r.totalPrice ?? 0) * netRatio);
       const variationId = r.variationId ?? null;
       const stock = r.variation?.stock ?? null;
       const stockVal = stock !== null && stock !== undefined ? stock : null;
@@ -3152,6 +3160,25 @@ export class EventsService {
     return keys;
   }
 
+  /**
+   * Valor líquido de uma order para o organizador (centavos):
+   * `(finalAmount - serviceFee) * (1 - organizerFeePercent/100)`.
+   *
+   * - `serviceFee` é taxa do participante (100% da plataforma) — sai do gross.
+   * - `organizerFeeRate` (0–1) é a taxa retida do organizador.
+   *
+   * Resultado equivale ao `orgNet` usado no Repasse e nas métricas do dashboard.
+   */
+  private computeOrderNetCents(
+    order: { finalAmount?: number | null; serviceFee?: number | null } | null | undefined,
+    organizerFeeRate: number,
+  ): number {
+    const gross = this.normalizeToCents(order?.finalAmount ?? 0);
+    const fee = this.normalizeToCents(order?.serviceFee ?? 0);
+    const orgBase = Math.max(0, gross - fee);
+    return Math.round(orgBase * (1 - organizerFeeRate));
+  }
+
   private emptyTrendBucket(): {
     revenue: number;
     confirmed: number;
@@ -3159,6 +3186,7 @@ export class EventsService {
     refunded: number;
     canceledRevenue: number;
     refundedRevenue: number;
+    _seenOrderIds: Set<string>;
   } {
     return {
       revenue: 0,
@@ -3167,11 +3195,18 @@ export class EventsService {
       refunded: 0,
       canceledRevenue: 0,
       refundedRevenue: 0,
+      // Dedup por order: uma order com N inscrições só conta o net 1× no revenue
+      // do bucket (mas cada inscrição conta como +1 em confirmed/canceled/refunded).
+      _seenOrderIds: new Set<string>(),
     };
   }
 
   /**
-   * Acumula uma inscrição num bucket diário/mensal (centavos + contagens).
+   * Acumula uma inscrição num bucket diário/mensal.
+   * - Contagens (confirmed/canceled/refunded) somam +1 por inscrição.
+   * - Receita (revenue/canceledRevenue/refundedRevenue) soma o líquido da ORDER
+   *   uma única vez (dedup por orderId) — evita inflar quando uma order tem
+   *   múltiplas inscrições.
    * Estorno antes de cancelado antes de confirmado, para não duplicar.
    */
   private accumulateRegistrationIntoTrendBucket(
@@ -3182,24 +3217,37 @@ export class EventsService {
       refunded: number;
       canceledRevenue: number;
       refundedRevenue: number;
+      _seenOrderIds: Set<string>;
     },
     reg: any,
+    organizerFeeRate: number,
   ) {
-    const cents = this.normalizeToCents(reg.order?.finalAmount);
+    const orderId: string | undefined = reg.order?.id;
+    const orderNetCents = this.computeOrderNetCents(reg.order, organizerFeeRate);
+    const orderAlreadyCounted = !!orderId && bucket._seenOrderIds.has(orderId);
     const payStatus = reg.order?.payment?.status;
     if (payStatus === PaymentStatus.REFUNDED) {
       bucket.refunded += 1;
-      bucket.refundedRevenue += cents;
+      if (!orderAlreadyCounted && orderId) {
+        bucket._seenOrderIds.add(orderId);
+        bucket.refundedRevenue += orderNetCents;
+      }
       return;
     }
     if (reg.status === RegistrationStatus.CANCELLED) {
       bucket.canceled += 1;
-      bucket.canceledRevenue += cents;
+      if (!orderAlreadyCounted && orderId) {
+        bucket._seenOrderIds.add(orderId);
+        bucket.canceledRevenue += orderNetCents;
+      }
       return;
     }
     if (payStatus === PaymentStatus.PAID && reg.status === RegistrationStatus.CONFIRMED) {
-      bucket.revenue += cents;
       bucket.confirmed += 1;
+      if (!orderAlreadyCounted && orderId) {
+        bucket._seenOrderIds.add(orderId);
+        bucket.revenue += orderNetCents;
+      }
     }
   }
 
@@ -3209,12 +3257,13 @@ export class EventsService {
   private buildChartData(
     registrations: any[],
     dateRange: { start: Date | null; end: Date | null },
+    organizerFeeRate: number,
     period?: DashboardPeriod,
   ) {
     if (period === DashboardPeriod.GERAL || !dateRange.start) {
-      return this.buildMonthlyChartData(registrations);
+      return this.buildMonthlyChartData(registrations, organizerFeeRate);
     }
-    return this.buildDailyChartData(registrations, dateRange);
+    return this.buildDailyChartData(registrations, dateRange, organizerFeeRate);
   }
 
   /**
@@ -3223,19 +3272,10 @@ export class EventsService {
   private buildDailyChartData(
     registrations: any[],
     dateRange: { start: Date; end: Date },
+    organizerFeeRate: number,
   ) {
     const sortedDates = this.eachUtcDayKeys(dateRange.start, dateRange.end);
-    const byDay = new Map<
-      string,
-      {
-        revenue: number;
-        confirmed: number;
-        canceled: number;
-        refunded: number;
-        canceledRevenue: number;
-        refundedRevenue: number;
-      }
-    >();
+    const byDay = new Map<string, ReturnType<EventsService['emptyTrendBucket']>>();
     for (const d of sortedDates) {
       byDay.set(d, this.emptyTrendBucket());
     }
@@ -3245,7 +3285,7 @@ export class EventsService {
         .toISOString()
         .split('T')[0];
       if (!byDay.has(date)) return;
-      this.accumulateRegistrationIntoTrendBucket(byDay.get(date)!, reg);
+      this.accumulateRegistrationIntoTrendBucket(byDay.get(date)!, reg, organizerFeeRate);
     });
 
     const labels = sortedDates.map((d) => {
@@ -3277,24 +3317,14 @@ export class EventsService {
   /**
    * Gráfico período "geral": últimos 6 meses calendário; mesmo contrato que o diário (`dailyData`).
    */
-  private buildMonthlyChartData(registrations: any[]) {
+  private buildMonthlyChartData(registrations: any[], organizerFeeRate: number) {
     const endDate = new Date();
     const startDate = new Date();
     startDate.setMonth(startDate.getMonth() - 6);
     startDate.setDate(1);
     startDate.setHours(0, 0, 0, 0);
 
-    const monthlyData = new Map<
-      string,
-      {
-        revenue: number;
-        confirmed: number;
-        canceled: number;
-        refunded: number;
-        canceledRevenue: number;
-        refundedRevenue: number;
-      }
-    >();
+    const monthlyData = new Map<string, ReturnType<EventsService['emptyTrendBucket']>>();
 
     for (let i = 5; i >= 0; i--) {
       const date = new Date();
@@ -3309,7 +3339,7 @@ export class EventsService {
       if (regDate < startDate || regDate > endDate) return;
       const monthKey = `${regDate.getFullYear()}-${String(regDate.getMonth() + 1).padStart(2, '0')}`;
       if (!monthlyData.has(monthKey)) return;
-      this.accumulateRegistrationIntoTrendBucket(monthlyData.get(monthKey)!, reg);
+      this.accumulateRegistrationIntoTrendBucket(monthlyData.get(monthKey)!, reg, organizerFeeRate);
     });
 
     const sortedMonths = Array.from(monthlyData.keys()).sort();
@@ -3345,30 +3375,31 @@ export class EventsService {
   /**
    * Constrói ranking de ingressos
    */
-  private buildTicketRanking(registrations: any[], page: number, limit: number) {
+  private buildTicketRanking(registrations: any[], page: number, limit: number, organizerFeeRate: number) {
     const ticketMap = new Map<string, { ticketId: string; name: string; category: string; quantity: number; total: number }>();
 
     // Group confirmed+paid registrations by order to compute the correct per-ticket value.
-    // finalAmount is order-level: dividing it by only one registration's tickets double-counts
-    // when an order contains multiple registrations.
-    const orderGroups = new Map<string, { finalAmount: number; regs: any[] }>();
+    // Usa o líquido da order (descontadas as taxas de participante e organizador) —
+    // dividir entre os items dá o líquido por ingresso. Group-by-order evita
+    // double-counting quando uma order tem múltiplas inscrições.
+    const orderGroups = new Map<string, { netAmount: number; regs: any[] }>();
     for (const reg of registrations) {
       if (reg.order?.payment?.status !== PaymentStatus.PAID || reg.status !== RegistrationStatus.CONFIRMED) continue;
       const orderId = reg.order.id;
       if (!orderGroups.has(orderId)) {
-        orderGroups.set(orderId, { finalAmount: this.normalizeToCents(reg.order.finalAmount), regs: [] });
+        orderGroups.set(orderId, { netAmount: this.computeOrderNetCents(reg.order, organizerFeeRate), regs: [] });
       }
       orderGroups.get(orderId)!.regs.push(reg);
     }
 
-    for (const { finalAmount, regs } of orderGroups.values()) {
+    for (const { netAmount, regs } of orderGroups.values()) {
       // Count total items across all registrations in this order to split revenue evenly
       const totalItems = regs.reduce((sum, reg) => {
         if (reg.tickets?.length > 0) return sum + reg.tickets.length;
         if (reg.modalities?.length > 0) return sum + reg.modalities.length;
         return sum + 1;
       }, 0);
-      const valuePerItem = totalItems > 0 ? finalAmount / totalItems : 0;
+      const valuePerItem = totalItems > 0 ? netAmount / totalItems : 0;
 
       for (const reg of regs) {
         if (reg.tickets && reg.tickets.length > 0) {
@@ -4111,6 +4142,7 @@ export class EventsService {
     total: number;
     paid: number;
     cancelled: number;
+    refunded: number;
     collected: number;
   }> {
     const upperBoundSql =
@@ -4120,22 +4152,31 @@ export class EventsService {
           ? Prisma.sql`AND o."createdAt" <= ${orderCreatedBetween.lte}`
           : Prisma.empty;
 
-    // collected must be summed per unique order, not per registration.
-    // Using a CTE with DISTINCT (orderId, finalAmount) prevents double-counting
-    // when multiple confirmed registrations belong to the same order.
+    // collected: somado por order única (DISTINCT no CTE evita double-count quando
+    // a order tem múltiplas inscrições) e LÍQUIDO para o organizador:
+    //   `(finalAmount - serviceFee) * (1 - organizerFeePercent/100)`
+    // serviceFee = taxa do participante (100% plataforma). organizerFeePercent vem do Event.
+    //
+    // refunded: contagem por inscrição agrupando estornos manuais (refundType=REFUND/vazio)
+    // e chargebacks (refundType=CHARGEBACK). Frontend pode distinguir cada caso via
+    // payment.metadata->>'refundType' nos itens da listagem.
     const rows = orderCreatedBetween
       ? await prismaRead.$queryRaw<
         {
           total: bigint;
           paid: bigint;
           cancelled: bigint;
+          refunded: bigint;
           collected: bigint;
         }[]
       >(Prisma.sql`
           WITH paid_orders AS (
-            SELECT DISTINCT r."orderId", o."finalAmount"
+            SELECT DISTINCT r."orderId",
+              GREATEST(0, o."finalAmount" - COALESCE(o."serviceFee", 0))::numeric
+                * (1 - COALESCE(e."organizerFeePercent", 0)::numeric / 100) AS "netCents"
             FROM "Registration" r
             INNER JOIN "Order" o ON o.id = r."orderId"
+            INNER JOIN "Event" e ON e.id = o."eventId"
             INNER JOIN "Payment" p ON p."orderId" = o.id
             WHERE r."eventId" = ${eventId}::uuid
               AND r.status::text IN ('CONFIRMED', 'COMPLETED')
@@ -4152,7 +4193,8 @@ export class EventsService {
                 AND p.status::text = 'PAID'
             )::bigint AS paid,
             COUNT(*) FILTER (WHERE r.status::text = 'CANCELLED')::bigint AS cancelled,
-            COALESCE((SELECT SUM("finalAmount") FROM paid_orders), 0)::bigint AS collected
+            COUNT(*) FILTER (WHERE p.status::text = 'REFUNDED')::bigint AS refunded,
+            COALESCE((SELECT SUM(ROUND("netCents")) FROM paid_orders), 0)::bigint AS collected
           FROM "Registration" r
           INNER JOIN "Order" o ON o.id = r."orderId"
           LEFT JOIN "Payment" p ON p."orderId" = o.id
@@ -4166,13 +4208,17 @@ export class EventsService {
           total: bigint;
           paid: bigint;
           cancelled: bigint;
+          refunded: bigint;
           collected: bigint;
         }[]
       >(Prisma.sql`
           WITH paid_orders AS (
-            SELECT DISTINCT r."orderId", o."finalAmount"
+            SELECT DISTINCT r."orderId",
+              GREATEST(0, o."finalAmount" - COALESCE(o."serviceFee", 0))::numeric
+                * (1 - COALESCE(e."organizerFeePercent", 0)::numeric / 100) AS "netCents"
             FROM "Registration" r
             INNER JOIN "Order" o ON o.id = r."orderId"
+            INNER JOIN "Event" e ON e.id = o."eventId"
             INNER JOIN "Payment" p ON p."orderId" = o.id
             WHERE r."eventId" = ${eventId}::uuid
               AND r.status::text IN ('CONFIRMED', 'COMPLETED')
@@ -4187,7 +4233,8 @@ export class EventsService {
                 AND p.status::text = 'PAID'
             )::bigint AS paid,
             COUNT(*) FILTER (WHERE r.status::text = 'CANCELLED')::bigint AS cancelled,
-            COALESCE((SELECT SUM("finalAmount") FROM paid_orders), 0)::bigint AS collected
+            COUNT(*) FILTER (WHERE p.status::text = 'REFUNDED')::bigint AS refunded,
+            COALESCE((SELECT SUM(ROUND("netCents")) FROM paid_orders), 0)::bigint AS collected
           FROM "Registration" r
           INNER JOIN "Order" o ON o.id = r."orderId"
           LEFT JOIN "Payment" p ON p."orderId" = o.id
@@ -4200,6 +4247,7 @@ export class EventsService {
       total: Number(row?.total ?? 0),
       paid: Number(row?.paid ?? 0),
       cancelled: Number(row?.cancelled ?? 0),
+      refunded: Number(row?.refunded ?? 0),
       collected: Number(row?.collected ?? 0),
     };
   }
@@ -4216,6 +4264,7 @@ export class EventsService {
     totalChange: number;
     paidChange: number;
     cancelledChange: number;
+    refundedChange: number;
     totalCollectedChange: number;
   }> {
     const now = reference;
@@ -4242,6 +4291,7 @@ export class EventsService {
       totalChange: pct(thisWeek.total, prevWeek.total),
       paidChange: pct(thisWeek.paid, prevWeek.paid),
       cancelledChange: pct(thisWeek.cancelled, prevWeek.cancelled),
+      refundedChange: pct(thisWeek.refunded, prevWeek.refunded),
       totalCollectedChange: pct(
         this.normalizeToCents(thisWeek.collected),
         this.normalizeToCents(prevWeek.collected),
@@ -4619,9 +4669,10 @@ export class EventsService {
 
     const paid = stats.paid;
     const cancelled = stats.cancelled;
+    const refunded = stats.refunded;
     const totalCollected = this.normalizeToCents(stats.collected);
 
-    const { totalChange, paidChange, cancelledChange, totalCollectedChange } = wowChanges;
+    const { totalChange, paidChange, cancelledChange, refundedChange, totalCollectedChange } = wowChanges;
 
     // Formatar registrations
     // Cada registration representa um participante do pedido
@@ -4797,10 +4848,12 @@ export class EventsService {
           total: stats.total,
           paid,
           cancelled,
+          refunded,
           totalCollected,
           totalChange,
           paidChange,
           cancelledChange,
+          refundedChange,
           totalCollectedChange,
         },
         pagination: {
@@ -4934,9 +4987,10 @@ export class EventsService {
 
     const paid = stats.paid;
     const cancelled = stats.cancelled;
+    const refunded = stats.refunded;
     const totalCollected = this.normalizeToCents(stats.collected);
 
-    const { totalChange, paidChange, cancelledChange, totalCollectedChange } = wowChanges;
+    const { totalChange, paidChange, cancelledChange, refundedChange, totalCollectedChange } = wowChanges;
 
     return {
       message: 'Registration stats fetched successfully',
@@ -4944,10 +4998,12 @@ export class EventsService {
         total: stats.total,
         paid,
         cancelled,
+        refunded,
         totalCollected,
         totalChange,
         paidChange,
         cancelledChange,
+        refundedChange,
         totalCollectedChange,
       },
     };
