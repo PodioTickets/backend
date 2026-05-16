@@ -310,8 +310,15 @@ export class ExportRegistrationsService {
       const { headers, rows: expandedRows } = buildExpandedRows(registrations, fields);
       const colW = Math.max(40, Math.floor(pageW / headers.length));
       const ROW_H_MIN = 18;
-      const headerH = 22;
       const fontSize = headers.length > 10 ? 6 : headers.length > 7 ? 7 : 8;
+
+      // headerH dinâmico: calcula a altura do header mais alto e adiciona padding
+      doc.font('Helvetica-Bold').fontSize(fontSize);
+      const headerH = Math.max(
+        22,
+        ...headers.map((h) => doc.heightOfString(h, { width: colW - 6 }) + 12),
+      );
+      doc.font('Helvetica');
 
       const TITLE_H = 20;
 
@@ -347,9 +354,8 @@ export class ExportRegistrationsService {
         doc.fillColor('#ffffff').fontSize(fontSize).font('Helvetica-Bold');
         headers.forEach((h, i) => {
           doc.text(h, MARGIN + i * colW + 3, yPos + 6, {
-            width: colW - 4,
-            lineBreak: false,
-            ellipsis: true,
+            width: colW - 6,
+            lineBreak: true,
           });
         });
         doc.fillColor('#000000').font('Helvetica');
