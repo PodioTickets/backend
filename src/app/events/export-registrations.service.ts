@@ -335,11 +335,11 @@ export class ExportRegistrationsService {
           .fillColor('#202020')
           .text(eventName, MARGIN, yPos + 4, {
             width: pageW,
-            lineBreak: false,
-            ellipsis: true,
+            lineBreak: true,
           });
+        const renderedBottom = doc.y;
         doc.font('Helvetica').fillColor('#000000');
-        return yPos + TITLE_H;
+        return Math.max(yPos + TITLE_H, renderedBottom + 4);
       };
 
       const drawHeader = (yPos: number): number => {
@@ -369,7 +369,7 @@ export class ExportRegistrationsService {
         // Calcular altura dinâmica da linha com base no conteúdo mais alto
         doc.font('Helvetica').fontSize(fontSize);
         const alturas = cells.map((val) =>
-          doc.heightOfString(String(val || ''), { width: colW - 6 }) + 10,
+          doc.heightOfString(String(val || ''), { width: colW - 6 }) + 18,
         );
         const thisRowH = Math.max(ROW_H_MIN, ...alturas);
 

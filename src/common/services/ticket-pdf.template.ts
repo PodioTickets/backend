@@ -518,8 +518,12 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) => 
           View,
           { style: { flexDirection: 'row', alignItems: 'center', gap: 6 } },
           React.createElement(LogoVector, null),
-          React.createElement(PodioBrand, null),
-          React.createElement(TicketBrand, null),
+          React.createElement(
+            View,
+            { style: { flexDirection: 'row', alignItems: 'flex-end', gap: 0 } },
+            React.createElement(PodioBrand, null),
+            React.createElement(TicketBrand, null),
+          ),
         ),
         React.createElement(
           View,
