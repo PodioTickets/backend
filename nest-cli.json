@@ -16,6 +16,10 @@
       {
         "include": "common/templates/**/*",
         "outDir": "dist"
+      },
+      {
+        "include": "common/assets/**/*",
+        "outDir": "dist"
       }
     ]
   }

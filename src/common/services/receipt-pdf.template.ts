@@ -456,13 +456,10 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
             marginBottom: 20,
           },
         },
-        React.createElement(
-          View,
-          { style: { flexDirection: 'row', alignItems: 'center', gap: 5 } },
-          React.createElement(LogoVector, null),
-          React.createElement(PodioBrand, null),
-          React.createElement(TicketBrand, null),
-        ),
+        React.createElement(Image, {
+          src: path.join(process.cwd(), 'src', 'common', 'assets', 'logo-podioticket.png'),
+          style: { width: 160, height: 27 },
+        }),
         React.createElement(
           View,
           { style: { alignItems: 'flex-end', gap: 6 } },
