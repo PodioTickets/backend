@@ -12,6 +12,7 @@ import { OrganizersService } from './organizers.service';
 import { CreateOrganizerDto, UpdateOrganizerDto, ContactOrganizerDto } from './dto/create-organizer.dto';
 import { OrganizerEventsQueryDto } from './dto/organizer-events-query.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EventsService } from '../events/events.service';
 import { EventStatus } from '@prisma/client';
@@ -153,6 +154,7 @@ export class OrganizersController {
   }
 
   @Post(':organizationId/contact')
+  @UseGuards(OptionalJwtAuthGuard)
   @ApiOperation({ summary: 'Contact organizer', description: 'Sends a contact message to an organization. Authentication is optional.' })
   @ApiParam({ name: 'organizationId', description: 'Organization UUID' })
   @ApiBody({ type: ContactOrganizerDto })
