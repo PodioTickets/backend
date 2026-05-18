@@ -62,29 +62,29 @@
 
         <!-- ════════ BODY ════════ -->
         <tr>
-          <td style="padding:60px 24px;border-bottom:1px solid #D9D9D9;">
+          <td style="padding:60px 24px;border-bottom:1px solid #D9D9D9;background-color:#FCFCFC;">
 
             <!-- ── Ícone + título + subtítulo ── -->
-            <table width="100%" cellpadding="0" cellspacing="0" border="0">
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:40px;">
               <tr>
                 <td align="center" style="padding-bottom:20px;">
                   <img src="https://www.podioticket.com.br/images/check-circle-solid.svg" alt="" width="64" height="64">
                 </td>
               </tr>
               <tr>
-                <td align="center" style="padding-bottom:12px;">
-                  <span style="font-family:'Manrope',Arial,sans-serif;font-size:24px;font-weight:800;line-height:26px;color:#202020;">Mensagem enviada</span>
+                <td align="center" style="padding-bottom:20px;">
+                  <span style="font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:24px;font-weight:800;line-height:26.40px;color:#202020;">Mensagem enviada</span>
                 </td>
               </tr>
               <tr>
-                <td align="center" style="padding-bottom:40px;">
-                  <span style="font-family:'DM Sans',Arial,sans-serif;font-size:16px;font-weight:400;line-height:21px;color:#202020;">Sua mensagem foi entregue ao organizador. Você receberá a resposta neste mesmo e-mail.</span>
+                <td align="center">
+                  <span style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:400;line-height:20.80px;color:#202020;">Sua mensagem foi entregue ao organizador. Em breve você receberá uma resposta.</span>
                 </td>
               </tr>
             </table>
 
-            <!-- ── Card: evento e organizador ── -->
-            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F9F9F9;border-radius:8px;border:1px solid #D9D9D9;border-collapse:separate;border-spacing:0;margin-bottom:16px;">
+            <!-- ── Card: evento + organizador ── -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F9F9F9;border:1px solid #D9D9D9;border-radius:8px;border-collapse:separate;border-spacing:0;margin-bottom:20px;">
               <tr>
                 <td style="padding:20px;">
 
@@ -93,49 +93,55 @@
                   <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;">
                     <tr>
                       <td style="padding-bottom:8px;">
-                        <span style="font-family:'DM Sans',Arial,sans-serif;font-size:16px;font-weight:400;line-height:21px;color:#203C25;">Evento:</span>
+                        <p style="margin:0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:400;line-height:20.80px;color:#203C25;">Evento:</p>
                       </td>
                     </tr>
                     <tr>
                       <td>
-                        <span style="font-family:'Manrope',Arial,sans-serif;font-size:16px;font-weight:700;line-height:18px;color:#202020;">{{eventName}}</span>
+                        <p style="margin:0;font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:700;line-height:17.60px;color:#202020;word-wrap:break-word;">{{eventName}}</p>
                       </td>
                     </tr>
                   </table>
                   {{/eventName}}
 
-                  <!-- Organizador -->
+                  <!-- Organizador: avatar + labels -->
                   <table cellpadding="0" cellspacing="0" border="0">
                     <tr>
-                      <td style="vertical-align:middle;padding-right:12px;">
-                        <table cellpadding="0" cellspacing="0" border="0">
+                      <!-- Avatar -->
+                      <td width="56" style="vertical-align:middle;padding-right:8px;">
+                        <table width="56" height="56" cellpadding="0" cellspacing="0" border="0" style="background-color:#193B30;border:1px solid #46A758;border-radius:28px;border-collapse:separate;border-spacing:0;overflow:hidden;">
                           <tr>
-                            {{#organizerAvatarUrl}}
-                            <td width="56" height="56" align="center" valign="middle" style="width:56px;height:56px;border-radius:28px;border:1px solid #46A758;overflow:hidden;">
-                              <img src="{{organizerAvatarUrl}}" alt="{{organizerName}}" width="56" height="56" style="display:block;border-radius:28px;">
+                            <td width="56" height="56" align="center" valign="middle" style="width:56px;height:56px;">
+                              {{#organizerAvatarUrl}}
+                              <img src="{{organizerAvatarUrl}}" width="56" height="56" alt="" style="display:block;width:56px;height:56px;border-radius:28px;object-fit:cover;">
+                              {{/organizerAvatarUrl}}
+                              {{^organizerAvatarUrl}}
+                              <!-- Silhueta genérica: cabeça + ombros em branco -->
+                              <table cellpadding="0" cellspacing="0" border="0">
+                                <tr>
+                                  <td align="center">
+                                    <table width="14" height="14" cellpadding="0" cellspacing="0" border="0" style="background-color:#F9F9F9;border-radius:7px;border-collapse:separate;margin-bottom:3px;">
+                                      <tr><td style="width:14px;height:14px;font-size:0;line-height:0;">&nbsp;</td></tr>
+                                    </table>
+                                  </td>
+                                </tr>
+                                <tr>
+                                  <td align="center">
+                                    <table width="20" height="10" cellpadding="0" cellspacing="0" border="0" style="background-color:#F9F9F9;border-radius:10px 10px 0 0;border-collapse:separate;">
+                                      <tr><td style="width:20px;height:10px;font-size:0;line-height:0;">&nbsp;</td></tr>
+                                    </table>
+                                  </td>
+                                </tr>
+                              </table>
+                              {{/organizerAvatarUrl}}
                             </td>
-                            {{/organizerAvatarUrl}}
-                            {{^organizerAvatarUrl}}
-                            <td width="56" height="56" align="center" valign="middle" style="width:56px;height:56px;background-color:#193B30;border-radius:28px;border:1px solid #46A758;">
-                              <span style="font-family:'Manrope',Arial,sans-serif;font-size:22px;font-weight:700;line-height:56px;color:#FFFFFF;">{{organizerInitial}}</span>
-                            </td>
-                            {{/organizerAvatarUrl}}
                           </tr>
                         </table>
                       </td>
+                      <!-- Labels -->
                       <td style="vertical-align:middle;">
-                        <table cellpadding="0" cellspacing="0" border="0">
-                          <tr>
-                            <td style="padding-bottom:8px;">
-                              <span style="font-family:'DM Sans',Arial,sans-serif;font-size:14px;font-weight:400;line-height:18px;color:#202020;">Mensagem para</span>
-                            </td>
-                          </tr>
-                          <tr>
-                            <td>
-                              <span style="font-family:'Manrope',Arial,sans-serif;font-size:16px;font-weight:700;line-height:18px;color:#202020;">{{organizerName}}</span>
-                            </td>
-                          </tr>
-                        </table>
+                        <p style="margin:0 0 12px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;line-height:18.20px;color:#202020;">Mensagem para</p>
+                        <p style="margin:0;font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:700;line-height:17.60px;color:#202020;word-wrap:break-word;">{{organizerName}}</p>
                       </td>
                     </tr>
                   </table>
@@ -144,137 +150,12 @@
               </tr>
             </table>
 
-            <!-- ── Card: dados do remetente ── -->
-            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F9F9F9;border-radius:8px;border:1px solid #D9D9D9;border-collapse:separate;border-spacing:0;margin-bottom:16px;">
-              <tr>
-                <td style="padding:4px 20px;">
-
-                  <!-- Nome completo -->
-                  <table width="100%" cellpadding="0" cellspacing="0" border="0">
-                    <tr>
-                      <td style="padding-top:16px;padding-bottom:16px;border-bottom:1px solid #E9E9E9;">
-                        <table cellpadding="0" cellspacing="0" border="0">
-                          <tr>
-                            <td style="padding-bottom:12px;">
-                              <span style="font-family:'DM Sans',Arial,sans-serif;font-size:16px;font-weight:400;line-height:21px;color:#202020;">Nome completo</span>
-                            </td>
-                          </tr>
-                          <tr>
-                            <td>
-                              <span style="font-family:'DM Sans',Arial,sans-serif;font-size:16px;font-weight:500;line-height:21px;color:#202020;">{{userName}}</span>
-                            </td>
-                          </tr>
-                        </table>
-                      </td>
-                    </tr>
-                  </table>
-
-                  <!-- Email -->
-                  <table width="100%" cellpadding="0" cellspacing="0" border="0">
-                    <tr>
-                      <td style="padding-top:16px;padding-bottom:16px;border-bottom:1px solid #E9E9E9;">
-                        <table cellpadding="0" cellspacing="0" border="0">
-                          <tr>
-                            <td style="padding-bottom:12px;">
-                              <span style="font-family:'DM Sans',Arial,sans-serif;font-size:16px;font-weight:400;line-height:21px;color:#202020;">Email</span>
-                            </td>
-                          </tr>
-                          <tr>
-                            <td>
-                              <span style="font-family:'DM Sans',Arial,sans-serif;font-size:16px;font-weight:500;line-height:21px;color:#202020;">{{userEmail}}</span>
-                            </td>
-                          </tr>
-                        </table>
-                      </td>
-                    </tr>
-                  </table>
-
-                  {{#userCpf}}
-                  <!-- CPF -->
-                  <table width="100%" cellpadding="0" cellspacing="0" border="0">
-                    <tr>
-                      <td style="padding-top:16px;padding-bottom:16px;border-bottom:1px solid #E9E9E9;">
-                        <table cellpadding="0" cellspacing="0" border="0">
-                          <tr>
-                            <td style="padding-bottom:12px;">
-                              <span style="font-family:'DM Sans',Arial,sans-serif;font-size:16px;font-weight:400;line-height:21px;color:#202020;">CPF</span>
-                            </td>
-                          </tr>
-                          <tr>
-                            <td>
-                              <span style="font-family:'DM Sans',Arial,sans-serif;font-size:16px;font-weight:500;line-height:21px;color:#202020;">{{userCpf}}</span>
-                            </td>
-                          </tr>
-                        </table>
-                      </td>
-                    </tr>
-                  </table>
-                  {{/userCpf}}
-
-                  {{#userPhone}}
-                  <!-- Telefone -->
-                  <table width="100%" cellpadding="0" cellspacing="0" border="0">
-                    <tr>
-                      <td style="padding-top:16px;padding-bottom:16px;border-bottom:1px solid #E9E9E9;">
-                        <table cellpadding="0" cellspacing="0" border="0">
-                          <tr>
-                            <td style="padding-bottom:12px;">
-                              <span style="font-family:'DM Sans',Arial,sans-serif;font-size:16px;font-weight:400;line-height:21px;color:#202020;">Telefone</span>
-                            </td>
-                          </tr>
-                          <tr>
-                            <td>
-                              <span style="font-family:'DM Sans',Arial,sans-serif;font-size:16px;font-weight:500;line-height:21px;color:#202020;">{{userPhone}}</span>
-                            </td>
-                          </tr>
-                        </table>
-                      </td>
-                    </tr>
-                  </table>
-                  {{/userPhone}}
-
-                  {{#subject}}
-                  <!-- Assunto -->
-                  <table width="100%" cellpadding="0" cellspacing="0" border="0">
-                    <tr>
-                      <td style="padding-top:16px;padding-bottom:16px;">
-                        <table cellpadding="0" cellspacing="0" border="0">
-                          <tr>
-                            <td style="padding-bottom:12px;">
-                              <span style="font-family:'DM Sans',Arial,sans-serif;font-size:16px;font-weight:400;line-height:21px;color:#202020;">Assunto</span>
-                            </td>
-                          </tr>
-                          <tr>
-                            <td>
-                              <span style="font-family:'DM Sans',Arial,sans-serif;font-size:16px;font-weight:500;line-height:21px;color:#202020;">{{subject}}</span>
-                            </td>
-                          </tr>
-                        </table>
-                      </td>
-                    </tr>
-                  </table>
-                  {{/subject}}
-
-                </td>
-              </tr>
-            </table>
-
-            <!-- ── Card: mensagem ── -->
-            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F5FBF5;border-radius:8px;border-top:1px solid #46A758;border-right:1px solid #46A758;border-bottom:1px solid #46A758;border-left:4px solid #46A758;border-collapse:separate;border-spacing:0;">
+            <!-- ── Card: mensagem (verde) ── -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F5FBF5;border-top:1px solid #46A758;border-right:1px solid #46A758;border-bottom:1px solid #46A758;border-left:4px solid #46A758;border-radius:8px;border-collapse:separate;border-spacing:0;">
               <tr>
                 <td style="padding:24px;">
-                  <table width="100%" cellpadding="0" cellspacing="0" border="0">
-                    <tr>
-                      <td style="padding-bottom:16px;">
-                        <span style="font-family:'DM Sans',Arial,sans-serif;font-size:16px;font-weight:400;line-height:21px;color:#203C25;">Mensagem</span>
-                      </td>
-                    </tr>
-                    <tr>
-                      <td>
-                        <span style="font-family:'DM Sans',Arial,sans-serif;font-size:18px;font-weight:500;line-height:23px;color:#203C25;white-space:pre-wrap;">{{message}}</span>
-                      </td>
-                    </tr>
-                  </table>
+                  <p style="margin:0 0 20px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:400;line-height:20.80px;color:#203C25;">Mensagem</p>
+                  <p style="margin:0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:18px;font-weight:500;line-height:23.40px;color:#203C25;word-wrap:break-word;white-space:pre-line;">{{message}}</p>
                 </td>
               </tr>
             </table>
@@ -285,33 +166,16 @@
         <!-- ════════ FOOTER ════════ -->
         <tr>
           <td align="center" style="padding:40px 24px;background-color:#FFFFFF;">
-            <table cellpadding="0" cellspacing="0" border="0">
-              <tr>
-                <td align="center" style="padding-bottom:20px;">
-                  <img src="https://www.podioticket.com.br/images/Vector-1.svg" alt="PódioTicket" width="37" height="36">
-                </td>
-              </tr>
-              <tr>
-                <td align="center" style="padding-bottom:8px;">
-                  <span style="font-family:'DM Sans',Arial,sans-serif;font-size:14px;font-weight:400;line-height:18px;color:#202020;">Plataforma de inscrições para eventos esportivos</span>
-                </td>
-              </tr>
-              <tr>
-                <td align="center" style="padding-bottom:32px;">
-                  <span style="font-family:'DM Sans',Arial,sans-serif;font-size:14px;font-weight:500;line-height:18px;color:#202020;">Este é um e-mail automático. Para suporte, acesse a Central de Ajuda.</span>
-                </td>
-              </tr>
-              <tr>
-                <td align="center" style="padding-bottom:8px;">
-                  <span style="font-family:'DM Sans',Arial,sans-serif;font-size:14px;font-weight:400;line-height:18px;color:#202020;">© 2026 Podioticket Ltda.</span>
-                </td>
-              </tr>
-              <tr>
-                <td align="center">
-                  <span style="font-family:'DM Sans',Arial,sans-serif;font-size:14px;font-weight:400;line-height:18px;color:#202020;">CNPJ 65.174.909/0001-01</span>
-                </td>
-              </tr>
-            </table>
+
+            <img src="https://www.podioticket.com.br/images/Vector.svg" alt="" width="37" height="36" style="display:block;margin:0 auto 20px auto;">
+
+            <p style="margin:0 0 12px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;line-height:18.20px;color:#202020;text-align:center;">Plataforma de inscrições para eventos esportivos</p>
+
+            <p style="margin:0 0 52px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:500;line-height:18.20px;color:#202020;text-align:center;">Este é um e-mail automático. Para suporte, acesse a Central de Ajuda.</p>
+
+            <p style="margin:0 0 16px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;line-height:18.20px;color:#202020;text-align:center;">© 2026 Podioticket Ltda.</p>
+            <p style="margin:0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;line-height:18.20px;color:#202020;text-align:center;">CNPJ 65.174.909/0001-01</p>
+
           </td>
         </tr>
 
