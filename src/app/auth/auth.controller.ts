@@ -103,12 +103,6 @@ export class AuthController {
           description: 'User password',
           example: 'password123',
         },
-        accountType: {
-          type: 'string',
-          enum: ['USER', 'ORGANIZER'],
-          description: 'Account type: USER (participant) or ORGANIZER. Defaults to USER if not provided.',
-          example: 'USER',
-        },
         turnstileToken: {
           type: 'string',
           description: 'Cloudflare Turnstile token from frontend widget',
@@ -134,7 +128,6 @@ export class AuthController {
       properties: {
         emailOrCpf: { type: 'string' },
         password: { type: 'string' },
-        accountType: { type: 'string', enum: ['USER', 'ORGANIZER'], default: 'USER' },
       },
       required: ['emailOrCpf', 'password'],
     },

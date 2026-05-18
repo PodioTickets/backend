@@ -23,8 +23,8 @@ export class LocalStrategy extends PassportStrategy(Strategy) {
       throw new UnauthorizedException('Senha é obrigatória');
     }
 
-    // Obter accountType do body (default: USER)
-    const accountType = (req.body?.accountType as AccountType) || AccountType.USER;
+    // Rota /auth/login e /auth/login/admin são exclusivas para contas USER
+    const accountType = AccountType.USER;
 
     const user = await this.authService.validateUser(emailOrCpf, password, accountType);
     if (!user) {

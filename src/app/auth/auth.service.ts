@@ -1149,7 +1149,7 @@ export class AuthService {
     }
 
     const existing = await prismaRead.user.findFirst({
-      where: { email: { equals: normalizedEmail, mode: 'insensitive' } },
+      where: { email: { equals: normalizedEmail, mode: 'insensitive' }, accountType: user.accountType },
       select: { id: true },
     });
     if (existing) throw new BadRequestException('Este e-mail já está em uso');
