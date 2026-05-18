@@ -140,6 +140,7 @@ export class EmailService {
     userEmail: string;
     userCpf?: string;
     userPhone?: string;
+    userAvatarUrl?: string;
     subject?: string;
     message: string;
     eventName?: string;
@@ -151,6 +152,7 @@ export class EmailService {
       userEmail: this.escapeHtml(data.userEmail),
       userCpf: data.userCpf ? this.escapeHtml(data.userCpf) : '',
       userPhone: data.userPhone ? this.escapeHtml(data.userPhone) : '',
+      userAvatarUrl: this.escapeHtml(this.safeUrl(data.userAvatarUrl)),
       subject: data.subject ? this.escapeHtml(data.subject) : '',
       message: this.escapeHtml(data.message),
       eventName: data.eventName ? this.escapeHtml(data.eventName) : '',

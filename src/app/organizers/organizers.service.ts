@@ -351,6 +351,7 @@ export class OrganizersService {
         userEmail: contactData.email,
         userCpf: contactData.cpf,
         userPhone: contactData.phone,
+        userAvatarUrl,
         subject: contactData.subject,
         message: cleanMessage,
         eventName: event?.name,
