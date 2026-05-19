@@ -253,18 +253,23 @@ export class RepasseService {
    * Buckets:
    *   aguardandoLiberacao — pedidos à vista ainda dentro do prazo de retenção (100%)
    *   valorRetido         — 10% de pedidos à vista fora do prazo, aguardando auditoria
-   *   parceladosAReceber  — parcelas futuras (90%/N) + 10% retido de parcelados (aguarda auditoria)
+   *   parceladosAReceber  — parcelas futuras (orgNet/N). Parcelado NÃO retém 10%:
+   *                         o total líquido é distribuído entre N parcelas e cada uma
+   *                         migra para saldoDisponivel quando vence.
    *   saldoDisponivel     — montante já liberado; pode ser negativo em caso de estorno
    *
-   * Prioridade de dedução por estorno (non-installment):
-   *   1. 10% sai de aguardandoLiberacao + valorRetido
-   *   2. 90% (+ deficit do 10%) sai de saldoDisponivel
-   *   3. Se saldo insuficiente, recupera o deficit do aguardando restante
-   *   4. Se ainda insuficiente, saldoDisponivel fica negativo
+   * Dedução por estorno (à vista, evento auditado):
+   *   - 100% do orgNet sai de saldoDisponivel (pode ficar negativo).
    *
-   * Prioridade de dedução por estorno (installment):
-   *   1. Deduz de parceladosAReceber primeiro
-   *   2. Remainder vai de saldoDisponivel (pode ficar negativo)
+   * Dedução por estorno (à vista, evento NÃO auditado):
+   *   - 10% (retained) sai primeiro de aguardandoLiberacao, depois de valorRetido.
+   *     Ambos têm clamp em 0 — aguardando/retido NUNCA fica negativo.
+   *   - O que não couber no 10% (déficit) é somado ao 90% e sai de saldoDisponivel.
+   *   - 90% (+ déficit) sai de saldoDisponivel (pode ficar negativo).
+   *
+   * Dedução por estorno (parcelado):
+   *   - Deduz de parceladosAReceber primeiro (clamp em 0).
+   *   - Restante sai de saldoDisponivel (pode ficar negativo).
    *
    * @param committedWithdrawals — COMPLETED + PENDING withdrawals (both reduce saldoParaSaque)
    */
@@ -300,12 +305,11 @@ export class RepasseService {
       const metadata = payment.metadata as any;
 
       if (isInstallment(metadata)) {
-        // 10% retido separado; 90% dividido em N parcelas de 31 dias cada
+        // Parcelado não retém 10%: 100% do orgNet distribuído em N parcelas de 31 dias.
+        // Cada parcela vencida vai pro saldoDisponivel; as futuras ficam em parceladosAReceber.
         const count: number = metadata.creditCard.installments;
-        const retained = Math.round(orgNet * retentionRate);
-        const distributable = orgNet - retained;
-        const baseInstallment = Math.floor(distributable / count);
-        const lastExtra = distributable - baseInstallment * count;
+        const baseInstallment = Math.floor(orgNet / count);
+        const lastExtra = orgNet - baseInstallment * count;
 
         for (let i = 0; i < count; i++) {
           const dueDate = addDays(paymentDate, 31 * (i + 1));
@@ -315,12 +319,6 @@ export class RepasseService {
           } else {
             saldoDisponivel += amount;
           }
-        }
-
-        if (isAudited) {
-          saldoDisponivel += retained;
-        } else {
-          parceladosAReceber += retained;
         }
       } else {
         const releaseDate = getReleaseDate(paymentDate, payment.method);
@@ -349,36 +347,31 @@ export class RepasseService {
       const metadata = payment.metadata as any;
 
       if (isInstallment(metadata)) {
-        // Parcelado: deduz de parceladosAReceber primeiro, depois de saldo
+        // Parcelado: deduz de parceladosAReceber primeiro (clamp em 0), restante de saldo.
         const fromParcelados = Math.min(orgNet, Math.max(0, parceladosAReceber));
         parceladosAReceber -= fromParcelados;
         saldoDisponivel -= orgNet - fromParcelados;
+      } else if (isAudited) {
+        // Auditado: 10% já foi liberado — não existe mais bucket de retenção.
+        // 100% do orgNet sai direto do saldo (pode ficar negativo).
+        saldoDisponivel -= orgNet;
       } else {
+        // Não-auditado: tira 10% de aguardando/retido (clamp em 0) + 90% do saldo.
         const retained = Math.round(orgNet * retentionRate); // 10%
         const toRelease = orgNet - retained;                  // 90%
 
-        // 10% sai de aguardandoLiberacao (prioridade) ou valorRetido
-        const aguardandoDisp = Math.max(0, aguardandoLiberacao) + Math.max(0, valorRetido);
-        const fromAguardando = Math.min(retained, aguardandoDisp);
-        const deficit10 = retained - fromAguardando;
-
-        const fromAL = Math.min(fromAguardando, Math.max(0, aguardandoLiberacao));
+        // 10% sai primeiro de aguardandoLiberacao, depois de valorRetido. Ambos clamp em 0.
+        const fromAL = Math.min(retained, Math.max(0, aguardandoLiberacao));
         aguardandoLiberacao -= fromAL;
-        valorRetido -= fromAguardando - fromAL;
+        const remaining10 = retained - fromAL;
+        const fromVR = Math.min(remaining10, Math.max(0, valorRetido));
+        valorRetido -= fromVR;
+        const deficit10 = remaining10 - fromVR;
 
-        // 90% + deficit do 10% sai de saldo (pode ficar negativo)
+        // 90% + déficit do 10% sai do saldo (pode ficar negativo).
+        // Diferente da regra antiga: NÃO há recovery do aguardando/retido —
+        // se saldo ficou negativo, ele permanece negativo até nova receita entrar.
         saldoDisponivel -= toRelease + deficit10;
-
-        // Se saldo ficou negativo, recupera do aguardando restante
-        if (saldoDisponivel < 0) {
-          const remainingAg = Math.max(0, aguardandoLiberacao) + Math.max(0, valorRetido);
-          const recovery = Math.min(Math.abs(saldoDisponivel), remainingAg);
-          saldoDisponivel += recovery;
-          const recFromAL = Math.min(recovery, Math.max(0, aguardandoLiberacao));
-          aguardandoLiberacao -= recFromAL;
-          valorRetido -= recovery - recFromAL;
-          // saldo permanece negativo se recovery < deficit (conforme spec)
-        }
       }
     }
 
@@ -594,14 +587,12 @@ export class RepasseService {
 
     // Primary client — financeiro precisa estar sempre atualizado
     const prismaPrimary = this.prisma.getWriteClient();
-    const [event, audit, orders] = await Promise.all([
+    const [event, orders] = await Promise.all([
       this.loadEventConfig(eventId, prismaPrimary),
-      this.loadAudit(eventId, prismaPrimary),
       this.loadPaidOrders(eventId, prismaPrimary),
     ]);
 
     const now = getNow();
-    const isAudited = !!audit;
     const items: any[] = [];
     let totalPending = 0;
 
@@ -615,16 +606,16 @@ export class RepasseService {
       const paymentDate = new Date(payment.paymentDate);
 
       // serviceFee é 100% da plataforma, sai antes do split. Em cima do que sobra,
-      // aplicamos organizerFeePercent, e em cima do líquido, retentionRate (10%) + 90%.
+      // aplicamos organizerFeePercent. Parcelado NÃO retém 10%: o líquido é distribuído
+      // integralmente entre as N parcelas (decisão de produto — apenas pedidos à vista
+      // têm retenção de 10% aguardando auditoria).
       const organizerBase = Math.max(
         0,
         (order.finalAmount ?? 0) - (order.serviceFee ?? 0),
       );
       const netAmount = Math.round(organizerBase * (1 - event.organizerFeePercent / 100));
-      const retained = Math.round(netAmount * event.retentionRate);
-      const distributable = netAmount - retained;
-      const baseInstallment = Math.floor(distributable / count);
-      const lastExtra = distributable - baseInstallment * count;
+      const baseInstallment = Math.floor(netAmount / count);
+      const lastExtra = netAmount - baseInstallment * count;
 
       for (let i = 0; i < count; i++) {
         const dueDate = addDays(paymentDate, 31 * (i + 1));
@@ -645,22 +636,6 @@ export class RepasseService {
           });
           totalPending += amount;
         }
-      }
-
-      // 10% retido: fica em parceladosAReceber até a auditoria
-      if (!isAudited) {
-        items.push({
-          id: `${payment.id}-retention`,
-          orderId: order.id,
-          paymentId: payment.id,
-          installmentNumber: null,
-          totalInstallments: count,
-          amount: retained,
-          dueDate: null, // liberado na auditoria
-          isRetention: true,
-          buyer: order.user,
-        });
-        totalPending += retained;
       }
     }
 

@@ -6,6 +6,7 @@ import {
   UpdateTicketCategoryDto,
   ReorderTicketCategoriesDto,
 } from './dto/create-ticket-category.dto';
+import { stripDeletedCategoryFromKitSelectionDisplay } from '../events/kit-selection-display.prune';
 
 @Injectable()
 export class TicketCategoriesService {
@@ -188,8 +189,27 @@ export class TicketCategoriesService {
       throw new BadRequestException('Não é possível excluir categoria com ingressos associados');
     }
 
-    await prismaWrite.ticketCategory.delete({
-      where: { id: categoryId },
+    // Hard delete + limpeza de kitSelectionDisplay na mesma tx: o categoryId
+    // pode estar como chave em primaryKitProductByCategoryId e quebraria a
+    // validação no próximo PATCH /events/:id se ficasse órfão.
+    await prismaWrite.$transaction(async (tx) => {
+      const ev = await tx.event.findUnique({
+        where: { id: eventId },
+        select: { kitSelectionDisplay: true },
+      });
+      if (ev?.kitSelectionDisplay != null) {
+        const { next, changed } = stripDeletedCategoryFromKitSelectionDisplay(
+          ev.kitSelectionDisplay,
+          categoryId,
+        );
+        if (changed) {
+          await tx.event.update({
+            where: { id: eventId },
+            data: { kitSelectionDisplay: next },
+          });
+        }
+      }
+      await tx.ticketCategory.delete({ where: { id: categoryId } });
     });
 
     return {

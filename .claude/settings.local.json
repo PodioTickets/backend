@@ -41,7 +41,8 @@
       "Bash(python3 -c \"import sys, json; d=json.load\\(sys.stdin\\); print\\('tickets:', len\\(d['data']['tickets']\\)\\); print\\('pagination:', d['data']['pagination']\\); print\\('names:', [t['name'] for t in d['data']['tickets']]\\)\")",
       "Bash(pnpm exec *)",
       "Bash(curl -s \"https://api.podioticket.com.br/api/v1/events/search?page=1&limit=20\")",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(wait %1)"
     ]
   }
 }

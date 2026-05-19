@@ -1816,9 +1816,15 @@ export class EventsService {
   }
 
   /**
-   * Sanitiza o payload do evento para resposta pública por slug.
-   * Além de remover IDs de tracking de anúncios, omite configurações financeiras
-   * internas (taxas e retenção) que não devem ser expostas a consumidores públicos.
+   * Sanitiza o payload do evento para resposta pública por slug/id.
+   * Remove:
+   *  - IDs de tracking de anúncios (Meta/GA/Ads) — não pertencem ao contrato público.
+   *  - `organizerFeePercent` e `retentionRate` — taxas internas (Podio↔organizador)
+   *    que o participante não deve conhecer.
+   *
+   * `participantFeePercent` é PRESERVADO: o participante paga essa taxa e ela já
+   * compõe o total exibido no checkout — o front precisa do valor para mostrar
+   * o breakdown antes de chamar o pagamento.
    */
   private stripPublicEventForSlug<E extends Record<string, unknown>>(event: E): E {
     const {
@@ -1826,7 +1832,6 @@ export class EventsService {
       googleAnalyticsId: _ga,
       googleAdsId: _gad,
       organizerFeePercent: _ofp,
-      participantFeePercent: _pfp,
       retentionRate: _rr,
       ...rest
     } = event;
@@ -3730,10 +3735,27 @@ export class EventsService {
       this.ticketsService.findAll(eventId, { page, limit, includeInactive: true }),
     ]);
 
-    const totalRefunded = refundedOrders.reduce(
-      (s: number, o: any) => s + (o.finalAmount ?? 0),
-      0,
-    );
+    // Separa refunds "comuns" (estorno via admin) de chargebacks (reversão pelo emissor/painel Cielo).
+    // Convenção do projeto (alinhada com queryRegistrationIdsPageForRefundedMetadataFilter):
+    //   - CHARGEBACK: metadata.refundType === 'CHARGEBACK'
+    //   - REFUND:     metadata.refundType ∈ {'REFUND', null, '', undefined}
+    const isChargeback = (o: any) =>
+      (o.payment?.metadata as any)?.refundType === 'CHARGEBACK';
+
+    let totalRefunded = 0;
+    let refundedCount = 0;
+    let totalChargebacks = 0;
+    let chargebackCount = 0;
+    for (const o of refundedOrders) {
+      const amount = o.finalAmount ?? 0;
+      if (isChargeback(o)) {
+        totalChargebacks += amount;
+        chargebackCount += 1;
+      } else {
+        totalRefunded += amount;
+        refundedCount += 1;
+      }
+    }
 
     const dateRange = period
       ? this.calculateFinancialDateRange(period)
@@ -3750,16 +3772,20 @@ export class EventsService {
       message: 'Financial data fetched successfully',
       data: {
         summary: {
-          // Mapeia nomes do RepasseService → contrato existente do EventsService.getFinancial
-          availableBalance: Math.max(0, breakdown.saldoParaSaque),
+          // Mapeia nomes do RepasseService → contrato existente do EventsService.getFinancial.
+          // availableBalance pode ser NEGATIVO em caso de estorno sem saldo suficiente —
+          // alinhado com a nova regra do calcBreakdown (saldo permanece negativo até nova
+          // receita compensar, sem recovery do aguardando/retido).
+          availableBalance: breakdown.saldoParaSaque,
           pendingRelease: breakdown.aguardandoLiberacao,
           awaitingAudit: breakdown.valorRetido,
           installmentsToReceive: breakdown.parceladosAReceber,
           grossRevenue: breakdown.grossRevenue,
           totalWithdrawn: completedWithdrawalsTotal,
           totalRefunded,
-          refundedCount: refundedOrders.length,
-          totalChargebacks: 0,
+          refundedCount,
+          totalChargebacks,
+          chargebackCount,
           isAudited: !!audit,
           paymentMethodStats,
         },

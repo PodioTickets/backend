@@ -14,6 +14,7 @@ import {
   type TicketBeforeAudit,
 } from './ticket-audit.helpers';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
+import { stripDeletedTicketFromKitSelectionDisplay } from '../events/kit-selection-display.prune';
 
 function resolveImageUrl(url: string | null | undefined, baseUrl: string): string | null | undefined {
   if (!url) return url;
@@ -845,13 +846,34 @@ export class TicketsService {
     const hasSales = ticket.registrations.length > 0 || ticket.reservedTickets.length > 0;
 
     if (hasSales) {
+      // Soft delete: ticket continua no evento (isActive=false), então não há
+      // ID órfão em kitSelectionDisplay — não precisa de prune.
       await prismaWrite.ticket.update({
         where: { id: ticketId },
         data: { isActive: false },
       });
     } else {
-      await prismaWrite.ticket.delete({
-        where: { id: ticketId },
+      // Hard delete: ticket some do banco; o ticketId pode estar como chave em
+      // event.kitSelectionDisplay.primaryKitProductByTicketId e quebraria a
+      // validação no próximo PATCH /events/:id. Limpa o JSON na mesma tx.
+      await prismaWrite.$transaction(async (tx) => {
+        const ev = await tx.event.findUnique({
+          where: { id: eventId },
+          select: { kitSelectionDisplay: true },
+        });
+        if (ev?.kitSelectionDisplay != null) {
+          const { next, changed } = stripDeletedTicketFromKitSelectionDisplay(
+            ev.kitSelectionDisplay,
+            ticketId,
+          );
+          if (changed) {
+            await tx.event.update({
+              where: { id: eventId },
+              data: { kitSelectionDisplay: next },
+            });
+          }
+        }
+        await tx.ticket.delete({ where: { id: ticketId } });
       });
     }
 
