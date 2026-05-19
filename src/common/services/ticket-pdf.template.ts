@@ -515,7 +515,7 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) => 
           },
         },
         React.createElement(Image, {
-          src: path.join(process.cwd(), 'src', 'common', 'assets', 'logo-podioticket.png'),
+          src: path.join(__dirname, '..', 'assets', 'logo-podioticket.png'),
           style: { width: 160, height: 27 },
         }),
         React.createElement(
