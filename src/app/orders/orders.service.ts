@@ -312,6 +312,24 @@ function computePendingProductsSubtotal(order: any): number {
   );
 }
 
+/**
+ * Resolve o preço unitário de um produto considerando a variação selecionada.
+ *
+ * Regra:
+ * - Sem variação → basePrice.
+ * - Variação "Sem interesse" → 0 (opt-out de produto opcional; convenção do projeto).
+ * - Variação com `price > 0` → usa o price da variação (sobrescreve basePrice).
+ * - Variação com `price === 0` (e nome ≠ "Sem interesse") → fallback para basePrice.
+ *   Cobre o caso de organizer cadastrar variações P/M/G sem preencher price,
+ *   esperando que o basePrice prevaleça.
+ */
+function resolveProductUnitPrice(product: any, variation: any | null | undefined): number {
+  const basePrice = product?.basePrice ?? 0;
+  if (!variation) return basePrice;
+  if (variation.name === 'Sem interesse') return 0;
+  return variation.price > 0 ? variation.price : basePrice;
+}
+
 function inferEffectiveUsage(
   reservedTickets: any[],
   coupon: { type: string; value: number; appliesTo?: string | null } | null | undefined,
@@ -1715,16 +1733,16 @@ export class OrdersService {
       });
       if (!product) throw new NotFoundException(`Produto ${item.productId} não encontrado`);
 
-      let unitPrice: number = product.basePrice;
+      let variation: any = null;
       if (item.variationId) {
-        const variation = product.variations.find((v: any) => v.id === item.variationId);
+        variation = product.variations.find((v: any) => v.id === item.variationId);
         if (!variation) {
           throw new UnprocessableEntityException(
             `Variação selecionada não encontrada para "${product.name}". Selecione uma opção válida.`,
           );
         }
-        unitPrice = variation.name === 'Sem interesse' ? 0 : variation.price;
       }
+      const unitPrice = resolveProductUnitPrice(product, variation);
       productsSubtotal += unitPrice * item.quantity;
     }
 
@@ -1869,11 +1887,10 @@ export class OrdersService {
           include: { variations: true },
         });
         if (product) {
-          let unitPrice: number = product.basePrice;
-          if (item.variationId) {
-            const variation = product.variations.find((v: any) => v.id === item.variationId);
-            if (variation) unitPrice = variation.name === 'Sem interesse' ? 0 : variation.price;
-          }
+          const variation = item.variationId
+            ? product.variations.find((v: any) => v.id === item.variationId)
+            : null;
+          const unitPrice = resolveProductUnitPrice(product, variation);
           productsSubtotal += unitPrice * item.quantity;
         }
       }
@@ -2598,14 +2615,10 @@ export class OrdersService {
               });
               if (product) participantProductMap.set(product.id, product);
               if (!product) continue;
-              let unitPrice: number = product.basePrice;
-              if (item.variationId) {
-                const variation = product.variations.find((v: any) => v.id === item.variationId);
-                if (variation) unitPrice = variation.name === 'Sem interesse' ? 0 : variation.price;
-              }
               const selectedVariation = item.variationId
                 ? (product.variations ?? []).find((v: any) => v.id === item.variationId)
                 : null;
+              const unitPrice = resolveProductUnitPrice(product, selectedVariation);
               const productSnapshot = {
                 id: product.id,
                 name: product.name,
