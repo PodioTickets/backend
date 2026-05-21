@@ -19,6 +19,22 @@ import { ReceiptPdfData, ReceiptPdfRegistrationRow } from './receipt-pdf.types';
 
 const LinearGradient = LinearGradientBase as any;
 
+/**
+ * Decide se o comprador é brasileiro com base no campo `country` do User.
+ * Aceita variantes ("BR", "Brasil", "Brazil"). null/undefined → BR (default).
+ */
+function isBR(country?: string | null): boolean {
+  if (!country) return true;
+  const c = country.trim().toLowerCase();
+  return c === 'br' || c === 'brasil' || c === 'brazil';
+}
+
+function fmtCPF(cpf: string): string {
+  const d = cpf.replace(/\D/g, '');
+  if (d.length !== 11) return cpf;
+  return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
+}
+
 function formatPaymentMethod(method: string | undefined): string {
   const m = (method ?? '').toUpperCase();
   if (m === 'CREDIT_CARD') return 'Cartão de crédito';
@@ -606,10 +622,15 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
             View,
             { style: { gap: 10 } },
             data.buyer.document
-              ? React.createElement(InfoRow, {
-                  label: 'CPF / CNPJ',
-                  value: data.buyer.document,
-                })
+              ? isBR(data.buyer.country)
+                ? React.createElement(InfoRow, {
+                    label: 'CPF / CNPJ',
+                    value: fmtCPF(data.buyer.document),
+                  })
+                : React.createElement(InfoRow, {
+                    label: 'Documento',
+                    value: data.buyer.document,
+                  })
               : null,
             React.createElement(InfoRow, { label: 'Evento', value: data.event.name }),
             React.createElement(InfoRow, {

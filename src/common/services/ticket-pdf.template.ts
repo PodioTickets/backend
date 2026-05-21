@@ -85,6 +85,17 @@ function fmtCPF(cpf: string): string {
   return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
 }
 
+/**
+ * Decide se o usuário é brasileiro com base no campo `country` do User.
+ * Aceita variantes ("BR", "Brasil", "Brazil") e trata null/undefined como BR
+ * para compatibilidade com cadastros antigos sem nacionalidade preenchida.
+ */
+function isBR(country?: string | null): boolean {
+  if (!country) return true;
+  const c = country.trim().toLowerCase();
+  return c === 'br' || c === 'brasil' || c === 'brazil';
+}
+
 function fmtPhone(phone: string): string {
   const d = phone.replace(/\D/g, '');
   if (d.length === 11) return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
@@ -239,7 +250,11 @@ const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
 const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
   const fields = [
     reg.email ? { label: 'Email', value: reg.email } : null,
-    reg.cpf ? { label: 'CPF', value: fmtCPF(reg.cpf) } : null,
+    reg.cpf
+      ? isBR(reg.country)
+        ? { label: 'CPF', value: fmtCPF(reg.cpf) }
+        : { label: 'Documento', value: reg.cpf }
+      : null,
     reg.dateOfBirth ? { label: 'Data de nascimento', value: fmtDate(reg.dateOfBirth) } : null,
     reg.phone ? { label: 'Telefone', value: fmtPhone(reg.phone) } : null,
     reg.gender ? { label: 'Sexo', value: reg.gender === 'MALE' ? 'Masculino' : reg.gender === 'FEMALE' ? 'Feminino' : reg.gender } : null,

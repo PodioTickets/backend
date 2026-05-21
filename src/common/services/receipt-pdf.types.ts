@@ -18,6 +18,11 @@ export interface ReceiptPdfData {
   buyer: {
     name: string;
     document?: string;
+    /**
+     * País do comprador. Quando diferente de Brasil, o label muda de "CPF / CNPJ"
+     * para "Documento" e o valor é exibido sem formatação de CPF.
+     */
+    country?: string | null;
   };
   event: {
     name: string;

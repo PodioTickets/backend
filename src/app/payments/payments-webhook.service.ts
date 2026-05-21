@@ -297,6 +297,11 @@ export class PaymentsWebhookService {
               ticketName: fullTicketName,
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
+              /* País do participante: usado pelo template do PDF para decidir
+               * label do documento (CPF vs Documento) e aplicar/pular formatação.
+               * Pegamos sempre do user real (não só isBuyerReg) — convidado sem
+               * conta cai em null e o template assume BR. */
+              country: reg.user?.country ?? null,
               dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
               phone: reg.participantPhone ?? user.phone,
               gender: reg.participantGender ?? user.gender,
@@ -587,6 +592,11 @@ export class PaymentsWebhookService {
               ticketName: fullTicketName,
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
+              /* País do participante: usado pelo template do PDF para decidir
+               * label do documento (CPF vs Documento) e aplicar/pular formatação.
+               * Pegamos sempre do user real (não só isBuyerReg) — convidado sem
+               * conta cai em null e o template assume BR. */
+              country: reg.user?.country ?? null,
               dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
               phone: reg.participantPhone ?? user.phone,
               gender: reg.participantGender ?? user.gender,

@@ -13,6 +13,13 @@ export interface TicketPdfRegistration {
   ticketName: string;
   email?: string;
   cpf?: string;
+  /**
+   * País do participante (ex.: "BR", "Brasil", "US", "PT"). Usado para decidir
+   * o label do documento ("CPF" para brasileiros, "Documento" caso contrário)
+   * e se aplica formatação de CPF (xxx.xxx.xxx-xx) ou exibe o valor cru.
+   * Quando ausente/nulo, assume brasileiro (compatibilidade com dados antigos).
+   */
+  country?: string | null;
   dateOfBirth?: Date | string | null;
   phone?: string;
   gender?: string;

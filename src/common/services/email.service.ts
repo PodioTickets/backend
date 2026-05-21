@@ -84,6 +84,12 @@ export class EmailService {
     userPhone?: string;
     userCpf?: string;
     userAvatarUrl?: string;
+    /**
+     * Quando true, o template exibe o label "CPF". Quando false, exibe "Documento"
+     * e o valor é renderizado sem formatação de CPF (xxx.xxx.xxx-xx).
+     * Default: true (compatibilidade com chamadas existentes).
+     */
+    isBrazilian?: boolean;
     subject?: string;
     eventName?: string;
     message: string;
@@ -94,12 +100,19 @@ export class EmailService {
         : `Nova mensagem de ${data.userName}`,
     );
 
+    /* Default: brasileiro (mantém comportamento legado quando flag não é enviada). */
+    const isBrazilian = data.isBrazilian !== false;
+    const documentLabel = isBrazilian ? 'CPF' : 'Documento';
+
     const html = this.loadTemplate('mensagem-organizador.html', {
       organizerName: this.escapeHtml(data.organizerName),
       userName: this.escapeHtml(data.userName),
       userEmail: this.escapeHtml(data.userEmail),
       userPhone: data.userPhone ? this.escapeHtml(data.userPhone) : '',
       userCpf: data.userCpf ? this.escapeHtml(data.userCpf) : '',
+      /* loadTemplate trata vars como string e usa truthiness (value !== '' && != null).
+       * Para flags booleanas: '1' = truthy, '' = falsy. */
+      isBrazilian: isBrazilian ? '1' : '',
       /* safeUrl valida esquema https:// antes de escapeHtml — previne javascript: em src */
       userAvatarUrl: this.escapeHtml(this.safeUrl(data.userAvatarUrl)),
       subject: data.subject ? this.escapeHtml(data.subject) : '',
@@ -112,7 +125,7 @@ export class EmailService {
       '',
       `De: ${data.userName} (${data.userEmail})`,
       data.userPhone ? `Telefone: ${data.userPhone}` : null,
-      data.userCpf ? `CPF: ${data.userCpf}` : null,
+      data.userCpf ? `${documentLabel}: ${data.userCpf}` : null,
       data.subject ? `Assunto: ${data.subject}` : null,
       '',
       'Mensagem:',

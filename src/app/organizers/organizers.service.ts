@@ -302,15 +302,26 @@ export class OrganizersService {
     const owner = organization.members[0];
     const event = contactData.eventId ? organization.events[0] : undefined;
 
-    /* Buscar avatar do usuário logado, se houver. */
+    /* Buscar avatar e país do usuário logado, se houver. País é usado para
+     * decidir o label do documento ("CPF" para BR, "Documento" para outros). */
     let userAvatarUrl: string | undefined;
+    let userCountry: string | null = null;
     if (contactData.userId) {
       const userRecord = await prismaRead.user.findUnique({
         where: { id: contactData.userId },
-        select: { avatarUrl: true },
+        select: { avatarUrl: true, country: true },
       });
       userAvatarUrl = userRecord?.avatarUrl ?? undefined;
+      userCountry = userRecord?.country ?? null;
     }
+    /* Heurística de nacionalidade: aceita "BR", "Brasil", "Brazil" (case-insensitive).
+     * Quando country é null/undefined assume BR para compatibilidade com cadastros antigos. */
+    const normalizedCountry = userCountry?.trim().toLowerCase();
+    const isBrazilian =
+      !normalizedCountry ||
+      normalizedCountry === 'br' ||
+      normalizedCountry === 'brasil' ||
+      normalizedCountry === 'brazil';
 
     // Criar mensagem no banco (já com mensagem sanitizada)
     const contactMessage = await prismaWrite.contactMessage.create({
@@ -337,6 +348,7 @@ export class OrganizersService {
         userPhone: contactData.phone,
         userCpf: contactData.cpf,
         userAvatarUrl,
+        isBrazilian,
         subject: contactData.subject,
         eventName: event?.name,
         message: cleanMessage,
