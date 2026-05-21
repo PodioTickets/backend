@@ -144,46 +144,31 @@ export class PaymentsController {
     return { url: redirectUrl, statusCode: 302 };
   }
 
-  /*
-   * Sandbox endpoints — defesa em profundidade:
-   *   1. Exigem JWT autenticado (sem isso, qualquer um marca pagto como pago
-   *      caso CIELO_ENV não esteja setado como 'production').
-   *   2. Service valida `sandboxMode === true` antes de qualquer mutação.
-   *   3. Service valida que o transactionId/orderId pertence ao usuário logado
-   *      (impede simular pagto de pedido alheio mesmo em sandbox).
-   */
-
   @Get('sandbox/simulate-pix-paid/:transactionId')
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: '[SANDBOX ONLY] Simulate PIX payment confirmed', description: 'Marks a PIX as PAID and emits the WebSocket event. Only works when CIELO_ENV != production. Requires authentication and ownership of the order.' })
+  @ApiOperation({ summary: '[SANDBOX ONLY] Simulate PIX payment confirmed', description: 'Marks a PIX as PAID and emits the WebSocket event. Only works when CIELO_ENV != production.' })
   @ApiParam({ name: 'transactionId', description: 'Braspag PaymentId (transactionId)' })
-  sandboxSimulatePixPaid(@Request() req, @Param('transactionId') transactionId: string) {
-    return this.paymentsService.sandboxSimulatePixPaid(transactionId, req.user.id);
+  sandboxSimulatePixPaid(@Param('transactionId') transactionId: string) {
+    return this.paymentsService.sandboxSimulatePixPaid(transactionId);
   }
 
   @Get('sandbox/simulate-debit-3ds-pending/:orderId')
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
   @ApiOperation({
     summary: '[SANDBOX ONLY] Simulate debit card 3DS redirect — step 1',
-    description: 'Creates a PENDING DEBIT_CARD payment for the order and returns the redirectUrl the frontend would show in the iframe. Use simulate-debit-3ds-paid to complete. Requires authentication and ownership of the order.',
+    description: 'Creates a PENDING DEBIT_CARD payment for the order and returns the redirectUrl the frontend would show in the iframe. Use simulate-debit-3ds-paid to complete.',
   })
   @ApiParam({ name: 'orderId', description: 'Order UUID' })
-  sandboxSimulateDebit3dsPending(@Request() req, @Param('orderId') orderId: string) {
-    return this.paymentsService.sandboxSimulateDebit3dsPending(orderId, req.user.id);
+  sandboxSimulateDebit3dsPending(@Param('orderId') orderId: string) {
+    return this.paymentsService.sandboxSimulateDebit3dsPending(orderId);
   }
 
   @Get('sandbox/simulate-debit-3ds-paid/:orderId')
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
   @ApiOperation({
     summary: '[SANDBOX ONLY] Simulate debit card 3DS confirmed — step 2',
-    description: 'Marks the DEBIT_CARD payment as PAID, updates the order and registrations, and emits the payment:confirmed WebSocket event. Requires authentication and ownership of the order.',
+    description: 'Marks the DEBIT_CARD payment as PAID, updates the order and registrations, and emits the payment:confirmed WebSocket event.',
   })
   @ApiParam({ name: 'orderId', description: 'Order UUID' })
-  sandboxSimulateDebit3dsPaid(@Request() req, @Param('orderId') orderId: string) {
-    return this.paymentsService.sandboxSimulateDebit3dsPaid(orderId, req.user.id);
+  sandboxSimulateDebit3dsPaid(@Param('orderId') orderId: string) {
+    return this.paymentsService.sandboxSimulateDebit3dsPaid(orderId);
   }
 
   // ── WILDCARD — deve ficar por último para não engolir rotas com segmento fixo ──
