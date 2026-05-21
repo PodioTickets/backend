@@ -8,7 +8,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
-import { Prisma } from '@prisma/client';
+import { Prisma, DocumentType } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 import * as geoip from 'geoip-lite';
@@ -257,11 +257,23 @@ export class AuthService {
         throw new ConflictException('Já existe um usuário com este e-mail');
       }
 
-      // Verificar se CPF já existe para conta USER (se fornecido)
+      /* Normalização do documento para chave única (documentNumberClean):
+       *   - CPF: só dígitos (descarta máscara como "123.456.789-00").
+       *   - Outros (PASSPORT, identidade estrangeira): trim + uppercase + sem
+       *     espaços. NUNCA fazer replace(/\D/g) em passaporte — letras são
+       *     parte do número e seriam descartadas, causando colisões de
+       *     unique constraint entre passaportes diferentes que compartilham
+       *     os mesmos dígitos. */
+      const normalizeDocClean = (raw: string, type: DocumentType | undefined): string => {
+        if (type === 'CPF') return raw.replace(/\D/g, '');
+        return raw.trim().toUpperCase().replace(/\s+/g, '');
+      };
+
+      // Verificar se documento já existe para conta USER (se fornecido)
       if (documentNumber) {
-        const documentNumberClean = documentNumber.replace(/\D/g, '');
+        const documentNumberClean = normalizeDocClean(documentNumber, documentType);
         const existingUserByCpf = await prismaRead.user.findUnique({
-          where: { 
+          where: {
             documentNumberClean_accountType: {
               documentNumberClean,
               accountType: 'USER',
@@ -279,7 +291,7 @@ export class AuthService {
       const hashedPassword = await bcrypt.hash(password, 12);
 
       // Limpar documentNumber para validação de unicidade
-      const documentNumberClean = documentNumber ? documentNumber.replace(/\D/g, '') : null;
+      const documentNumberClean = documentNumber ? normalizeDocClean(documentNumber, documentType) : null;
 
       const user = await prismaWrite.user.create({
         data: {

@@ -53,6 +53,57 @@ function IsValidCpf(options?: ValidationOptions) {
   };
 }
 
+/**
+ * Decide se o usuário é brasileiro a partir do campo `country`. Aceita
+ * variantes ("BR", "Brasil", "Brazil"). null/undefined → assume BR (default
+ * compatível com cadastros antigos).
+ */
+function isBrazilianCountry(country: unknown): boolean {
+  if (typeof country !== 'string' || !country.trim()) return true;
+  const c = country.trim().toLowerCase();
+  return c === 'br' || c === 'brasil' || c === 'brazil';
+}
+
+/**
+ * Valida o número de documento conforme nacionalidade:
+ *   - Brasileiro (country = BR / Brasil / Brazil ou ausente): exige CPF válido
+ *     (11 dígitos + algoritmo de verificação).
+ *   - Estrangeiro: aceita qualquer string não-vazia entre 4 e 30 caracteres
+ *     (passaporte, identidade nacional, RNE, etc). Não tenta validar formato
+ *     pois cada país tem suas próprias regras.
+ *
+ * Como class-validator não passa o objeto raiz para validadores @IsXxx
+ * convencionais, usamos `ValidationArguments.object` para acessar o `country`
+ * irmão durante a validação.
+ */
+function IsValidDocumentNumber(options?: ValidationOptions) {
+  return function (object: object, propertyName: string) {
+    registerDecorator({
+      name: 'isValidDocumentNumber',
+      target: object.constructor,
+      propertyName,
+      options: { ...options },
+      validator: {
+        validate(value: any, args: ValidationArguments) {
+          if (!value || typeof value !== 'string') return false;
+          const root = args.object as Record<string, unknown>;
+          if (isBrazilianCountry(root.country)) {
+            return isValidCpf(value);
+          }
+          /* Documento estrangeiro: trim + tamanho razoável. */
+          const trimmed = value.trim();
+          return trimmed.length >= 4 && trimmed.length <= 30;
+        },
+        defaultMessage(args: ValidationArguments) {
+          const root = args.object as Record<string, unknown>;
+          if (isBrazilianCountry(root.country)) return 'CPF inválido';
+          return 'Documento inválido (mínimo 4 e máximo 30 caracteres)';
+        },
+      },
+    });
+  };
+}
+
 export class EmailLoginDto {
   @ApiProperty({ 
     description: 'User email or CPF',
@@ -132,10 +183,13 @@ export class EmailRegisterDto {
   @IsEnum(DocumentType)
   documentType: DocumentType;
 
-  @ApiProperty({ description: 'Document number — CPF (11 digits) or Passport' })
+  @ApiProperty({
+    description:
+      'Document number. Para brasileiros (country = BR/Brasil/Brazil ou ausente) deve ser um CPF válido. Para estrangeiros aceita passaporte ou outro documento (4-30 caracteres).',
+  })
   @IsString()
   @IsNotEmpty()
-  @IsValidCpf()
+  @IsValidDocumentNumber()
   documentNumber: string;
 
   @ApiPropertyOptional({ description: 'Sex' })

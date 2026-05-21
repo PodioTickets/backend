@@ -23,13 +23,27 @@ export class UserService {
   ) {}
 
   /**
-   * Limpa o documentNumber removendo formatação (pontos, traços, barras, espaços)
-   * @param documentNumber - CPF/CNPJ com ou sem formatação
-   * @returns Documento limpo (apenas números) ou null se não fornecido
+   * Normaliza o documentNumber para uso como chave única.
+   *
+   * Comportamento conforme o tipo do documento:
+   *   - CPF (ou tipo não informado, default brasileiro): remove formatação
+   *     (pontos, traços, barras, espaços) e mantém só dígitos. Aceita CPF e
+   *     CNPJ (legado, mesma regra).
+   *   - Outros documentos (PASSPORT, identidade estrangeira): preserva o
+   *     valor original com trim + uppercase + remoção de espaços internos.
+   *     NÃO faz replace(/\D/g) porque passaporte tem letras e elas são parte
+   *     do número — removê-las causaria colisões de unique constraint entre
+   *     passaportes diferentes que compartilham os mesmos dígitos.
    */
-  private cleanDocumentNumber(documentNumber?: string | null): string | null {
+  private cleanDocumentNumber(
+    documentNumber?: string | null,
+    documentType?: 'CPF' | 'PASSPORT' | null,
+  ): string | null {
     if (!documentNumber) return null;
-    return documentNumber.replace(/\D/g, '');
+    if (!documentType || documentType === 'CPF') {
+      return documentNumber.replace(/\D/g, '');
+    }
+    return documentNumber.trim().toUpperCase().replace(/\s+/g, '');
   }
 
   private validatePasswordStrength(password: string): void {
@@ -105,9 +119,12 @@ export class UserService {
       throw new ConflictException('Já existe um usuário com este e-mail');
     }
 
-    // Verificar se CPF já existe (se fornecido)
+    // Verificar se documento já existe (se fornecido) — normaliza conforme o tipo
     if (createUserDto.documentNumber) {
-      const documentNumberClean = this.cleanDocumentNumber(createUserDto.documentNumber);
+      const documentNumberClean = this.cleanDocumentNumber(
+        createUserDto.documentNumber,
+        createUserDto.documentType as any,
+      );
       const existingUserByCpf = await prismaRead.user.findUnique({
         where: { 
           documentNumberClean_accountType: {
@@ -277,7 +294,10 @@ export class UserService {
         throw new NotFoundException('Usuário não encontrado');
       }
 
-      const documentNumberClean = this.cleanDocumentNumber(updateData.documentNumber);
+      const documentNumberClean = this.cleanDocumentNumber(
+        updateData.documentNumber,
+        updateData.documentType ?? null,
+      );
 
       if (documentNumberClean) {
         const owner = await prismaRead.user.findUnique({
