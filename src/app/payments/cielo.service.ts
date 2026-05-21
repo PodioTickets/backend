@@ -919,10 +919,6 @@ export class CieloService {
    * - Verifica comprimento ANTES do timingSafeEqual (Node lança se buffers
    *   tiverem tamanhos diferentes); o pre-check NÃO é timing-sensitive porque
    *   o tamanho do secret é conhecido e não revela seus bytes.
-   * - Aceita também HMAC-SHA256 hex (formato comum em gateways) caso o cliente
-   *   envie a assinatura como hash do payload + secret. O backend tenta primeiro
-   *   o modo HMAC; se falhar, faz fallback para comparação direta (shared secret).
-   *   Quando o gateway passar a usar HMAC nativo no futuro, basta remover o fallback.
    *
    * Retorna o evento parseado em caso de sucesso; null em qualquer falha
    * (não exibe causa do erro para evitar oracle).
@@ -940,21 +936,11 @@ export class CieloService {
 
     try {
       const secretBuf = Buffer.from(this.webhookSecret, 'utf8');
-
-      // Modo 1: HMAC-SHA256(payload, secret) — preferred quando o gateway suportar.
-      const expectedHmac = crypto.createHmac('sha256', secretBuf).update(payload, 'utf8').digest('hex');
       const sigBuf = Buffer.from(signature, 'utf8');
-      const expectedHmacBuf = Buffer.from(expectedHmac, 'utf8');
 
-      let valid = false;
-      if (sigBuf.length === expectedHmacBuf.length) {
-        valid = crypto.timingSafeEqual(sigBuf, expectedHmacBuf);
-      }
-
-      // Modo 2 (fallback): shared secret literal — comparação em tempo constante.
-      if (!valid && sigBuf.length === secretBuf.length) {
-        valid = crypto.timingSafeEqual(sigBuf, secretBuf);
-      }
+      const valid =
+        sigBuf.length === secretBuf.length &&
+        crypto.timingSafeEqual(sigBuf, secretBuf);
 
       if (!valid) {
         this.logger.warn('Webhook signature verification failed');
