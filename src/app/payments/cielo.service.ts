@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance } from 'axios';
 import { PaymentMethod, PaymentStatus } from '@prisma/client';
+import * as crypto from 'crypto';
 
 export interface CieloPaymentResult {
   success: boolean;
@@ -909,17 +910,53 @@ export class CieloService {
     }
   }
 
+  /**
+   * Valida assinatura do webhook Cielo e parseia o payload.
+   *
+   * Segurança:
+   * - Comparação em tempo constante via `crypto.timingSafeEqual` para mitigar
+   *   timing attack na descoberta do secret.
+   * - Verifica comprimento ANTES do timingSafeEqual (Node lança se buffers
+   *   tiverem tamanhos diferentes); o pre-check NÃO é timing-sensitive porque
+   *   o tamanho do secret é conhecido e não revela seus bytes.
+   * - Aceita também HMAC-SHA256 hex (formato comum em gateways) caso o cliente
+   *   envie a assinatura como hash do payload + secret. O backend tenta primeiro
+   *   o modo HMAC; se falhar, faz fallback para comparação direta (shared secret).
+   *   Quando o gateway passar a usar HMAC nativo no futuro, basta remover o fallback.
+   *
+   * Retorna o evento parseado em caso de sucesso; null em qualquer falha
+   * (não exibe causa do erro para evitar oracle).
+   */
   async handleWebhook(signature: string, payload: string): Promise<any | null> {
     if (!this.webhookSecret) {
       this.logger.warn('Cielo webhook secret not configured');
       return null;
     }
 
+    if (!signature || !payload) {
+      this.logger.warn('Webhook signature or payload missing');
+      return null;
+    }
+
     try {
-      // A Cielo usa autenticação básica ou token específico para webhooks
-      // A validação do webhook pode ser feita comparando o signature com o secret
-      // Por enquanto, vamos apenas validar que o signature existe
-      if (signature !== this.webhookSecret) {
+      const secretBuf = Buffer.from(this.webhookSecret, 'utf8');
+
+      // Modo 1: HMAC-SHA256(payload, secret) — preferred quando o gateway suportar.
+      const expectedHmac = crypto.createHmac('sha256', secretBuf).update(payload, 'utf8').digest('hex');
+      const sigBuf = Buffer.from(signature, 'utf8');
+      const expectedHmacBuf = Buffer.from(expectedHmac, 'utf8');
+
+      let valid = false;
+      if (sigBuf.length === expectedHmacBuf.length) {
+        valid = crypto.timingSafeEqual(sigBuf, expectedHmacBuf);
+      }
+
+      // Modo 2 (fallback): shared secret literal — comparação em tempo constante.
+      if (!valid && sigBuf.length === secretBuf.length) {
+        valid = crypto.timingSafeEqual(sigBuf, secretBuf);
+      }
+
+      if (!valid) {
         this.logger.warn('Webhook signature verification failed');
         return null;
       }
@@ -927,7 +964,7 @@ export class CieloService {
       const event = JSON.parse(payload);
       return event;
     } catch (error: any) {
-      this.logger.error('Error parsing webhook payload:', error);
+      this.logger.error('Error parsing webhook payload:', error?.message ?? 'unknown');
       return null;
     }
   }

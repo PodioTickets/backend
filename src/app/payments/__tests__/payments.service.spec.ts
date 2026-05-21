@@ -168,23 +168,33 @@ describe('PaymentsService', () => {
 
   describe('getPaymentSummary', () => {
     const registrationId = 'registration-id';
+    const userId = 'test-user-id';
 
+    /* Após o fix de IDOR, getPaymentSummary exige userId. O mock simula um
+     * registration cujo order.userId === userId (comprador autorizado). */
     const mockRegistration = {
       id: registrationId,
-      totalAmount: 100.0,
-      serviceFee: 10.0,
-      discount: 5.0,
-      finalAmount: 105.0,
-      payment: {
-        id: 'payment-id',
-        status: PaymentStatus.PENDING,
+      userId,
+      order: {
+        userId,
+        totalAmount: 100.0,
+        serviceFee: 10.0,
+        discount: 5.0,
+        finalAmount: 105.0,
+        payment: {
+          id: 'payment-id',
+          status: PaymentStatus.PENDING,
+        },
+      },
+      event: {
+        organization: { members: [] },
       },
     };
 
     it('should return payment summary successfully', async () => {
       mockPrismaService.registration.findUnique.mockResolvedValue(mockRegistration);
 
-      const result = await service.getPaymentSummary(registrationId);
+      const result = await service.getPaymentSummary(registrationId, userId);
 
       expect(result).toHaveProperty(
         'message',
@@ -200,9 +210,9 @@ describe('PaymentsService', () => {
     it('should throw NotFoundException if registration not found', async () => {
       mockPrismaService.registration.findUnique.mockResolvedValue(null);
 
-      await expect(service.getPaymentSummary(registrationId)).rejects.toThrow(
-        NotFoundException,
-      );
+      await expect(
+        service.getPaymentSummary(registrationId, userId),
+      ).rejects.toThrow(NotFoundException);
     });
   });
 });

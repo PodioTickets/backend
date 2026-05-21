@@ -68,7 +68,7 @@ export class PaymentsService {
       include: {
         order: {
           include: {
-            event: true,
+            event: { include: { organization: { include: { members: true } } } },
             registrations: {
               include: {
                 user: {
@@ -88,6 +88,17 @@ export class PaymentsService {
 
     if (!payment) {
       throw new NotFoundException('Payment not found');
+    }
+
+    /* Authorization: dono do pagamento, admin, ou membro da organização do evento.
+     * Antes esta rota recebia userId mas não validava — IDOR: qualquer user
+     * conseguia ler Payment alheio só conhecendo o UUID. */
+    if (payment.userId !== userId && !(await this.isAdminUser(userId))) {
+      const orgMembers: any[] = (payment as any).order?.event?.organization?.members ?? [];
+      const isOrganizer = orgMembers.some((m: any) => m.userId === userId);
+      if (!isOrganizer) {
+        throw new NotFoundException('Payment not found');
+      }
     }
 
     // Buscar informações atualizadas da Cielo se disponível
@@ -142,7 +153,17 @@ export class PaymentsService {
     };
   }
 
-  async getPaymentSummary(registrationId: string) {
+  /**
+   * Retorna resumo financeiro de uma inscrição.
+   *
+   * Autorização (defesa contra IDOR):
+   * 1. Dono do pedido (`order.userId === userId`), OU
+   * 2. Próprio participante (`registration.userId === userId`), OU
+   * 3. Administrador, OU
+   * 4. Membro da organização do evento.
+   * Em qualquer outro caso, retorna 404 (não revela existência do recurso).
+   */
+  async getPaymentSummary(registrationId: string, userId: string) {
     const prismaRead = this.prisma.getReadClient();
 
     const registration = await prismaRead.registration.findUnique({
@@ -151,6 +172,11 @@ export class PaymentsService {
         order: {
           include: {
             payment: true,
+          },
+        },
+        event: {
+          select: {
+            organization: { select: { members: { select: { userId: true } } } },
           },
         },
       },
@@ -162,6 +188,24 @@ export class PaymentsService {
 
     if (!registration.order) {
       throw new BadRequestException('Registration must have an order');
+    }
+
+    const isBuyer = registration.order.userId === userId;
+    const isParticipant = registration.userId === userId;
+    let authorized = isBuyer || isParticipant;
+
+    if (!authorized) {
+      authorized = await this.isAdminUser(userId);
+    }
+
+    if (!authorized) {
+      const orgMembers = (registration as any).event?.organization?.members ?? [];
+      authorized = orgMembers.some((m: any) => m.userId === userId);
+    }
+
+    if (!authorized) {
+      /* 404 em vez de 403 para não vazar existência da registration. */
+      throw new NotFoundException('Registration not found');
     }
 
     return {
@@ -748,17 +792,23 @@ export class PaymentsService {
     return { status: PaymentStatus.PAID, paid: true };
   }
 
-  async sandboxSimulatePixPaid(transactionId: string): Promise<{ confirmed: boolean; orderId: string }> {
+  async sandboxSimulatePixPaid(transactionId: string, userId: string): Promise<{ confirmed: boolean; orderId: string }> {
     if (this.cieloService.sandboxMode === false) {
       throw new BadRequestException('Only available in sandbox mode');
     }
 
     const payment = await this.prisma.getReadClient().payment.findFirst({
       where: { transactionId },
-      select: { id: true, orderId: true, status: true, metadata: true },
+      select: { id: true, orderId: true, status: true, metadata: true, userId: true },
     });
 
     if (!payment) throw new NotFoundException(`Payment not found for transactionId: ${transactionId}`);
+
+    /* Defesa contra IDOR mesmo em sandbox: só o dono do pedido pode simular pagto.
+     * Admin pode tudo para suportar testes de QA. */
+    if (payment.userId !== userId && !(await this.isAdminUser(userId))) {
+      throw new NotFoundException(`Payment not found for transactionId: ${transactionId}`);
+    }
     if (payment.status === PaymentStatus.PAID) {
       this.gateway.emitPaymentConfirmed(payment.orderId);
       return { confirmed: true, orderId: payment.orderId };
@@ -801,7 +851,7 @@ export class PaymentsService {
     return { confirmed: true, orderId: payment.orderId };
   }
 
-  async sandboxSimulateDebit3dsPending(orderId: string): Promise<{ redirectUrl: string; orderId: string }> {
+  async sandboxSimulateDebit3dsPending(orderId: string, userId: string): Promise<{ redirectUrl: string; orderId: string }> {
     if (this.cieloService.sandboxMode === false) {
       throw new BadRequestException('Only available in sandbox mode');
     }
@@ -811,6 +861,12 @@ export class PaymentsService {
       select: { id: true, status: true, userId: true, finalAmount: true, totalAmount: true },
     });
     if (!order) throw new NotFoundException(`Order not found: ${orderId}`);
+
+    /* Defesa contra IDOR mesmo em sandbox: só o dono do pedido pode simular. */
+    if (order.userId !== userId && !(await this.isAdminUser(userId))) {
+      throw new NotFoundException(`Order not found: ${orderId}`);
+    }
+
     if (order.status !== 'PENDING') throw new BadRequestException(`Order ${orderId} is not PENDING`);
 
     const amount = order.finalAmount ?? order.totalAmount ?? 0;
@@ -851,16 +907,21 @@ export class PaymentsService {
     return { redirectUrl, orderId };
   }
 
-  async sandboxSimulateDebit3dsPaid(orderId: string): Promise<{ confirmed: boolean; orderId: string }> {
+  async sandboxSimulateDebit3dsPaid(orderId: string, userId: string): Promise<{ confirmed: boolean; orderId: string }> {
     if (this.cieloService.sandboxMode === false) {
       throw new BadRequestException('Only available in sandbox mode');
     }
 
     const payment = await this.prisma.getReadClient().payment.findFirst({
       where: { orderId, method: 'DEBIT_CARD' },
-      select: { id: true, orderId: true, status: true, metadata: true },
+      select: { id: true, orderId: true, status: true, metadata: true, userId: true },
     });
     if (!payment) throw new NotFoundException(`No DEBIT_CARD payment found for order ${orderId}`);
+
+    /* Defesa contra IDOR mesmo em sandbox: só o dono do pedido pode simular. */
+    if (payment.userId !== userId && !(await this.isAdminUser(userId))) {
+      throw new NotFoundException(`No DEBIT_CARD payment found for order ${orderId}`);
+    }
     if (payment.status === PaymentStatus.PAID) {
       this.gateway.emitPaymentConfirmed(orderId);
       return { confirmed: true, orderId };

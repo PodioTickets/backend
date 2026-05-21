@@ -113,7 +113,32 @@ export class PaymentsWebhookService {
   async handleWebhook(event: CieloWebhookEvent) {
     this.logger.log(`Processing Cielo webhook: PaymentId ${event.PaymentId}, Status ${event.Status}`);
 
-    const paymentStatus = this.cieloService.mapCieloStatusToPaymentStatus(event.Status);
+    /* Defesa em profundidade: NÃO confia cegamente no status do payload.
+     * O webhook só notifica que "algo mudou" naquele PaymentId — busca o status
+     * real na API da Cielo antes de aplicar qualquer transição. Sem esta query,
+     * um atacante que conseguisse forjar o webhook (signature bypass, replay
+     * antigo, etc.) poderia marcar pedidos como PAID. Mesmo padrão usado em
+     * handle3dsCallback (linha 429-439).
+     *
+     * Performance: query feita só em webhooks legítimos (após signature check).
+     * O 3DS callback faz a mesma chamada e nunca foi gargalo.
+     */
+    let paymentStatus: PaymentStatus;
+    try {
+      const cieloPayment = await this.cieloService.getPayment(event.PaymentId);
+      if (!cieloPayment) {
+        this.logger.warn(`Webhook: getPayment(${event.PaymentId}) retornou null — payload pode ser forjado, abortando.`);
+        return;
+      }
+      const actualStatus = cieloPayment.Payment.Status;
+      paymentStatus = this.cieloService.mapCieloStatusToPaymentStatus(actualStatus);
+      if (actualStatus !== event.Status) {
+        this.logger.warn(`Webhook status divergente da Cielo: payload=${event.Status}, Cielo=${actualStatus}. Usando valor real (${actualStatus}).`);
+      }
+    } catch (err: any) {
+      this.logger.error(`Webhook: erro ao validar status na Cielo: ${err?.message ?? 'unknown'}`);
+      return;
+    }
 
     // orderId capturado durante a transação para uso posterior (fora da transação)
     let confirmedOrderId: string | null = null;
