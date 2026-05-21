@@ -980,9 +980,25 @@ export class OrdersService {
     const payment = order.payment as any;
     const metadata = (payment?.metadata as any) ?? {};
 
-    // Billing address: prefer fields on order, fallback to payment metadata
-    const billingAddress =
-      order.billingPostalCode
+    // Primeira registration com receiptSnapshot — quando existe, vira a fonte
+    // de verdade pra event/coupon/voucher/billing. Pedidos PENDING (sem pay)
+    // não têm snapshot e caem no caminho live.
+    const primaryReceipt = ((order.registrations as any[]).find((reg: any) => reg.receiptSnapshot)?.receiptSnapshot ?? null) as any | null;
+    const snapBilling = primaryReceipt?.billing ?? null;
+
+    // Billing address: snapshot > order.* > payment metadata
+    const billingAddress = snapBilling
+      ? {
+          country: snapBilling.country ?? null,
+          postalCode: snapBilling.postalCode ?? null,
+          stateUf: snapBilling.state ?? null,
+          street: snapBilling.street ?? null,
+          number: snapBilling.number ?? null,
+          complement: snapBilling.complement ?? null,
+          neighborhood: snapBilling.neighborhood ?? null,
+          city: snapBilling.city ?? null,
+        }
+      : order.billingPostalCode
         ? {
             country: order.billingCountry ?? null,
             postalCode: order.billingPostalCode ?? null,
@@ -1036,16 +1052,51 @@ export class OrdersService {
             };
           })(),
           billingAddress,
-          coupon: order.coupon
-            ? { id: order.coupon.id, code: order.coupon.code, type: order.coupon.type, value: order.coupon.value }
-            : null,
-          voucher: order.voucher
-            ? { id: order.voucher.id, code: order.voucher.code, name: order.voucher.name, status: order.voucher.status }
-            : null,
+          coupon: primaryReceipt?.pricing?.coupon
+            ? {
+                id: primaryReceipt.pricing.coupon.id,
+                code: primaryReceipt.pricing.coupon.code,
+                type: primaryReceipt.pricing.coupon.type,
+                value: primaryReceipt.pricing.coupon.value,
+              }
+            : order.coupon
+              ? { id: order.coupon.id, code: order.coupon.code, type: order.coupon.type, value: order.coupon.value }
+              : null,
+          voucher: primaryReceipt?.pricing?.voucher
+            ? {
+                id: primaryReceipt.pricing.voucher.id,
+                code: primaryReceipt.pricing.voucher.code,
+                name: primaryReceipt.pricing.voucher.name,
+                // Recibo grava apenas vouchers usados — status implícito é USED.
+                status: 'USED',
+              }
+            : order.voucher
+              ? { id: order.voucher.id, code: order.voucher.code, name: order.voucher.name, status: order.voucher.status }
+              : null,
         },
-        event: order.event
-          ? (({ participantFeePercent: _fee, ...rest }) => rest)(order.event as any)
-          : null,
+        event: primaryReceipt?.event
+          ? {
+              id: primaryReceipt.event.id,
+              name: primaryReceipt.event.name,
+              slug: primaryReceipt.event.slug,
+              description: primaryReceipt.event.description ?? null,
+              eventDate: primaryReceipt.event.eventDate,
+              registrationStartDate: primaryReceipt.event.registrationStartDate ?? null,
+              registrationEndDate: primaryReceipt.event.registrationEndDate ?? null,
+              bannerUrl: primaryReceipt.event.bannerUrl ?? null,
+              logoUrl: primaryReceipt.event.logoUrl ?? null,
+              location: primaryReceipt.event.location?.name ?? null,
+              city: primaryReceipt.event.location?.city ?? null,
+              state: primaryReceipt.event.location?.state ?? null,
+              country: primaryReceipt.event.location?.country ?? null,
+              zipCode: primaryReceipt.event.location?.zipCode ?? null,
+              neighborhood: primaryReceipt.event.location?.neighborhood ?? null,
+              googleMapsLink: primaryReceipt.event.location?.googleMapsLink ?? null,
+              organization: primaryReceipt.event.organization ?? null,
+            }
+          : order.event
+            ? (({ participantFeePercent: _fee, ...rest }) => rest)(order.event as any)
+            : null,
         payment: payment
           ? {
               id: payment.id,
@@ -1259,176 +1310,14 @@ export class OrdersService {
     this.assertPending(order);
 
     const w: any = this.prisma.getWriteClient();
-    const r: any = this.prisma.getReadClient();
 
     const reservedTickets = (order.reservedTickets ?? []) as any[];
     const participants = dto.participants as any[];
 
-    // Auto-aplicar cupons QUANTITY/AGE — só se ainda não há cupom/voucher no pedido
-    let autoCouponId: string | undefined;
-    let autoDiscount = 0;
-    let autoEffectiveUsage: number | undefined;
-    let shouldRemoveAgeCoupon = false;
-    let ageQualifyingSlots: number[] | undefined;
-
-    // Re-avaliar cupom AGE já aplicado quando participantes mudam
-    if (order.couponId && !order.voucherId) {
-      const existingCoupon = await r.coupon.findUnique({
-        where: { id: order.couponId },
-        select: { id: true, couponType: true, type: true, value: true, minAge: true, maxAge: true, maxUsage: true, usageCount: true, appliesTo: true, applyToProducts: true },
-      });
-      if (existingCoupon?.couponType === 'AGE') {
-        const refDate = resolveAgeReferenceDate(order);
-        const min = existingCoupon.minAge ?? 0;
-        const max = existingCoupon.maxAge ?? Infinity;
-        const ageMatchCount = participants.filter((p: any) => {
-          if (!p.birthDate) return false;
-          const age = computeAgeAt(p.birthDate, refDate);
-          return age >= min && age <= max;
-        }).length;
-
-        if (ageMatchCount <= 0) {
-          shouldRemoveAgeCoupon = true;
-        } else {
-          let ageApplicableTickets = reservedTickets;
-          if (existingCoupon.appliesTo && existingCoupon.appliesTo !== 'all') {
-            const allowed = parseAppliesToArray(existingCoupon.appliesTo);
-            ageApplicableTickets = reservedTickets.filter((rt: any) => allowed.includes(rt.ticketId));
-          }
-          const ageApplicableQty = ageApplicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-          const remaining = existingCoupon.maxUsage != null
-            ? Math.max(0, existingCoupon.maxUsage - existingCoupon.usageCount)
-            : ageMatchCount;
-          const effectiveUsage = Math.min(remaining, ageMatchCount, ageApplicableQty);
-          const totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-          ageQualifyingSlots = participants
-            .map((p: any, i: number) => {
-              if (!p.birthDate || i >= totalUnits) return -1;
-              const age = computeAgeAt(p.birthDate, refDate);
-              return (age >= min && age <= max) ? i : -1;
-            })
-            .filter((i: number) => i >= 0);
-          autoCouponId = existingCoupon.id;
-          const productsExtra = existingCoupon.applyToProducts ? computePendingProductsSubtotal(order) : 0;
-          autoDiscount = computePartialCouponDiscount(ageApplicableTickets, existingCoupon.type, existingCoupon.value, effectiveUsage, productsExtra);
-          autoEffectiveUsage = effectiveUsage;
-        }
-      }
-    }
-
-    if (!order.couponId && !order.voucherId) {
-      const totalQuantity = reservedTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
-      const ticketIds = reservedTickets.map((rt: any) => rt.ticketId);
-      const ticketsSubtotal = reservedTickets.reduce((sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0);
-
-      const autoCoupons = await w.coupon.findMany({
-        where: {
-          eventId: order.eventId,
-          status: 'ACTIVE',
-          deletedAt: null,
-          couponType: { in: ['QUANTITY', 'AGE'] },
-          OR: [{ expiryDate: null }, { expiryDate: { gt: new Date() } }],
-        },
-      });
-
-      for (const coupon of autoCoupons) {
-        // Verificar appliesTo
-        if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-          const allowed = parseAppliesToArray(coupon.appliesTo);
-          if (!ticketIds.some((id: string) => allowed.includes(id))) continue;
-        }
-
-        if (coupon.minCartValue && ticketsSubtotal < coupon.minCartValue) continue;
-
-        if (coupon.couponType === 'QUANTITY') {
-          if (coupon.minQuantity && totalQuantity < coupon.minQuantity) continue;
-          // QUANTITY: all-or-nothing — se esgotado, não aplica
-          if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) continue;
-        } else if (coupon.couponType === 'AGE') {
-          const refDate = resolveAgeReferenceDate(order);
-          const min = coupon.minAge ?? 0;
-          const max = coupon.maxAge ?? Infinity;
-          const ageMatchCount = participants.filter((p: any) => {
-            if (!p.birthDate) return false;
-            const age = computeAgeAt(p.birthDate, refDate);
-            return age >= min && age <= max;
-          }).length;
-          if (ageMatchCount <= 0) continue;
-          // Store for use in the age discount block below
-          (coupon as any)._ageMatchCount = ageMatchCount;
-        }
-
-        {
-          let autoApplicableTickets = reservedTickets;
-          if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-            const allowedIds = parseAppliesToArray(coupon.appliesTo);
-            autoApplicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
-          }
-
-          if (coupon.couponType === 'QUANTITY') {
-            // QUANTITY: desconto sobre todo o pedido (all-or-nothing).
-            // Produtos adicionais entram na base apenas quando applyToProducts=true
-            // (cupons QUANTITY pré-existentes têm o flag setado via backfill na migration).
-            const autoApplicableSubtotal = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0);
-            const autoApplicableQty = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
-            const totalProductsSubtotal = computePendingProductsSubtotal(order);
-            const productsContribution = coupon.applyToProducts ? totalProductsSubtotal : 0;
-            if (coupon.type === 'PERCENTAGE') {
-              const applicableRatio = ticketsSubtotal > 0 ? autoApplicableSubtotal / ticketsSubtotal : 1;
-              const applicableBase = autoApplicableSubtotal + Math.round(productsContribution * applicableRatio);
-              autoDiscount = Math.floor(applicableBase * (coupon.value / 100));
-            } else {
-              // FIXED: valor por unidade aplicável (semântica histórica); cap definido abaixo.
-              autoDiscount = autoApplicableQty * coupon.value;
-            }
-            autoDiscount = Math.min(autoDiscount, autoApplicableSubtotal + productsContribution);
-          } else {
-            // AGE: desconto apenas nos ingressos dos participantes que passaram no critério de idade
-            const ageMatchCount: number = (coupon as any)._ageMatchCount ?? 0;
-            const autoApplicableQty = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
-            const remaining = coupon.maxUsage != null
-              ? Math.max(0, coupon.maxUsage - coupon.usageCount)
-              : ageMatchCount;
-            const effectiveUsage = Math.min(remaining, ageMatchCount, autoApplicableQty);
-            if (effectiveUsage <= 0) continue;
-            const productsExtra = coupon.applyToProducts ? computePendingProductsSubtotal(order) : 0;
-            autoDiscount = computePartialCouponDiscount(autoApplicableTickets, coupon.type, coupon.value, effectiveUsage, productsExtra);
-            autoEffectiveUsage = effectiveUsage;
-            // Track which participant positions qualify for position-aware discount display
-            const _ageRefDate = resolveAgeReferenceDate(order);
-            const _ageMin = coupon.minAge ?? 0;
-            const _ageMax = coupon.maxAge ?? Infinity;
-            const _totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-            ageQualifyingSlots = participants
-              .map((p: any, i: number) => {
-                if (!p.birthDate || i >= _totalUnits) return -1;
-                const age = computeAgeAt(p.birthDate, _ageRefDate);
-                return (age >= _ageMin && age <= _ageMax) ? i : -1;
-              })
-              .filter((i: number) => i >= 0);
-          }
-
-          autoCouponId = coupon.id;
-          break;
-        }
-      }
-    }
-
-    // Remover cupom QUANTITY se nova quantidade cair abaixo do mínimo
-    let shouldRemoveQuantityCoupon = false;
-    if (order.couponId && !autoCouponId) {
-      const existingCoupon = await r.coupon.findUnique({
-        where: { id: order.couponId },
-        select: { couponType: true, minQuantity: true },
-      });
-      if (
-        existingCoupon?.couponType === 'QUANTITY' &&
-        existingCoupon.minQuantity &&
-        participants.length < existingCoupon.minQuantity
-      ) {
-        shouldRemoveQuantityCoupon = true;
-      }
-    }
+    // Cupons automáticos (QUANTITY/AGE) NÃO são aplicados aqui — toda aplicação,
+    // re-avaliação e remoção automática acontece em PATCH /products, que é
+    // chamado logo após este endpoint pelo frontend e tem acesso ao subtotal
+    // de produtos (necessário p/ cupons com applyToProducts=true).
 
     // Calcular vagas a liberar se participantes < reservados
     // Participantes sem email são slots ainda não preenchidos — contam como reserva
@@ -1465,8 +1354,10 @@ export class OrdersService {
       0,
     );
     const newTotalAmount = newTicketsSubtotal + productsSubtotal;
-    const newDiscount = autoCouponId ? autoDiscount : (shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon) ? 0 : (order.discount ?? 0);
-    const newFinalAmount = Math.max(0, newTotalAmount - newDiscount);
+    // Discount permanece o que estava — PATCH /products é quem re-avalia
+    // cupom automático após esta operação.
+    const currentDiscount = order.discount ?? 0;
+    const newFinalAmount = Math.max(0, newTotalAmount - currentDiscount);
 
     const updated = await w.$transaction(async (tx: any) => {
       // Restaurar availableQuantity nos lotes liberados
@@ -1496,24 +1387,12 @@ export class OrdersService {
           pendingParticipants: dto.participants,
           totalAmount: newTotalAmount,
           finalAmount: newFinalAmount,
-          ...(autoCouponId && {
-            couponId: autoCouponId,
-            discount: autoDiscount,
-          }),
-          ...(shouldRemoveQuantityCoupon && {
-            couponId: null,
-            discount: 0,
-          }),
-          ...(shouldRemoveAgeCoupon && {
-            couponId: null,
-            discount: 0,
-          }),
           updatedAt: new Date(),
         },
         include: ORDER_INCLUDE,
       });
     });
-    return orderShape(updated, newDiscount > 0 ? newDiscount : undefined, { couponAutoRemoved: shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon }, autoEffectiveUsage, undefined, ageQualifyingSlots);
+    return orderShape(updated);
   }
 
   // ── 3b. patchCoupon ───────────────────────────────────────────────────────
@@ -1714,12 +1593,19 @@ export class OrdersService {
     this.assertPending(order);
 
     const w: any = this.prisma.getWriteClient();
+    const r: any = this.prisma.getReadClient();
 
     const participants = (order.pendingParticipants as any[] | null) ?? [];
     const validEmails = new Set(participants.map((p: any) => p.email?.toLowerCase()));
+    const reservedTickets = (order.reservedTickets as any[]) ?? [];
 
-    // Recalculate product subtotal validando produtos e participantes
+    // Recalculate product subtotal validando produtos e participantes.
+    // Enriquecemos cada item com `unitPrice` calculado para gravar no JSON
+    // pendingProducts — é o snapshot do preço usado por patchParticipants e por
+    // helpers como computePendingProductsSubtotal (que leem p.unitPrice direto).
+    // Sem isso, qualquer recálculo de totalAmount posterior zera os produtos.
     let productsSubtotal = 0;
+    const enrichedProducts: any[] = [];
     for (const item of dto.products) {
       if (!validEmails.has(item.participantEmail.toLowerCase())) {
         throw new UnprocessableEntityException(
@@ -1744,27 +1630,223 @@ export class OrdersService {
       }
       const unitPrice = resolveProductUnitPrice(product, variation);
       productsSubtotal += unitPrice * item.quantity;
+      enrichedProducts.push({
+        productId: item.productId,
+        variationId: item.variationId ?? null,
+        quantity: item.quantity,
+        participantEmail: item.participantEmail,
+        unitPrice,
+      });
     }
 
-    const ticketsSubtotal = (order.reservedTickets as any[]).reduce(
+    const ticketsSubtotal = reservedTickets.reduce(
       (sum: number, rt: any) => sum + rt.unitPrice * rt.quantity,
       0,
     );
     const totalAmount = ticketsSubtotal + productsSubtotal;
 
-    // Recalculate discount when products change: PERCENTAGE coupons apply to the full order.
-    // AGE coupons are excluded — their discount is bounded by effectiveUsage (qualifying
-    // participants), not totalAmount. Recalculating here would lose that constraint.
-    let newDiscount = (order as any).discount ?? 0;
-    const activeCoupon = (order as any).coupon;
-    if (
-      activeCoupon &&
-      activeCoupon.type === 'PERCENTAGE' &&
-      activeCoupon.couponType !== 'AGE' &&
-      !(order as any).voucherId
-    ) {
-      newDiscount = Math.floor(totalAmount * (activeCoupon.value / 100));
-      newDiscount = Math.min(newDiscount, totalAmount);
+    // ── Cupons automáticos (QUANTITY/AGE) ──────────────────────────────────
+    // Aplicados aqui (não mais em PATCH /participants) porque dependem do
+    // subtotal de produtos quando `applyToProducts=true`. O front sempre chama
+    // este endpoint depois de /participants, mesmo com `products: []`.
+
+    let autoCouponId: string | undefined;
+    let autoDiscount = 0;
+    let autoEffectiveUsage: number | undefined;
+    let shouldRemoveAgeCoupon = false;
+    let shouldRemoveQuantityCoupon = false;
+    let ageQualifyingSlots: number[] | undefined;
+
+    // (a) Re-avaliar cupom AGE já aplicado (depende dos participantes atuais)
+    if (order.couponId && !order.voucherId) {
+      const existingCoupon = await r.coupon.findUnique({
+        where: { id: order.couponId },
+        select: { id: true, couponType: true, type: true, value: true, minAge: true, maxAge: true, maxUsage: true, usageCount: true, appliesTo: true, applyToProducts: true },
+      });
+      if (existingCoupon?.couponType === 'AGE') {
+        const refDate = resolveAgeReferenceDate(order);
+        const min = existingCoupon.minAge ?? 0;
+        const max = existingCoupon.maxAge ?? Infinity;
+        const ageMatchCount = participants.filter((p: any) => {
+          if (!p.birthDate) return false;
+          const age = computeAgeAt(p.birthDate, refDate);
+          return age >= min && age <= max;
+        }).length;
+
+        if (ageMatchCount <= 0) {
+          shouldRemoveAgeCoupon = true;
+        } else {
+          let ageApplicableTickets = reservedTickets;
+          if (existingCoupon.appliesTo && existingCoupon.appliesTo !== 'all') {
+            const allowed = parseAppliesToArray(existingCoupon.appliesTo);
+            ageApplicableTickets = reservedTickets.filter((rt: any) => allowed.includes(rt.ticketId));
+          }
+          const ageApplicableQty = ageApplicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
+          const remaining = existingCoupon.maxUsage != null
+            ? Math.max(0, existingCoupon.maxUsage - existingCoupon.usageCount)
+            : ageMatchCount;
+          const effectiveUsage = Math.min(remaining, ageMatchCount, ageApplicableQty);
+          const totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
+          ageQualifyingSlots = participants
+            .map((p: any, i: number) => {
+              if (!p.birthDate || i >= totalUnits) return -1;
+              const age = computeAgeAt(p.birthDate, refDate);
+              return (age >= min && age <= max) ? i : -1;
+            })
+            .filter((i: number) => i >= 0);
+          autoCouponId = existingCoupon.id;
+          const productsExtra = existingCoupon.applyToProducts ? productsSubtotal : 0;
+          autoDiscount = computePartialCouponDiscount(ageApplicableTickets, existingCoupon.type, existingCoupon.value, effectiveUsage, productsExtra);
+          autoEffectiveUsage = effectiveUsage;
+        }
+      }
+    }
+
+    // (b) Aplicação inicial — apenas se ainda não há cupom/voucher
+    if (!order.couponId && !order.voucherId) {
+      const totalQuantity = reservedTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
+      const ticketIds = reservedTickets.map((rt: any) => rt.ticketId);
+
+      const autoCoupons = await w.coupon.findMany({
+        where: {
+          eventId: order.eventId,
+          status: 'ACTIVE',
+          deletedAt: null,
+          couponType: { in: ['QUANTITY', 'AGE'] },
+          OR: [{ expiryDate: null }, { expiryDate: { gt: new Date() } }],
+        },
+      });
+
+      for (const coupon of autoCoupons) {
+        // Verificar appliesTo
+        if (coupon.appliesTo && coupon.appliesTo !== 'all') {
+          const allowed = parseAppliesToArray(coupon.appliesTo);
+          if (!ticketIds.some((id: string) => allowed.includes(id))) continue;
+        }
+
+        if (coupon.minCartValue && ticketsSubtotal < coupon.minCartValue) continue;
+
+        if (coupon.couponType === 'QUANTITY') {
+          if (coupon.minQuantity && totalQuantity < coupon.minQuantity) continue;
+          // QUANTITY: all-or-nothing — se esgotado, não aplica
+          if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) continue;
+        } else if (coupon.couponType === 'AGE') {
+          const refDate = resolveAgeReferenceDate(order);
+          const min = coupon.minAge ?? 0;
+          const max = coupon.maxAge ?? Infinity;
+          const ageMatchCount = participants.filter((p: any) => {
+            if (!p.birthDate) return false;
+            const age = computeAgeAt(p.birthDate, refDate);
+            return age >= min && age <= max;
+          }).length;
+          if (ageMatchCount <= 0) continue;
+          (coupon as any)._ageMatchCount = ageMatchCount;
+        }
+
+        {
+          let autoApplicableTickets = reservedTickets;
+          if (coupon.appliesTo && coupon.appliesTo !== 'all') {
+            const allowedIds = parseAppliesToArray(coupon.appliesTo);
+            autoApplicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
+          }
+
+          if (coupon.couponType === 'QUANTITY') {
+            // QUANTITY: desconto sobre todo o pedido (all-or-nothing).
+            // Produtos adicionais entram na base apenas quando applyToProducts=true.
+            const autoApplicableSubtotal = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0);
+            const autoApplicableQty = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
+            const productsContribution = coupon.applyToProducts ? productsSubtotal : 0;
+            if (coupon.type === 'PERCENTAGE') {
+              const applicableRatio = ticketsSubtotal > 0 ? autoApplicableSubtotal / ticketsSubtotal : 1;
+              const applicableBase = autoApplicableSubtotal + Math.round(productsContribution * applicableRatio);
+              autoDiscount = Math.floor(applicableBase * (coupon.value / 100));
+            } else {
+              // FIXED: valor por unidade aplicável; cap definido abaixo.
+              autoDiscount = autoApplicableQty * coupon.value;
+            }
+            autoDiscount = Math.min(autoDiscount, autoApplicableSubtotal + productsContribution);
+          } else {
+            // AGE: desconto apenas nos ingressos dos participantes qualificados
+            const ageMatchCount: number = (coupon as any)._ageMatchCount ?? 0;
+            const autoApplicableQty = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
+            const remaining = coupon.maxUsage != null
+              ? Math.max(0, coupon.maxUsage - coupon.usageCount)
+              : ageMatchCount;
+            const effectiveUsage = Math.min(remaining, ageMatchCount, autoApplicableQty);
+            if (effectiveUsage <= 0) continue;
+            const productsExtra = coupon.applyToProducts ? productsSubtotal : 0;
+            autoDiscount = computePartialCouponDiscount(autoApplicableTickets, coupon.type, coupon.value, effectiveUsage, productsExtra);
+            autoEffectiveUsage = effectiveUsage;
+            const _ageRefDate = resolveAgeReferenceDate(order);
+            const _ageMin = coupon.minAge ?? 0;
+            const _ageMax = coupon.maxAge ?? Infinity;
+            const _totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
+            ageQualifyingSlots = participants
+              .map((p: any, i: number) => {
+                if (!p.birthDate || i >= _totalUnits) return -1;
+                const age = computeAgeAt(p.birthDate, _ageRefDate);
+                return (age >= _ageMin && age <= _ageMax) ? i : -1;
+              })
+              .filter((i: number) => i >= 0);
+          }
+
+          autoCouponId = coupon.id;
+          break;
+        }
+      }
+    }
+
+    // (c) Remover cupom QUANTITY se quantidade ficou abaixo do mínimo
+    if (order.couponId && !autoCouponId && !shouldRemoveAgeCoupon) {
+      const existingCoupon = await r.coupon.findUnique({
+        where: { id: order.couponId },
+        select: { couponType: true, minQuantity: true },
+      });
+      if (
+        existingCoupon?.couponType === 'QUANTITY' &&
+        existingCoupon.minQuantity &&
+        participants.length < existingCoupon.minQuantity
+      ) {
+        shouldRemoveQuantityCoupon = true;
+      }
+    }
+
+    // Discount final — prioridade: auto-aplicado > remoção > recálculo PERCENTAGE não-AGE > existente.
+    // AGE existente com participantes intactos cai no caminho (a) acima; PERCENTAGE/FIXED
+    // de cupons DISCOUNT são recalculados aqui para refletir a nova base com produtos.
+    let newDiscount: number;
+    if (autoCouponId) {
+      newDiscount = autoDiscount;
+    } else if (shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon) {
+      newDiscount = 0;
+    } else {
+      newDiscount = (order as any).discount ?? 0;
+      const activeCoupon = (order as any).coupon;
+      if (
+        activeCoupon &&
+        activeCoupon.type === 'PERCENTAGE' &&
+        activeCoupon.couponType !== 'AGE' &&
+        !(order as any).voucherId
+      ) {
+        // Espelha a fórmula da aplicação inicial QUANTITY PERCENTAGE: respeita
+        // `appliesTo` (só ingressos cobertos) e `applyToProducts` (produtos só
+        // entram na base se o flag estiver ligado). Antes usava totalAmount cru
+        // e cobrava desconto sobre produtos quando applyToProducts=false.
+        let applicableTickets = reservedTickets;
+        if (activeCoupon.appliesTo && activeCoupon.appliesTo !== 'all') {
+          const allowed = parseAppliesToArray(activeCoupon.appliesTo);
+          applicableTickets = reservedTickets.filter((rt: any) => allowed.includes(rt.ticketId));
+        }
+        const applicableSubtotal = applicableTickets.reduce(
+          (s: number, rt: any) => s + rt.unitPrice * rt.quantity,
+          0,
+        );
+        const productsContribution = activeCoupon.applyToProducts ? productsSubtotal : 0;
+        const applicableRatio = ticketsSubtotal > 0 ? applicableSubtotal / ticketsSubtotal : 1;
+        const applicableBase = applicableSubtotal + Math.round(productsContribution * applicableRatio);
+        newDiscount = Math.floor(applicableBase * (activeCoupon.value / 100));
+        newDiscount = Math.min(newDiscount, applicableBase);
+      }
     }
 
     const finalAmount = Math.max(0, totalAmount - newDiscount);
@@ -1772,15 +1854,24 @@ export class OrdersService {
     const updated = await w.order.update({
       where: { id: orderId },
       data: {
-        pendingProducts: dto.products,
+        pendingProducts: enrichedProducts,
         totalAmount,
         discount: newDiscount,
         finalAmount,
+        ...(autoCouponId && { couponId: autoCouponId }),
+        ...((shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon) && { couponId: null }),
         updatedAt: new Date(),
       },
       include: ORDER_INCLUDE,
     });
-    return orderShape(updated);
+    return orderShape(
+      updated,
+      newDiscount > 0 ? newDiscount : undefined,
+      { couponAutoRemoved: shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon },
+      autoEffectiveUsage,
+      undefined,
+      ageQualifyingSlots,
+    );
   }
 
   // ── 5. patchBillingAddress ────────────────────────────────────────────────
@@ -2369,10 +2460,11 @@ export class OrdersService {
       r.event.findUnique({
         where: { id: order.eventId },
         select: {
-          id: true, name: true, slug: true,
+          id: true, name: true, slug: true, description: true,
           eventDate: true, registrationStartDate: true, registrationEndDate: true,
           location: true, city: true, state: true, country: true, zipCode: true, neighborhood: true,
-          bannerUrl: true, logoUrl: true,
+          googleMapsLink: true, bannerUrl: true, logoUrl: true,
+          organization: { select: { id: true, name: true, logoUrl: true, email: true, phone: true } },
         },
       }),
       r.question.findMany({
@@ -2697,15 +2789,33 @@ export class OrdersService {
               id: snapshotEvent.id,
               name: snapshotEvent.name,
               slug: snapshotEvent.slug,
-              startDate: snapshotEvent.startDate,
-              endDate: snapshotEvent.endDate,
+              description: snapshotEvent.description ?? null,
+              // Event tem apenas eventDate (data única). Mantemos também a janela
+              // de inscrição porque ajuda a auditar quando o pedido foi feito.
+              eventDate: snapshotEvent.eventDate,
+              registrationStartDate: snapshotEvent.registrationStartDate ?? null,
+              registrationEndDate: snapshotEvent.registrationEndDate ?? null,
+              bannerUrl: snapshotEvent.bannerUrl ?? null,
+              logoUrl: snapshotEvent.logoUrl ?? null,
+              organization: (snapshotEvent as any).organization
+                ? {
+                    id: (snapshotEvent as any).organization.id,
+                    name: (snapshotEvent as any).organization.name,
+                    logoUrl: (snapshotEvent as any).organization.logoUrl ?? null,
+                    email: (snapshotEvent as any).organization.email ?? null,
+                    phone: (snapshotEvent as any).organization.phone ?? null,
+                  }
+                : null,
               location: {
-                street: snapshotEvent.street ?? null,
-                number: snapshotEvent.number ?? null,
+                // `Event.location` é uma string livre com o nome do local (ex: "Parque do Ibirapuera").
+                // O endereço estruturado (street/number) vive em `EventLocation` (1:N) — fora do escopo do recibo.
+                name: snapshotEvent.location ?? null,
+                neighborhood: snapshotEvent.neighborhood ?? null,
                 city: snapshotEvent.city ?? null,
                 state: snapshotEvent.state ?? null,
                 country: snapshotEvent.country ?? null,
                 zipCode: snapshotEvent.zipCode ?? null,
+                googleMapsLink: snapshotEvent.googleMapsLink ?? null,
               },
             } : null,
             ticket: ticketSnapshot,

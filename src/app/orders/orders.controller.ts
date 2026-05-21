@@ -138,7 +138,7 @@ export class OrdersController {
   @Patch(':orderId/coupon')
   @ApiOperation({
     summary: 'Apply or remove coupon/voucher',
-    description: 'Apply a DISCOUNT coupon or voucher to the order. Send empty body to remove. Automatic coupons (QUANTITY/AGE) are applied automatically on PATCH /participants.',
+    description: 'Apply a DISCOUNT coupon or voucher to the order. Send empty body to remove. Automatic coupons (QUANTITY/AGE) are applied automatically on PATCH /products.',
   })
   @ApiParam({ name: 'orderId', type: String, format: 'uuid' })
   @ApiResponse({ status: 200, description: 'Coupon/voucher applied' })

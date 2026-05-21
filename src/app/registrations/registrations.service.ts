@@ -504,6 +504,7 @@ export class RegistrationsService {
           status: true,
           createdAt: true,
           payment: { select: { status: true } },
+          // Mantido como fallback para pedidos PENDING sem receiptSnapshot.
           event: {
             select: {
               id: true,
@@ -520,6 +521,7 @@ export class RegistrationsService {
             select: {
               userId: true,
               invitedById: true,
+              receiptSnapshot: true,
               invitedBy: {
                 select: {
                   id: true,
@@ -529,11 +531,11 @@ export class RegistrationsService {
               },
               tickets: {
                 select: {
+                  ticketSnapshot: true,
+                  // Mantido como fallback para pedidos PENDING sem ticketSnapshot.
                   ticket: {
                     select: {
                       modality: true,
-                      distance: true,
-                      distanceUnit: true,
                     },
                   },
                 },
@@ -551,11 +553,22 @@ export class RegistrationsService {
     const formattedOrders = orders.map((order: any) => {
       const modalitySet = new Set<string>();
       let invitedBy: { id: string; fullName: string } | null = null;
+      let snapshotEvent: any = null;
+
       for (const reg of order.registrations ?? []) {
-        for (const rt of reg.tickets ?? []) {
-          if (rt.ticket?.modality) modalitySet.add(rt.ticket.modality);
+        // Event vem do primeiro receiptSnapshot encontrado — todas as registrations
+        // do mesmo pedido carregam o mesmo evento.
+        if (!snapshotEvent && reg.receiptSnapshot?.event) {
+          snapshotEvent = reg.receiptSnapshot.event;
         }
-        // only show badge when THIS user is the participant and someone else bought it
+        for (const rt of reg.tickets ?? []) {
+          // Snapshot tem prioridade: se o organizer renomear modality depois,
+          // o recibo mantém o nome original.
+          const modality = rt.ticketSnapshot?.modality ?? rt.ticket?.modality ?? null;
+          if (modality) modalitySet.add(modality);
+        }
+        // invitedBy: só exibimos quando ESTE user é o participante e outro comprou.
+        // Continua live (não está no snapshot) — é apenas um label visual.
         if (!invitedBy && reg.userId === userId && reg.invitedBy) {
           invitedBy = {
             id: reg.invitedBy.id,
@@ -563,11 +576,25 @@ export class RegistrationsService {
           };
         }
       }
+
+      const event = snapshotEvent
+        ? {
+            id: snapshotEvent.id,
+            name: snapshotEvent.name,
+            slug: snapshotEvent.slug,
+            eventDate: snapshotEvent.eventDate,
+            logoUrl: snapshotEvent.logoUrl ?? null,
+            location: snapshotEvent.location?.name ?? null,
+            city: snapshotEvent.location?.city ?? null,
+            state: snapshotEvent.location?.state ?? null,
+          }
+        : order.event;
+
       return {
         id: order.id,
         status: this.deriveOrderStatus(order.status, order.payment?.status ?? null),
         createdAt: order.createdAt,
-        event: order.event,
+        event,
         modalities: Array.from(modalitySet),
         invitedBy,
       };
