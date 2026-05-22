@@ -564,8 +564,14 @@ model Registration {
   // Snapshot do participante convidado (preenchido quando userId = null)
   participantName       String?
   participantEmail      String?
+  // Documento (legacy, ainda gravado em paralelo enquanto durar a compat):
   participantCpf        String?
   participantCpfClean   String?
+  // Documento internacionalizado — fonte de verdade nova. *Clean normalizado
+  // por cleanDocumentNumber() (depende de participantDocumentType).
+  participantDocumentType        DocumentType?
+  participantDocumentNumber      String?
+  participantDocumentNumberClean String?
   participantPhone      String?
   participantDateOfBirth DateTime?
   participantGender     String?
@@ -590,6 +596,8 @@ model Registration {
   @@index([userId])
   @@index([invitedById])
   @@index([participantCpfClean])
+  @@index([participantDocumentNumberClean])
+  @@index([eventId, participantDocumentNumberClean])
   @@index([eventId, status])
   @@index([userId, createdAt])
   @@index([invitedById, createdAt])
@@ -777,24 +785,31 @@ model ContactMessage {
 }
 
 model LinkedUser {
-  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  mainUserId          String    @db.Uuid
+  id                  String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  mainUserId          String        @db.Uuid
   firstName           String
   lastName            String
   email               String?
+  // documentType nullable durante a janela de compat. Após o backfill, todos
+  // os registros antigos viram CPF; novos sempre informam o tipo via DTO.
+  documentType        DocumentType?
   documentNumber      String?
   documentNumberClean String?
   phone               String?
   dateOfBirth         DateTime?
   gender              String?
   relationshipType    String?
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
 
   mainUser User @relation("MainUser", fields: [mainUserId], references: [id], onDelete: Cascade)
 
-  @@unique([mainUserId, documentNumberClean])
+  // Unique composta com tipo: evita colisão entre CPF 11-dígitos e passaporte
+  // que coincidentemente normaliza pra 11 chars idênticos. O unique antigo
+  // (mainUserId, documentNumberClean) é dropado pela migration A.
+  @@unique([mainUserId, documentType, documentNumberClean])
   @@index([mainUserId])
+  @@index([mainUserId, documentType])
 }
 
 model Coupon {
@@ -809,7 +824,12 @@ model Coupon {
   expiryDate    DateTime?
   minCartValue  Int? // Valor mínimo do carrinho em centavos
   cpfListStatus CpfListStatus      @default(DISABLED)
-  cpfList       Json? // Array de CPFs
+  cpfList       Json? // LEGACY — array de CPFs (clean, só dígitos). Mantido pra retrocompat.
+  // Lista internacionalizada de documentos elegíveis. Shape:
+  //   [{ type: 'CPF' | 'PASSPORT', numberClean: string }]
+  // Fonte de verdade nova. cpfList é mantido em paralelo durante a transição
+  // (fase E remove). Quando ambos estão presentes, o service prefere documentList.
+  documentList  Json?
   minQuantity   Int? // Para couponType QUANTITY
   ageRule       String? // 'MIN' ou 'MAX' para couponType AGE
   ageValue      String? // Ex: '9 anos'
@@ -842,7 +862,9 @@ model Voucher {
   appliesTo     String? // 'all' ou JSON array de ticket IDs
   expiryDate    DateTime?
   cpfListStatus CpfListStatus @default(DISABLED)
-  cpfList       Json? // Array de CPFs
+  cpfList       Json? // LEGACY — array de CPFs (clean). Mantido pra retrocompat.
+  // Lista internacionalizada: [{ type, numberClean }]. Ver Coupon.documentList.
+  documentList  Json?
   status        VoucherStatus @default(ACTIVE)
   usedAt        DateTime? // Data em que foi usado
   usedBy        String?       @db.Uuid // ID do usuário que usou

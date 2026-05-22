@@ -11,6 +11,7 @@ import {
   Matches,
   MaxLength,
   ValidateIf,
+  ValidateNested,
   IsNotEmpty,
   IsUUID,
   IsPositive,
@@ -18,6 +19,24 @@ import {
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsDateString } from 'class-validator';
+import { DocumentType } from '@prisma/client';
+
+/**
+ * Entrada de cupom/voucher elegível por documento (internacionalizado).
+ * `numberClean` deve vir já normalizado pelo cliente (ou é normalizado no
+ * service via cleanDocumentNumber). Charset restrito barra injection.
+ */
+export class DocumentListItemDto {
+  @IsEnum(DocumentType)
+  @ApiProperty({ enum: DocumentType, example: 'CPF' })
+  type: DocumentType;
+
+  @IsString()
+  @MaxLength(30)
+  @Matches(/^[A-Za-z0-9]+$/, { message: 'numberClean deve ser alfanumérico sem formatação' })
+  @ApiProperty({ example: '12345678900' })
+  numberClean: string;
+}
 
 export enum CouponType {
   DISCOUNT = 'DISCOUNT',
@@ -127,16 +146,35 @@ export class CreateCouponDto {
   })
   cpfListStatus?: CpfListStatus;
 
-  @ValidateIf((o) => o.cpfListStatus === CpfListStatus.ENABLED)
-  @IsNotEmpty()
+  /**
+   * LEGACY — array de CPFs (clean). Aceito por retrocompat com clientes
+   * antigos. Quando `documentList` vem preenchido, ele tem prioridade.
+   * O service auto-converte cpfList em documentList quando este não foi
+   * informado (gravando ambos em paralelo durante a transição).
+   */
+  @IsOptional()
   @IsArray()
   @IsString({ each: true })
   @ApiPropertyOptional({
-    description: 'Array of CPFs (only if cpfListStatus is ENABLED)',
+    description: 'LEGACY: Array of CPFs. Prefira `documentList` em clientes novos.',
     type: [String],
     example: ['12345678900', '98765432100'],
   })
   cpfList?: string[];
+
+  /**
+   * Lista internacionalizada de documentos elegíveis. Quando `cpfListStatus`
+   * for ENABLED, é obrigatório enviar `documentList` OU `cpfList` (legacy).
+   */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => DocumentListItemDto)
+  @ApiPropertyOptional({
+    description: 'Lista de documentos elegíveis: [{type, numberClean}]',
+    type: [DocumentListItemDto],
+  })
+  documentList?: DocumentListItemDto[];
 
   // Campos específicos para QUANTITY
   @ValidateIf((o) => o.couponType === CouponType.QUANTITY)
@@ -257,6 +295,12 @@ export class UpdateCouponDto {
   @IsArray()
   @IsString({ each: true })
   cpfList?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => DocumentListItemDto)
+  documentList?: DocumentListItemDto[];
 
   @IsOptional()
   @IsInt()

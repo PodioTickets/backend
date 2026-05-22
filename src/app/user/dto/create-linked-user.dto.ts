@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import {
   IsString,
   IsEmail,
@@ -7,8 +8,10 @@ import {
   IsNotEmpty,
   IsOptional,
   Matches,
+  MaxLength,
   MinLength,
 } from 'class-validator';
+import { DocumentType } from '@prisma/client';
 
 export enum GenderEnum {
   MASCULINO = 'masculino',
@@ -16,6 +19,9 @@ export enum GenderEnum {
   OUTRO = 'outro',
   PREFIRO_NAO_DIZER = 'prefiro-nao-dizer',
 }
+
+const emptyToUndefined = ({ value }: { value: any }) =>
+  value === '' || value === null ? undefined : value;
 
 export class CreateLinkedUserDto {
   @ApiProperty({
@@ -42,14 +48,36 @@ export class CreateLinkedUserDto {
   @IsEmail()
   email?: string;
 
+  @ApiPropertyOptional({
+    description: 'Tipo do documento. Default CPF para retrocompatibilidade.',
+    enum: DocumentType,
+    example: 'CPF',
+  })
+  @Transform(emptyToUndefined)
+  @IsOptional()
+  @IsEnum(DocumentType)
+  documentType?: DocumentType;
+
+  /**
+   * Documento do usuário vinculado. Validação real depende do `documentType`:
+   *   - CPF (default histórico): exige 11 dígitos após strip de formatação.
+   *   - PASSPORT: aceita alfanumérico 4–30 chars (mantém letras essenciais).
+   *
+   * A regra estrita por tipo é aplicada no service via `resolveDocument()`,
+   * pois o DTO precisa aceitar os dois formatos simultaneamente durante a
+   * fase de transição. O regex aqui só barra caracteres claramente
+   * inválidos (injection chars).
+   */
   @ApiProperty({
-    description: 'CPF do usuário (apenas números, sem formatação)',
+    description:
+      'Documento do usuário. CPF (11 dígitos) ou passaporte (alfanumérico 4-30 chars).',
     example: '98765432100',
   })
   @IsString()
   @IsNotEmpty()
-  @Matches(/^\d{11}$/, {
-    message: 'CPF deve conter exatamente 11 dígitos numéricos',
+  @MaxLength(30)
+  @Matches(/^[A-Za-z0-9.\-\s]+$/, {
+    message: 'Documento contém caracteres inválidos',
   })
   documentNumber: string;
 

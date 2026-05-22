@@ -2,12 +2,16 @@ import {
   IsArray,
   IsBoolean,
   IsEmail,
+  IsEnum,
   IsOptional,
   IsString,
   IsUUID,
+  Matches,
+  MaxLength,
   ValidateNested,
 } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
+import { DocumentType } from '@prisma/client';
 
 export class QuestionAnswerDto {
   @IsUUID()
@@ -25,9 +29,34 @@ export class ParticipantDto {
   @IsString()
   name?: string;
 
+  /**
+   * Alias retrocompatível. Aceita o formato antigo (CPF cru ou formatado).
+   * Clientes novos devem usar `documentNumber` + `documentType`. O service
+   * preenche o documento final via `resolveDocument()` priorizando os
+   * campos novos quando ambos vierem.
+   */
+  @Transform(emptyToUndefined)
   @IsOptional()
   @IsString()
+  @MaxLength(30)
   cpf?: string;
+
+  @Transform(emptyToUndefined)
+  @IsOptional()
+  @IsEnum(DocumentType)
+  documentType?: DocumentType;
+
+  /**
+   * Documento internacionalizado. Charset restrito a alfanumérico + pontos,
+   * hífens e espaços — bloqueia injeção de caracteres estranhos (<, ', ;).
+   * Length cap em 30 chars (acomoda CPF formatado e passaportes mais longos).
+   */
+  @Transform(emptyToUndefined)
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  @Matches(/^[A-Za-z0-9.\-\s]+$/, { message: 'documentNumber inválido' })
+  documentNumber?: string;
 
   @Transform(emptyToUndefined)
   @IsOptional()

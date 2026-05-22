@@ -10,7 +10,11 @@ import { UpdateUserDto } from './dto/update-user.dto';
 import { CreateLinkedUserDto } from './dto/create-linked-user.dto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EmailService } from '../../common/services/email.service';
-import { Prisma } from '@prisma/client';
+import { DocumentType, Prisma } from '@prisma/client';
+import {
+  cleanDocumentNumber as cleanDoc,
+  inferDocumentType,
+} from '../../common/utils/document.util';
 import * as bcrypt from 'bcryptjs';
 
 @Injectable()
@@ -23,27 +27,18 @@ export class UserService {
   ) {}
 
   /**
-   * Normaliza o documentNumber para uso como chave única.
-   *
-   * Comportamento conforme o tipo do documento:
-   *   - CPF (ou tipo não informado, default brasileiro): remove formatação
-   *     (pontos, traços, barras, espaços) e mantém só dígitos. Aceita CPF e
-   *     CNPJ (legado, mesma regra).
-   *   - Outros documentos (PASSPORT, identidade estrangeira): preserva o
-   *     valor original com trim + uppercase + remoção de espaços internos.
-   *     NÃO faz replace(/\D/g) porque passaporte tem letras e elas são parte
-   *     do número — removê-las causaria colisões de unique constraint entre
-   *     passaportes diferentes que compartilham os mesmos dígitos.
+   * Wrapper sobre `cleanDocumentNumber` do util compartilhado. Mantém a
+   * assinatura antiga (retorna null pra entrada vazia) usada por todos os
+   * call-sites internos pra preservar `Prisma.update({ documentNumberClean })`
+   * com null explícito.
    */
   private cleanDocumentNumber(
     documentNumber?: string | null,
-    documentType?: 'CPF' | 'PASSPORT' | null,
+    documentType?: DocumentType | null,
   ): string | null {
     if (!documentNumber) return null;
-    if (!documentType || documentType === 'CPF') {
-      return documentNumber.replace(/\D/g, '');
-    }
-    return documentNumber.trim().toUpperCase().replace(/\s+/g, '');
+    const out = cleanDoc(documentNumber, documentType ?? DocumentType.CPF);
+    return out.length > 0 ? out : null;
   }
 
   private validatePasswordStrength(password: string): void {
@@ -376,7 +371,9 @@ export class UserService {
         firstName: true,
         lastName: true,
         email: true,
+        documentType: true,
         documentNumber: true,
+        country: true,
         phone: true,
         dateOfBirth: true,
         gender: true,
@@ -400,12 +397,16 @@ export class UserService {
         gender: this.mapGenderFromEnum(mainUser.gender),
         dateOfBirth: mainUser.dateOfBirth ? mainUser.dateOfBirth.toISOString().split('T')[0] : null,
       },
+      // Linked profiles ainda não têm country próprio — herdamos do mainUser
+      // como melhor aproximação até existir coluna `country` em LinkedUser.
       ...linkedProfiles.map((lp) => ({
         id: lp.id,
         firstName: lp.firstName,
         lastName: lp.lastName,
         email: lp.email,
+        documentType: lp.documentType,
         documentNumber: lp.documentNumber,
+        country: mainUser.country,
         phone: lp.phone,
         dateOfBirth: lp.dateOfBirth ? lp.dateOfBirth.toISOString().split('T')[0] : null,
         gender: lp.gender,
@@ -425,19 +426,34 @@ export class UserService {
       throw new BadRequestException('Data de nascimento não pode ser futura');
     }
 
-    const documentNumberClean = this.cleanDocumentNumber(dto.documentNumber);
+    const documentType =
+      (dto.documentType as DocumentType | undefined) ??
+      inferDocumentType(dto.documentNumber);
+    const documentNumberClean = this.cleanDocumentNumber(dto.documentNumber, documentType);
 
     if (documentNumberClean) {
       const mainUser = await prismaRead.user.findUnique({
         where: { id: mainUserId },
-        select: { documentNumberClean: true },
+        select: { documentType: true, documentNumberClean: true },
       });
-      if (mainUser?.documentNumberClean && mainUser.documentNumberClean === documentNumberClean) {
+      // Anti-self: só rejeita se TIPO + número coincidem com o próprio
+      // usuário principal. Tipos distintos com mesmo numberClean por acaso
+      // são tratados como documentos diferentes.
+      if (
+        mainUser?.documentNumberClean === documentNumberClean &&
+        (mainUser.documentType ?? DocumentType.CPF) === documentType
+      ) {
         throw new BadRequestException('Não é possível adicionar você mesmo como usuário vinculado');
       }
 
       const result = await prismaWrite.linkedUser.upsert({
-        where: { mainUserId_documentNumberClean: { mainUserId, documentNumberClean } },
+        where: {
+          mainUserId_documentType_documentNumberClean: {
+            mainUserId,
+            documentType,
+            documentNumberClean,
+          },
+        },
         update: {
           firstName: dto.firstName,
           lastName: dto.lastName,
@@ -451,6 +467,7 @@ export class UserService {
           firstName: dto.firstName,
           lastName: dto.lastName,
           email: dto.email ?? null,
+          documentType,
           documentNumber: dto.documentNumber ?? null,
           documentNumberClean,
           phone: dto.phone,
@@ -468,6 +485,7 @@ export class UserService {
         firstName: dto.firstName,
         lastName: dto.lastName,
         email: dto.email ?? null,
+        documentType: null,
         documentNumber: null,
         documentNumberClean: null,
         phone: dto.phone,
@@ -498,9 +516,22 @@ export class UserService {
     return { success: true };
   }
 
-  async findUserByCpf(cpf: string) {
+  /**
+   * Lookup de usuário por documento. Aceita CPF (formatado ou só dígitos)
+   * E passaporte. O tipo é inferido pela heurística do util — 11 dígitos
+   * puros → CPF; qualquer coisa com letras → PASSPORT.
+   *
+   * URL antiga `/by-cpf/:value` mantida por compat — endpoint generalizado
+   * internamente (decisão da §12 do doc de internacionalização).
+   */
+  async findUserByCpf(value: string) {
     const prismaRead = this.prisma.getReadClient();
-    const documentNumberClean = cpf.replace(/\D/g, '');
+    const inferredType = inferDocumentType(value);
+    const documentNumberClean = cleanDoc(value, inferredType);
+
+    if (!documentNumberClean) {
+      throw new NotFoundException('Usuário não encontrado');
+    }
 
     const user = await prismaRead.user.findUnique({
       where: {
@@ -511,10 +542,16 @@ export class UserService {
         firstName: true,
         lastName: true,
         email: true,
+        documentType: true,
         documentNumber: true,
         phone: true,
         dateOfBirth: true,
         gender: true,
+        // Localização/nacionalidade — necessário pro pré-preenchimento do
+        // formulário de participante estrangeiro (front decide UI por country).
+        country: true,
+        state: true,
+        city: true,
       },
     });
 
@@ -537,6 +574,7 @@ export class UserService {
     firstName: string;
     lastName: string;
     email: string | null;
+    documentType?: DocumentType | null;
     documentNumber: string | null;
     phone: string | null;
     dateOfBirth: Date | null;
@@ -547,6 +585,7 @@ export class UserService {
       firstName: lp.firstName,
       lastName: lp.lastName,
       email: lp.email,
+      documentType: lp.documentType ?? null,
       documentNumber: lp.documentNumber,
       phone: lp.phone,
       dateOfBirth: lp.dateOfBirth ? lp.dateOfBirth.toISOString().split('T')[0] : null,

@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateCouponDto, UpdateCouponDto, FilterCouponsDto, CouponStatus } from './dto/create-coupon.dto';
+import { buildDocumentList } from '../../common/utils/document.util';
 
 @Injectable()
 export class CouponsService {
@@ -57,6 +58,14 @@ export class CouponsService {
       status = CouponStatus.EXPIRED;
     }
 
+    // Dual-write: grava documentList (shape novo) e mantém cpfList em
+    // paralelo durante a transição. buildDocumentList prefere documentList
+    // do DTO e auto-converte cpfList quando só este vem (cliente legado).
+    const documentList = buildDocumentList({
+      documentList: createCouponDto.documentList,
+      cpfList: createCouponDto.cpfList,
+    });
+
     const coupon = await prismaWrite.coupon.create({
       data: {
         ...createCouponDto,
@@ -66,6 +75,7 @@ export class CouponsService {
         expiryDate: expiryDateValue,
         appliesTo: appliesToValue,
         cpfList: createCouponDto.cpfList ? (createCouponDto.cpfList as any) : null,
+        documentList: (documentList as any) ?? null,
         cpfListStatus: createCouponDto.cpfListStatus || 'DISABLED',
         minCartValue: createCouponDto.minCartValue != null ? createCouponDto.minCartValue : null,
         maxUsage: createCouponDto.maxUsage ?? null,
@@ -218,8 +228,22 @@ export class CouponsService {
         updateData.appliesTo = updateCouponDto.appliesTo;
       }
     }
-    if (updateCouponDto.cpfList) {
-      updateData.cpfList = updateCouponDto.cpfList as any;
+    // Update da lista de documentos: aceita documentList (novo) e/ou
+    // cpfList (legacy). Quando qualquer um dos dois é informado, recalcula
+    // o documentList canônico mantendo cpfList em paralelo.
+    if (updateCouponDto.cpfList !== undefined || updateCouponDto.documentList !== undefined) {
+      const merged = buildDocumentList({
+        documentList: updateCouponDto.documentList ?? (coupon.documentList as any),
+        cpfList: updateCouponDto.cpfList ?? (coupon.cpfList as any),
+      });
+      updateData.documentList = (merged as any) ?? null;
+      if (updateCouponDto.cpfList !== undefined) {
+        updateData.cpfList = updateCouponDto.cpfList as any;
+      }
+    } else {
+      // Sem mudança em listas — não persistir o `documentList` cru do spread
+      // (ele já entrou via `{ ...updateCouponDto }` se o cliente mandou).
+      delete updateData.documentList;
     }
 
     // Converter expiryDate para Date se fornecido
@@ -344,9 +368,15 @@ export class CouponsService {
       }
     }
 
-    // Validar CPF list
-    if (dto.cpfListStatus === 'ENABLED' && (!dto.cpfList || dto.cpfList.length === 0)) {
-      throw new BadRequestException('cpfList is required when cpfListStatus is ENABLED');
+    // Validar lista de documentos quando habilitada: aceita cpfList (legacy)
+    // OU documentList (novo, internacionalizado). Pelo menos um precisa
+    // estar preenchido.
+    if (dto.cpfListStatus === 'ENABLED') {
+      const hasCpf = Array.isArray(dto.cpfList) && dto.cpfList.length > 0;
+      const hasDocList = Array.isArray((dto as any).documentList) && (dto as any).documentList.length > 0;
+      if (!hasCpf && !hasDocList) {
+        throw new BadRequestException('documentList ou cpfList é obrigatório quando cpfListStatus = ENABLED');
+      }
     }
   }
 

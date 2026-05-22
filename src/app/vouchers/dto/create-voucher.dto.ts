@@ -7,10 +7,12 @@ import {
   IsEnum,
   IsArray,
   IsNotEmpty,
+  ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsDateString } from 'class-validator';
+import { DocumentListItemDto } from '../../coupons/dto/create-coupon.dto';
 
 export enum VoucherStatus {
   ACTIVE = 'ACTIVE',
@@ -69,15 +71,28 @@ export class CreateVoucherDto {
   })
   cpfListStatus?: CpfListStatus;
 
+  /**
+   * LEGACY — ver Coupon.cpfList. Prefira `documentList` em clientes novos.
+   */
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
   @ApiPropertyOptional({
-    description: 'Array of CPFs (only if cpfListStatus is ENABLED)',
+    description: 'LEGACY: Array of CPFs. Prefira `documentList`.',
     type: [String],
     example: ['12345678900', '98765432100'],
   })
   cpfList?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => DocumentListItemDto)
+  @ApiPropertyOptional({
+    description: 'Lista de documentos elegíveis: [{type, numberClean}]',
+    type: [DocumentListItemDto],
+  })
+  documentList?: DocumentListItemDto[];
 }
 
 export class UpdateVoucherDto {
@@ -108,6 +123,12 @@ export class UpdateVoucherDto {
   @IsArray()
   @IsString({ each: true })
   cpfList?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => DocumentListItemDto)
+  documentList?: DocumentListItemDto[];
 
   @IsOptional()
   @IsEnum(VoucherStatus)

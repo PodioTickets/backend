@@ -2,9 +2,10 @@ import { Injectable, NotFoundException, BadRequestException } from '@nestjs/comm
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateRegistrationDto, CreateRegistrationWithInvitedUserDto } from './dto/create-registration.dto';
 import { FilterRegistrationsDto, RegistrationFilterStatus } from './dto/filter-registrations.dto';
-import { Prisma, RegistrationStatus, PaymentStatus } from '@prisma/client';
+import { DocumentType, Prisma, RegistrationStatus, PaymentStatus } from '@prisma/client';
 // QR Code é gerado dinamicamente no frontend/backend usando o payload salvo em qrCode
 import { KitsService } from '../kits/kits.service';
+import { isDocumentInList, resolveDocument } from '../../common/utils/document.util';
 
 @Injectable()
 export class RegistrationsService {
@@ -115,7 +116,13 @@ export class RegistrationsService {
 
     // Determinar o usuário da inscrição (próprio ou convidado)
     let registrationUserId: string | null = userId;
-    let guestSnapshot: { name: string; email: string; cpf: string; cpfClean: string } | null = null;
+    let guestSnapshot: {
+      name: string;
+      email: string;
+      documentType: DocumentType | null;
+      documentNumber: string;
+      documentNumberClean: string;
+    } | null = null;
 
     if (invitedUser) {
       const existingUser = await prismaRead.user.findFirst({
@@ -126,11 +133,18 @@ export class RegistrationsService {
         registrationUserId = existingUser.id;
       } else {
         registrationUserId = null;
+        // invitedUser pode trazer documentType opcional (DTO atualizado);
+        // ausência cai no inferDocumentType (CPF se for 11 dígitos).
+        const doc = resolveDocument({
+          documentType: (invitedUser as any).documentType,
+          documentNumber: invitedUser.documentNumber,
+        });
         guestSnapshot = {
           name: `${invitedUser.firstName} ${invitedUser.lastName}`,
           email: invitedUser.email,
-          cpf: invitedUser.documentNumber,
-          cpfClean: invitedUser.documentNumber.replace(/\D/g, ''),
+          documentType: doc.type,
+          documentNumber: doc.number,
+          documentNumberClean: doc.clean,
         };
       }
     } else if (invitedUserId) {
@@ -230,8 +244,16 @@ export class RegistrationsService {
           ...(guestSnapshot && {
             participantName: guestSnapshot.name,
             participantEmail: guestSnapshot.email,
-            participantCpf: guestSnapshot.cpf,
-            participantCpfClean: guestSnapshot.cpfClean,
+            // Legacy (mantém durante a transição)
+            participantCpf: guestSnapshot.documentNumber,
+            participantCpfClean:
+              guestSnapshot.documentType === DocumentType.CPF
+                ? guestSnapshot.documentNumberClean
+                : '',
+            // Fonte de verdade nova
+            participantDocumentType: guestSnapshot.documentType,
+            participantDocumentNumber: guestSnapshot.documentNumber,
+            participantDocumentNumberClean: guestSnapshot.documentNumberClean,
           }),
         },
       });
@@ -1356,20 +1378,18 @@ export class RegistrationsService {
       throw new BadRequestException('Cupom expirado');
     }
 
-    // Verificar CPF list se habilitado
+    // Verificar lista de documentos se habilitada (CPF + estrangeiros).
     if (coupon.cpfListStatus === 'ENABLED') {
       const user = await prisma.user.findUnique({
         where: { id: userId },
-        select: { documentNumber: true },
+        select: { documentType: true, documentNumberClean: true },
       });
 
-      if (!user || !user.documentNumber) {
-        throw new BadRequestException('CPF do usuário é obrigatório para este cupom');
+      if (!user || !user.documentNumberClean) {
+        throw new BadRequestException('Documento do usuário é obrigatório para este cupom');
       }
 
-      const cpfList = ((coupon.cpfList as string[] | null) ?? []).map((c) => c.replace(/\D/g, ''));
-      const userCpf = user.documentNumber.replace(/\D/g, '');
-      if (cpfList.length === 0 || !cpfList.includes(userCpf)) {
+      if (!isDocumentInList(user, coupon.documentList, coupon.cpfList)) {
         throw new BadRequestException('Cupom não é válido para este usuário');
       }
     }
@@ -1468,20 +1488,18 @@ export class RegistrationsService {
       throw new BadRequestException('Voucher has expired');
     }
 
-    // Verificar CPF list se habilitado
+    // Verificar lista de documentos se habilitada (CPF + estrangeiros).
     if (voucher.cpfListStatus === 'ENABLED') {
       const user = await prisma.user.findUnique({
         where: { id: userId },
-        select: { documentNumber: true },
+        select: { documentType: true, documentNumberClean: true },
       });
 
-      if (!user || !user.documentNumber) {
-        throw new BadRequestException('CPF do usuário é obrigatório para este voucher');
+      if (!user || !user.documentNumberClean) {
+        throw new BadRequestException('Documento do usuário é obrigatório para este voucher');
       }
 
-      const cpfList = ((voucher.cpfList as string[] | null) ?? []).map((c) => c.replace(/\D/g, ''));
-      const userCpf = user.documentNumber.replace(/\D/g, '');
-      if (cpfList.length === 0 || !cpfList.includes(userCpf)) {
+      if (!isDocumentInList(user, voucher.documentList, voucher.cpfList)) {
         throw new BadRequestException('Voucher is not valid for this user');
       }
     }

@@ -7,6 +7,7 @@ import {
   FilterVouchersDto,
   VoucherStatus,
 } from './dto/create-voucher.dto';
+import { buildDocumentList } from '../../common/utils/document.util';
 
 @Injectable()
 export class VouchersService {
@@ -46,6 +47,12 @@ export class VouchersService {
     // Gerar códigos únicos para cada voucher
     const codes = await this.generateUniqueCodes(eventId, createVoucherDto.quantity);
 
+    // Dual-write da lista de documentos elegíveis (ver Coupon).
+    const documentListValue = buildDocumentList({
+      documentList: createVoucherDto.documentList,
+      cpfList: createVoucherDto.cpfList,
+    });
+
     // Criar múltiplos vouchers em lote
     const vouchers = await prismaWrite.voucher.createMany({
       data: codes.map((code) => ({
@@ -55,6 +62,7 @@ export class VouchersService {
         appliesTo: appliesToValue,
         expiryDate: expiryDateValue,
         cpfList: createVoucherDto.cpfList ? (createVoucherDto.cpfList as any) : null,
+        documentList: (documentListValue as any) ?? null,
         cpfListStatus: createVoucherDto.cpfListStatus || 'DISABLED',
         status,
       })),
@@ -399,8 +407,19 @@ export class VouchersService {
         updateData.appliesTo = updateVoucherDto.appliesTo;
       }
     }
-    if (updateVoucherDto.cpfList) {
-      updateData.cpfList = updateVoucherDto.cpfList as any;
+    // Sincroniza documentList canônico quando cpfList OU documentList mudam
+    // (ver Coupon.update — mesma estratégia de dual-write).
+    if (updateVoucherDto.cpfList !== undefined || updateVoucherDto.documentList !== undefined) {
+      const merged = buildDocumentList({
+        documentList: updateVoucherDto.documentList ?? (voucher.documentList as any),
+        cpfList: updateVoucherDto.cpfList ?? (voucher.cpfList as any),
+      });
+      updateData.documentList = (merged as any) ?? null;
+      if (updateVoucherDto.cpfList !== undefined) {
+        updateData.cpfList = updateVoucherDto.cpfList as any;
+      }
+    } else {
+      delete updateData.documentList;
     }
 
     // Converter expiryDate para Date se fornecido
@@ -430,6 +449,10 @@ export class VouchersService {
     if (updateVoucherDto.cpfListStatus !== undefined) groupSyncData.cpfListStatus = updateData.cpfListStatus;
     if (updateVoucherDto.cpfList !== undefined || 'cpfList' in updateVoucherDto) {
       groupSyncData.cpfList = updateData.cpfList ?? null;
+    }
+    // documentList faz parte do grupo (mesma semântica de cpfList).
+    if (updateVoucherDto.documentList !== undefined || updateVoucherDto.cpfList !== undefined) {
+      groupSyncData.documentList = updateData.documentList ?? null;
     }
     if (updateVoucherDto.appliesTo !== undefined) groupSyncData.appliesTo = updateData.appliesTo;
     if (updateVoucherDto.expiryDate !== undefined) groupSyncData.expiryDate = updateData.expiryDate;
@@ -562,8 +585,14 @@ export class VouchersService {
   }
 
   private validateVoucherData(dto: CreateVoucherDto | UpdateVoucherDto) {
-    if (dto.cpfListStatus === 'ENABLED' && (!dto.cpfList || dto.cpfList.length === 0)) {
-      throw new BadRequestException('cpfList is required when cpfListStatus is ENABLED');
+    // Aceita documentList (novo) OU cpfList (legacy) — pelo menos um precisa
+    // estar preenchido quando a restrição de documento está habilitada.
+    if (dto.cpfListStatus === 'ENABLED') {
+      const hasCpf = Array.isArray(dto.cpfList) && dto.cpfList.length > 0;
+      const hasDocList = Array.isArray((dto as any).documentList) && (dto as any).documentList.length > 0;
+      if (!hasCpf && !hasDocList) {
+        throw new BadRequestException('documentList ou cpfList é obrigatório quando cpfListStatus = ENABLED');
+      }
     }
 
     if (dto.appliesTo !== undefined && dto.appliesTo !== null) {

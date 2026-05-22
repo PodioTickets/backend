@@ -8,7 +8,7 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { PaymentMethod, PaymentStatus, RegistrationStatus } from '@prisma/client';
+import { DocumentType, PaymentMethod, PaymentStatus, RegistrationStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from '../payments/cielo.service';
 import { OrdersRedisService } from './orders-redis.service';
@@ -21,6 +21,11 @@ import { PatchCouponDto } from './dto/patch-coupon.dto';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
 import { parseAppliesToArray } from '../../helpers/AppliesToHelper';
+import {
+  cleanDocumentNumber,
+  isDocumentInList,
+  resolveDocument,
+} from '../../common/utils/document.util';
 
 // ─── helpers de formatação ────────────────────────────────────────────────────
 
@@ -888,8 +893,12 @@ export class OrdersService {
                   firstName: true,
                   lastName: true,
                   email: true,
+                  documentType: true,
                   documentNumber: true,
                   documentNumberClean: true,
+                  country: true,
+                  state: true,
+                  city: true,
                   phone: true,
                   dateOfBirth: true,
                   gender: true,
@@ -1135,16 +1144,27 @@ export class OrdersService {
           const snapP = receipt?.participant;
           const participant = snapP
             ? {
+                // Snapshot é fonte de verdade pros dados do recibo (nome,
+                // doc, contato). Pra nacionalidade/avatar — que não eram
+                // snapshotados originalmente — caímos pro live user quando
+                // disponível. Não é "violação" do snapshot: country/state/
+                // city/avatar mudam raramente e não são parte do recibo
+                // fiscal — recompor live mantém a UI atualizada e cobre
+                // pedidos antigos sem backfill.
                 id: reg.userId,
                 fullName: snapP.name ?? null,
                 firstName: snapP.name?.split(' ')[0] ?? null,
                 lastName: snapP.name?.split(' ').slice(1).join(' ') ?? null,
                 email: snapP.email ?? null,
-                documentNumber: snapP.cpf ?? null,
-                phone: snapP.phone ?? null,
-                dateOfBirth: snapP.birthDate ?? null,
-                gender: snapP.gender ?? null,
-                avatarUrl: null,
+                documentType: snapP.documentType ?? reg.user?.documentType ?? null,
+                documentNumber: snapP.documentNumber ?? snapP.cpf ?? reg.user?.documentNumber ?? null,
+                phone: snapP.phone ?? reg.user?.phone ?? null,
+                dateOfBirth: snapP.birthDate ?? reg.user?.dateOfBirth ?? null,
+                gender: snapP.gender ?? reg.user?.gender ?? null,
+                country: snapP.country ?? reg.user?.country ?? null,
+                state: snapP.state ?? reg.user?.state ?? null,
+                city: snapP.city ?? reg.user?.city ?? null,
+                avatarUrl: reg.user?.avatarUrl ?? null,
               }
             : reg.user
             ? {
@@ -1153,22 +1173,33 @@ export class OrdersService {
                 firstName: reg.user.firstName,
                 lastName: reg.user.lastName,
                 email: reg.user.email,
+                documentType: reg.user.documentType ?? null,
                 documentNumber: reg.user.documentNumber ?? null,
                 phone: reg.user.phone ?? null,
                 dateOfBirth: reg.user.dateOfBirth ?? null,
                 gender: reg.user.gender ?? null,
+                country: reg.user.country ?? null,
+                state: reg.user.state ?? null,
+                city: reg.user.city ?? null,
                 avatarUrl: reg.user.avatarUrl ?? null,
               }
             : {
+                // Guest sem User: Registration não snapshota nacionalidade
+                // (fora do escopo do snapshot de convidado). Front trata como
+                // ausente.
                 id: null,
                 fullName: reg.participantName ?? null,
                 firstName: (reg.participantName ?? '').split(' ')[0] || null,
                 lastName: (reg.participantName ?? '').split(' ').slice(1).join(' ') || null,
                 email: reg.participantEmail ?? null,
-                documentNumber: reg.participantCpf ?? null,
+                documentType: reg.participantDocumentType ?? null,
+                documentNumber: reg.participantDocumentNumber ?? reg.participantCpf ?? null,
                 phone: reg.participantPhone ?? null,
                 dateOfBirth: reg.participantDateOfBirth ?? null,
                 gender: reg.participantGender ?? null,
+                country: null,
+                state: null,
+                city: null,
                 avatarUrl: null,
               };
 
@@ -1431,13 +1462,16 @@ export class OrdersService {
       const voucherByCode = await r.voucher.findUnique({ where: { code: normalizedCode } });
       if (voucherByCode && voucherByCode.eventId === order.eventId && voucherByCode.status === 'ACTIVE') {
         if (!voucherByCode.expiryDate || new Date(voucherByCode.expiryDate) > new Date()) {
-          // Validar lista de CPF se habilitada
+          // Validar lista de documentos se habilitada (CPF + estrangeiros).
+          // Prefere voucher.documentList (shape internacionalizado); cai pra
+          // cpfList legado em vouchers não-migrados — ver isDocumentInList.
           if (voucherByCode.cpfListStatus === 'ENABLED') {
-            const userDoc = await r.user.findUnique({ where: { id: userId }, select: { documentNumber: true } });
-            const cpfList = ((voucherByCode.cpfList as string[] | null) ?? []).map((c: string) => c.replace(/\D/g, ''));
-            const userCpf = (userDoc?.documentNumber ?? '').replace(/\D/g, '');
-            if (cpfList.length === 0 || !userCpf || !cpfList.includes(userCpf)) {
-              throw new AppUnprocessableException('VOUCHER_CPF_RESTRICTED', 'Voucher não aplicável ao CPF informado');
+            const userDoc = await r.user.findUnique({
+              where: { id: userId },
+              select: { documentType: true, documentNumberClean: true },
+            });
+            if (!isDocumentInList(userDoc ?? {}, voucherByCode.documentList, voucherByCode.cpfList)) {
+              throw new AppUnprocessableException('VOUCHER_CPF_RESTRICTED', 'Voucher não aplicável ao documento informado');
             }
           }
           discount = ticketsSubtotal;
@@ -1473,12 +1507,13 @@ export class OrdersService {
         throw new AppUnprocessableException('COUPON_MIN_VALUE', `Valor mínimo do pedido para este cupom: R$ ${(coupon.minCartValue / 100).toFixed(2)}`);
       }
 
-      // Validar lista de CPF se habilitada
+      // Validar lista de documentos se habilitada (CPF + estrangeiros).
       if (coupon.cpfListStatus === 'ENABLED') {
-        const userDoc = await r.user.findUnique({ where: { id: userId }, select: { documentNumber: true } });
-        const cpfList = ((coupon.cpfList as string[] | null) ?? []).map((c: string) => c.replace(/\D/g, ''));
-        const userCpf = (userDoc?.documentNumber ?? '').replace(/\D/g, '');
-        if (cpfList.length === 0 || !userCpf || !cpfList.includes(userCpf)) {
+        const userDoc = await r.user.findUnique({
+          where: { id: userId },
+          select: { documentType: true, documentNumberClean: true },
+        });
+        if (!isDocumentInList(userDoc ?? {}, coupon.documentList, coupon.cpfList)) {
           throw new AppUnprocessableException('COUPON_CPF_RESTRICTED', 'Cupom não encontrado ou inválido');
         }
       }
@@ -1539,13 +1574,14 @@ export class OrdersService {
         throw new AppUnprocessableException('VOUCHER_EXPIRED', 'Voucher expirado');
       }
 
-      // Validar lista de CPF se habilitada
+      // Validar lista de documentos se habilitada (CPF + estrangeiros).
       if (voucher.cpfListStatus === 'ENABLED') {
-        const userDoc = await r.user.findUnique({ where: { id: userId }, select: { documentNumber: true } });
-        const cpfList = ((voucher.cpfList as string[] | null) ?? []).map((c: string) => c.replace(/\D/g, ''));
-        const userCpf = (userDoc?.documentNumber ?? '').replace(/\D/g, '');
-        if (cpfList.length === 0 || !userCpf || !cpfList.includes(userCpf)) {
-          throw new AppUnprocessableException('VOUCHER_CPF_RESTRICTED', 'Voucher não aplicável ao CPF informado');
+        const userDoc = await r.user.findUnique({
+          where: { id: userId },
+          select: { documentType: true, documentNumberClean: true },
+        });
+        if (!isDocumentInList(userDoc ?? {}, voucher.documentList, voucher.cpfList)) {
+          throw new AppUnprocessableException('VOUCHER_CPF_RESTRICTED', 'Voucher não aplicável ao documento informado');
         }
       }
 
@@ -2171,7 +2207,14 @@ export class OrdersService {
       select: { firstName: true, lastName: true, email: true },
     });
 
-    const firstCpf = participants[0]?.cpf?.replace(/\D/g, '') || undefined;
+    // Identidade enviada ao Cielo (antifraude). Aceita CPF formatado/legacy
+    // e o novo documentNumber+documentType. Se for passaporte ou ausente,
+    // não setamos identity (Cielo aceita ausência).
+    const firstParticipantDoc = resolveDocument(participants[0] ?? {});
+    const firstCpf =
+      firstParticipantDoc.type === DocumentType.CPF && firstParticipantDoc.clean
+        ? firstParticipantDoc.clean
+        : undefined;
     // Cielo limit: 50 chars. "order-" (6) + 8-char id slice (8) + "-" (1) + timestamp (13) = 28
     const merchantOrderId = `order-${orderId.replace(/-/g, '').slice(0, 8)}-${Date.now()}`;
 
@@ -2615,19 +2658,34 @@ export class OrdersService {
 
           // Resolve participant — nunca cria User fantasma
           let participantUserId: string | null = userId;
-          let guestSnapshot: { name: string; email: string; cpf: string; cpfClean: string; phone: string; dateOfBirth: Date | null; gender: string | null } | null = null;
+          let guestSnapshot:
+            | {
+                name: string;
+                email: string;
+                documentType: DocumentType | null;
+                documentNumber: string;
+                documentNumberClean: string;
+                phone: string;
+                dateOfBirth: Date | null;
+                gender: string | null;
+              }
+            | null = null;
 
           if (pData.email?.toLowerCase() !== buyerUser?.email?.toLowerCase()) {
             const existingUser = await tx.user.findFirst({ where: { email: pData.email } });
             if (existingUser) {
               participantUserId = existingUser.id;
             } else {
+              // Resolve documento aceitando ambos formatos do DTO
+              // (documentType+documentNumber novo OU cpf legacy).
+              const doc = resolveDocument(pData);
               participantUserId = null;
               guestSnapshot = {
                 name: pData.name ?? '',
                 email: pData.email ?? '',
-                cpf: pData.cpf ?? '',
-                cpfClean: (pData.cpf ?? '').replace(/\D/g, ''),
+                documentType: doc.type,
+                documentNumber: doc.number,
+                documentNumberClean: doc.clean,
                 phone: pData.phone ?? '',
                 dateOfBirth: pData.birthDate ? new Date(pData.birthDate) : null,
                 gender: pData.gender ?? null,
@@ -2652,8 +2710,16 @@ export class OrdersService {
               ...(guestSnapshot && {
                 participantName: guestSnapshot.name,
                 participantEmail: guestSnapshot.email,
-                participantCpf: guestSnapshot.cpf,
-                participantCpfClean: guestSnapshot.cpfClean,
+                // Legacy: mantido em paralelo durante a transição. Fase E remove.
+                participantCpf: guestSnapshot.documentNumber,
+                participantCpfClean:
+                  guestSnapshot.documentType === DocumentType.CPF
+                    ? guestSnapshot.documentNumberClean
+                    : '',
+                // Fonte de verdade nova
+                participantDocumentType: guestSnapshot.documentType,
+                participantDocumentNumber: guestSnapshot.documentNumber,
+                participantDocumentNumberClean: guestSnapshot.documentNumberClean,
                 participantPhone: guestSnapshot.phone,
                 participantDateOfBirth: guestSnapshot.dateOfBirth,
                 participantGender: guestSnapshot.gender,
@@ -2821,14 +2887,24 @@ export class OrdersService {
             ticket: ticketSnapshot,
             products: participantProductSnapshots,
             questionAnswers: snapshotedAnswers,
-            participant: {
-              name: pData.name ?? null,
-              email: pData.email ?? null,
-              cpf: pData.cpf ?? null,
-              phone: pData.phone ?? null,
-              birthDate: pData.birthDate ?? null,
-              gender: pData.gender ?? null,
-            },
+            participant: (() => {
+              // Snapshot completo do participante. Doc resolvido pelo util
+              // pra suportar CPF legacy + documentType/documentNumber novos.
+              // Nationality fica fora do snapshot (lida live no leitor — ver
+              // getOrderDetails) porque depende do User cadastrado e mudaria
+              // com a frequência baixa o suficiente pra não justificar congelar.
+              const participantDoc = resolveDocument(pData);
+              return {
+                name: pData.name ?? null,
+                email: pData.email ?? null,
+                cpf: pData.cpf ?? null,
+                documentType: participantDoc.type ?? null,
+                documentNumber: participantDoc.number || null,
+                phone: pData.phone ?? null,
+                birthDate: pData.birthDate ?? null,
+                gender: pData.gender ?? null,
+              };
+            })(),
             billing: {
               postalCode: order.billingPostalCode ?? null,
               street: order.billingStreet ?? null,

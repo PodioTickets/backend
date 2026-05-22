@@ -399,18 +399,34 @@ export class CieloService {
         Payment: paymentData,
       };
 
-      // Adicionar Customer se fornecido
-      // IMPORTANTE: Para PIX, a Cielo requer Customer com Identity (CPF)
-      // Estrutura conforme documentação: apenas Name, Identity e IdentityType (SEM Email)
-      if (customerData && customerData.identity) {
+      // Adicionar Customer ao request body.
+      //
+      // Regra por método:
+      //   - PIX: Cielo exige Customer com Identity (CPF). Sem identity, não
+      //     monta Customer (o PIX vai falhar antes, mas mantemos a semântica
+      //     antiga pra não inventar identity falsa).
+      //   - CREDIT_CARD / DEBIT_CARD: Cielo exige Customer.Name (erro 105
+      //     "Customer Name is required" quando ausente). Identity é opcional —
+      //     participantes estrangeiros (PASSPORT) chegam sem CPF, então só
+      //     enviamos Name. Não passamos passaporte como Identity porque
+      //     IdentityType da Cielo é estritamente CPF/CNPJ; mandar passaporte
+      //     como CPF causaria recusa por algoritmo de validação.
+      //
+      // Estrutura: Name + (Identity, IdentityType opcionais) + Email
+      // (Email omitido em PIX por convenção da documentação Cielo).
+      const isPix = paymentMethod === PaymentMethod.PIX;
+      const hasIdentity = !!customerData?.identity;
+      const hasName = !!customerData?.name?.trim();
+      const shouldSendCustomer = isPix ? hasIdentity : (hasName || hasIdentity);
+
+      if (customerData && shouldSendCustomer) {
         requestBody.Customer = {
-          // Limpar espaços no início e fim do nome
-          ...(customerData.name && { Name: customerData.name.trim() }),
-          Identity: customerData.identity,
-          IdentityType: customerData.identityType || 'CPF',
-          // Email NÃO deve ser incluído para PIX (conforme exemplo da documentação)
-          // Apenas incluir Email para outros métodos de pagamento
-          ...(customerData.email && paymentMethod !== PaymentMethod.PIX && { Email: customerData.email.trim() }),
+          ...(hasName && { Name: customerData.name!.trim() }),
+          ...(hasIdentity && {
+            Identity: customerData.identity,
+            IdentityType: customerData.identityType || 'CPF',
+          }),
+          ...(customerData.email && !isPix && { Email: customerData.email.trim() }),
         };
       }
 
