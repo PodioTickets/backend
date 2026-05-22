@@ -46,7 +46,8 @@
       "PowerShell(Get-Process *)",
       "PowerShell(Get-Item *)",
       "Bash(curl *)",
-      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d['data']['registrations'][0]['participant'], indent=2\\)\\)\")"
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d['data']['registrations'][0]['participant'], indent=2\\)\\)\")",
+      "Bash(redis-cli -h localhost -p 6379 -a podiogo123 --no-auth-warning EXISTS perf:monitor:v1)"
     ]
   }
 }

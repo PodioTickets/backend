@@ -1,5 +1,6 @@
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { monitorEventLoopDelay, performance } from 'perf_hooks';
+import { CacheRedisService } from './cache-redis.service';
 
 type RequestSample = {
   method: string;
@@ -19,8 +20,23 @@ type RouteMetric = {
   buckets: number[];
 };
 
+/**
+ * Shape persistido no Redis. `version` permite evoluir o shape sem ler
+ * dados incompatíveis (mismatch → ignora e começa do zero).
+ */
+type PersistedMetrics = {
+  version: 1;
+  totalRequests: number;
+  totalErrors: number;
+  totalDurationMs: number;
+  globalBuckets: number[];
+  routes: RouteMetric[];
+  persistedAt: string;
+};
+
 @Injectable()
-export class PerformanceMonitorService implements OnModuleDestroy {
+export class PerformanceMonitorService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(PerformanceMonitorService.name);
   private readonly startedAt = Date.now();
   private readonly latencyBucketsMs = [25, 50, 100, 250, 500, 1000, 3000, 10000];
   private readonly maxRouteKeys = 500;
@@ -34,12 +50,38 @@ export class PerformanceMonitorService implements OnModuleDestroy {
   private readonly loopDelay = monitorEventLoopDelay({ resolution: 20 });
   private previousElu = performance.eventLoopUtilization();
 
-  constructor() {
+  // ── Persistência (Redis) ──────────────────────────────────────────────────
+  // Chave única (single-instance). Se evoluir pra multi-instance, prefixar
+  // com instanceId e agregar no read.
+  private static readonly REDIS_KEY = 'perf:monitor:v1';
+  private static readonly TTL_SECONDS = 30 * 24 * 60 * 60; // 30 dias
+  private static readonly FLUSH_INTERVAL_MS = 30_000;       // 30s
+  private flushTimer: NodeJS.Timeout | null = null;
+  private dirty = false;
+
+  constructor(private readonly cache: CacheRedisService) {
     this.loopDelay.enable();
   }
 
-  onModuleDestroy() {
+  async onModuleInit(): Promise<void> {
+    // Hidratar contadores de uma execução anterior. Se Redis estiver fora
+    // (fail-open do CacheRedisService), retorna null → começa do zero.
+    await this.hydrateFromRedis();
+    this.flushTimer = setInterval(() => {
+      void this.flushToRedis();
+    }, PerformanceMonitorService.FLUSH_INTERVAL_MS);
+    // `unref` evita que o timer segure o event loop no shutdown.
+    this.flushTimer.unref?.();
+  }
+
+  async onModuleDestroy(): Promise<void> {
     this.loopDelay.disable();
+    if (this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    }
+    // Flush final pra capturar tudo que ficou desde o último tick.
+    await this.flushToRedis();
   }
 
   recordRequest(sample: RequestSample): void {
@@ -82,6 +124,10 @@ export class PerformanceMonitorService implements OnModuleDestroy {
 
     this.incrementBucket(metric.buckets, sample.durationMs);
     this.incrementBucket(this.globalBuckets, sample.durationMs);
+
+    // Marca pra flush no próximo tick. Sem custo extra por request (sem
+    // I/O — apenas seta o flag).
+    this.dirty = true;
   }
 
   getSnapshot() {
@@ -173,6 +219,88 @@ export class PerformanceMonitorService implements OnModuleDestroy {
   private nanosecondsToMs(value: number): number {
     if (!Number.isFinite(value) || value <= 0) return 0;
     return value / 1_000_000;
+  }
+
+  /**
+   * Lê o snapshot persistido e re-popula contadores em memória. Defensivo:
+   * - Sem Redis → null → mantém zero.
+   * - Shape incompatível → ignora e logga (sem quebrar boot).
+   * - Buckets com tamanho divergente → ignora (mudou a config de
+   *   `latencyBucketsMs` desde o último persist).
+   */
+  private async hydrateFromRedis(): Promise<void> {
+    const persisted = await this.cache.getJson<PersistedMetrics>(
+      PerformanceMonitorService.REDIS_KEY,
+    );
+    if (!persisted) return;
+    if (persisted.version !== 1) {
+      this.logger.warn(`perf snapshot version mismatch (${persisted.version}), ignorando`);
+      return;
+    }
+    if (
+      !Array.isArray(persisted.globalBuckets) ||
+      persisted.globalBuckets.length !== this.globalBuckets.length
+    ) {
+      this.logger.warn('perf snapshot bucket shape mismatch, ignorando');
+      return;
+    }
+
+    this.totalRequests = persisted.totalRequests ?? 0;
+    this.totalErrors = persisted.totalErrors ?? 0;
+    this.totalDurationMs = persisted.totalDurationMs ?? 0;
+    for (let i = 0; i < this.globalBuckets.length; i++) {
+      this.globalBuckets[i] = persisted.globalBuckets[i] ?? 0;
+    }
+
+    for (const route of persisted.routes ?? []) {
+      // Defensivo contra buckets antigos de tamanho diferente
+      if (!Array.isArray(route.buckets) || route.buckets.length !== this.globalBuckets.length) {
+        continue;
+      }
+      this.routeMetrics.set(route.key, {
+        key: route.key,
+        method: route.method,
+        path: route.path,
+        count: route.count,
+        errorCount: route.errorCount,
+        totalDurationMs: route.totalDurationMs,
+        maxDurationMs: route.maxDurationMs,
+        buckets: [...route.buckets],
+      });
+    }
+    this.logger.log(
+      `perf monitor hidratado do Redis: ${this.totalRequests} reqs, ${this.routeMetrics.size} rotas`,
+    );
+  }
+
+  /**
+   * Escreve snapshot no Redis se houve mudança desde o último flush. Sem
+   * mudança → no-op (evita escrita inútil quando o server está ocioso).
+   * Single SET com TTL — operação atômica do lado do Redis.
+   */
+  private async flushToRedis(): Promise<void> {
+    if (!this.dirty) return;
+    if (!this.cache.isAvailable()) return;
+    const snapshot: PersistedMetrics = {
+      version: 1,
+      totalRequests: this.totalRequests,
+      totalErrors: this.totalErrors,
+      totalDurationMs: this.totalDurationMs,
+      globalBuckets: [...this.globalBuckets],
+      routes: Array.from(this.routeMetrics.values()).map((m) => ({
+        ...m,
+        buckets: [...m.buckets],
+      })),
+      persistedAt: new Date().toISOString(),
+    };
+    // Marca como limpo ANTES do await: novas requests durante o I/O viram
+    // dirty=true de novo e capturadas no próximo flush.
+    this.dirty = false;
+    await this.cache.setJson(
+      PerformanceMonitorService.REDIS_KEY,
+      snapshot,
+      PerformanceMonitorService.TTL_SECONDS,
+    );
   }
 
   private normalizePath(path: string): string {
