@@ -96,7 +96,23 @@ function isBR(country?: string | null): boolean {
   return c === 'br' || c === 'brasil' || c === 'brazil';
 }
 
-function fmtPhone(phone: string): string {
+/**
+ * Formata telefone conforme país.
+ *   - Brasileiro (BR / Brasil / Brazil ou ausente): aplica máscara
+ *     (XX) XXXXX-XXXX para celular (11 dígitos) ou
+ *     (XX) XXXX-XXXX para fixo (10 dígitos).
+ *   - Estrangeiro: preserva o valor original (assumindo que veio no formato
+ *     local). Apenas faz trim e normaliza espaços múltiplos. Não aplica
+ *     máscara — cada país tem sua convenção (E.164 +XX, espaços, parênteses
+ *     etc.) e tentar reformatar quebraria mais do que ajudaria.
+ *
+ * Sem dependência externa (libphonenumber-js) para manter o bundle do PDF leve.
+ */
+function fmtPhone(phone: string, country?: string | null): string {
+  if (!phone) return phone;
+  if (!isBR(country)) {
+    return phone.trim().replace(/\s+/g, ' ');
+  }
   const d = phone.replace(/\D/g, '');
   if (d.length === 11) return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
   if (d.length === 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
@@ -256,7 +272,7 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
         : { label: 'Documento', value: reg.cpf }
       : null,
     reg.dateOfBirth ? { label: 'Data de nascimento', value: fmtDate(reg.dateOfBirth) } : null,
-    reg.phone ? { label: 'Telefone', value: fmtPhone(reg.phone) } : null,
+    reg.phone ? { label: 'Telefone', value: fmtPhone(reg.phone, reg.country) } : null,
     reg.gender ? { label: 'Sexo', value: reg.gender === 'MALE' ? 'Masculino' : reg.gender === 'FEMALE' ? 'Feminino' : reg.gender } : null,
   ].filter(Boolean) as { label: string; value: string }[];
 
