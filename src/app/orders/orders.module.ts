@@ -8,12 +8,14 @@ import { OrdersRedisService } from './orders-redis.service';
 import { OrdersController } from './orders.controller';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
+import { CommonModule } from '../../common/common.module';
 
 @Module({
   imports: [
     PrismaModule,
     ConfigModule,
     PaymentsModule, // exports CieloService
+    CommonModule,
   ],
   providers: [OrdersService, OrdersExpirationService, OrdersRedisService, EmailService, TicketPdfService],
   controllers: [OrdersController],

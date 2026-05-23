@@ -6,6 +6,7 @@ import {
   Post,
   Req,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -19,6 +20,8 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AdminGuard } from '../auth/guards/admin.guard';
 import { PaymentsRefundService } from '../payments/payments-refund.service';
 import { RefundOrderDto } from '../payments/dto/refund-order.dto';
+import { TrackActivity } from '../../common/decorators/track-activity.decorator';
+import { TrackActivityInterceptor } from '../../common/interceptors/track-activity.interceptor';
 
 @ApiTags('Admin — Orders')
 @ApiBearerAuth()
@@ -28,6 +31,8 @@ export class AdminOrdersController {
   constructor(private readonly refundService: PaymentsRefundService) {}
 
   @Post(':id/refund')
+  @UseInterceptors(TrackActivityInterceptor)
+  @TrackActivity({ category: 'COMPLIANCE', action: 'order.refund' })
   @ApiOperation({
     summary: '[Admin] Estornar pedido pago via Cielo',
     description:

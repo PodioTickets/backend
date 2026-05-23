@@ -10,6 +10,7 @@ import {
   Post,
   Request,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -29,6 +30,8 @@ import { PatchProductsDto } from './dto/patch-products.dto';
 import { PatchBillingAddressDto } from './dto/patch-billing-address.dto';
 import { PayOrderDto } from './dto/pay-order.dto';
 import { PatchCouponDto } from './dto/patch-coupon.dto';
+import { TrackActivity } from '../../common/decorators/track-activity.decorator';
+import { TrackActivityInterceptor } from '../../common/interceptors/track-activity.interceptor';
 
 @ApiTags('Orders')
 @Controller('api/v1/orders')
@@ -41,6 +44,8 @@ export class OrdersController {
 
   @Post('reserve')
   @Throttle({ short: { limit: 5, ttl: 60000 } })
+  @UseInterceptors(TrackActivityInterceptor)
+  @TrackActivity({ category: 'CHECKOUT', action: 'order.reserve' })
   @ApiOperation({
     summary: 'Reserve tickets',
     description:
@@ -156,6 +161,8 @@ export class OrdersController {
 
   @Post(':orderId/pay')
   @Throttle({ short: { limit: 3, ttl: 60000 } })
+  @UseInterceptors(TrackActivityInterceptor)
+  @TrackActivity({ category: 'CHECKOUT', action: 'order.pay' })
   @ApiOperation({
     summary: 'Pay for an order',
     description:

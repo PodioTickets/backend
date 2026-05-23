@@ -33,6 +33,8 @@ import {
 import { MFAService } from '../../common/services/mfa.service';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { TrackActivity } from '../../common/decorators/track-activity.decorator';
+import { TrackActivityInterceptor } from '../../common/interceptors/track-activity.interceptor';
 import { AdminGuard } from '../auth/guards/admin.guard';
 
 @ApiTags('User')
@@ -188,6 +190,8 @@ export class UserController {
 
   @Patch(':id')
   @UseGuards(JwtAuthGuard)
+  @UseInterceptors(TrackActivityInterceptor)
+  @TrackActivity({ category: 'PROFILE', action: 'user.update' })
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Atualizar perfil do usuário (próprio ou admin)' })
   @ApiResponse({ status: 200, description: 'Perfil atualizado' })

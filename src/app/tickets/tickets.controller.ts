@@ -31,17 +31,7 @@ import {
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
-
-function clientIp(req: ExpressRequest): string {
-  const xff = req.headers['x-forwarded-for'];
-  if (typeof xff === 'string' && xff.length > 0) {
-    return xff.split(',')[0].trim();
-  }
-  if (Array.isArray(xff) && xff[0]) {
-    return String(xff[0]).split(',')[0].trim();
-  }
-  return (req as ExpressRequest & { ip?: string }).ip || '';
-}
+import { getClientIp as clientIp } from '../../common/utils/client-ip.util';
 
 function baseUrl(req: ExpressRequest): string {
   const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';

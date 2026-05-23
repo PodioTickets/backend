@@ -14,6 +14,9 @@ import { PerformanceMonitorService } from './services/performance-monitor.servic
 import { PerformanceMonitorController } from './controllers/performance-monitor.controller';
 import { ConcurrencyRedisService } from './services/concurrency-redis.service';
 import { CacheRedisService } from './services/cache-redis.service';
+import { UserActivityService } from './services/user-activity.service';
+import { UserActivityCleanupService } from './services/user-activity-cleanup.service';
+import { TrackActivityInterceptor } from './interceptors/track-activity.interceptor';
 
 @Module({
   imports: [ConfigModule],
@@ -31,6 +34,9 @@ import { CacheRedisService } from './services/cache-redis.service';
     PerformanceMonitorService,
     ConcurrencyRedisService,
     CacheRedisService,
+    UserActivityService,
+    UserActivityCleanupService,
+    TrackActivityInterceptor,
   ],
   exports: [
     CsrfGuard,
@@ -44,6 +50,8 @@ import { CacheRedisService } from './services/cache-redis.service';
     PerformanceMonitorService,
     ConcurrencyRedisService,
     CacheRedisService,
+    UserActivityService,
+    TrackActivityInterceptor,
   ],
 })
 export class CommonModule {}

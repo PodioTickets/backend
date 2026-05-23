@@ -4,6 +4,7 @@ import {
   Patch,
   Body,
   UseGuards,
+  UseInterceptors,
   Get,
   Query,
   HttpCode,
@@ -45,6 +46,8 @@ import { GoogleAuthGuard } from './guards/google-auth.guard';
 import { TurnstileGuard } from './guards/turnstile.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
+import { TrackActivity } from 'src/common/decorators/track-activity.decorator';
+import { TrackActivityInterceptor } from 'src/common/interceptors/track-activity.interceptor';
 
 @ApiTags('Authentication')
 @Controller('api/v1/auth')
@@ -66,7 +69,9 @@ export class AuthController {
   }
 
   @Post('register')
-  @ApiOperation({ 
+  @UseInterceptors(TrackActivityInterceptor)
+  @TrackActivity({ category: 'AUTH', action: 'register' })
+  @ApiOperation({
     summary: 'Register new user',
     description: 'Register a new user with email, password and required information for PodioGo'
   })
@@ -84,6 +89,8 @@ export class AuthController {
 
   @Post('login')
   @UseGuards(TurnstileGuard, LocalAuthGuard)
+  @UseInterceptors(TrackActivityInterceptor)
+  @TrackActivity({ category: 'AUTH', action: 'login' })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Login with email/CPF and password (User account)' })
   @ApiResponse({ status: 200, description: 'Login successful' })
@@ -142,6 +149,8 @@ export class AuthController {
 
   @Post('login/organizer')
   @UseGuards(TurnstileGuard)
+  @UseInterceptors(TrackActivityInterceptor)
+  @TrackActivity({ category: 'AUTH', action: 'login.organizer' })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Login as organizer with email/CPF and password' })
   @ApiResponse({ status: 200, description: 'Login successful' })
@@ -255,6 +264,8 @@ export class AuthController {
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
   @UseGuards(ThrottlerGuard)
+  @UseInterceptors(TrackActivityInterceptor)
+  @TrackActivity({ category: 'AUTH', action: 'password.forgot' })
   @Throttle({ long: { limit: 10, ttl: 60000 } })
   @ApiOperation({
     summary: 'Solicitar redefinição de senha (USER ou ORGANIZER)',
@@ -300,6 +311,8 @@ export class AuthController {
 
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
+  @UseInterceptors(TrackActivityInterceptor)
+  @TrackActivity({ category: 'AUTH', action: 'password.reset' })
   @ApiOperation({
     summary: 'Redefinir senha com token (USER ou ORGANIZER)',
     description:
@@ -318,6 +331,8 @@ export class AuthController {
   @Post('change-password')
   @HttpCode(HttpStatus.OK)
   @UseGuards(JwtAuthGuard)
+  @UseInterceptors(TrackActivityInterceptor)
+  @TrackActivity({ category: 'AUTH', action: 'password.change' })
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Change password (logged-in user)',

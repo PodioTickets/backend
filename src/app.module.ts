@@ -31,6 +31,7 @@ import { ProductsModule } from './app/products/products.module';
 import { OrdersModule } from './app/orders/orders.module';
 import { RepasseModule } from './app/repasse/repasse.module';
 import { AdminModule } from './app/admin/admin.module';
+import { UserActivityModule } from './app/user-activity/user-activity.module';
 
 @Module({
   imports: [
@@ -67,6 +68,7 @@ import { AdminModule } from './app/admin/admin.module';
     OrdersModule,
     RepasseModule,
     AdminModule,
+    UserActivityModule,
   ],
   controllers: [],
   providers: [

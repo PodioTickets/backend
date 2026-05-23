@@ -127,6 +127,30 @@ enum WithdrawalStatus {
   CANCELLED
 }
 
+/// Origem do registro de atividade do usuário.
+/// FRONTEND  → telemetria enviada pelo cliente (cliques, page-view, scroll, etc.).
+/// BACKEND   → captura automática via interceptor em rotas sensíveis.
+/// WEBHOOK   → eventos vindos de provedores externos (Cielo, etc.).
+enum UserActivitySource {
+  FRONTEND
+  BACKEND
+  WEBHOOK
+}
+
+/// Categoria do evento — usada como dimensão de agregação e regra de retenção.
+/// Categorias de auditoria (AUTH/CHECKOUT/COMPLIANCE) têm retenção longa (2 anos).
+/// Demais (PAGE_VIEW/CLICK/API/PROFILE/OTHER) têm retenção curta (90 dias).
+enum UserActivityCategory {
+  PAGE_VIEW
+  CLICK
+  API
+  AUTH
+  CHECKOUT
+  PROFILE
+  COMPLIANCE
+  OTHER
+}
+
 model User {
   id                    String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email                 String
@@ -174,6 +198,7 @@ model User {
   eventNotificationsCreated EventNotification[]        @relation("EventNotificationCreator")
   withdrawals               EventWithdrawal[]
   eventAudits               EventAudit[]
+  activityLogs              UserActivityLog[]
 
   // Índices compostos para permitir mesmo email em contas diferentes
   @@unique([email, accountType])
@@ -1110,4 +1135,37 @@ model EventAudit {
 
   event     Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
   auditedBy User  @relation(fields: [auditedById], references: [id], onDelete: Cascade)
+}
+
+/// Log granular de atividade de usuário (participante + organizador + anônimo).
+/// Insert-only; gravado em batch via UserActivityService. Cron de retenção
+/// apaga linhas conforme a categoria (analytics 90d / auditoria 2 anos).
+///
+/// userId pode ser null em duas situações legítimas:
+///  - visita anônima (pré-login) — `sessionId` costura a jornada.
+///  - usuário excluído via direito LGPD — relação cai pra null (SetNull).
+model UserActivityLog {
+  id         String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId     String?              @db.Uuid
+  /// ID gerado pelo frontend (UUID em localStorage) para costurar pré→pós login.
+  sessionId  String?              @db.VarChar(64)
+  ip         String?
+  userAgent  String?
+  source     UserActivitySource
+  category   UserActivityCategory
+  /// Identificador curto da ação. Ex.: "page:event/:slug", "click:btn-buy", "api:POST /orders/reserve".
+  action     String
+  path       String?
+  referrer   String?
+  /// Payload livre. Sanitizado antes do insert (chaves PII removidas).
+  metadata   Json?
+  occurredAt DateTime             @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, occurredAt])
+  @@index([sessionId, occurredAt])
+  @@index([category, occurredAt])
+  /// Usado pelo cron de retenção (DELETE WHERE occurredAt < N).
+  @@index([occurredAt])
 }

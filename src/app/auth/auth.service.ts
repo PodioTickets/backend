@@ -26,6 +26,7 @@ import {
   ChangePasswordDto,
 } from './dto/auth.dto';
 import { EmailService } from '../../common/services/email.service';
+import { cleanDocumentNumber } from '../../common/utils/document.util';
 
 type PasswordResetLinkPayload = {
   userId: string;
@@ -257,17 +258,13 @@ export class AuthService {
         throw new ConflictException('Já existe um usuário com este e-mail');
       }
 
-      /* Normalização do documento para chave única (documentNumberClean):
-       *   - CPF: só dígitos (descarta máscara como "123.456.789-00").
-       *   - Outros (PASSPORT, identidade estrangeira): trim + uppercase + sem
-       *     espaços. NUNCA fazer replace(/\D/g) em passaporte — letras são
-       *     parte do número e seriam descartadas, causando colisões de
-       *     unique constraint entre passaportes diferentes que compartilham
-       *     os mesmos dígitos. */
-      const normalizeDocClean = (raw: string, type: DocumentType | undefined): string => {
-        if (type === 'CPF') return raw.replace(/\D/g, '');
-        return raw.trim().toUpperCase().replace(/\s+/g, '');
-      };
+      // Normalização única do projeto — ver `common/utils/document.util.ts`.
+      // CPF: só dígitos. PASSPORT: uppercase + strip não-alfanumérico.
+      // Lookup da unique key (documentNumberClean, accountType) precisa
+      // bater com o que `user.service.update()` grava — qualquer drift de
+      // regra aqui quebra dedupe.
+      const normalizeDocClean = (raw: string, type: DocumentType | undefined): string =>
+        cleanDocumentNumber(raw, type ?? DocumentType.CPF);
 
       // Verificar se documento já existe para conta USER (se fornecido)
       if (documentNumber) {
@@ -984,12 +981,6 @@ export class AuthService {
     else if (ua.includes('iPhone') || ua.includes('iPad')) os = 'iOS';
     else if (ua.includes('Linux')) os = 'Linux';
     return os ? `${browser} no ${os}` : browser;
-  }
-
-  private getClientIp(req: any): string {
-    const forwarded = req?.headers?.['x-forwarded-for'];
-    if (forwarded) return String(forwarded).split(',')[0].trim();
-    return req?.ip || '—';
   }
 
   private async issuePasswordResetCodeForUser(

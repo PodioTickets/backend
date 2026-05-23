@@ -10,8 +10,11 @@ import { DocumentType } from '@prisma/client';
  *
  *   - CPF (ou tipo nulo/desconhecido tratado como CPF — assume contexto
  *     brasileiro legado): remove formatação e mantém só dígitos.
- *   - PASSPORT (e demais tipos estrangeiros que vierem no futuro): trim +
- *     uppercase + remove espaços/pontos/hífens internos. Mantém letras.
+ *   - PASSPORT (e demais tipos estrangeiros que vierem no futuro):
+ *     uppercase + strip de TUDO que não é alfanumérico ([^A-Z0-9]).
+ *     Bloqueia formatação histórica (espaços, pontos, hífens) E caracteres
+ *     especiais inesperados (/, \, *, @, #, etc.) — defesa em profundidade
+ *     contra input sujo do front que driblar o regex do DTO.
  *
  * Retorna string vazia para entrada nula/vazia para permitir uso direto
  * com `??` nos call-sites sem checagens extras.
@@ -30,7 +33,8 @@ export function cleanDocumentNumber(
     return trimmed.replace(/\D/g, '');
   }
 
-  return trimmed.toUpperCase().replace(/[\s.\-]/g, '');
+  // Strip não-alfanumérico após uppercase. Equivalente a manter [A-Z0-9].
+  return trimmed.toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
 /**
