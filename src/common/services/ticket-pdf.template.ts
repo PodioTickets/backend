@@ -13,6 +13,7 @@ import {
   Stop,
 } from '@react-pdf/renderer';
 import * as path from 'path';
+import { AsYouType, type CountryCode } from 'libphonenumber-js';
 import {
   TicketPdfProduct,
   TicketPdfRegistrationWithQr,
@@ -97,26 +98,64 @@ function isBR(country?: string | null): boolean {
 }
 
 /**
- * Formata telefone conforme país.
- *   - Brasileiro (BR / Brasil / Brazil ou ausente): aplica máscara
- *     (XX) XXXXX-XXXX para celular (11 dígitos) ou
- *     (XX) XXXX-XXXX para fixo (10 dígitos).
- *   - Estrangeiro: preserva o valor original (assumindo que veio no formato
- *     local). Apenas faz trim e normaliza espaços múltiplos. Não aplica
- *     máscara — cada país tem sua convenção (E.164 +XX, espaços, parênteses
- *     etc.) e tentar reformatar quebraria mais do que ajudaria.
+ * Mapa mínimo de nome do país (PT-BR/EN) → ISO 3166-1 alpha-2.
+ * Cobre os países mais frequentes em compras de evento. Países fora do mapa
+ * caem no fallback (retorna só dígitos limpos). Manter sincronizado com o
+ * `getCountryCodeFromName` do frontend (`src/utils/phone.ts`).
+ */
+const COUNTRY_NAME_TO_ISO: Record<string, CountryCode> = {
+  'brasil': 'BR', 'brazil': 'BR', 'br': 'BR',
+  'estados unidos': 'US', 'united states': 'US', 'usa': 'US', 'us': 'US',
+  'portugal': 'PT', 'pt': 'PT',
+  'argentina': 'AR', 'ar': 'AR',
+  'chile': 'CL', 'cl': 'CL',
+  'colombia': 'CO', 'colômbia': 'CO', 'co': 'CO',
+  'peru': 'PE', 'pe': 'PE',
+  'uruguai': 'UY', 'uruguay': 'UY', 'uy': 'UY',
+  'paraguai': 'PY', 'paraguay': 'PY', 'py': 'PY',
+  'méxico': 'MX', 'mexico': 'MX', 'mx': 'MX',
+  'canadá': 'CA', 'canada': 'CA', 'ca': 'CA',
+  'espanha': 'ES', 'spain': 'ES', 'es': 'ES',
+  'frança': 'FR', 'france': 'FR', 'fr': 'FR',
+  'alemanha': 'DE', 'germany': 'DE', 'de': 'DE',
+  'itália': 'IT', 'italy': 'IT', 'it': 'IT',
+  'reino unido': 'GB', 'united kingdom': 'GB', 'uk': 'GB', 'gb': 'GB',
+  'japão': 'JP', 'japan': 'JP', 'jp': 'JP',
+  'china': 'CN', 'cn': 'CN',
+};
+
+function getISOFromCountry(country?: string | null): CountryCode | null {
+  if (!country) return null;
+  const key = country.trim().toLowerCase();
+  return COUNTRY_NAME_TO_ISO[key] ?? null;
+}
+
+/**
+ * Formata telefone conforme país usando `libphonenumber-js` AsYouType.
  *
- * Sem dependência externa (libphonenumber-js) para manter o bundle do PDF leve.
+ * Exemplos:
+ *   - BR "11999990000" → "(11) 99999-0000"
+ *   - US "2025550100" → "(202) 555-0100"
+ *   - PT "912345678" → "912 345 678"
+ *   - GB "7911123456" → "7911 123456"
+ *
+ * Quando o país não é mapeado (sem ISO), retorna só dígitos limpos pra não
+ * forçar formato BR em estrangeiros. Quando o `AsYouType` falha (bundler
+ * sem interop CJS/ESM correto), também retorna dígitos limpos.
  */
 function fmtPhone(phone: string, country?: string | null): string {
   if (!phone) return phone;
-  if (!isBR(country)) {
-    return phone.trim().replace(/\s+/g, ' ');
+  const iso = getISOFromCountry(country);
+  if (!iso) {
+    return phone.replace(/\D/g, '');
   }
-  const d = phone.replace(/\D/g, '');
-  if (d.length === 11) return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
-  if (d.length === 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
-  return phone;
+  try {
+    const formatter = new AsYouType(iso);
+    const formatted = formatter.input(phone);
+    return formatted || phone;
+  } catch {
+    return phone.replace(/\D/g, '');
+  }
 }
 
 /**
