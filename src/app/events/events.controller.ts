@@ -48,7 +48,10 @@ import {
   ReorderEventTopicsDto,
   CreateEventLocationDto,
 } from './dto/event-topic.dto';
-import { DashboardQueryDto } from './dto/dashboard.dto';
+import { DashboardOverviewQueryDto } from './dashboard/dto/overview.dto';
+import { DashboardRankingsQueryDto } from './dashboard/dto/rankings.dto';
+import { DashboardSecondaryQueryDto } from './dashboard/dto/secondary.dto';
+import { DashboardService } from './dashboard/dashboard.service';
 import { FinancialQueryDto } from './dto/financial.dto';
 import { RegistrationsQueryDto } from './dto/registrations.dto';
 import { ExportRegistrationsDto, EXPORT_FIELDS } from './dto/export-registrations.dto';
@@ -77,6 +80,7 @@ export class EventsController {
     private readonly eventsService: EventsService,
     private readonly exportService: ExportRegistrationsService,
     private readonly fiscalExportService: FiscalExportService,
+    private readonly dashboardService: DashboardService,
   ) { }
 
   @Post()
@@ -576,46 +580,106 @@ export class EventsController {
     return this.eventsService.getRevenue(req.user.id, eventId);
   }
 
-  // ========== DASHBOARD ==========
-  @Get(':eventId/dashboard')
+  // ========== DASHBOARD (split em 3 rotas — overview/rankings/secondary) ==========
+
+  /**
+   * Above-the-fold: KPIs + gráfico de tendência. Cache 30s.
+   *
+   * `Cache-Control: private` — dados de organizador específico, NUNCA cachear em CDN/proxy.
+   * `max-age=30` espelha o TTL do Redis. `stale-while-revalidate=60` deixa o browser
+   * servir stale por mais 60s enquanto refaz em background — UX fluida no organizador
+   * que volta pra aba do dashboard.
+   */
+  @Get(':eventId/dashboard/overview')
   @NoCache()
+  @Header('Cache-Control', 'private, max-age=30, stale-while-revalidate=60')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({
-    summary: 'Get event dashboard',
-    description: 'Retrieves comprehensive dashboard data for an event including metrics, trends, rankings, and heatmaps. Only organization owner can access.',
-  })
+  @ApiOperation({ summary: 'Get dashboard overview (KPIs + trend chart)' })
   @ApiParam({ name: 'eventId', description: 'Event UUID' })
-  @ApiQuery({ name: 'period', required: false, enum: ['geral', '24h', '7d', '15d', '1m', '2m'], description: 'Time period filter' })
-  @ApiQuery({ name: 'ticketIds', required: false, type: [String], description: 'Filter by ticket IDs' })
-  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number for rankings (default: 1)' })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 10)' })
-  @ApiResponse({ status: 200, description: 'Dashboard data fetched successfully' })
-  @ApiResponse({ status: 401, description: 'Unauthorized' })
-  @ApiResponse({ status: 403, description: 'Forbidden - Only organization owner can access' })
-  @ApiResponse({ status: 404, description: 'Event not found' })
-  async getDashboard(
+  @ApiQuery({ name: 'period', required: false, enum: ['geral', '24h', '7d', '15d', '1m', '2m'] })
+  @ApiQuery({ name: 'ticketIds', required: false, type: [String] })
+  @ApiResponse({ status: 200, description: 'Overview fetched successfully' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  async getDashboardOverview(
     @Request() req,
     @Param('eventId') eventId: string,
     @Query() rawQuery: any,
   ) {
-    // Normalizar ticketIds[] para ticketIds antes da validação
-    const normalizedQuery: any = { ...rawQuery };
+    const queryDto = await this.parseDashboardQuery(DashboardOverviewQueryDto, rawQuery);
+    return this.dashboardService.getOverview(req.user.id, eventId, queryDto);
+  }
+
+  /**
+   * Tabelas paginadas: ticketRanking, tickets, topProductVariations, lotsNearDepletion. Cache 30s.
+   */
+  @Get(':eventId/dashboard/rankings')
+  @NoCache()
+  @Header('Cache-Control', 'private, max-age=30, stale-while-revalidate=60')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get dashboard rankings (paginated tables)' })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiQuery({ name: 'period', required: false, enum: ['geral', '24h', '7d', '15d', '1m', '2m'] })
+  @ApiQuery({ name: 'ticketIds', required: false, type: [String] })
+  @ApiQuery({ name: 'ticketRankingPage', required: false, type: Number, description: 'Default 1' })
+  @ApiQuery({ name: 'ticketRankingLimit', required: false, type: Number, description: 'Default 10, max 100' })
+  @ApiQuery({ name: 'ticketsPage', required: false, type: Number, description: 'Default 1' })
+  @ApiQuery({ name: 'ticketsLimit', required: false, type: Number, description: 'Default 20, max 100' })
+  @ApiResponse({ status: 200, description: 'Rankings fetched successfully' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  async getDashboardRankings(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Query() rawQuery: any,
+  ) {
+    const queryDto = await this.parseDashboardQuery(DashboardRankingsQueryDto, rawQuery);
+    return this.dashboardService.getRankings(req.user.id, eventId, queryDto);
+  }
+
+  /**
+   * Widgets secundários: topCities, salesHeatmap, mostAnsweredQuestions. Cache 60s.
+   * TTL maior (dados mudam mais devagar).
+   */
+  @Get(':eventId/dashboard/secondary')
+  @NoCache()
+  @Header('Cache-Control', 'private, max-age=60, stale-while-revalidate=120')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get dashboard secondary widgets (geo + heatmap + Q&A)' })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiQuery({ name: 'period', required: false, enum: ['geral', '24h', '7d', '15d', '1m', '2m'] })
+  @ApiQuery({ name: 'ticketIds', required: false, type: [String] })
+  @ApiResponse({ status: 200, description: 'Secondary widgets fetched successfully' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  async getDashboardSecondary(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Query() rawQuery: any,
+  ) {
+    const queryDto = await this.parseDashboardQuery(DashboardSecondaryQueryDto, rawQuery);
+    return this.dashboardService.getSecondary(req.user.id, eventId, queryDto);
+  }
+
+  /**
+   * Normaliza `ticketIds[]` → `ticketIds`, transforma e valida o DTO de qualquer
+   * rota do dashboard. Centraliza a lógica duplicada nos 3 handlers.
+   */
+  private async parseDashboardQuery<T extends object>(
+    dtoClass: new () => T,
+    rawQuery: any,
+  ): Promise<T> {
+    const normalized: any = { ...rawQuery };
     if (rawQuery['ticketIds[]']) {
-      normalizedQuery.ticketIds = Array.isArray(rawQuery['ticketIds[]'])
+      normalized.ticketIds = Array.isArray(rawQuery['ticketIds[]'])
         ? rawQuery['ticketIds[]']
         : [rawQuery['ticketIds[]']];
-      delete normalizedQuery['ticketIds[]'];
+      delete normalized['ticketIds[]'];
     }
-
-    // Transformar e validar manualmente para evitar erro de whitelist
-    const queryDto = plainToClass(DashboardQueryDto, normalizedQuery);
-    const errors = await validate(queryDto);
-    if (errors.length > 0) {
-      throw new BadRequestException('Falha na validação');
-    }
-
-    return this.eventsService.getDashboard(req.user.id, eventId, queryDto);
+    const dto = plainToClass(dtoClass, normalized);
+    const errors = await validate(dto as object);
+    if (errors.length > 0) throw new BadRequestException('Falha na validação');
+    return dto;
   }
 
   @Get(':eventId/questions/:questionId/text-answers')
