@@ -1343,7 +1343,28 @@ export class OrdersService {
     const w: any = this.prisma.getWriteClient();
 
     const reservedTickets = (order.reservedTickets ?? []) as any[];
-    const participants = dto.participants as any[];
+    // Normaliza documento de cada participante ANTES de persistir no JSONB
+    // `pendingParticipants`. Garante que a versão visual ("123.456.789-00")
+    // nunca chega ao banco — só letras/números. Mesma regra aplicada no
+    // User (register/patch) pra evitar drift entre fontes.
+    //
+    // `resolveDocument` lida com os 3 formatos legados: `documentType`+
+    // `documentNumber`, `cpf` puro, ou apenas `documentNumber`. Quando há
+    // documento, sobrescreve as 3 chaves do payload em paralelo:
+    //   - documentNumber  → limpo (era cru)
+    //   - documentType    → inferido se não veio
+    //   - cpf (alias)     → mesmo valor quando type=CPF; null caso contrário
+    // Participantes sem documento (slot vazio pré-checkout) passam intactos.
+    const participants = (dto.participants as any[]).map((p) => {
+      const doc = resolveDocument(p);
+      if (!doc.clean) return p;
+      return {
+        ...p,
+        documentType: doc.type,
+        documentNumber: doc.clean,
+        cpf: doc.type === DocumentType.CPF ? doc.clean : null,
+      };
+    });
 
     // Cupons automáticos (QUANTITY/AGE) NÃO são aplicados aqui — toda aplicação,
     // re-avaliação e remoção automática acontece em PATCH /products, que é
@@ -1415,7 +1436,8 @@ export class OrdersService {
       return tx.order.update({
         where: { id: orderId },
         data: {
-          pendingParticipants: dto.participants,
+          // Usa a versão normalizada (documento limpo), não o dto cru.
+          pendingParticipants: participants,
           totalAmount: newTotalAmount,
           finalAmount: newFinalAmount,
           updatedAt: new Date(),

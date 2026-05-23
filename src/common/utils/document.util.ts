@@ -155,6 +155,13 @@ export function isDocumentInList(
  *
  * Centraliza a regra de prioridade num único ponto pra evitar drift entre
  * services. Retorna `null` em ambos os campos quando o input é vazio.
+ *
+ * IMPORTANTE (2026-05-22): `number` e `clean` são SEMPRE iguais — o tempo
+ * em que `number` carregava formatação visual ("123.456.789-00") foi
+ * encerrado. A duplicidade `number/clean` aqui sobrevive só pra preservar
+ * a forma do retorno (call-sites legados que leem `.number` continuam
+ * funcionando, agora recebendo o valor limpo). Em código novo, use
+ * `.clean` por clareza de intenção.
  */
 export function resolveDocument(input: {
   documentType?: DocumentType | null;
@@ -166,9 +173,10 @@ export function resolveDocument(input: {
     return { type: null, number: '', clean: '' };
   }
   const type = input.documentType ?? inferDocumentType(raw);
+  const clean = cleanDocumentNumber(raw, type);
   return {
     type,
-    number: raw,
-    clean: cleanDocumentNumber(raw, type),
+    number: clean,
+    clean,
   };
 }

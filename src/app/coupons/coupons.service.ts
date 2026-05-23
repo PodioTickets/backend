@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  UnprocessableEntityException,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateCouponDto, UpdateCouponDto, FilterCouponsDto, CouponStatus } from './dto/create-coupon.dto';
 import { buildDocumentList } from '../../common/utils/document.util';
@@ -165,6 +170,111 @@ export class CouponsService {
     return {
       message: 'Coupon fetched successfully',
       data: { coupon: transformedCoupon },
+    };
+  }
+
+  /**
+   * Preview público de cupom pelo código. Usado pelo checkout antes de
+   * aplicar — só retorna os campos necessários pro front exibir a
+   * sinalização ("R$ 50 OFF", "10% OFF"). Não vaza:
+   *   - cpfList/documentList (PII de elegíveis)
+   *   - usageCount/maxUsage (timing pra esgotar cupom)
+   *   - minCartValue, ageRule, minAge/maxAge (config interna)
+   *   - note (texto interno do organizador)
+   *
+   * Erros:
+   *   - 404 Evento não encontrado
+   *   - 404 Cupom não encontrado (não existe, ou soft-deleted)
+   *   - 422 Cupom expirado (por data OU status EXPIRED)
+   *   - 422 Cupom inativo (status INACTIVE)
+   *   - 422 Cupom esgotado (atingiu maxUsage)
+   *
+   * Performance: lookup direto na unique key `(eventId, code)` — uma
+   * query indexada. Evento checado em paralelo (Promise.all) pra cortar
+   * latência em metade quando ambos existem.
+   *
+   * Segurança: rota pública. Rate-limit é aplicado no controller via
+   * `@Throttle` (preview é alvo natural pra brute-force de códigos).
+   * Code é uppercased antes do lookup pra match case-insensitive.
+   */
+  async previewByCode(eventId: string, rawCode: string) {
+    const code = rawCode.trim().toUpperCase();
+    const prismaRead = this.prisma.getReadClient();
+
+    const [event, coupon] = await Promise.all([
+      prismaRead.event.findUnique({
+        where: { id: eventId },
+        select: { id: true },
+      }),
+      prismaRead.coupon.findUnique({
+        where: { eventId_code: { eventId, code } },
+        select: {
+          code: true,
+          value: true,
+          type: true,
+          couponType: true,
+          applyToProducts: true,
+          status: true,
+          expiryDate: true,
+          usageCount: true,
+          maxUsage: true,
+          deletedAt: true,
+        },
+      }),
+    ]);
+
+    if (!event) {
+      throw new NotFoundException({
+        code: 'EVENT_NOT_FOUND',
+        message: 'Evento não encontrado',
+      });
+    }
+
+    // Soft-delete tratado como inexistente (consistente com leitura admin).
+    if (!coupon || coupon.deletedAt) {
+      throw new NotFoundException({
+        code: 'COUPON_NOT_FOUND',
+        message: 'Cupom não encontrado',
+      });
+    }
+
+    // Expiração: confiar tanto na data quanto no status. O status pode
+    // estar desatualizado se o cron de expiração ainda não rodou (ou se
+    // foi expirado manualmente pelo organizador).
+    const now = new Date();
+    if (
+      coupon.status === 'EXPIRED' ||
+      (coupon.expiryDate && coupon.expiryDate < now)
+    ) {
+      throw new UnprocessableEntityException({
+        code: 'COUPON_EXPIRED',
+        message: 'Cupom expirado',
+      });
+    }
+
+    if (coupon.status === 'INACTIVE') {
+      throw new UnprocessableEntityException({
+        code: 'COUPON_INACTIVE',
+        message: 'Cupom inativo',
+      });
+    }
+
+    if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) {
+      throw new UnprocessableEntityException({
+        code: 'COUPON_USAGE_LIMIT_REACHED',
+        message: 'Cupom esgotado',
+      });
+    }
+
+    return {
+      message: 'Coupon preview fetched successfully',
+      data: {
+        code: coupon.code,
+        value: coupon.value,
+        type: coupon.type,
+        couponType: coupon.couponType,
+        applyToProducts: coupon.applyToProducts,
+      },
     };
   }
 

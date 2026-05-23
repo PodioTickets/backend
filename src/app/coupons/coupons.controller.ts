@@ -1,4 +1,16 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete, Query, UseGuards, Request } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  ParseUUIDPipe,
+  Delete,
+  Query,
+  UseGuards,
+  Request,
+} from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
@@ -8,8 +20,14 @@ import {
   ApiBody,
   ApiQuery,
 } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { CouponsService } from './coupons.service';
-import { CreateCouponDto, UpdateCouponDto, FilterCouponsDto } from './dto/create-coupon.dto';
+import {
+  CreateCouponDto,
+  UpdateCouponDto,
+  FilterCouponsDto,
+  PreviewCouponQueryDto,
+} from './dto/create-coupon.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 
@@ -58,6 +76,42 @@ export class CouponsController {
   @ApiResponse({ status: 404, description: 'Event not found' })
   findAll(@Request() req, @Param('eventId') eventId: string, @Query() filterDto: FilterCouponsDto) {
     return this.couponsService.findAll(eventId, filterDto);
+  }
+
+  // Rota pública: precede `GET /:id` no arquivo pra garantir que o router
+  // do Nest case "events/:eventId/preview" antes de tentar bater como
+  // "/:id". Ambas as ordens funcionam no Express, mas mantemos rotas mais
+  // específicas primeiro por consistência com o resto do projeto.
+  @Get('events/:eventId/preview')
+  @NoCache()
+  @Throttle({ short: { limit: 20, ttl: 60_000 } })
+  @ApiOperation({
+    summary: 'Preview coupon by code (public)',
+    description:
+      'Endpoint público usado pelo checkout para validar um código de cupom e retornar dados de exibição (valor, tipo, escopo). Não revela elegíveis, contadores de uso ou regras internas (AGE, minCartValue, etc.) — checkout final aplica todas as regras no PATCH de cupom. Código case-insensitive.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiQuery({
+    name: 'code',
+    required: true,
+    description: 'Coupon code (letras + números, sem espaços)',
+    example: 'PODIO500',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Preview retornado. `value` em centavos (FIXED) ou percentual inteiro 1-100 (PERCENTAGE).',
+  })
+  @ApiResponse({ status: 404, description: 'Event ou cupom não encontrado' })
+  @ApiResponse({
+    status: 422,
+    description: 'Cupom expirado / inativo / esgotado (códigos: COUPON_EXPIRED, COUPON_INACTIVE, COUPON_USAGE_LIMIT_REACHED)',
+  })
+  previewByCode(
+    @Param('eventId', ParseUUIDPipe) eventId: string,
+    @Query() query: PreviewCouponQueryDto,
+  ) {
+    return this.couponsService.previewByCode(eventId, query.code);
   }
 
   @Get(':id')

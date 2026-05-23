@@ -361,3 +361,19 @@ export class FilterCouponsDto {
   @IsEnum(CouponStatus)
   status?: CouponStatus;
 }
+
+/**
+ * Query do endpoint público de preview de cupom. Charset estrito + cap
+ * curto barram brute-force exótico e injection. Mesmo regex do `code` em
+ * CreateCouponDto pra evitar drift.
+ */
+export class PreviewCouponQueryDto {
+  @IsNotEmpty()
+  @IsString()
+  @MaxLength(25)
+  @Matches(/^[A-Za-z0-9]+$/, {
+    message: 'Code must contain only letters and numbers, no spaces',
+  })
+  @ApiProperty({ example: 'PODIO500', description: 'Coupon code (case-insensitive)' })
+  code: string;
+}

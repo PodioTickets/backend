@@ -115,17 +115,20 @@ export class UserService {
     }
 
     // Verificar se documento já existe (se fornecido) — normaliza conforme o tipo
-    if (createUserDto.documentNumber) {
-      const documentNumberClean = this.cleanDocumentNumber(
-        createUserDto.documentNumber,
-        createUserDto.documentType as any,
-      );
+    const documentNumberClean = createUserDto.documentNumber
+      ? this.cleanDocumentNumber(
+          createUserDto.documentNumber,
+          createUserDto.documentType as any,
+        )
+      : null;
+
+    if (documentNumberClean) {
       const existingUserByCpf = await prismaRead.user.findUnique({
-        where: { 
+        where: {
           documentNumberClean_accountType: {
             documentNumberClean,
             accountType: 'USER',
-          }
+          },
         },
       });
 
@@ -142,6 +145,10 @@ export class UserService {
       const user = await prismaWrite.user.create({
         data: {
           ...createUserDto,
+          // Sobrescreve depois do spread: documentNumber e documentNumberClean
+          // sempre iguais (só letras/números). Mesma regra do register e patch.
+          documentNumber: documentNumberClean,
+          documentNumberClean,
           accountType: 'USER', // Conta de usuário normal
           password: hashedPassword || '',
           dateOfBirth: createUserDto.dateOfBirth
@@ -313,6 +320,9 @@ export class UserService {
       }
 
       updateData.documentNumberClean = documentNumberClean;
+      // documentNumber também recebe a versão limpa — sem dual-format
+      // entre os 2 campos. Se o front enviou null/'', mantém null.
+      updateData.documentNumber = documentNumberClean;
     }
     
     if ('emergencyPhone' in updateData) {
@@ -468,7 +478,8 @@ export class UserService {
           lastName: dto.lastName,
           email: dto.email ?? null,
           documentType,
-          documentNumber: dto.documentNumber ?? null,
+          // Mesma regra do register/patch: documentNumber sempre limpo.
+          documentNumber: documentNumberClean,
           documentNumberClean,
           phone: dto.phone,
           dateOfBirth,

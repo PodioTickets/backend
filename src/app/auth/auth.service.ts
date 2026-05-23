@@ -287,7 +287,11 @@ export class AuthService {
 
       const hashedPassword = await bcrypt.hash(password, 12);
 
-      // Limpar documentNumber para validação de unicidade
+      // Limpar documentNumber para validação de unicidade.
+      // Decisão (2026-05-22): documentNumber e documentNumberClean passam a ser
+      // sempre iguais (só letras/números, sem formatação visual). Front formata
+      // pra exibição quando precisar. Mata drift entre os 2 campos e evita
+      // que recibos/snapshots gravem o mesmo dado em formatos divergentes.
       const documentNumberClean = documentNumber ? normalizeDocClean(documentNumber, documentType) : null;
 
       const user = await prismaWrite.user.create({
@@ -305,7 +309,7 @@ export class AuthService {
           state,
           city,
           documentType,
-          documentNumber,
+          documentNumber: documentNumberClean,
           documentNumberClean,
           acceptedTerms,
           acceptedPrivacyPolicy,
