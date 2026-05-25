@@ -235,7 +235,7 @@ export class DashboardService {
       }),
       this.buildTopProductVariations(eventId, dateRange, ticketIds, organizerFeeRate),
       this.buildLotsNearDepletion(eventId),
-      this.buildSalesByPaymentMethod(eventId, dateRange, ticketIds),
+      this.buildSalesByPaymentMethod(eventId, dateRange, ticketIds, organizerFeeRate),
     ]);
 
     const total = rankingRows.length;
@@ -738,38 +738,57 @@ export class DashboardService {
    * Agrega vendas confirmadas por método de pagamento.
    *
    * Considera apenas Payment com status PAID, agrupado por method. Retorna
-   * para cada método: quantidade de vendas (count), valor bruto pago em
-   * centavos, e o percentual sobre o total (calculado em JS pra evitar
-   * divisão por zero no SQL).
+   * para cada método: quantidade de vendas (count), valor LÍQUIDO recebido
+   * pelo organizador em centavos, e o percentual sobre o total (calculado em
+   * JS pra evitar divisão por zero no SQL).
+   *
+   * Líquido = (finalAmount - serviceFee) × (1 - organizerFeeRate), mesma
+   * fórmula usada em buildTopProductVariations e queryTicketRanking. Aplica
+   * agregação por order (DISTINCT) usando subquery — evita multiplicar valor
+   * pelo número de registrations quando há múltiplos atletas no pedido.
    *
    * Métodos: PIX, CREDIT_CARD, DEBIT_CARD, BOLETO, CRYPTO, FREE (ver enum
-   * PaymentMethod no schema). Sempre retorna entradas pros métodos
-   * presentes — não inclui zeros pra métodos sem vendas, pra UI poder
-   * renderizar só barras com dados.
+   * PaymentMethod). Sempre retorna entradas pros métodos presentes — não
+   * inclui zeros pra métodos sem vendas, pra UI poder renderizar só barras
+   * com dados.
    */
   private async buildSalesByPaymentMethod(
     eventId: string,
     dateRange: DateRange,
     ticketIds: string[] | null,
+    organizerFeeRate: number,
   ) {
     const prismaRead = this.prisma.getReadClient();
 
     const rows = await prismaRead.$queryRaw<
       { method: string; sales_count: bigint; total_amount: bigint }[]
     >(Prisma.sql`
+      WITH order_methods AS (
+        SELECT DISTINCT
+          o.id AS order_id,
+          p.method::text AS method,
+          o."finalAmount" AS final_amount,
+          o."serviceFee" AS service_fee
+        FROM "Order" o
+        INNER JOIN "Payment" p ON p."orderId" = o.id
+        INNER JOIN "Registration" r ON r."orderId" = o.id
+        WHERE r."eventId" = ${eventId}::uuid
+          AND p.status = 'PAID'::"PaymentStatus"
+          AND o.status = 'PAID'::"OrderStatus"
+          ${this.sqlDateFilter(dateRange, 'o')}
+          ${this.sqlTicketIdsFilter(ticketIds, 'r')}
+      )
       SELECT
-        p.method::text AS method,
-        COUNT(DISTINCT o.id)::bigint AS sales_count,
-        COALESCE(SUM(o."finalAmount"), 0)::bigint AS total_amount
-      FROM "Payment" p
-      INNER JOIN "Order" o ON o.id = p."orderId"
-      INNER JOIN "Registration" r ON r."orderId" = o.id
-      WHERE r."eventId" = ${eventId}::uuid
-        AND p.status = 'PAID'::"PaymentStatus"
-        AND o.status = 'PAID'::"OrderStatus"
-        ${this.sqlDateFilter(dateRange, 'o')}
-        ${this.sqlTicketIdsFilter(ticketIds, 'r')}
-      GROUP BY p.method
+        method,
+        COUNT(*)::bigint AS sales_count,
+        COALESCE(
+          ROUND(SUM(
+            GREATEST(final_amount - service_fee, 0) * (1 - ${organizerFeeRate}::numeric)
+          )),
+          0
+        )::bigint AS total_amount
+      FROM order_methods
+      GROUP BY method
       ORDER BY total_amount DESC;
     `);
 
