@@ -125,7 +125,10 @@ const COUNTRY_NAME_TO_ISO: Record<string, CountryCode> = {
 };
 
 function getISOFromCountry(country?: string | null): CountryCode | null {
-  if (!country) return null;
+  /* Country ausente/vazio → default BR. Cobre cadastros antigos onde
+   * o campo nao era obrigatorio. Pra usuario estrangeiro sem o pais
+   * preenchido o backend deve passar o nome do pais explicitamente. */
+  if (!country || !country.trim()) return 'BR';
   const key = country.trim().toLowerCase();
   return COUNTRY_NAME_TO_ISO[key] ?? null;
 }
