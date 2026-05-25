@@ -316,6 +316,7 @@ export class PaymentsService {
                       dateOfBirth: true,
                       reservePhone: true,
                       gender: true,
+                      avatarUrl: true,
                     },
                   },
                   tickets: {
@@ -638,6 +639,7 @@ export class PaymentsService {
               id: reg.id,
               name: reg.user ? `${reg.user.firstName} ${reg.user.lastName}` : null,
               email: reg.user?.email || null,
+              avatarUrl: reg.user?.avatarUrl ?? null,
               ticket: reg.tickets && reg.tickets.length > 0 ? (() => {
                 const rt = reg.tickets[0];
                 const snap = rt.ticketSnapshot as Record<string, any> | null;
@@ -668,6 +670,7 @@ export class PaymentsService {
               id: null, // Comprador pode não ter registration própria
               name: buyer ? `${buyer.firstName} ${buyer.lastName}` : null,
               email: buyer?.email || null,
+              avatarUrl: (buyer as any)?.avatarUrl ?? null,
               ticket: null, // Comprador pode não ter ticket se comprou apenas para outros
               ticketCategory: null,
             });

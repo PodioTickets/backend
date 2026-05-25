@@ -76,6 +76,7 @@ export const PAYMENT_DETAILS_STANDARD_INCLUDE = {
               dateOfBirth: true,
               reservePhone: true,
               gender: true,
+              avatarUrl: true,
             },
           },
           tickets: {
@@ -102,6 +103,7 @@ export const PAYMENT_DETAILS_STANDARD_INCLUDE = {
       dateOfBirth: true,
       reservePhone: true,
       gender: true,
+      avatarUrl: true,
     },
   },
 } satisfies Prisma.PaymentInclude;
