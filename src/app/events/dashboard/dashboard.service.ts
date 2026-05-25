@@ -225,6 +225,7 @@ export class DashboardService {
       tickets,
       topProductVariations,
       lotsNearDepletion,
+      salesByPaymentMethod,
     ] = await Promise.all([
       this.queryTicketRanking(eventId, dateRange, ticketIds, organizerFeeRate),
       this.ticketsService.findAll(eventId, {
@@ -234,6 +235,7 @@ export class DashboardService {
       }),
       this.buildTopProductVariations(eventId, dateRange, ticketIds, organizerFeeRate),
       this.buildLotsNearDepletion(eventId),
+      this.buildSalesByPaymentMethod(eventId, dateRange, ticketIds),
     ]);
 
     const total = rankingRows.length;
@@ -263,6 +265,7 @@ export class DashboardService {
         tickets,
         topProductVariations,
         lotsNearDepletion,
+        salesByPaymentMethod,
       },
     };
 
@@ -730,6 +733,63 @@ export class DashboardService {
   // Top product variations (sql + composição no app — produto+variação tem
   // shape complexo, vale fazer 2 queries focadas).
   // ============================================================
+
+  /**
+   * Agrega vendas confirmadas por método de pagamento.
+   *
+   * Considera apenas Payment com status PAID, agrupado por method. Retorna
+   * para cada método: quantidade de vendas (count), valor bruto pago em
+   * centavos, e o percentual sobre o total (calculado em JS pra evitar
+   * divisão por zero no SQL).
+   *
+   * Métodos: PIX, CREDIT_CARD, DEBIT_CARD, BOLETO, CRYPTO, FREE (ver enum
+   * PaymentMethod no schema). Sempre retorna entradas pros métodos
+   * presentes — não inclui zeros pra métodos sem vendas, pra UI poder
+   * renderizar só barras com dados.
+   */
+  private async buildSalesByPaymentMethod(
+    eventId: string,
+    dateRange: DateRange,
+    ticketIds: string[] | null,
+  ) {
+    const prismaRead = this.prisma.getReadClient();
+
+    const rows = await prismaRead.$queryRaw<
+      { method: string; sales_count: bigint; total_amount: bigint }[]
+    >(Prisma.sql`
+      SELECT
+        p.method::text AS method,
+        COUNT(DISTINCT o.id)::bigint AS sales_count,
+        COALESCE(SUM(o."finalAmount"), 0)::bigint AS total_amount
+      FROM "Payment" p
+      INNER JOIN "Order" o ON o.id = p."orderId"
+      INNER JOIN "Registration" r ON r."orderId" = o.id
+      WHERE r."eventId" = ${eventId}::uuid
+        AND p.status = 'PAID'::"PaymentStatus"
+        AND o.status = 'PAID'::"OrderStatus"
+        ${this.sqlDateFilter(dateRange, 'o')}
+        ${this.sqlTicketIdsFilter(ticketIds, 'r')}
+      GROUP BY p.method
+      ORDER BY total_amount DESC;
+    `);
+
+    const items = rows.map((r) => ({
+      method: r.method,
+      salesCount: Number(r.sales_count),
+      totalAmount: Number(r.total_amount),
+    }));
+
+    const totalSales = items.reduce((acc, r) => acc + r.salesCount, 0);
+    const totalAmount = items.reduce((acc, r) => acc + r.totalAmount, 0);
+
+    return {
+      items: items.map((r) => ({
+        ...r,
+        percentage: totalAmount > 0 ? (r.totalAmount / totalAmount) * 100 : 0,
+      })),
+      totals: { salesCount: totalSales, totalAmount },
+    };
+  }
 
   private async buildTopProductVariations(
     eventId: string,
