@@ -174,24 +174,33 @@ export class CouponsService {
   }
 
   /**
-   * Preview público de cupom pelo código. Usado pelo checkout antes de
-   * aplicar — só retorna os campos necessários pro front exibir a
-   * sinalização ("R$ 50 OFF", "10% OFF"). Não vaza:
+   * Preview público de cupom OU voucher pelo código. Usado pelo checkout
+   * antes de aplicar — o front tem um único input de "código de desconto",
+   * então a rota resolve os dois tipos e devolve um `kind` discriminador
+   * (`'coupon'` | `'voucher'`).
+   *
+   * Só retorna os campos necessários pro front exibir a sinalização
+   * ("R$ 50 OFF", "10% OFF", "ingresso grátis"). Não vaza:
    *   - cpfList/documentList (PII de elegíveis)
    *   - usageCount/maxUsage (timing pra esgotar cupom)
    *   - minCartValue, ageRule, minAge/maxAge (config interna)
    *   - note (texto interno do organizador)
    *
+   * Precedência voucher > cupom: espelha `OrdersService.patchCoupon`, onde um
+   * voucher ACTIVE e não-expirado tem prioridade sobre um cupom de mesmo
+   * código. Garante que "validar" (preview) e "aplicar" (checkout) nunca
+   * divirjam — se o checkout vai aplicar o voucher, o preview também o anuncia.
+   *
    * Erros:
    *   - 404 Evento não encontrado
-   *   - 404 Cupom não encontrado (não existe, ou soft-deleted)
-   *   - 422 Cupom expirado (por data OU status EXPIRED)
-   *   - 422 Cupom inativo (status INACTIVE)
-   *   - 422 Cupom esgotado (atingiu maxUsage)
+   *   - 404 Cupom/voucher não encontrado (não existe, ou soft-deleted)
+   *   - 422 Cupom expirado / inativo / esgotado
+   *   - 422 Voucher expirado / inativo / já utilizado
    *
-   * Performance: lookup direto na unique key `(eventId, code)` — uma
-   * query indexada. Evento checado em paralelo (Promise.all) pra cortar
-   * latência em metade quando ambos existem.
+   * Performance: cupom e voucher são buscados em paralelo com o evento
+   * (Promise.all) — ambos por unique key `(eventId, code)`, point-lookups
+   * indexados. O lookup extra do voucher não adiciona latência (corre em
+   * paralelo) e o custo de DB é desprezível.
    *
    * Segurança: rota pública. Rate-limit é aplicado no controller via
    * `@Throttle` (preview é alvo natural pra brute-force de códigos).
@@ -201,7 +210,7 @@ export class CouponsService {
     const code = rawCode.trim().toUpperCase();
     const prismaRead = this.prisma.getReadClient();
 
-    const [event, coupon] = await Promise.all([
+    const [event, coupon, voucher] = await Promise.all([
       prismaRead.event.findUnique({
         where: { id: eventId },
         select: { id: true },
@@ -221,6 +230,17 @@ export class CouponsService {
           deletedAt: true,
         },
       }),
+      prismaRead.voucher.findUnique({
+        where: { eventId_code: { eventId, code } },
+        select: {
+          code: true,
+          appliesTo: true,
+          status: true,
+          expiryDate: true,
+          usedAt: true,
+          deletedAt: true,
+        },
+      }),
     ]);
 
     if (!event) {
@@ -230,52 +250,100 @@ export class CouponsService {
       });
     }
 
-    // Soft-delete tratado como inexistente (consistente com leitura admin).
-    if (!coupon || coupon.deletedAt) {
-      throw new NotFoundException({
-        code: 'COUPON_NOT_FOUND',
-        message: 'Cupom não encontrado',
-      });
-    }
-
-    // Expiração: confiar tanto na data quanto no status. O status pode
-    // estar desatualizado se o cron de expiração ainda não rodou (ou se
-    // foi expirado manualmente pelo organizador).
+    // Confiar tanto na data quanto no status: o cron de expiração pode não
+    // ter rodado ainda (ou expiração manual pelo organizador).
     const now = new Date();
-    if (
-      coupon.status === 'EXPIRED' ||
-      (coupon.expiryDate && coupon.expiryDate < now)
-    ) {
-      throw new UnprocessableEntityException({
-        code: 'COUPON_EXPIRED',
-        message: 'Cupom expirado',
-      });
+
+    // Soft-delete tratado como inexistente (consistente com leitura admin).
+    const voucherExists = !!voucher && !voucher.deletedAt;
+    const voucherUsable =
+      voucherExists &&
+      voucher!.status === 'ACTIVE' &&
+      (!voucher!.expiryDate || voucher!.expiryDate >= now);
+
+    // 1) Voucher usável → prioridade sobre cupom (espelha o checkout).
+    if (voucherUsable) {
+      return {
+        message: 'Voucher preview fetched successfully',
+        data: {
+          kind: 'voucher',
+          code: voucher!.code,
+          appliesTo: voucher!.appliesTo ?? 'all',
+        },
+      };
     }
 
-    if (coupon.status === 'INACTIVE') {
-      throw new UnprocessableEntityException({
-        code: 'COUPON_INACTIVE',
-        message: 'Cupom inativo',
-      });
+    // 2) Cupom válido (não soft-deletado) → valida e retorna.
+    if (coupon && !coupon.deletedAt) {
+      if (
+        coupon.status === 'EXPIRED' ||
+        (coupon.expiryDate && coupon.expiryDate < now)
+      ) {
+        throw new UnprocessableEntityException({
+          code: 'COUPON_EXPIRED',
+          message: 'Cupom expirado',
+        });
+      }
+
+      if (coupon.status === 'INACTIVE') {
+        throw new UnprocessableEntityException({
+          code: 'COUPON_INACTIVE',
+          message: 'Cupom inativo',
+        });
+      }
+
+      if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) {
+        throw new UnprocessableEntityException({
+          code: 'COUPON_USAGE_LIMIT_REACHED',
+          message: 'Cupom esgotado',
+        });
+      }
+
+      return {
+        message: 'Coupon preview fetched successfully',
+        data: {
+          kind: 'coupon',
+          code: coupon.code,
+          value: coupon.value,
+          type: coupon.type,
+          couponType: coupon.couponType,
+          applyToProducts: coupon.applyToProducts,
+        },
+      };
     }
 
-    if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) {
-      throw new UnprocessableEntityException({
-        code: 'COUPON_USAGE_LIMIT_REACHED',
-        message: 'Cupom esgotado',
-      });
+    // 3) Não há cupom válido, mas existe um voucher não-usável → devolve o
+    //    erro específico do voucher (melhor UX que um 404 genérico).
+    if (voucherExists) {
+      if (voucher!.status === 'USED' || voucher!.usedAt) {
+        throw new UnprocessableEntityException({
+          code: 'VOUCHER_ALREADY_USED',
+          message: 'Voucher já utilizado',
+        });
+      }
+      if (
+        voucher!.status === 'EXPIRED' ||
+        (voucher!.expiryDate && voucher!.expiryDate < now)
+      ) {
+        throw new UnprocessableEntityException({
+          code: 'VOUCHER_EXPIRED',
+          message: 'Voucher expirado',
+        });
+      }
+      if (voucher!.status === 'INACTIVE') {
+        throw new UnprocessableEntityException({
+          code: 'VOUCHER_INACTIVE',
+          message: 'Voucher inativo',
+        });
+      }
     }
 
-    return {
-      message: 'Coupon preview fetched successfully',
-      data: {
-        code: coupon.code,
-        value: coupon.value,
-        type: coupon.type,
-        couponType: coupon.couponType,
-        applyToProducts: coupon.applyToProducts,
-      },
-    };
+    // 4) Nem cupom nem voucher. Mantém o code `COUPON_NOT_FOUND` por
+    //    retrocompat com o tratamento de 404 já existente no front.
+    throw new NotFoundException({
+      code: 'COUPON_NOT_FOUND',
+      message: 'Cupom ou voucher não encontrado',
+    });
   }
 
   async update(userId: string, eventId: string, couponId: string, updateCouponDto: UpdateCouponDto) {

@@ -86,26 +86,27 @@ export class CouponsController {
   @NoCache()
   @Throttle({ short: { limit: 20, ttl: 60_000 } })
   @ApiOperation({
-    summary: 'Preview coupon by code (public)',
+    summary: 'Preview coupon OR voucher by code (public)',
     description:
-      'Endpoint público usado pelo checkout para validar um código de cupom e retornar dados de exibição (valor, tipo, escopo). Não revela elegíveis, contadores de uso ou regras internas (AGE, minCartValue, etc.) — checkout final aplica todas as regras no PATCH de cupom. Código case-insensitive.',
+      'Endpoint público usado pelo checkout para validar um código de desconto (cupom OU voucher) e retornar dados de exibição. A resposta traz um campo `kind` (`"coupon"` | `"voucher"`): cupom retorna value/type/couponType/applyToProducts; voucher retorna appliesTo (ingresso grátis). Voucher tem prioridade sobre cupom de mesmo código (espelha o checkout). Não revela elegíveis, contadores de uso ou regras internas — checkout final aplica todas as regras no PATCH de cupom. Código case-insensitive.',
   })
   @ApiParam({ name: 'eventId', description: 'Event UUID' })
   @ApiQuery({
     name: 'code',
     required: true,
-    description: 'Coupon code (letras + números, sem espaços)',
+    description: 'Coupon/voucher code (letras + números, sem espaços)',
     example: 'PODIO500',
   })
   @ApiResponse({
     status: 200,
     description:
-      'Preview retornado. `value` em centavos (FIXED) ou percentual inteiro 1-100 (PERCENTAGE).',
+      'Preview retornado. Cupom: `value` em centavos (FIXED) ou percentual inteiro 1-100 (PERCENTAGE). Voucher: `kind="voucher"` + `appliesTo`.',
   })
-  @ApiResponse({ status: 404, description: 'Event ou cupom não encontrado' })
+  @ApiResponse({ status: 404, description: 'Event, cupom ou voucher não encontrado (code: COUPON_NOT_FOUND)' })
   @ApiResponse({
     status: 422,
-    description: 'Cupom expirado / inativo / esgotado (códigos: COUPON_EXPIRED, COUPON_INACTIVE, COUPON_USAGE_LIMIT_REACHED)',
+    description:
+      'Cupom expirado/inativo/esgotado (COUPON_EXPIRED, COUPON_INACTIVE, COUPON_USAGE_LIMIT_REACHED) ou voucher expirado/inativo/já utilizado (VOUCHER_EXPIRED, VOUCHER_INACTIVE, VOUCHER_ALREADY_USED)',
   })
   previewByCode(
     @Param('eventId', ParseUUIDPipe) eventId: string,

@@ -1959,6 +1959,36 @@ export class OrdersService {
       },
       include: ORDER_INCLUDE,
     });
+
+    // Espelha o endereço de cobrança no perfil do DONO do pedido
+    // (`updated.userId`, não o caller — admin pode editar em nome de terceiro
+    // via `findOrderForWrite`). O perfil só armazena country/state/city, então
+    // sincronizamos apenas esses três (UF é compatível com `billingStateUf`).
+    //
+    // Best-effort: persistir o billing é o caminho crítico do checkout; uma
+    // falha aqui (improvável — colunas sem constraints) não deve abortar o
+    // pedido. Só incluímos campos com valor não-vazio para nunca apagar dado
+    // já existente no perfil (billing.country é opcional).
+    const profileAddress: Record<string, string> = {};
+    if (b.country?.trim()) profileAddress.country = b.country.trim();
+    if (b.stateUf?.trim()) profileAddress.state = b.stateUf.trim();
+    if (b.city?.trim()) profileAddress.city = b.city.trim();
+
+    if (Object.keys(profileAddress).length > 0) {
+      try {
+        await w.user.update({
+          where: { id: updated.userId },
+          data: profileAddress,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `Falha ao sincronizar endereço no perfil (user=${updated.userId}, order=${orderId}): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
     return orderShape(updated);
   }
 
