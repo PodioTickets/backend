@@ -773,8 +773,8 @@ export class DashboardService {
         INNER JOIN "Payment" p ON p."orderId" = o.id
         INNER JOIN "Registration" r ON r."orderId" = o.id
         WHERE r."eventId" = ${eventId}::uuid
-          AND r.status = 'CONFIRMED'::"RegistrationStatus"
           AND p.status = 'PAID'::"PaymentStatus"
+          AND o.status = 'PAID'::"OrderStatus"
           ${this.sqlDateFilter(dateRange, 'o')}
           ${this.sqlTicketIdsFilter(ticketIds, 'r')}
       )
