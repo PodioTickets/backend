@@ -3102,9 +3102,18 @@ export class OrdersService {
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
               /* Nacionalidade do participante usada pelo template do PDF pra
-               * decidir label (CPF/Documento) e formatacao do telefone. */
-              country: reg.user?.country ?? null,
-              documentType: reg.user?.documentType ?? null,
+               * decidir label (CPF/Documento) e formatacao do telefone.
+               * Prioriza snapshot do checkout (escolha do usuario no momento
+               * da compra) sobre User.country (perfil base, pode estar
+               * desatualizado ou em default). */
+              country:
+                (reg.receiptSnapshot as any)?.participant?.country
+                ?? reg.user?.country
+                ?? null,
+              documentType:
+                (reg.receiptSnapshot as any)?.participant?.documentType
+                ?? reg.user?.documentType
+                ?? null,
               dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
               phone: reg.participantPhone ?? user.phone,
               gender: reg.participantGender ?? user.gender,

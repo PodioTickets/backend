@@ -326,11 +326,19 @@ export class PaymentsWebhookService {
                * label do documento (CPF vs Documento) e aplicar/pular formatação.
                * Pegamos sempre do user real (não só isBuyerReg) — convidado sem
                * conta cai em null e o template assume BR. */
-              country: reg.user?.country ?? null,
-              /* Sinal autoritativo de nacionalidade quando country e nulo.
-               * Cadastros estrangeiros salvam documentType=PASSPORT, mesmo
-               * sem country preenchido nos cadastros mais antigos. */
-              documentType: reg.user?.documentType ?? null,
+              /* Prioriza nacionalidade do snapshot do checkout (o que o
+               * usuario escolheu na hora da compra) sobre o User.country
+               * (perfil base, pode estar desatualizado ou em default). */
+              country:
+                (reg.receiptSnapshot as any)?.participant?.country
+                ?? reg.user?.country
+                ?? null,
+              /* documentType do snapshot tambem prevalece. PASSPORT explicito
+               * salvo no checkout = estrangeiro confirmado. */
+              documentType:
+                (reg.receiptSnapshot as any)?.participant?.documentType
+                ?? reg.user?.documentType
+                ?? null,
               dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
               phone: reg.participantPhone ?? user.phone,
               gender: reg.participantGender ?? user.gender,
@@ -625,11 +633,19 @@ export class PaymentsWebhookService {
                * label do documento (CPF vs Documento) e aplicar/pular formatação.
                * Pegamos sempre do user real (não só isBuyerReg) — convidado sem
                * conta cai em null e o template assume BR. */
-              country: reg.user?.country ?? null,
-              /* Sinal autoritativo de nacionalidade quando country e nulo.
-               * Cadastros estrangeiros salvam documentType=PASSPORT, mesmo
-               * sem country preenchido nos cadastros mais antigos. */
-              documentType: reg.user?.documentType ?? null,
+              /* Prioriza nacionalidade do snapshot do checkout (o que o
+               * usuario escolheu na hora da compra) sobre o User.country
+               * (perfil base, pode estar desatualizado ou em default). */
+              country:
+                (reg.receiptSnapshot as any)?.participant?.country
+                ?? reg.user?.country
+                ?? null,
+              /* documentType do snapshot tambem prevalece. PASSPORT explicito
+               * salvo no checkout = estrangeiro confirmado. */
+              documentType:
+                (reg.receiptSnapshot as any)?.participant?.documentType
+                ?? reg.user?.documentType
+                ?? null,
               dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
               phone: reg.participantPhone ?? user.phone,
               gender: reg.participantGender ?? user.gender,

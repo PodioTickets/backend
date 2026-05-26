@@ -155,33 +155,20 @@ export function isBrazilian(
 export function formatPhoneByCountry(
   phone?: string | null,
   country?: string | null,
-  documentType?: 'CPF' | 'PASSPORT' | string | null,
-  doc?: string | null,
+  _documentType?: 'CPF' | 'PASSPORT' | string | null,
+  _doc?: string | null,
 ): string {
   if (!phone) return phone ?? '';
-  const trimmed = phone.trim();
-  const isForeign =
-    documentType === 'PASSPORT' ||
-    (doc && /[A-Za-z]/.test(doc)) ||
-    (country ? getISOFromCountry(country) !== 'BR' : false);
-
-  /* Estrangeiro: so formata se o phone vier em E.164 (com '+' e DDI).
-   * Sem +DDI nao da pra inferir o pais do numero — qualquer mascara
-   * aplicada acaba errada (caso atual: numero argentino "9202564818"
-   * com country=AR formatava como BR-like). Preserva o valor cru. */
-  if (isForeign) {
-    if (trimmed.startsWith('+')) {
-      try {
-        const formatter = new AsYouType();
-        const formatted = formatter.input(trimmed);
-        return formatted || trimmed;
-      } catch {
-        return trimmed;
-      }
+  /* Phone em E.164 (com '+'): AsYouType sem ISO infere pelo DDI. */
+  if (phone.trim().startsWith('+')) {
+    try {
+      const formatted = new AsYouType().input(phone.trim());
+      return formatted || phone.trim();
+    } catch {
+      return phone.trim();
     }
-    return trimmed;
   }
-
+  /* Phone nacional cru: usa ISO do country pra formatar. */
   const iso = getISOFromCountry(country);
   if (!iso) {
     return phone.replace(/\D/g, '');

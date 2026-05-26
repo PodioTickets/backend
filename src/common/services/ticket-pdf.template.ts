@@ -258,32 +258,20 @@ function isBR(
 function fmtPhone(
   phone: string,
   country?: string | null,
-  documentType?: 'CPF' | 'PASSPORT' | null,
-  doc?: string | null,
+  _documentType?: 'CPF' | 'PASSPORT' | null,
+  _doc?: string | null,
 ): string {
   if (!phone) return phone;
-  const trimmed = phone.trim();
-  /* Estrangeiro detectado por: PASSPORT explicito, doc com letras, ou
-   * country mapeado != BR. Sem +DDI nao da pra inferir formato — qualquer
-   * mascara acaba errada. Preserva cru. */
-  const isForeign =
-    documentType === 'PASSPORT' ||
-    (doc && /[A-Za-z]/.test(doc)) ||
-    (country ? getISOFromCountry(country) !== 'BR' : false);
-
-  if (isForeign) {
-    if (trimmed.startsWith('+')) {
-      try {
-        const formatter = new AsYouType();
-        const formatted = formatter.input(trimmed);
-        return formatted || trimmed;
-      } catch {
-        return trimmed;
-      }
+  /* Phone em E.164 (com '+'): AsYouType sem ISO infere pelo DDI. */
+  if (phone.trim().startsWith('+')) {
+    try {
+      const formatted = new AsYouType().input(phone.trim());
+      return formatted || phone.trim();
+    } catch {
+      return phone.trim();
     }
-    return trimmed;
   }
-
+  /* Phone nacional cru: usa ISO do country pra formatar. */
   const iso = getISOFromCountry(country);
   if (!iso) {
     return phone.replace(/\D/g, '');
