@@ -302,26 +302,24 @@ export class OrganizersService {
     const owner = organization.members[0];
     const event = contactData.eventId ? organization.events[0] : undefined;
 
-    /* Buscar avatar e país do usuário logado, se houver. País é usado para
-     * decidir o label do documento ("CPF" para BR, "Documento" para outros). */
+    /* Busca avatar, país e tipo do documento do usuário logado. Os 3 campos
+     * sao passados pro email service que usa locale.util pra decidir
+     * formatacao e label do documento. */
     let userAvatarUrl: string | undefined;
     let userCountry: string | null = null;
+    let userDocumentType: 'CPF' | 'PASSPORT' | null = null;
     if (contactData.userId) {
       const userRecord = await prismaRead.user.findUnique({
         where: { id: contactData.userId },
-        select: { avatarUrl: true, country: true },
+        select: { avatarUrl: true, country: true, documentType: true },
       });
       userAvatarUrl = userRecord?.avatarUrl ?? undefined;
       userCountry = userRecord?.country ?? null;
+      userDocumentType = (userRecord?.documentType ?? null) as
+        | 'CPF'
+        | 'PASSPORT'
+        | null;
     }
-    /* Heurística de nacionalidade: aceita "BR", "Brasil", "Brazil" (case-insensitive).
-     * Quando country é null/undefined assume BR para compatibilidade com cadastros antigos. */
-    const normalizedCountry = userCountry?.trim().toLowerCase();
-    const isBrazilian =
-      !normalizedCountry ||
-      normalizedCountry === 'br' ||
-      normalizedCountry === 'brasil' ||
-      normalizedCountry === 'brazil';
 
     // Criar mensagem no banco (já com mensagem sanitizada)
     const contactMessage = await prismaWrite.contactMessage.create({
@@ -348,7 +346,8 @@ export class OrganizersService {
         userPhone: contactData.phone,
         userCpf: contactData.cpf,
         userAvatarUrl,
-        isBrazilian,
+        userCountry,
+        userDocumentType,
         subject: contactData.subject,
         eventName: event?.name,
         message: cleanMessage,
@@ -364,6 +363,8 @@ export class OrganizersService {
         userCpf: contactData.cpf,
         userPhone: contactData.phone,
         userAvatarUrl,
+        userCountry,
+        userDocumentType,
         subject: contactData.subject,
         message: cleanMessage,
         eventName: event?.name,

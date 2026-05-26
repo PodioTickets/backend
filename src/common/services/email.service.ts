@@ -5,6 +5,11 @@ import { ConfigService } from '@nestjs/config';
 import type { MailDataRequired } from '@sendgrid/mail';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const sgMail = require('@sendgrid/mail');
+import {
+  isBrazilian,
+  formatPhoneByCountry,
+  formatCpfByCountry,
+} from '../utils/locale.util';
 
 @Injectable()
 export class EmailService {
@@ -87,9 +92,17 @@ export class EmailService {
     /**
      * Quando true, o template exibe o label "CPF". Quando false, exibe "Documento"
      * e o valor é renderizado sem formatação de CPF (xxx.xxx.xxx-xx).
-     * Default: true (compatibilidade com chamadas existentes).
+     * Default: detectado automaticamente a partir de userCountry/userDocumentType.
      */
     isBrazilian?: boolean;
+    /**
+     * Pais do remetente (nome em qualquer idioma ou ISO alpha-2/alpha-3).
+     * Usado pra formatar o telefone via libphonenumber-js e decidir a label
+     * CPF/Documento. Quando ausente, aplica heuristica via documentType e
+     * shape do doc.
+     */
+    userCountry?: string | null;
+    userDocumentType?: 'CPF' | 'PASSPORT' | string | null;
     subject?: string;
     eventName?: string;
     message: string;
@@ -100,19 +113,37 @@ export class EmailService {
         : `Nova mensagem de ${data.userName}`,
     );
 
-    /* Default: brasileiro (mantém comportamento legado quando flag não é enviada). */
-    const isBrazilian = data.isBrazilian !== false;
-    const documentLabel = isBrazilian ? 'CPF' : 'Documento';
+    /* Detecta brasileiro pelo trio (country, documentType, doc). Flag legacy
+     * `isBrazilian` ainda respeitada se passada explicitamente. */
+    const isBrazilianFlag =
+      data.isBrazilian !== undefined
+        ? data.isBrazilian
+        : isBrazilian(data.userCountry, data.userDocumentType, data.userCpf);
+    const documentLabel = isBrazilianFlag ? 'CPF' : 'Documento';
+
+    /* Formata telefone e documento conforme nacionalidade. Estrangeiro sem
+     * country mapeado: phone fica so digitos, doc fica cru. */
+    const formattedPhone = data.userPhone
+      ? formatPhoneByCountry(
+        data.userPhone,
+        data.userCountry,
+        data.userDocumentType,
+        data.userCpf,
+      )
+      : '';
+    const formattedCpf = data.userCpf
+      ? formatCpfByCountry(data.userCpf, data.userCountry, data.userDocumentType)
+      : '';
 
     const html = this.loadTemplate('mensagem-organizador.html', {
       organizerName: this.escapeHtml(data.organizerName),
       userName: this.escapeHtml(data.userName),
       userEmail: this.escapeHtml(data.userEmail),
-      userPhone: data.userPhone ? this.escapeHtml(data.userPhone) : '',
-      userCpf: data.userCpf ? this.escapeHtml(data.userCpf) : '',
+      userPhone: formattedPhone ? this.escapeHtml(formattedPhone) : '',
+      userCpf: formattedCpf ? this.escapeHtml(formattedCpf) : '',
       /* loadTemplate trata vars como string e usa truthiness (value !== '' && != null).
        * Para flags booleanas: '1' = truthy, '' = falsy. */
-      isBrazilian: isBrazilian ? '1' : '',
+      isBrazilian: isBrazilianFlag ? '1' : '',
       /* safeUrl valida esquema https:// antes de escapeHtml — previne javascript: em src */
       userAvatarUrl: this.escapeHtml(this.safeUrl(data.userAvatarUrl)),
       subject: data.subject ? this.escapeHtml(data.subject) : '',
@@ -124,8 +155,8 @@ export class EmailService {
       `Nova mensagem de contato${data.eventName ? ` — ${data.eventName}` : ''}`,
       '',
       `De: ${data.userName} (${data.userEmail})`,
-      data.userPhone ? `Telefone: ${data.userPhone}` : null,
-      data.userCpf ? `${documentLabel}: ${data.userCpf}` : null,
+      formattedPhone ? `Telefone: ${formattedPhone}` : null,
+      formattedCpf ? `${documentLabel}: ${formattedCpf}` : null,
       data.subject ? `Assunto: ${data.subject}` : null,
       '',
       'Mensagem:',
@@ -154,17 +185,39 @@ export class EmailService {
     userCpf?: string;
     userPhone?: string;
     userAvatarUrl?: string;
+    userCountry?: string | null;
+    userDocumentType?: 'CPF' | 'PASSPORT' | string | null;
     subject?: string;
     message: string;
     eventName?: string;
     organizerName: string;
     organizerAvatarUrl?: string;
   }) {
+    /* Formata phone/CPF conforme nacionalidade do remetente. */
+    const formattedPhone = data.userPhone
+      ? formatPhoneByCountry(
+        data.userPhone,
+        data.userCountry,
+        data.userDocumentType,
+        data.userCpf,
+      )
+      : '';
+    const formattedCpf = data.userCpf
+      ? formatCpfByCountry(data.userCpf, data.userCountry, data.userDocumentType)
+      : '';
+    const docLabel = isBrazilian(
+      data.userCountry,
+      data.userDocumentType,
+      data.userCpf,
+    )
+      ? 'CPF'
+      : 'Documento';
+
     const html = this.loadTemplate('confirmacao-mensagem-organizador.html', {
       userName: this.escapeHtml(data.userName),
       userEmail: this.escapeHtml(data.userEmail),
-      userCpf: data.userCpf ? this.escapeHtml(data.userCpf) : '',
-      userPhone: data.userPhone ? this.escapeHtml(data.userPhone) : '',
+      userCpf: formattedCpf ? this.escapeHtml(formattedCpf) : '',
+      userPhone: formattedPhone ? this.escapeHtml(formattedPhone) : '',
       userAvatarUrl: this.escapeHtml(this.safeUrl(data.userAvatarUrl)),
       subject: data.subject ? this.escapeHtml(data.subject) : '',
       message: this.escapeHtml(data.message),
@@ -182,8 +235,8 @@ export class EmailService {
       data.eventName ? `Evento: ${data.eventName}` : null,
       `Nome: ${data.userName}`,
       `E-mail: ${data.userEmail}`,
-      data.userCpf ? `CPF: ${data.userCpf}` : null,
-      data.userPhone ? `Telefone: ${data.userPhone}` : null,
+      formattedCpf ? `${docLabel}: ${formattedCpf}` : null,
+      formattedPhone ? `Telefone: ${formattedPhone}` : null,
       data.subject ? `Assunto: ${data.subject}` : null,
       '',
       'Mensagem:',
