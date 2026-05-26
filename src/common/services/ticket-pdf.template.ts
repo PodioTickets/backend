@@ -18,18 +18,35 @@ import * as countries from 'i18n-iso-countries';
 
 /* JSON locales carregados via require pra evitar precisar de
  * `resolveJsonModule` no tsconfig (o projeto nao usa essa flag). */
+/* Carrega TODOS os 77 locales suportados pelo i18n-iso-countries pra que
+ * qualquer nome de pais escrito em qualquer idioma seja resolvido.
+ * `fs.readdirSync` roda 1 vez no boot e o `require` cacheia os JSONs. */
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const ptLocale = require('i18n-iso-countries/langs/pt.json');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const enLocale = require('i18n-iso-countries/langs/en.json');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const esLocale = require('i18n-iso-countries/langs/es.json');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const frLocale = require('i18n-iso-countries/langs/fr.json');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const deLocale = require('i18n-iso-countries/langs/de.json');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const itLocale = require('i18n-iso-countries/langs/it.json');
+const fs = require('fs');
+const LANGS_DIR = path.dirname(
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  require.resolve('i18n-iso-countries/langs/en.json'),
+);
+const ALL_LOCALES: any[] = (() => {
+  try {
+    const files = fs.readdirSync(LANGS_DIR) as string[];
+    return files
+      .filter((f: string) => f.endsWith('.json'))
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      .map((f: string) => require(path.join(LANGS_DIR, f)));
+  } catch {
+    return [];
+  }
+})();
+const SUPPORTED_LOCALE_CODES: string[] = (() => {
+  try {
+    return (fs.readdirSync(LANGS_DIR) as string[])
+      .filter((f: string) => f.endsWith('.json'))
+      .map((f: string) => f.replace('.json', ''));
+  } catch {
+    return [];
+  }
+})();
 import {
   TicketPdfProduct,
   TicketPdfRegistrationWithQr,
@@ -102,21 +119,17 @@ function fmtCPF(cpf: string): string {
   return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
 }
 
-/* Registra locales no `i18n-iso-countries` (idempotente). Memoizado
- * fora das funcoes pra rodar so uma vez por processo. PT, EN, ES, FR,
- * DE, IT cobrem todos os ~250 paises ISO-3166 em variantes principais. */
+/* Registra TODOS os 77 locales no `i18n-iso-countries` (idempotente).
+ * Memoizado fora das funcoes pra rodar so uma vez por processo. */
 let localesRegistered = false;
 function ensureLocales() {
   if (localesRegistered) return;
-  try {
-    (countries as any).registerLocale(ptLocale);
-    (countries as any).registerLocale(enLocale);
-    (countries as any).registerLocale(esLocale);
-    (countries as any).registerLocale(frLocale);
-    (countries as any).registerLocale(deLocale);
-    (countries as any).registerLocale(itLocale);
-  } catch {
-    // ignora: registerLocale e idempotente mas pode lancar em re-import
+  for (const locale of ALL_LOCALES) {
+    try {
+      (countries as any).registerLocale(locale);
+    } catch {
+      // ignora: locale pode lancar em re-registro
+    }
   }
   localesRegistered = true;
 }
@@ -171,8 +184,6 @@ const PT_BR_ALIASES: Record<string, CountryCode> = {
  * lookup por string). Vive enquanto o processo Node estiver up. */
 const isoLookupCache = new Map<string, CountryCode | null>();
 
-const SUPPORTED_LOCALES = ['pt', 'en', 'es', 'fr', 'de', 'it'] as const;
-
 function getISOFromCountry(country?: string | null): CountryCode | null {
   if (!country || !country.trim()) return 'BR';
   ensureLocales();
@@ -187,9 +198,9 @@ function getISOFromCountry(country?: string | null): CountryCode | null {
     code = PT_BR_ALIASES[lowered];
   }
 
-  // 2) Lookup em todos os locales registrados (case + lower) ate achar.
+  // 2) Lookup em TODOS os 77 locales registrados (case + lower) ate achar.
   if (!code) {
-    for (const locale of SUPPORTED_LOCALES) {
+    for (const locale of SUPPORTED_LOCALE_CODES) {
       code = (countries as any).getAlpha2Code(key, locale) as string | undefined;
       if (code) break;
       code = (countries as any).getAlpha2Code(lowered, locale) as string | undefined;
@@ -203,7 +214,7 @@ function getISOFromCountry(country?: string | null): CountryCode | null {
     if ((countries as any).isValid(upper)) code = upper;
   }
 
-  // 4) Aceita codigo ISO-3166 alpha-3 ("BRA", "USA") via toAlpha2Code.
+  // 4) Aceita codigo ISO-3166 alpha-3 ("BRA", "USA") via alpha3ToAlpha2.
   if (!code && /^[a-zA-Z]{3}$/.test(key)) {
     code = (countries as any).alpha3ToAlpha2(key.toUpperCase()) as string | undefined;
   }
