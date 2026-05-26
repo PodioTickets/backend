@@ -262,14 +262,28 @@ function fmtPhone(
   doc?: string | null,
 ): string {
   if (!phone) return phone;
-  // Estrangeiro sem country preenchido (PASSPORT explicito ou doc com letras):
-  // retorna so digitos, evita mascara BR errada.
-  const isForeignNoCountry =
-    (documentType === 'PASSPORT' || (doc && /[A-Za-z]/.test(doc))) &&
-    (!country || !country.trim());
-  if (isForeignNoCountry) {
-    return phone.replace(/\D/g, '');
+  const trimmed = phone.trim();
+  /* Estrangeiro detectado por: PASSPORT explicito, doc com letras, ou
+   * country mapeado != BR. Sem +DDI nao da pra inferir formato — qualquer
+   * mascara acaba errada. Preserva cru. */
+  const isForeign =
+    documentType === 'PASSPORT' ||
+    (doc && /[A-Za-z]/.test(doc)) ||
+    (country ? getISOFromCountry(country) !== 'BR' : false);
+
+  if (isForeign) {
+    if (trimmed.startsWith('+')) {
+      try {
+        const formatter = new AsYouType();
+        const formatted = formatter.input(trimmed);
+        return formatted || trimmed;
+      } catch {
+        return trimmed;
+      }
+    }
+    return trimmed;
   }
+
   const iso = getISOFromCountry(country);
   if (!iso) {
     return phone.replace(/\D/g, '');
