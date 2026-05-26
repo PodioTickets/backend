@@ -22,6 +22,14 @@ import * as countries from 'i18n-iso-countries';
 const ptLocale = require('i18n-iso-countries/langs/pt.json');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const enLocale = require('i18n-iso-countries/langs/en.json');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const esLocale = require('i18n-iso-countries/langs/es.json');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const frLocale = require('i18n-iso-countries/langs/fr.json');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const deLocale = require('i18n-iso-countries/langs/de.json');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const itLocale = require('i18n-iso-countries/langs/it.json');
 import {
   TicketPdfProduct,
   TicketPdfRegistrationWithQr,
@@ -94,14 +102,19 @@ function fmtCPF(cpf: string): string {
   return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
 }
 
-/* Registra locales PT e EN no `i18n-iso-countries` (idempotente). Memoizado
- * fora das funcoes pra rodar so uma vez por processo. */
+/* Registra locales no `i18n-iso-countries` (idempotente). Memoizado
+ * fora das funcoes pra rodar so uma vez por processo. PT, EN, ES, FR,
+ * DE, IT cobrem todos os ~250 paises ISO-3166 em variantes principais. */
 let localesRegistered = false;
 function ensureLocales() {
   if (localesRegistered) return;
   try {
     (countries as any).registerLocale(ptLocale);
     (countries as any).registerLocale(enLocale);
+    (countries as any).registerLocale(esLocale);
+    (countries as any).registerLocale(frLocale);
+    (countries as any).registerLocale(deLocale);
+    (countries as any).registerLocale(itLocale);
   } catch {
     // ignora: registerLocale e idempotente mas pode lancar em re-import
   }
@@ -112,14 +125,32 @@ function ensureLocales() {
  * (lib usa nomenclatura PT-PT em algumas entradas). Sincronizado com o
  * `PT_BR_ALIASES` do frontend (`src/utils/phone.ts`). */
 const PT_BR_ALIASES: Record<string, CountryCode> = {
+  'armênia': 'AM',
+  'barém': 'BH',
+  'bósnia e herzegovina': 'BA',
   'brasil': 'BR',
+  'catar': 'QA',
   'estados unidos': 'US',
   'reino unido': 'GB',
-  'vietnã': 'VN',
-  'catar': 'QA',
+  'djibuti': 'DJ',
+  'eslovênia': 'SI',
+  'estônia': 'EE',
+  'iêmen': 'YE',
   'irã': 'IR',
-  'palestina': 'PS',
+  'letônia': 'LV',
+  'macedônia do norte': 'MK',
   'mianmar': 'MM',
+  'mônaco': 'MC',
+  'palestina': 'PS',
+  'polônia': 'PL',
+  'quênia': 'KE',
+  'romênia': 'RO',
+  'são cristóvão e nevis': 'KN',
+  'seicheles': 'SC',
+  'trinidad e tobago': 'TT',
+  'turcomenistão': 'TM',
+  'vaticano': 'VA',
+  'vietnã': 'VN',
 };
 
 /**
@@ -135,20 +166,51 @@ const PT_BR_ALIASES: Record<string, CountryCode> = {
  * Aceita tanto codigo ISO direto ("BR", "AR") quanto nome em portugues ou
  * ingles ("Brasil", "Argentina", "United States").
  */
+/**
+ * Cache memoizado pra evitar varrer locales em cada chamada (overhead de
+ * lookup por string). Vive enquanto o processo Node estiver up. */
+const isoLookupCache = new Map<string, CountryCode | null>();
+
+const SUPPORTED_LOCALES = ['pt', 'en', 'es', 'fr', 'de', 'it'] as const;
+
 function getISOFromCountry(country?: string | null): CountryCode | null {
   if (!country || !country.trim()) return 'BR';
   ensureLocales();
   const key = country.trim();
+  if (isoLookupCache.has(key)) return isoLookupCache.get(key) as CountryCode | null;
+
   const lowered = key.toLowerCase();
-  if (PT_BR_ALIASES[lowered]) return PT_BR_ALIASES[lowered];
-  let code: string | undefined = (countries as any).getAlpha2Code(key, 'pt') as string | undefined;
-  if (!code) code = (countries as any).getAlpha2Code(lowered, 'pt') as string | undefined;
-  if (!code) code = (countries as any).getAlpha2Code(key, 'en') as string | undefined;
-  if (!code) code = (countries as any).getAlpha2Code(lowered, 'en') as string | undefined;
-  if (!code && /^[a-zA-Z]{2}$/.test(key)) {
-    code = key.toUpperCase();
+  let code: string | undefined;
+
+  // 1) Override manual PT-BR pros nomes que a lib resolve em PT-PT.
+  if (PT_BR_ALIASES[lowered]) {
+    code = PT_BR_ALIASES[lowered];
   }
-  return (code as CountryCode) || null;
+
+  // 2) Lookup em todos os locales registrados (case + lower) ate achar.
+  if (!code) {
+    for (const locale of SUPPORTED_LOCALES) {
+      code = (countries as any).getAlpha2Code(key, locale) as string | undefined;
+      if (code) break;
+      code = (countries as any).getAlpha2Code(lowered, locale) as string | undefined;
+      if (code) break;
+    }
+  }
+
+  // 3) Aceita codigo ISO-3166 alpha-2 cru ("BR", "AR", "us", "GB").
+  if (!code && /^[a-zA-Z]{2}$/.test(key)) {
+    const upper = key.toUpperCase();
+    if ((countries as any).isValid(upper)) code = upper;
+  }
+
+  // 4) Aceita codigo ISO-3166 alpha-3 ("BRA", "USA") via toAlpha2Code.
+  if (!code && /^[a-zA-Z]{3}$/.test(key)) {
+    code = (countries as any).alpha3ToAlpha2(key.toUpperCase()) as string | undefined;
+  }
+
+  const result = (code as CountryCode) || null;
+  isoLookupCache.set(key, result);
+  return result;
 }
 
 /**
