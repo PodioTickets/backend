@@ -3101,6 +3101,10 @@ export class OrdersService {
               ticketName: fullTicketName,
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
+              /* Nacionalidade do participante usada pelo template do PDF pra
+               * decidir label (CPF/Documento) e formatacao do telefone. */
+              country: reg.user?.country ?? null,
+              documentType: reg.user?.documentType ?? null,
               dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
               phone: reg.participantPhone ?? user.phone,
               gender: reg.participantGender ?? user.gender,

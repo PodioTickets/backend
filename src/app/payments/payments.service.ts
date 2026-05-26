@@ -1019,6 +1019,10 @@ export class PaymentsService {
           ticketName: fullTicketName,
           email: reg.participantEmail ?? user.email,
           cpf: reg.participantCpf ?? user.documentNumber,
+          /* Nacionalidade do participante — usada pelo template do PDF pra
+           * decidir label (CPF/Documento) e formatacao do telefone. */
+          country: user.country ?? null,
+          documentType: user.documentType ?? null,
           dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
           phone: reg.participantPhone ?? user.phone,
           gender: reg.participantGender ?? user.gender,

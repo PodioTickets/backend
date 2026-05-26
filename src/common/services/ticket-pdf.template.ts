@@ -227,13 +227,23 @@ function getISOFromCountry(country?: string | null): CountryCode | null {
 /**
  * Decide se o usuário é brasileiro.
  *
- * Prioridade:
+ * Prioridade (mais autoritativo → menos autoritativo):
  *   1. `documentType === 'PASSPORT'` → forca nao-brasileiro (sinal explicito).
- *   2. ISO do `country` resolvido para 'BR'.
- *   3. country null/vazio → assume BR (default historico).
+ *   2. Shape do doc indica passaporte (contem letras) → nao-brasileiro.
+ *      Cobre o caso de cadastros antigos onde documentType estava CPF default
+ *      mas o numero salvo tem letras (estrangeiro).
+ *   3. ISO do `country` mapeado para outro pais → nao-brasileiro.
+ *   4. ISO resolvido para 'BR' → brasileiro.
+ *   5. country null/vazio + doc nao tem letras + sem documentType PASSPORT
+ *      → assume BR (default historico).
  */
-function isBR(country?: string | null, documentType?: 'CPF' | 'PASSPORT' | null): boolean {
+function isBR(
+  country?: string | null,
+  documentType?: 'CPF' | 'PASSPORT' | null,
+  doc?: string | null,
+): boolean {
   if (documentType === 'PASSPORT') return false;
+  if (doc && /[A-Za-z]/.test(doc)) return false;
   const iso = getISOFromCountry(country);
   return iso === 'BR';
 }
@@ -249,9 +259,15 @@ function fmtPhone(
   phone: string,
   country?: string | null,
   documentType?: 'CPF' | 'PASSPORT' | null,
+  doc?: string | null,
 ): string {
   if (!phone) return phone;
-  if (documentType === 'PASSPORT' && (!country || !country.trim())) {
+  // Estrangeiro sem country preenchido (PASSPORT explicito ou doc com letras):
+  // retorna so digitos, evita mascara BR errada.
+  const isForeignNoCountry =
+    (documentType === 'PASSPORT' || (doc && /[A-Za-z]/.test(doc))) &&
+    (!country || !country.trim());
+  if (isForeignNoCountry) {
     return phone.replace(/\D/g, '');
   }
   const iso = getISOFromCountry(country);
@@ -415,12 +431,12 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
   const fields = [
     reg.email ? { label: 'Email', value: reg.email } : null,
     reg.cpf
-      ? isBR(reg.country, reg.documentType)
+      ? isBR(reg.country, reg.documentType, reg.cpf)
         ? { label: 'CPF', value: fmtCPF(reg.cpf) }
         : { label: 'Documento', value: reg.cpf }
       : null,
     reg.dateOfBirth ? { label: 'Data de nascimento', value: fmtDate(reg.dateOfBirth) } : null,
-    reg.phone ? { label: 'Telefone', value: fmtPhone(reg.phone, reg.country, reg.documentType) } : null,
+    reg.phone ? { label: 'Telefone', value: fmtPhone(reg.phone, reg.country, reg.documentType, reg.cpf) } : null,
     reg.gender ? { label: 'Sexo', value: reg.gender === 'MALE' ? 'Masculino' : reg.gender === 'FEMALE' ? 'Feminino' : reg.gender } : null,
   ].filter(Boolean) as { label: string; value: string }[];
 
