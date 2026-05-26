@@ -80,6 +80,7 @@
     "form-data": "^4.0.4",
     "geoip-lite": "^2.0.1",
     "helmet": "^8.1.0",
+    "i18n-iso-countries": "^7.14.0",
     "libphonenumber-js": "^1.13.3",
     "luxon": "^3.7.2",
     "multer": "2.0.2",

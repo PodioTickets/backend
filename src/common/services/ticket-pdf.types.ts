@@ -20,6 +20,12 @@ export interface TicketPdfRegistration {
    * Quando ausente/nulo, assume brasileiro (compatibilidade com dados antigos).
    */
   country?: string | null;
+  /**
+   * Tipo do documento (CPF | PASSPORT). Sinal autoritativo de nacionalidade
+   * quando o campo `country` chega nulo (cadastros pre-migration). PASSPORT
+   * explicito força o template a tratar o usuario como estrangeiro.
+   */
+  documentType?: 'CPF' | 'PASSPORT' | null;
   dateOfBirth?: Date | string | null;
   phone?: string;
   gender?: string;

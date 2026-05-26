@@ -14,6 +14,14 @@ import {
 } from '@react-pdf/renderer';
 import * as path from 'path';
 import { AsYouType, type CountryCode } from 'libphonenumber-js';
+import * as countries from 'i18n-iso-countries';
+
+/* JSON locales carregados via require pra evitar precisar de
+ * `resolveJsonModule` no tsconfig (o projeto nao usa essa flag). */
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const ptLocale = require('i18n-iso-countries/langs/pt.json');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const enLocale = require('i18n-iso-countries/langs/en.json');
 import {
   TicketPdfProduct,
   TicketPdfRegistrationWithQr,
@@ -86,68 +94,93 @@ function fmtCPF(cpf: string): string {
   return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
 }
 
+/* Registra locales PT e EN no `i18n-iso-countries` (idempotente). Memoizado
+ * fora das funcoes pra rodar so uma vez por processo. */
+let localesRegistered = false;
+function ensureLocales() {
+  if (localesRegistered) return;
+  try {
+    (countries as any).registerLocale(ptLocale);
+    (countries as any).registerLocale(enLocale);
+  } catch {
+    // ignora: registerLocale e idempotente mas pode lancar em re-import
+  }
+  localesRegistered = true;
+}
+
+/* Overrides manuais pra nomes PT-BR que `i18n-iso-countries` nao resolve
+ * (lib usa nomenclatura PT-PT em algumas entradas). Sincronizado com o
+ * `PT_BR_ALIASES` do frontend (`src/utils/phone.ts`). */
+const PT_BR_ALIASES: Record<string, CountryCode> = {
+  'brasil': 'BR',
+  'estados unidos': 'US',
+  'reino unido': 'GB',
+  'vietnã': 'VN',
+  'catar': 'QA',
+  'irã': 'IR',
+  'palestina': 'PS',
+  'mianmar': 'MM',
+};
+
 /**
- * Decide se o usuário é brasileiro com base no campo `country` do User.
- * Aceita variantes ("BR", "Brasil", "Brazil") e trata null/undefined como BR
- * para compatibilidade com cadastros antigos sem nacionalidade preenchida.
+ * Resolve nome do país para código ISO 3166-1 alpha-2.
+ *
+ * Ordem de resolucao:
+ *   1. country null/vazio → 'BR' (default historico).
+ *   2. Override manual em PT_BR_ALIASES.
+ *   3. `i18n-iso-countries.getAlpha2Code` em PT.
+ *   4. Mesma lib em EN.
+ *   5. null (pais nao identificado).
+ *
+ * Aceita tanto codigo ISO direto ("BR", "AR") quanto nome em portugues ou
+ * ingles ("Brasil", "Argentina", "United States").
  */
-function isBR(country?: string | null): boolean {
-  if (!country) return true;
-  const c = country.trim().toLowerCase();
-  return c === 'br' || c === 'brasil' || c === 'brazil';
+function getISOFromCountry(country?: string | null): CountryCode | null {
+  if (!country || !country.trim()) return 'BR';
+  ensureLocales();
+  const key = country.trim();
+  const lowered = key.toLowerCase();
+  if (PT_BR_ALIASES[lowered]) return PT_BR_ALIASES[lowered];
+  let code: string | undefined = (countries as any).getAlpha2Code(key, 'pt') as string | undefined;
+  if (!code) code = (countries as any).getAlpha2Code(lowered, 'pt') as string | undefined;
+  if (!code) code = (countries as any).getAlpha2Code(key, 'en') as string | undefined;
+  if (!code) code = (countries as any).getAlpha2Code(lowered, 'en') as string | undefined;
+  if (!code && /^[a-zA-Z]{2}$/.test(key)) {
+    code = key.toUpperCase();
+  }
+  return (code as CountryCode) || null;
 }
 
 /**
- * Mapa mínimo de nome do país (PT-BR/EN) → ISO 3166-1 alpha-2.
- * Cobre os países mais frequentes em compras de evento. Países fora do mapa
- * caem no fallback (retorna só dígitos limpos). Manter sincronizado com o
- * `getCountryCodeFromName` do frontend (`src/utils/phone.ts`).
+ * Decide se o usuário é brasileiro.
+ *
+ * Prioridade:
+ *   1. `documentType === 'PASSPORT'` → forca nao-brasileiro (sinal explicito).
+ *   2. ISO do `country` resolvido para 'BR'.
+ *   3. country null/vazio → assume BR (default historico).
  */
-const COUNTRY_NAME_TO_ISO: Record<string, CountryCode> = {
-  'brasil': 'BR', 'brazil': 'BR', 'br': 'BR',
-  'estados unidos': 'US', 'united states': 'US', 'usa': 'US', 'us': 'US',
-  'portugal': 'PT', 'pt': 'PT',
-  'argentina': 'AR', 'ar': 'AR',
-  'chile': 'CL', 'cl': 'CL',
-  'colombia': 'CO', 'colômbia': 'CO', 'co': 'CO',
-  'peru': 'PE', 'pe': 'PE',
-  'uruguai': 'UY', 'uruguay': 'UY', 'uy': 'UY',
-  'paraguai': 'PY', 'paraguay': 'PY', 'py': 'PY',
-  'méxico': 'MX', 'mexico': 'MX', 'mx': 'MX',
-  'canadá': 'CA', 'canada': 'CA', 'ca': 'CA',
-  'espanha': 'ES', 'spain': 'ES', 'es': 'ES',
-  'frança': 'FR', 'france': 'FR', 'fr': 'FR',
-  'alemanha': 'DE', 'germany': 'DE', 'de': 'DE',
-  'itália': 'IT', 'italy': 'IT', 'it': 'IT',
-  'reino unido': 'GB', 'united kingdom': 'GB', 'uk': 'GB', 'gb': 'GB',
-  'japão': 'JP', 'japan': 'JP', 'jp': 'JP',
-  'china': 'CN', 'cn': 'CN',
-};
-
-function getISOFromCountry(country?: string | null): CountryCode | null {
-  /* Country ausente/vazio → default BR. Cobre cadastros antigos onde
-   * o campo nao era obrigatorio. Pra usuario estrangeiro sem o pais
-   * preenchido o backend deve passar o nome do pais explicitamente. */
-  if (!country || !country.trim()) return 'BR';
-  const key = country.trim().toLowerCase();
-  return COUNTRY_NAME_TO_ISO[key] ?? null;
+function isBR(country?: string | null, documentType?: 'CPF' | 'PASSPORT' | null): boolean {
+  if (documentType === 'PASSPORT') return false;
+  const iso = getISOFromCountry(country);
+  return iso === 'BR';
 }
 
 /**
  * Formata telefone conforme país usando `libphonenumber-js` AsYouType.
  *
- * Exemplos:
- *   - BR "11999990000" → "(11) 99999-0000"
- *   - US "2025550100" → "(202) 555-0100"
- *   - PT "912345678" → "912 345 678"
- *   - GB "7911123456" → "7911 123456"
- *
- * Quando o país não é mapeado (sem ISO), retorna só dígitos limpos pra não
- * forçar formato BR em estrangeiros. Quando o `AsYouType` falha (bundler
- * sem interop CJS/ESM correto), também retorna dígitos limpos.
+ * Quando o documento e PASSPORT (estrangeiro) mas o pais e desconhecido,
+ * retorna so digitos limpos pra evitar mascara BR errada. Pra paises
+ * mapeados, AsYouType cuida da formatacao nativa.
  */
-function fmtPhone(phone: string, country?: string | null): string {
+function fmtPhone(
+  phone: string,
+  country?: string | null,
+  documentType?: 'CPF' | 'PASSPORT' | null,
+): string {
   if (!phone) return phone;
+  if (documentType === 'PASSPORT' && (!country || !country.trim())) {
+    return phone.replace(/\D/g, '');
+  }
   const iso = getISOFromCountry(country);
   if (!iso) {
     return phone.replace(/\D/g, '');
@@ -309,12 +342,12 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
   const fields = [
     reg.email ? { label: 'Email', value: reg.email } : null,
     reg.cpf
-      ? isBR(reg.country)
+      ? isBR(reg.country, reg.documentType)
         ? { label: 'CPF', value: fmtCPF(reg.cpf) }
         : { label: 'Documento', value: reg.cpf }
       : null,
     reg.dateOfBirth ? { label: 'Data de nascimento', value: fmtDate(reg.dateOfBirth) } : null,
-    reg.phone ? { label: 'Telefone', value: fmtPhone(reg.phone, reg.country) } : null,
+    reg.phone ? { label: 'Telefone', value: fmtPhone(reg.phone, reg.country, reg.documentType) } : null,
     reg.gender ? { label: 'Sexo', value: reg.gender === 'MALE' ? 'Masculino' : reg.gender === 'FEMALE' ? 'Feminino' : reg.gender } : null,
   ].filter(Boolean) as { label: string; value: string }[];
 

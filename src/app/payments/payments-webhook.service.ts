@@ -327,6 +327,10 @@ export class PaymentsWebhookService {
                * Pegamos sempre do user real (não só isBuyerReg) — convidado sem
                * conta cai em null e o template assume BR. */
               country: reg.user?.country ?? null,
+              /* Sinal autoritativo de nacionalidade quando country e nulo.
+               * Cadastros estrangeiros salvam documentType=PASSPORT, mesmo
+               * sem country preenchido nos cadastros mais antigos. */
+              documentType: reg.user?.documentType ?? null,
               dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
               phone: reg.participantPhone ?? user.phone,
               gender: reg.participantGender ?? user.gender,
@@ -622,6 +626,10 @@ export class PaymentsWebhookService {
                * Pegamos sempre do user real (não só isBuyerReg) — convidado sem
                * conta cai em null e o template assume BR. */
               country: reg.user?.country ?? null,
+              /* Sinal autoritativo de nacionalidade quando country e nulo.
+               * Cadastros estrangeiros salvam documentType=PASSPORT, mesmo
+               * sem country preenchido nos cadastros mais antigos. */
+              documentType: reg.user?.documentType ?? null,
               dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
               phone: reg.participantPhone ?? user.phone,
               gender: reg.participantGender ?? user.gender,
