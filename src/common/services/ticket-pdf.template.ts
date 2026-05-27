@@ -269,16 +269,34 @@ function fmtPhone(
   /* Resolve ISO. Brasileiro com country null mas documentType=CPF cai em
    * BR via fallback isBR. Estrangeiro sem country → cru. */
   let iso = getISOFromCountry(country);
-  if (!iso && isBR(country, documentType, doc)) {
+  const isoFromCountry = iso;
+  const brFallback = !iso && isBR(country, documentType, doc);
+  if (brFallback) {
     iso = 'BR';
   }
-  if (!iso) return phone.replace(/\D/g, '');
-  try {
-    const formatted = new AsYouType(iso).input(phone);
-    return formatted || phone;
-  } catch {
-    return phone.replace(/\D/g, '');
+  let result: string;
+  if (!iso) {
+    result = phone.replace(/\D/g, '');
+  } else {
+    try {
+      const formatted = new AsYouType(iso).input(phone);
+      result = formatted || phone;
+    } catch {
+      result = phone.replace(/\D/g, '');
+    }
   }
+  // eslint-disable-next-line no-console
+  console.log(
+    `[PDF-FMTPHONE-DEBUG] phone=${JSON.stringify(phone)} ` +
+    `country=${JSON.stringify(country)} ` +
+    `documentType=${JSON.stringify(documentType)} ` +
+    `doc=${JSON.stringify(doc)} ` +
+    `isoFromCountry=${JSON.stringify(isoFromCountry)} ` +
+    `brFallback=${brFallback} ` +
+    `iso=${JSON.stringify(iso)} ` +
+    `result=${JSON.stringify(result)}`
+  );
+  return result;
 }
 
 /**
