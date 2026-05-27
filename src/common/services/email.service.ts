@@ -336,6 +336,13 @@ export class EmailService {
     eventDate?: string;
     eventAddress?: string;
     eventBannerUrl: string;
+    /**
+     * Nome completo do comprador quando a inscricao foi feita por outra pessoa
+     * (comprador != participante). Renderiza banner "Inscricao feita por" no
+     * template — paridade com badge da pagina /meus-ingressos. Vazio/omisso
+     * = inscricao propria, sem banner.
+     */
+    invitedByName?: string;
     ticketPdfs?: Array<{ buffer: Buffer; participantName: string }>;
   }) {
     const html = this.loadTemplate('inscricao-confirmada.html', {
@@ -345,11 +352,15 @@ export class EmailService {
       eventDate: this.escapeHtml(data.eventDate ?? ''),
       eventAddress: this.escapeHtml(data.eventAddress ?? data.eventLocation),
       eventBannerUrl: this.escapeHtml(data.eventBannerUrl),
+      invitedByName: this.escapeHtml(data.invitedByName ?? ''),
       hasReceipt: '',
     });
 
     const address = data.eventAddress ?? data.eventLocation;
-    const text = `Olá ${data.firstName},\n\nSua inscrição na ${data.eventName} foi confirmada! Sua vaga está garantida.\n\nEvento: ${data.eventName}\nData: ${data.eventDate ?? ''}\nLocal: ${address}\n\nPodioTicket — podioticket.com.br`;
+    const invitedByLine = data.invitedByName
+      ? `\nInscrição feita por: ${data.invitedByName}\n`
+      : '';
+    const text = `Olá ${data.firstName},\n\nSua inscrição na ${data.eventName} foi confirmada! Sua vaga está garantida.${invitedByLine}\nEvento: ${data.eventName}\nData: ${data.eventDate ?? ''}\nLocal: ${address}\n\nPodioTicket — podioticket.com.br`;
 
     const msg: any = {
       from: this.from,

@@ -3281,6 +3281,7 @@ export class OrdersService {
         }
 
         // Participantes não-compradores recebem apenas seu próprio ingresso
+        const invitedByFullName = `${emailBuyer?.firstName ?? ''} ${emailBuyer?.lastName ?? ''}`.trim();
         for (const p of individualPdfs) {
           if (!p.participantEmail || p.participantEmail === buyerEmail) continue;
           await this.emailService.sendRegistrationConfirmed({
@@ -3291,6 +3292,7 @@ export class OrdersService {
             eventDate,
             eventAddress: location,
             eventBannerUrl,
+            invitedByName: invitedByFullName || undefined,
             ticketPdfs: p.pdf ? [{ buffer: p.pdf, participantName: p.participantName }] : [],
           }).catch((err: any) => this.logger.warn(`Email participante ${p.participantEmail} falhou:`, err));
         }

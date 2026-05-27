@@ -404,6 +404,7 @@ export class PaymentsWebhookService {
         }
 
         // Participantes não-compradores recebem apenas seu próprio ingresso
+        const invitedByFullName = `${buyerUser?.firstName ?? ''} ${buyerUser?.lastName ?? ''}`.trim();
         for (const p of individualPdfs) {
           if (!p.participantEmail || p.participantEmail === buyerEmail) continue;
           emailPromises.push(
@@ -411,6 +412,7 @@ export class PaymentsWebhookService {
               email: p.participantEmail,
               firstName: p.participantName.split(' ')[0] || 'Participante',
               eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
+              invitedByName: invitedByFullName || undefined,
               ticketPdfs: p.pdf ? [{ buffer: p.pdf, participantName: p.participantName }] : [],
             }).catch((err: any) => this.logger.warn(`Email participante ${p.participantEmail} falhou:`, err)),
           );
@@ -712,6 +714,7 @@ export class PaymentsWebhookService {
         }
 
         // Participantes não-compradores recebem apenas seu próprio ingresso
+        const invitedByFullName3ds = `${buyerUser?.firstName ?? ''} ${buyerUser?.lastName ?? ''}`.trim();
         for (const p of individualPdfs3ds) {
           if (!p.participantEmail || p.participantEmail === buyerEmail) continue;
           emailPromises3ds.push(
@@ -719,6 +722,7 @@ export class PaymentsWebhookService {
               email: p.participantEmail,
               firstName: p.participantName.split(' ')[0] || 'Participante',
               eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
+              invitedByName: invitedByFullName3ds || undefined,
               ticketPdfs: p.pdf ? [{ buffer: p.pdf, participantName: p.participantName }] : [],
             }).catch((err: any) => this.logger.warn(`3DS participant email failed for ${p.participantEmail}:`, err)),
           );
