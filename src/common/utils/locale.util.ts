@@ -1,5 +1,11 @@
 import * as path from 'path';
-import { AsYouType, parsePhoneNumberFromString, type CountryCode } from 'libphonenumber-js';
+import {
+  AsYouType,
+  formatIncompletePhoneNumber,
+  getCountryCallingCode,
+  parsePhoneNumberFromString,
+  type CountryCode,
+} from 'libphonenumber-js';
 import * as countries from 'i18n-iso-countries';
 
 /**
@@ -179,36 +185,26 @@ export function formatPhoneByCountry(
   if (iso) {
     try {
       /* 1. parsePhoneNumberFromString → formatNational. Reconhece numeros
-       * nacionais validos e formata com mascara oficial. */
+       * nacionais validos do pais e formata com mascara oficial. */
       const parsed = parsePhoneNumberFromString(phone, iso);
       if (parsed && parsed.isValid()) {
         return parsed.formatNational();
       }
-      /* 2. AsYouType — formata input parcial. Se libphonenumber nao
-       * reconhece (input == output), cai pro agrupamento generico. */
-      const ayt = new AsYouType(iso).input(phone);
-      if (ayt && ayt !== phone && ayt !== digits) {
-        return ayt;
+      /* 2. formatIncompletePhoneNumber com prefixo +<calling-code><digits>.
+       * Funciona pra QUALQUER pais mesmo se area code nao for valido —
+       * libphonenumber aplica padrao de agrupamento do pais por tamanho.
+       * Ex: AR 9848984444 → '+54 9 848 984 444'. */
+      const cc = getCountryCallingCode(iso);
+      const intl = formatIncompletePhoneNumber(`+${cc}${digits}`, iso);
+      const raw = `+${cc}${digits}`;
+      if (intl && intl !== raw) {
+        return intl;
       }
     } catch {
       /* fall through */
     }
   }
-  /* Agrupamento generico — libphonenumber nao reconheceu area code do pais
-   * (ex: numero AR digitado com area code invalido). Aplica mascara visual
-   * por tamanho pra nao mostrar string crua. */
-  if (digits.length === 11) {
-    return `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`;
-  }
-  if (digits.length === 10) {
-    return `(${digits.slice(0, 2)}) ${digits.slice(2, 6)}-${digits.slice(6)}`;
-  }
-  if (digits.length === 9) {
-    return `${digits.slice(0, 1)} ${digits.slice(1, 5)}-${digits.slice(5)}`;
-  }
-  if (digits.length === 8) {
-    return `${digits.slice(0, 4)}-${digits.slice(4)}`;
-  }
+  /* Sem ISO ou tudo falhou → digitos crus. */
   return digits;
 }
 

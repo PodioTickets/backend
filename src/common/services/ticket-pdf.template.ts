@@ -13,7 +13,13 @@ import {
   Stop,
 } from '@react-pdf/renderer';
 import * as path from 'path';
-import { AsYouType, parsePhoneNumberFromString, type CountryCode } from 'libphonenumber-js';
+import {
+  AsYouType,
+  formatIncompletePhoneNumber,
+  getCountryCallingCode,
+  parsePhoneNumberFromString,
+  type CountryCode,
+} from 'libphonenumber-js';
 import * as countries from 'i18n-iso-countries';
 
 /* JSON locales carregados via require pra evitar precisar de
@@ -280,27 +286,18 @@ function fmtPhone(
       if (parsed && parsed.isValid()) {
         return parsed.formatNational();
       }
-      /* 2. AsYouType — formata input parcial. Se cru, cai agrupamento. */
-      const ayt = new AsYouType(iso).input(phone);
-      if (ayt && ayt !== phone && ayt !== digits) {
-        return ayt;
+      /* 2. formatIncompletePhoneNumber com +<calling-code><digits>.
+       * Aplica padrao de agrupamento do pais por tamanho mesmo se area
+       * code nao for valido. Funciona pra QUALQUER pais. */
+      const cc = getCountryCallingCode(iso);
+      const intl = formatIncompletePhoneNumber(`+${cc}${digits}`, iso);
+      const raw = `+${cc}${digits}`;
+      if (intl && intl !== raw) {
+        return intl;
       }
     } catch {
       /* fall through */
     }
-  }
-  /* Agrupamento generico por tamanho pra nao mostrar string crua. */
-  if (digits.length === 11) {
-    return `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`;
-  }
-  if (digits.length === 10) {
-    return `(${digits.slice(0, 2)}) ${digits.slice(2, 6)}-${digits.slice(6)}`;
-  }
-  if (digits.length === 9) {
-    return `${digits.slice(0, 1)} ${digits.slice(1, 5)}-${digits.slice(5)}`;
-  }
-  if (digits.length === 8) {
-    return `${digits.slice(0, 4)}-${digits.slice(4)}`;
   }
   return digits;
 }
