@@ -97,12 +97,22 @@
                   <![endif]-->
                   <div>
                     {{#invitedByName}}
-                    <!-- "Inscrição feita por" badge — overlay top-left dentro do preview da imagem (paridade com badge em /meus-ingressos). -->
+                    <!-- "Inscrição feita por" badge — overlay top-left dentro do preview da imagem (paridade com badge em /meus-ingressos).
+                         Icone PNG branco hospedado no front (/public/images/gift-huge-white.png) — email nao aceita SVG inline confiavel. -->
                     <table cellpadding="0" cellspacing="0" border="0" align="left" style="margin:8px 0 0 8px;background-color:#011D21;border-radius:8px;border-collapse:separate;border-spacing:0;">
                       <tr>
-                        <td style="padding:8px 10px;">
-                          <p style="margin:0 0 4px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:12px;font-weight:400;color:#B4B4B4;line-height:15.6px;">Inscrição feita por</p>
-                          <p style="margin:0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:12px;font-weight:600;color:#EEEEEE;line-height:15.6px;">{{invitedByName}}</p>
+                        <td style="padding:8px 10px;vertical-align:middle;">
+                          <table cellpadding="0" cellspacing="0" border="0">
+                            <tr>
+                              <td style="padding-right:8px;vertical-align:middle;">
+                                <img src="https://www.podioticket.com.br/images/gift-huge-white.png" alt="" width="20" height="20" style="display:block;">
+                              </td>
+                              <td style="vertical-align:middle;">
+                                <p style="margin:0 0 4px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:12px;font-weight:400;color:#B4B4B4;line-height:15.6px;">Inscrição feita por</p>
+                                <p style="margin:0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:12px;font-weight:600;color:#EEEEEE;line-height:15.6px;">{{invitedByName}}</p>
+                              </td>
+                            </tr>
+                          </table>
                         </td>
                       </tr>
                     </table>
