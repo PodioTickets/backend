@@ -169,6 +169,26 @@ export function formatPhoneByCountry(
   doc?: string | null,
 ): string {
   if (!phone) return phone ?? '';
+  /* PASSPORT explicito OU doc com letras = estrangeiro autoritativo.
+   * NUNCA aplica mascara BR mesmo se country resolve pra Brasil — billing
+   * pode estar errado (front mandou 'Brasil' default mesmo p/ argentino).
+   * Documento e prova autoritativa; country e derivado/editavel.
+   *
+   * Se phone tem prefixo internacional (+54, +1, ...) AsYouType sem country
+   * detecta pelo prefixo. Sem prefixo, retorna so digitos. */
+  const isForeigner =
+    documentType === 'PASSPORT' || (!!doc && /[A-Za-z]/.test(doc));
+  if (isForeigner) {
+    if (/^\s*\+/.test(phone)) {
+      try {
+        const formatted = new AsYouType().input(phone);
+        return formatted || phone;
+      } catch {
+        return phone.replace(/\D/g, '');
+      }
+    }
+    return phone.replace(/\D/g, '');
+  }
   /* Resolve ISO. Quando o country bate e o usuario e brasileiro (ou legado
    * com documentType=CPF), usa AsYouType('BR'). Estrangeiro sem country
    * mapeado → retorna so digitos pra evitar mascara errada. */

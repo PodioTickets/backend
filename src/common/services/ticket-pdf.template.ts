@@ -266,6 +266,23 @@ function fmtPhone(
   doc?: string | null,
 ): string {
   if (!phone) return phone;
+  /* PASSPORT explicito OU doc com letras = estrangeiro autoritativo.
+   * NUNCA aplica mascara BR mesmo se country resolve pra Brasil — billing
+   * pode estar errado (front mandou 'Brasil' default mesmo p/ argentino).
+   * Documento e prova autoritativa; country e derivado/editavel. */
+  const isForeigner =
+    documentType === 'PASSPORT' || (!!doc && /[A-Za-z]/.test(doc));
+  if (isForeigner) {
+    if (/^\s*\+/.test(phone)) {
+      try {
+        const formatted = new AsYouType().input(phone);
+        return formatted || phone;
+      } catch {
+        return phone.replace(/\D/g, '');
+      }
+    }
+    return phone.replace(/\D/g, '');
+  }
   /* Resolve ISO. Brasileiro com country null mas documentType=CPF cai em
    * BR via fallback isBR. Estrangeiro sem country → cru. */
   let iso = getISOFromCountry(country);
