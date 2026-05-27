@@ -7,7 +7,7 @@ import { ExportField, EXPORT_FIELDS } from './dto/export-registrations.dto';
 const FIELD_LABELS: Record<ExportField, string> = {
   nome: 'Nome',
   email: 'E-mail',
-  cpf: 'CPF',
+  cpf: 'Documento',
   dataNascimento: 'Data de Nascimento',
   telefone: 'Telefone',
   sexo: 'Sexo',
