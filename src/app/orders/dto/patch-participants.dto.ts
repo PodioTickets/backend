@@ -78,6 +78,28 @@ export class ParticipantDto {
   @IsString()
   gender?: string;
 
+  /**
+   * Nacionalidade escolhida pelo participante no checkout. Pode ser nome em
+   * portugues ("Brasil", "Argentina"), ingles ("Brazil") ou codigo ISO ("BR",
+   * "AR"). Usado pra formatar telefone e decidir label do documento no PDF e
+   * emails. Aceita ate 60 chars pra cobrir nomes longos ("Republica Centro-
+   * Africana"). Charset alfanumerico + espacos + acentos comuns.
+   */
+  @Transform(emptyToUndefined)
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  @Matches(/^[A-Za-zÀ-ÿ\s\-]+$/, { message: 'country inválido' })
+  country?: string;
+
+  /** Alias retrocompativel — clientes antigos enviavam `nationality`. */
+  @Transform(emptyToUndefined)
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  @Matches(/^[A-Za-zÀ-ÿ\s\-]+$/, { message: 'nationality inválido' })
+  nationality?: string;
+
   @IsOptional()
   @IsBoolean()
   hasEmergencyContact?: boolean;

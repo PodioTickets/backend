@@ -2942,9 +2942,10 @@ export class OrdersService {
             participant: (() => {
               // Snapshot completo do participante. Doc resolvido pelo util
               // pra suportar CPF legacy + documentType/documentNumber novos.
-              // Nationality fica fora do snapshot (lida live no leitor — ver
-              // getOrderDetails) porque depende do User cadastrado e mudaria
-              // com a frequência baixa o suficiente pra não justificar congelar.
+              // country snapshotado pra preservar a nacionalidade escolhida
+              // no checkout (PDF/email usam essa info pra formatar telefone
+              // e decidir label do documento — User.country pode mudar e
+              // nao representa a escolha feita no momento da compra).
               const participantDoc = resolveDocument(pData);
               return {
                 name: pData.name ?? null,
@@ -2955,6 +2956,10 @@ export class OrdersService {
                 phone: pData.phone ?? null,
                 birthDate: pData.birthDate ?? null,
                 gender: pData.gender ?? null,
+                country:
+                  (pData as any).country
+                  ?? (pData as any).nationality
+                  ?? null,
               };
             })(),
             billing: {
