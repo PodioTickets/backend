@@ -1,8 +1,5 @@
 import * as path from 'path';
 import {
-  AsYouType,
-  formatIncompletePhoneNumber,
-  getCountryCallingCode,
   parsePhoneNumberFromString,
   type CountryCode,
 } from 'libphonenumber-js';
@@ -184,28 +181,18 @@ export function formatPhoneByCountry(
   }
   if (iso) {
     try {
-      /* 1. parsePhoneNumberFromString → formatNational. Reconhece numeros
-       * nacionais validos do pais e formata com mascara oficial. */
+      /* parsePhoneNumberFromString → formatNational. Reconhece numeros
+       * nacionais validos do pais e formata com mascara oficial. Se
+       * invalido, retorna digitos crus — nao fazer best-effort que
+       * gera formato errado (ex: AR sem trunk '0'). */
       const parsed = parsePhoneNumberFromString(phone, iso);
       if (parsed && parsed.isValid()) {
         return parsed.formatNational();
-      }
-      /* 2. formatIncompletePhoneNumber com prefixo +<calling-code><digits>.
-       * Funciona pra QUALQUER pais mesmo se area code nao for valido —
-       * libphonenumber aplica padrao de agrupamento do pais por tamanho.
-       * Strip do '+CC ' depois pra mostrar so o nacional agrupado.
-       * Ex: AR 9848984444 → '+54 9 848 984 444' → '9 848 984 444'. */
-      const cc = getCountryCallingCode(iso);
-      const intl = formatIncompletePhoneNumber(`+${cc}${digits}`, iso);
-      const raw = `+${cc}${digits}`;
-      if (intl && intl !== raw) {
-        return intl.replace(new RegExp(`^\\+${cc}\\s*`), '').trim();
       }
     } catch {
       /* fall through */
     }
   }
-  /* Sem ISO ou tudo falhou → digitos crus. */
   return digits;
 }
 

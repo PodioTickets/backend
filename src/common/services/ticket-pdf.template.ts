@@ -14,9 +14,6 @@ import {
 } from '@react-pdf/renderer';
 import * as path from 'path';
 import {
-  AsYouType,
-  formatIncompletePhoneNumber,
-  getCountryCallingCode,
   parsePhoneNumberFromString,
   type CountryCode,
 } from 'libphonenumber-js';
@@ -281,19 +278,11 @@ function fmtPhone(
   }
   if (iso) {
     try {
-      /* 1. parse → formatNational. Reconhece numeros nacionais validos. */
+      /* parse → formatNational. Reconhece numeros nacionais validos.
+       * Invalido → digitos crus (nao best-effort errado). */
       const parsed = parsePhoneNumberFromString(phone, iso);
       if (parsed && parsed.isValid()) {
         return parsed.formatNational();
-      }
-      /* 2. formatIncompletePhoneNumber com +<calling-code><digits>.
-       * Aplica padrao de agrupamento do pais por tamanho mesmo invalido.
-       * Strip do '+CC ' depois pra mostrar so o nacional agrupado. */
-      const cc = getCountryCallingCode(iso);
-      const intl = formatIncompletePhoneNumber(`+${cc}${digits}`, iso);
-      const raw = `+${cc}${digits}`;
-      if (intl && intl !== raw) {
-        return intl.replace(new RegExp(`^\\+${cc}\\s*`), '').trim();
       }
     } catch {
       /* fall through */
