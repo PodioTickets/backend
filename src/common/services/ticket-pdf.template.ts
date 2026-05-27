@@ -13,7 +13,7 @@ import {
   Stop,
 } from '@react-pdf/renderer';
 import * as path from 'path';
-import { AsYouType, type CountryCode } from 'libphonenumber-js';
+import { AsYouType, parsePhoneNumberFromString, type CountryCode } from 'libphonenumber-js';
 import * as countries from 'i18n-iso-countries';
 
 /* JSON locales carregados via require pra evitar precisar de
@@ -266,20 +266,41 @@ function fmtPhone(
   doc?: string | null,
 ): string {
   if (!phone) return phone;
-  /* Resolve ISO via country. Argentino com country='Argentina' → AR →
-   * AsYouType('AR') formata nativamente. PASSPORT nao bypassa formatacao —
-   * so importa pro fallback isBR (cadastros legados sem country). */
+  const digits = phone.replace(/\D/g, '');
+  /* Resolve ISO via country. PASSPORT importa so pro fallback isBR
+   * (cadastros legados sem country). */
   let iso = getISOFromCountry(country);
   if (!iso && isBR(country, documentType, doc)) {
     iso = 'BR';
   }
-  if (!iso) return phone.replace(/\D/g, '');
-  try {
-    const formatted = new AsYouType(iso).input(phone);
-    return formatted || phone;
-  } catch {
-    return phone.replace(/\D/g, '');
+  if (iso) {
+    try {
+      /* 1. parse → formatNational. Reconhece numeros nacionais validos. */
+      const parsed = parsePhoneNumberFromString(phone, iso);
+      if (parsed && parsed.isValid()) {
+        return parsed.formatNational();
+      }
+      /* 2. AsYouType — formata input parcial. Se retorna cru, cai fallback. */
+      const ayt = new AsYouType(iso).input(phone);
+      if (ayt && ayt !== phone && ayt !== digits) {
+        return ayt;
+      }
+    } catch {
+      /* fall through */
+    }
   }
+  /* Fallback generico: numero nao reconhecido pelo libphonenumber pro pais.
+   * Agrupa em (XX) XXXXX-XXXX / (XX) XXXX-XXXX pra evitar string crua. */
+  if (digits.length === 11) {
+    return `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`;
+  }
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 2)}) ${digits.slice(2, 6)}-${digits.slice(6)}`;
+  }
+  if (digits.length >= 8) {
+    return digits.replace(/(\d{2,4})(\d{4})(\d{4})$/, '$1 $2-$3');
+  }
+  return digits;
 }
 
 /**

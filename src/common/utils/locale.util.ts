@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { AsYouType, type CountryCode } from 'libphonenumber-js';
+import { AsYouType, parsePhoneNumberFromString, type CountryCode } from 'libphonenumber-js';
 import * as countries from 'i18n-iso-countries';
 
 /**
@@ -169,24 +169,45 @@ export function formatPhoneByCountry(
   doc?: string | null,
 ): string {
   if (!phone) return phone ?? '';
-  /* Resolve ISO via country (Argentina → AR, Brasil → BR, etc.). Quando
-   * o country resolve, AsYouType formata nativamente — vale pra BR, AR, US.
-   * PASSPORT NAO bypassa formatacao se country resolve: argentino com
-   * country='Argentina' formata como AR. PASSPORT so importa pro fallback
-   * isBrazilian (cadastros legados sem country, doc define).
-   *
-   * Estrangeiro sem country mapeado → so digitos pra evitar mascara errada. */
+  const digits = phone.replace(/\D/g, '');
+  /* Resolve ISO via country (Argentina → AR, Brasil → BR). PASSPORT importa
+   * so pro fallback isBrazilian (cadastros legados sem country). */
   let iso = getISOFromCountry(country);
   if (!iso && isBrazilian(country, documentType, doc)) {
     iso = 'BR';
   }
-  if (!iso) return phone.replace(/\D/g, '');
-  try {
-    const formatted = new AsYouType(iso).input(phone);
-    return formatted || phone;
-  } catch {
-    return phone.replace(/\D/g, '');
+  if (iso) {
+    try {
+      /* 1. parsePhoneNumberFromString → formatNational. Mais robusto que
+       * AsYouType — reconhece números nacionais válidos do país e formata
+       * com mascara oficial. */
+      const parsed = parsePhoneNumberFromString(phone, iso);
+      if (parsed && parsed.isValid()) {
+        return parsed.formatNational();
+      }
+      /* 2. AsYouType — formata mesmo input parcial; mas se retorna o input
+       * cru (libphonenumber nao reconhece formato), cai no fallback. */
+      const ayt = new AsYouType(iso).input(phone);
+      if (ayt && ayt !== phone && ayt !== digits) {
+        return ayt;
+      }
+    } catch {
+      /* libphonenumber falhou — cai no fallback generico abaixo. */
+    }
   }
+  /* Fallback generico: numero nao reconhecido pelo libphonenumber pro pais
+   * (ex: usuario digitou numero BR mas escolheu AR como nacionalidade).
+   * Agrupa pra nao mostrar string crua de digitos. */
+  if (digits.length === 11) {
+    return `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`;
+  }
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 2)}) ${digits.slice(2, 6)}-${digits.slice(6)}`;
+  }
+  if (digits.length >= 8) {
+    return digits.replace(/(\d{2,4})(\d{4})(\d{4})$/, '$1 $2-$3');
+  }
+  return digits;
 }
 
 /**
