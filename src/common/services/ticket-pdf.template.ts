@@ -258,20 +258,46 @@ function isBR(
 function fmtPhone(
   phone: string,
   country?: string | null,
-  _documentType?: 'CPF' | 'PASSPORT' | null,
-  _doc?: string | null,
+  documentType?: 'CPF' | 'PASSPORT' | null,
+  doc?: string | null,
 ): string {
   if (!phone) return phone;
+  const trimmed = phone.trim();
+
   /* Phone em E.164 (com '+'): AsYouType sem ISO infere pelo DDI. */
-  if (phone.trim().startsWith('+')) {
+  if (trimmed.startsWith('+')) {
     try {
-      const formatted = new AsYouType().input(phone.trim());
-      return formatted || phone.trim();
+      const formatted = new AsYouType().input(trimmed);
+      return formatted || trimmed;
     } catch {
-      return phone.trim();
+      return trimmed;
     }
   }
-  /* Phone nacional cru: usa ISO do country pra formatar. */
+
+  /* Sinais AUTORITATIVOS de estrangeiro (independente do country que pode
+   * estar 'Brasil' default no User legado):
+   *   - documentType === 'PASSPORT'
+   *   - doc tem letras [A-Za-z] (passaporte/RNE)
+   *
+   * Quando estrangeiro: NUNCA aplica AsYouType('BR'). Tenta o ISO do
+   * country se ele for outro pais valido; senao retorna so digitos. */
+  const isForeign =
+    documentType === 'PASSPORT' || (doc ? /[A-Za-z]/.test(doc) : false);
+
+  if (isForeign) {
+    const iso = getISOFromCountry(country);
+    if (iso && iso !== 'BR') {
+      try {
+        const formatted = new AsYouType(iso).input(phone);
+        return formatted || phone;
+      } catch {
+        return phone.replace(/\D/g, '');
+      }
+    }
+    return phone.replace(/\D/g, '');
+  }
+
+  /* Brasileiro: formata pelo ISO resolvido (default BR). */
   const iso = getISOFromCountry(country);
   if (!iso) {
     return phone.replace(/\D/g, '');
