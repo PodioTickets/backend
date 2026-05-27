@@ -185,16 +185,30 @@ export function formatPhoneByCountry(
         return parsed.formatNational();
       }
       /* 2. AsYouType — formata input parcial. Se libphonenumber nao
-       * reconhece (input == output), cai pra digitos crus. */
+       * reconhece (input == output), cai pro agrupamento generico. */
       const ayt = new AsYouType(iso).input(phone);
       if (ayt && ayt !== phone && ayt !== digits) {
         return ayt;
       }
     } catch {
-      /* fall through pra digitos crus */
+      /* fall through */
     }
   }
-  /* Sem formatacao reconhecida → digitos crus. */
+  /* Agrupamento generico — libphonenumber nao reconheceu area code do pais
+   * (ex: numero AR digitado com area code invalido). Aplica mascara visual
+   * por tamanho pra nao mostrar string crua. */
+  if (digits.length === 11) {
+    return `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`;
+  }
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 2)}) ${digits.slice(2, 6)}-${digits.slice(6)}`;
+  }
+  if (digits.length === 9) {
+    return `${digits.slice(0, 1)} ${digits.slice(1, 5)}-${digits.slice(5)}`;
+  }
+  if (digits.length === 8) {
+    return `${digits.slice(0, 4)}-${digits.slice(4)}`;
+  }
   return digits;
 }
 

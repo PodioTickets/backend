@@ -280,7 +280,7 @@ function fmtPhone(
       if (parsed && parsed.isValid()) {
         return parsed.formatNational();
       }
-      /* 2. AsYouType — formata input parcial. Se retorna cru, cai digitos. */
+      /* 2. AsYouType — formata input parcial. Se cru, cai agrupamento. */
       const ayt = new AsYouType(iso).input(phone);
       if (ayt && ayt !== phone && ayt !== digits) {
         return ayt;
@@ -289,7 +289,19 @@ function fmtPhone(
       /* fall through */
     }
   }
-  /* Sem formatacao reconhecida → digitos crus. */
+  /* Agrupamento generico por tamanho pra nao mostrar string crua. */
+  if (digits.length === 11) {
+    return `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`;
+  }
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 2)}) ${digits.slice(2, 6)}-${digits.slice(6)}`;
+  }
+  if (digits.length === 9) {
+    return `${digits.slice(0, 1)} ${digits.slice(1, 5)}-${digits.slice(5)}`;
+  }
+  if (digits.length === 8) {
+    return `${digits.slice(0, 4)}-${digits.slice(4)}`;
+  }
   return digits;
 }
 
