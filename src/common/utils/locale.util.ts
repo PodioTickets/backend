@@ -95,7 +95,11 @@ const isoLookupCache = new Map<string, CountryCode | null>();
  *   - Caso contrário null.
  */
 export function getISOFromCountry(country?: string | null): CountryCode | null {
-  if (!country || !country.trim()) return 'BR';
+  /* Sem country → null (NAO assume BR default). Caller deve tratar null
+   * como "nao formatar". Assumir BR escondia bug: contas legadas sem
+   * country (incluindo argentinos que nao tinham o campo) caiam em
+   * AsYouType('BR') e distorciam o telefone como brasileiro. */
+  if (!country || !country.trim()) return null;
   ensureLocales();
   const key = country.trim();
   if (isoLookupCache.has(key)) return isoLookupCache.get(key) as CountryCode | null;
@@ -142,10 +146,16 @@ export function isBrazilian(
   documentType?: 'CPF' | 'PASSPORT' | string | null,
   doc?: string | null,
 ): boolean {
+  /* PASSPORT explicito = estrangeiro. */
   if (documentType === 'PASSPORT') return false;
+  /* Doc com letras = passaporte. */
   if (doc && /[A-Za-z]/.test(doc)) return false;
   const iso = getISOFromCountry(country);
-  return iso === 'BR';
+  if (iso === 'BR') return true;
+  if (iso !== null) return false;
+  /* country null e nem PASSPORT nem doc com letras: cai em documentType
+   * (cadastros brasileiros legados tem CPF default). */
+  return documentType === 'CPF';
 }
 
 /**
@@ -155,13 +165,17 @@ export function isBrazilian(
 export function formatPhoneByCountry(
   phone?: string | null,
   country?: string | null,
-  _documentType?: 'CPF' | 'PASSPORT' | string | null,
-  _doc?: string | null,
+  documentType?: 'CPF' | 'PASSPORT' | string | null,
+  doc?: string | null,
 ): string {
   if (!phone) return phone ?? '';
-  /* Phone sempre formatado pelo ISO resolvido a partir da nacionalidade
-   * (snapshot do checkout > User.country). Phone salvo sem DDI no banco. */
-  const iso = getISOFromCountry(country);
+  /* Resolve ISO. Quando o country bate e o usuario e brasileiro (ou legado
+   * com documentType=CPF), usa AsYouType('BR'). Estrangeiro sem country
+   * mapeado → retorna so digitos pra evitar mascara errada. */
+  let iso = getISOFromCountry(country);
+  if (!iso && isBrazilian(country, documentType, doc)) {
+    iso = 'BR';
+  }
   if (!iso) return phone.replace(/\D/g, '');
   try {
     const formatted = new AsYouType(iso).input(phone);

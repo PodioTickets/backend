@@ -245,7 +245,11 @@ function isBR(
   if (documentType === 'PASSPORT') return false;
   if (doc && /[A-Za-z]/.test(doc)) return false;
   const iso = getISOFromCountry(country);
-  return iso === 'BR';
+  if (iso === 'BR') return true;
+  if (iso !== null) return false;
+  /* country null + sem PASSPORT/letras: cai em documentType. Cadastros
+   * brasileiros legados tem documentType=CPF default. */
+  return documentType === 'CPF';
 }
 
 /**
@@ -258,13 +262,16 @@ function isBR(
 function fmtPhone(
   phone: string,
   country?: string | null,
-  _documentType?: 'CPF' | 'PASSPORT' | null,
-  _doc?: string | null,
+  documentType?: 'CPF' | 'PASSPORT' | null,
+  doc?: string | null,
 ): string {
   if (!phone) return phone;
-  /* Phone sempre formatado pelo ISO resolvido a partir da nacionalidade
-   * (snapshot do checkout > User.country). Sem +DDI no input. */
-  const iso = getISOFromCountry(country);
+  /* Resolve ISO. Brasileiro com country null mas documentType=CPF cai em
+   * BR via fallback isBR. Estrangeiro sem country → cru. */
+  let iso = getISOFromCountry(country);
+  if (!iso && isBR(country, documentType, doc)) {
+    iso = 'BR';
+  }
   if (!iso) return phone.replace(/\D/g, '');
   try {
     const formatted = new AsYouType(iso).input(phone);
