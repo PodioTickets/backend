@@ -245,7 +245,11 @@ function isBR(
   if (documentType === 'PASSPORT') return false;
   if (doc && /[A-Za-z]/.test(doc)) return false;
   const iso = getISOFromCountry(country);
-  return iso === 'BR';
+  if (iso === 'BR') return true;
+  if (iso !== null) return false;
+  /* country null + sem PASSPORT/letras: cai em documentType. Cadastros
+   * brasileiros legados tem documentType=CPF default. */
+  return documentType === 'CPF';
 }
 
 /**
@@ -262,21 +266,15 @@ function fmtPhone(
   doc?: string | null,
 ): string {
   if (!phone) return phone;
-  // Estrangeiro sem country preenchido (PASSPORT explicito ou doc com letras):
-  // retorna so digitos, evita mascara BR errada.
-  const isForeignNoCountry =
-    (documentType === 'PASSPORT' || (doc && /[A-Za-z]/.test(doc))) &&
-    (!country || !country.trim());
-  if (isForeignNoCountry) {
-    return phone.replace(/\D/g, '');
+  /* Resolve ISO. Brasileiro com country null mas documentType=CPF cai em
+   * BR via fallback isBR. Estrangeiro sem country → cru. */
+  let iso = getISOFromCountry(country);
+  if (!iso && isBR(country, documentType, doc)) {
+    iso = 'BR';
   }
-  const iso = getISOFromCountry(country);
-  if (!iso) {
-    return phone.replace(/\D/g, '');
-  }
+  if (!iso) return phone.replace(/\D/g, '');
   try {
-    const formatter = new AsYouType(iso);
-    const formatted = formatter.input(phone);
+    const formatted = new AsYouType(iso).input(phone);
     return formatted || phone;
   } catch {
     return phone.replace(/\D/g, '');

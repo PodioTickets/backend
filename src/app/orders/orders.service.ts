@@ -3028,9 +3028,10 @@ export class OrdersService {
             participant: (() => {
               // Snapshot completo do participante. Doc resolvido pelo util
               // pra suportar CPF legacy + documentType/documentNumber novos.
-              // Nationality fica fora do snapshot (lida live no leitor — ver
-              // getOrderDetails) porque depende do User cadastrado e mudaria
-              // com a frequência baixa o suficiente pra não justificar congelar.
+              // country snapshotado pra preservar a nacionalidade escolhida
+              // no checkout (PDF/email usam essa info pra formatar telefone
+              // e decidir label do documento — User.country pode mudar e
+              // nao representa a escolha feita no momento da compra).
               const participantDoc = resolveDocument(pData);
               return {
                 name: pData.name ?? null,
@@ -3041,6 +3042,10 @@ export class OrdersService {
                 phone: pData.phone ?? null,
                 birthDate: pData.birthDate ?? null,
                 gender: pData.gender ?? null,
+                country:
+                  (pData as any).country
+                  ?? (pData as any).nationality
+                  ?? null,
               };
             })(),
             billing: {
@@ -3188,9 +3193,18 @@ export class OrdersService {
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
               /* Nacionalidade do participante usada pelo template do PDF pra
-               * decidir label (CPF/Documento) e formatacao do telefone. */
-              country: reg.user?.country ?? null,
-              documentType: reg.user?.documentType ?? null,
+               * decidir label (CPF/Documento) e formatacao do telefone.
+               * Prioriza snapshot do checkout (escolha do usuario no momento
+               * da compra) sobre User.country (perfil base, pode estar
+               * desatualizado ou em default). */
+              country:
+                (reg.receiptSnapshot as any)?.participant?.country
+                ?? reg.user?.country
+                ?? null,
+              documentType:
+                (reg.receiptSnapshot as any)?.participant?.documentType
+                ?? reg.user?.documentType
+                ?? null,
               dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
               phone: reg.participantPhone ?? user.phone,
               gender: reg.participantGender ?? user.gender,

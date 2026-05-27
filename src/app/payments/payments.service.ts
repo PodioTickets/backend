@@ -1020,9 +1020,16 @@ export class PaymentsService {
           email: reg.participantEmail ?? user.email,
           cpf: reg.participantCpf ?? user.documentNumber,
           /* Nacionalidade do participante — usada pelo template do PDF pra
-           * decidir label (CPF/Documento) e formatacao do telefone. */
-          country: user.country ?? null,
-          documentType: user.documentType ?? null,
+           * decidir label (CPF/Documento) e formatacao do telefone.
+           * Prioriza snapshot do checkout sobre User.country (perfil base). */
+          country:
+            (reg.receiptSnapshot as any)?.participant?.country
+            ?? user.country
+            ?? null,
+          documentType:
+            (reg.receiptSnapshot as any)?.participant?.documentType
+            ?? user.documentType
+            ?? null,
           dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
           phone: reg.participantPhone ?? user.phone,
           gender: reg.participantGender ?? user.gender,
