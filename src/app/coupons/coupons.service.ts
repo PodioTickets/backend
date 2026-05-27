@@ -7,6 +7,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateCouponDto, UpdateCouponDto, FilterCouponsDto, CouponStatus } from './dto/create-coupon.dto';
 import { buildDocumentList } from '../../common/utils/document.util';
+import { computeAgeAt } from '../../common/utils/age.util';
 
 @Injectable()
 export class CouponsService {
@@ -344,6 +345,142 @@ export class CouponsService {
       code: 'COUPON_NOT_FOUND',
       message: 'Cupom ou voucher não encontrado',
     });
+  }
+
+  /**
+   * Cupom AGE (por faixa etária) que será aplicado ao usuário se ele prosseguir
+   * para o pagamento ao entrar num evento.
+   *
+   * A idade é calculada na DATA DO EVENTO (mesma regra do checkout — ver
+   * `computeAgeAt`), não na data atual: um usuário que completa a idade-alvo
+   * antes do evento já qualifica. Reutiliza a mesma função de idade do
+   * `orders.service` para garantir que elegibilidade e aplicação nunca divirjam.
+   *
+   * **Resultado é único** (`appliedCoupon`, não lista): `assertNoAgeOverlap`
+   * impede faixas etárias sobrepostas entre os cupons AGE de um evento, então
+   * uma dada idade casa com no máximo UM cupom AGE — exatamente o que o checkout
+   * auto-aplicaria. Quando, por dado legado, houver sobreposição, escolhemos
+   * de forma determinística o de menor `minAge` (`orderBy`).
+   *
+   * Elegibilidade (espelha a auto-aplicação do checkout para AGE):
+   *   - evento existe;
+   *   - cupom ACTIVE, não soft-deletado, não expirado;
+   *   - idade ∈ [minAge ?? 0, maxAge ?? ∞];
+   *   - cupom não esgotado (usageCount < maxUsage).
+   *
+   * `minCartValue` e `appliesTo` são RETORNADOS no cupom (para a UX exibir as
+   * CONDIÇÕES da aplicação final), mas NÃO filtram aqui — não há carrinho nesta
+   * etapa; o checkout valida modalidade e valor mínimo no momento da compra.
+   *
+   * Não vaza contadores de uso, listas de elegíveis (cpf/document) nem regras
+   * internas.
+   *
+   * @param user perfil autenticado (de `req.user`) ou `null` (anônimo).
+   */
+  async getApplicableAgeCoupons(
+    eventId: string,
+    user: { dateOfBirth?: Date | string | null } | null,
+  ) {
+    const prismaRead = this.prisma.getReadClient();
+
+    const event = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: { id: true, eventDate: true },
+    });
+    if (!event) {
+      throw new NotFoundException({
+        code: 'EVENT_NOT_FOUND',
+        message: 'Evento não encontrado',
+      });
+    }
+
+    // Sem usuário ou sem data de nascimento não há idade a avaliar.
+    const birthDate = user?.dateOfBirth ?? null;
+    if (!birthDate) {
+      return {
+        message: 'Age coupon eligibility evaluated',
+        data: {
+          applicable: false,
+          reason: user ? 'NO_BIRTHDATE' : 'NOT_AUTHENTICATED',
+          age: null,
+          appliedCoupon: null,
+        },
+      };
+    }
+
+    // Idade na data do evento (fonte de verdade); fallback "agora" se o evento
+    // não tiver data definida — alinhado com `resolveAgeReferenceDate` do checkout.
+    const referenceDate = event.eventDate ? new Date(event.eventDate) : new Date();
+    const age = computeAgeAt(birthDate, referenceDate);
+
+    const now = new Date();
+    // Filtro coberto pelo índice @@index([eventId, status]).
+    const ageCoupons = await prismaRead.coupon.findMany({
+      where: {
+        eventId,
+        couponType: 'AGE',
+        status: 'ACTIVE',
+        deletedAt: null,
+        OR: [{ expiryDate: null }, { expiryDate: { gt: now } }],
+      },
+      select: {
+        id: true,
+        code: true,
+        couponType: true,
+        type: true,
+        value: true,
+        ageRule: true,
+        ageValue: true,
+        minAge: true,
+        maxAge: true,
+        appliesTo: true,
+        applyToProducts: true,
+        minCartValue: true,
+        note: true,
+        usageCount: true,
+        maxUsage: true,
+      },
+      // minAge asc → desempate determinístico caso (dado legado) haja sobreposição.
+      orderBy: { minAge: 'asc' },
+    });
+
+    // No máximo um casa (invariante de não-sobreposição); pegamos o primeiro.
+    const winner = ageCoupons.find((c) => {
+      const min = c.minAge ?? 0;
+      const max = c.maxAge ?? Number.POSITIVE_INFINITY;
+      if (age < min || age > max) return false;
+      // Cupom esgotado não se aplica (espelha o checkout).
+      if (c.maxUsage != null && c.usageCount >= c.maxUsage) return false;
+      return true;
+    });
+
+    return {
+      message: 'Age coupon eligibility evaluated',
+      data: {
+        applicable: !!winner,
+        age,
+        eventDate: event.eventDate,
+        // O cupom que o checkout aplicará se o usuário prosseguir. `appliesTo` e
+        // `minCartValue` são as CONDIÇÕES dessa aplicação (avaliadas no checkout).
+        appliedCoupon: winner
+          ? {
+              id: winner.id,
+              code: winner.code,
+              couponType: winner.couponType,
+              type: winner.type, // PERCENTAGE | FIXED
+              value: winner.value, // % inteiro (PERCENTAGE) ou centavos (FIXED)
+              ageRule: winner.ageRule,
+              ageValue: winner.ageValue,
+              minAge: winner.minAge,
+              maxAge: winner.maxAge,
+              appliesTo: winner.appliesTo ?? 'all',
+              applyToProducts: winner.applyToProducts,
+              minCartValue: winner.minCartValue,
+              note: winner.note,
+            }
+          : null,
+      },
+    };
   }
 
   async update(userId: string, eventId: string, couponId: string, updateCouponDto: UpdateCouponDto) {

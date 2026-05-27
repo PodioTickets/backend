@@ -692,6 +692,7 @@ export class EventsService {
             select: {
               id: true,
               name: true,
+              tradeName: true, // Nome fantasia — mesmo formato de /organizations/me
               email: true,
               logoUrl: true,
             },
@@ -917,6 +918,7 @@ export class EventsService {
             select: {
               id: true,
               name: true,
+              tradeName: true, // Nome fantasia — mesmo formato de /organizations/me
               email: true,
               logoUrl: true,
             },

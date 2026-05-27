@@ -29,6 +29,7 @@ import {
   PreviewCouponQueryDto,
 } from './dto/create-coupon.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 
 @ApiTags('Coupons')
@@ -113,6 +114,32 @@ export class CouponsController {
     @Query() query: PreviewCouponQueryDto,
   ) {
     return this.couponsService.previewByCode(eventId, query.code);
+  }
+
+  // Rota específica: precede `GET /:id` (mesmo motivo do preview acima).
+  // `OptionalJwtAuthGuard`: funciona com ou sem login — anônimo recebe
+  // `applicable: false` em vez de 401, evitando quebrar a página do evento.
+  @Get('events/:eventId/age-eligibility')
+  @UseGuards(OptionalJwtAuthGuard)
+  @NoCache()
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Age coupon eligibility for the current user',
+    description:
+      'Retorna o cupom por idade (AGE) que será APLICADO ao usuário autenticado se ele prosseguir para o pagamento neste evento. A idade é avaliada na DATA DO EVENTO (mesma regra do checkout). Resultado é único (`appliedCoupon`): faixas etárias dos cupons AGE não se sobrepõem, então uma idade casa com no máximo um cupom. `appliesTo`/`minCartValue` do cupom são as condições da aplicação final (validadas no checkout). Anônimo ou usuário sem data de nascimento recebe `applicable: false` com `reason`. Não revela elegíveis nem contadores de uso.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Elegibilidade avaliada. `data.applicable` (boolean), `data.age` (idade na data do evento ou null), `data.appliedCoupon` (o cupom que será aplicado — type/value/minAge/maxAge/appliesTo/minCartValue/... — ou null se nenhum).',
+  })
+  @ApiResponse({ status: 404, description: 'Event not found (code: EVENT_NOT_FOUND)' })
+  getAgeEligibility(
+    @Request() req,
+    @Param('eventId', ParseUUIDPipe) eventId: string,
+  ) {
+    return this.couponsService.getApplicableAgeCoupons(eventId, req.user ?? null);
   }
 
   @Get(':id')

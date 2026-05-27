@@ -166,6 +166,11 @@ model User {
   country               String?
   state                 String?
   city                  String?
+  postalCode            String? // CEP / código postal — espelhado do endereço de cobrança do pedido
+  street                String? // Logradouro
+  number                String? // Número
+  complement            String? // Complemento
+  neighborhood          String? // Bairro
   documentType          DocumentType?
   documentNumber        String? // CPF/CNPJ com formatação (ex: "123.456.789-00")
   documentNumberClean   String? // CPF/CNPJ sem formatação (ex: "12345678900") - usado para validação de unicidade

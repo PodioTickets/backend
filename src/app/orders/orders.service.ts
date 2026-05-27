@@ -26,6 +26,7 @@ import {
   isDocumentInList,
   resolveDocument,
 } from '../../common/utils/document.util';
+import { computeAgeAt } from '../../common/utils/age.util';
 
 // ─── helpers de formatação ────────────────────────────────────────────────────
 
@@ -109,7 +110,7 @@ const MAX_TICKETS_PER_ORDER = 20;
 const ORDER_INCLUDE = {
   reservedTickets: true,
   coupon: { select: { id: true, code: true, couponType: true, type: true, value: true, appliesTo: true, minAge: true, maxAge: true, applyToProducts: true } },
-  voucher: { select: { id: true, code: true, name: true, status: true } },
+  voucher: { select: { id: true, code: true, name: true, status: true, appliesTo: true } },
   payment: { select: { id: true, method: true, status: true, amount: true, transactionId: true, paymentDate: true, createdAt: true, metadata: true } },
   // participantFeePercent é necessário para calcular serviceFee em pedidos PENDING
   // (em que order.serviceFee ainda é 0). eventDate é usado como referência para validar
@@ -117,27 +118,6 @@ const ORDER_INCLUDE = {
   // Nada disso é exposto no payload — orderShape retorna apenas eventId.
   event: { select: { participantFeePercent: true, eventDate: true } },
 } as const;
-
-/**
- * Idade do participante em uma data de referência (aniversário-aware).
- *
- * Usada na validação de cupons AGE: a idade considera a data do evento, não a
- * data atual. Ex.: cupom min=60 + evento daqui 2 meses + participante que
- * completa 60 anos antes do evento → cupom é aplicado.
- *
- * Cálculo por (ano/mês/dia) em vez de dias/365.25 evita erro de ±1 perto do
- * aniversário (a aproximação por 365.25 antecipa a virada em até ~6 horas/ano).
- */
-function computeAgeAt(birthDate: Date | string, referenceDate: Date): number {
-  const birth = birthDate instanceof Date ? birthDate : new Date(birthDate);
-  if (isNaN(birth.getTime())) return -1;
-  let age = referenceDate.getFullYear() - birth.getFullYear();
-  const monthDiff = referenceDate.getMonth() - birth.getMonth();
-  if (monthDiff < 0 || (monthDiff === 0 && referenceDate.getDate() < birth.getDate())) {
-    age--;
-  }
-  return age;
-}
 
 /**
  * Resolve a data de referência para validação de cupons AGE.
@@ -372,6 +352,58 @@ function inferEffectiveUsage(
   }
 }
 
+/**
+ * Cobertura de um voucher sobre os ingressos do pedido.
+ *
+ * Regra do produto: **voucher = UM ingresso grátis**. Cobre exatamente uma
+ * unidade — a APLICÁVEL mais cara (respeita `voucher.appliesTo`) — nunca todos
+ * os ingressos. Com 3 ingressos iguais, zera só um.
+ *
+ * @param reservedTickets ingressos reservados (`{ ticketId, unitPrice, quantity }`).
+ * @param appliesTo `voucher.appliesTo`: `'all'`/`null` (qualquer ingresso) ou ticketIds.
+ * @param excludeTicketIds ticketIds já cobertos por um cupom (desconto combinado);
+ *   o voucher só cobre ingressos fora desse conjunto.
+ * @returns `discount` em centavos da unidade coberta (0 se nenhuma aplicável);
+ *   `qualifyingSlot` = índice da unidade coberta na expansão de `distributeDiscount`
+ *   (mesma ordem: itera reservedTickets, `quantity` unidades cada) ou -1;
+ *   `hasApplicable` = existe ≥1 ingresso elegível.
+ */
+function resolveVoucherCoverage(
+  reservedTickets: any[],
+  appliesTo: string | null | undefined,
+  excludeTicketIds?: Set<string>,
+): { discount: number; qualifyingSlot: number; hasApplicable: boolean } {
+  const restricted = !!appliesTo && appliesTo !== 'all';
+  const allowed = restricted ? new Set(parseAppliesToArray(appliesTo)) : null;
+
+  let bestPrice = -1;
+  let qualifyingSlot = -1;
+  let hasApplicable = false;
+  let slot = 0; // índice da próxima unidade na expansão por-unidade
+
+  for (const rt of reservedTickets) {
+    const qty = rt.quantity ?? 0;
+    const eligible =
+      qty > 0 &&
+      (!allowed || allowed.has(rt.ticketId)) &&
+      (!excludeTicketIds || !excludeTicketIds.has(rt.ticketId));
+    if (eligible) {
+      hasApplicable = true;
+      if ((rt.unitPrice ?? 0) > bestPrice) {
+        bestPrice = rt.unitPrice ?? 0;
+        qualifyingSlot = slot; // primeira unidade deste ticket
+      }
+    }
+    slot += qty;
+  }
+
+  return {
+    discount: hasApplicable ? Math.max(0, bestPrice) : 0,
+    qualifyingSlot,
+    hasApplicable,
+  };
+}
+
 function orderShape(order: any, discountOverride?: number, extra?: Record<string, unknown>, effectiveUsage?: number, fixedPerUnit?: number, qualifyingSlots?: number[]): Record<string, any> {
   const coupon = order.coupon ?? null;
   const resolvedFixedPerUnit = fixedPerUnit ?? (coupon?.type === 'FIXED' ? coupon.value : undefined);
@@ -399,6 +431,25 @@ function orderShape(order: any, discountOverride?: number, extra?: Record<string
     }
   }
 
+  // Voucher = um ingresso grátis (a unidade aplicável mais cara). Sem cupom no
+  // pedido, derivamos effectiveUsage=1 e o slot coberto a partir de
+  // `voucher.appliesTo` — garante exibição por-ingresso correta em QUALQUER
+  // leitura (GET details, patchProducts, etc.), não só na aplicação.
+  // No caso combinado (cupom + voucher) o total já está correto em order.discount;
+  // a distribuição por-unidade segue a lógica do cupom (aproximada para o voucher).
+  // Só PENDING: pedidos pagos mantêm o desconto/finalAmount congelados no pay
+  // (recomputar criaria divergência com o valor efetivamente cobrado).
+  const voucher = order.voucher ?? null;
+  let voucherDerivedDiscount: number | undefined;
+  if (resolvedEffectiveUsage === undefined && !coupon && voucher && order.voucherId && order.status === 'PENDING') {
+    const cov = resolveVoucherCoverage(order.reservedTickets ?? [], voucher.appliesTo);
+    if (cov.hasApplicable && cov.qualifyingSlot >= 0) {
+      resolvedEffectiveUsage = 1;
+      resolvedQualifyingSlots = resolvedQualifyingSlots ?? [cov.qualifyingSlot];
+      voucherDerivedDiscount = cov.discount;
+    }
+  }
+
   // When effectiveUsage was re-derived for an AGE coupon, also recompute the discount
   // to avoid showing a stale DB value (e.g. 4470 when only 1 participant now qualifies).
   let discount: number;
@@ -407,6 +458,10 @@ function orderShape(order: any, discountOverride?: number, extra?: Record<string
   } else if (resolvedEffectiveUsage !== undefined && effectiveUsage === undefined && coupon?.couponType === 'AGE') {
     const productsExtra = coupon.applyToProducts ? computePendingProductsSubtotal(order) : 0;
     discount = computePartialCouponDiscount(order.reservedTickets ?? [], coupon.type, coupon.value, resolvedEffectiveUsage, productsExtra);
+  } else if (voucherDerivedDiscount !== undefined) {
+    // Voucher sozinho: recomputa o total (1 ingresso) — auto-corrige order.discount
+    // legado de pedidos PENDING aplicados antes da regra "voucher = 1 ingresso".
+    discount = voucherDerivedDiscount;
   } else {
     discount = order.discount ?? 0;
   }
@@ -1496,7 +1551,16 @@ export class OrdersService {
               throw new AppUnprocessableException('VOUCHER_CPF_RESTRICTED', 'Voucher não aplicável ao documento informado');
             }
           }
-          discount = ticketsSubtotal;
+          // Voucher = 1 ingresso grátis: cobre só a unidade aplicável mais cara
+          // (respeita appliesTo), nunca todos os ingressos.
+          const cov = resolveVoucherCoverage(reservedTickets, voucherByCode.appliesTo);
+          if (!cov.hasApplicable) {
+            throw new AppUnprocessableException(
+              'VOUCHER_NOT_APPLICABLE',
+              'Voucher não aplicável aos ingressos do pedido',
+            );
+          }
+          discount = cov.discount;
           voucherId = voucherByCode.id;
           const finalAmountV = Math.max(0, order.totalAmount - discount);
           const updatedV = await w.order.update({
@@ -1566,7 +1630,7 @@ export class OrdersService {
       if (nonApplicableTickets.length > 0 && order.voucherId) {
         const existingVoucher = await r.voucher.findUnique({
           where: { id: order.voucherId },
-          select: { id: true, status: true, expiryDate: true, eventId: true },
+          select: { id: true, status: true, expiryDate: true, eventId: true, appliesTo: true },
         });
         if (
           existingVoucher &&
@@ -1574,11 +1638,13 @@ export class OrdersService {
           existingVoucher.status === 'ACTIVE' &&
           (!existingVoucher.expiryDate || new Date(existingVoucher.expiryDate) > new Date())
         ) {
-          const voucherPartialDiscount = nonApplicableTickets.reduce(
-            (sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0,
-          );
-          discount += voucherPartialDiscount;
-          voucherId = order.voucherId;
+          // Voucher = 1 ingresso grátis, restrito aos ingressos NÃO cobertos pelo
+          // cupom (combinado). Não erra aqui se nada sobrar — o cupom já cobre tudo.
+          const cov = resolveVoucherCoverage(reservedTickets, existingVoucher.appliesTo, applicableTicketIds);
+          if (cov.hasApplicable) {
+            discount += cov.discount;
+            voucherId = order.voucherId;
+          }
         }
       }
 
@@ -1607,7 +1673,16 @@ export class OrdersService {
         }
       }
 
-      discount = ticketsSubtotal; // voucher = 100% dos ingressos
+      // Voucher = 1 ingresso grátis: cobre só a unidade aplicável mais cara
+      // (respeita appliesTo), nunca todos os ingressos.
+      const cov = resolveVoucherCoverage(reservedTickets, voucher.appliesTo);
+      if (!cov.hasApplicable) {
+        throw new AppUnprocessableException(
+          'VOUCHER_NOT_APPLICABLE',
+          'Voucher não aplicável aos ingressos do pedido',
+        );
+      }
+      discount = cov.discount;
       voucherId = voucher.id;
 
     } else {
@@ -1960,19 +2035,25 @@ export class OrdersService {
       include: ORDER_INCLUDE,
     });
 
-    // Espelha o endereço de cobrança no perfil do DONO do pedido
+    // Espelha o endereço de cobrança COMPLETO no perfil do DONO do pedido
     // (`updated.userId`, não o caller — admin pode editar em nome de terceiro
-    // via `findOrderForWrite`). O perfil só armazena country/state/city, então
-    // sincronizamos apenas esses três (UF é compatível com `billingStateUf`).
+    // via `findOrderForWrite`). O `billingStateUf` mapeia para `user.state`;
+    // os demais campos têm correspondência 1:1 com as colunas do perfil.
     //
     // Best-effort: persistir o billing é o caminho crítico do checkout; uma
     // falha aqui (improvável — colunas sem constraints) não deve abortar o
     // pedido. Só incluímos campos com valor não-vazio para nunca apagar dado
-    // já existente no perfil (billing.country é opcional).
+    // já existente no perfil (country/complement/neighborhood são opcionais).
     const profileAddress: Record<string, string> = {};
     if (b.country?.trim()) profileAddress.country = b.country.trim();
     if (b.stateUf?.trim()) profileAddress.state = b.stateUf.trim();
     if (b.city?.trim()) profileAddress.city = b.city.trim();
+    if (b.postalCode?.trim()) profileAddress.postalCode = b.postalCode.trim();
+    if (b.street?.trim()) profileAddress.street = b.street.trim();
+    if (b.number?.trim()) profileAddress.number = b.number.trim();
+    if (b.complement?.trim()) profileAddress.complement = b.complement.trim();
+    if (b.neighborhood?.trim())
+      profileAddress.neighborhood = b.neighborhood.trim();
 
     if (Object.keys(profileAddress).length > 0) {
       try {
@@ -2217,16 +2298,21 @@ export class OrdersService {
         voucher.status === 'ACTIVE' &&
         (!voucher.expiryDate || new Date(voucher.expiryDate) > new Date())
       ) {
-        // Se há um cupom cobrindo parte dos ingressos, o voucher desconta apenas os demais
+        // Voucher = 1 ingresso grátis (a unidade aplicável mais cara), nunca todos.
         if (couponApplicableTicketIds && couponApplicableTicketIds.size > 0) {
-          const nonCouponTickets = reservedTickets.filter(
-            (rt: any) => !couponApplicableTicketIds!.has(rt.ticketId),
-          );
-          voucherDiscount = nonCouponTickets.reduce(
-            (s: number, rt: any) => s + rt.unitPrice * rt.quantity, 0,
-          );
+          // Combinado: voucher cobre 1 ingresso entre os NÃO cobertos pelo cupom
+          // (0 se nenhum sobrar — o cupom já cobre tudo; não erra no pay).
+          const cov = resolveVoucherCoverage(reservedTickets, voucher.appliesTo, couponApplicableTicketIds);
+          voucherDiscount = cov.discount;
         } else {
-          voucherDiscount = ticketsSubtotal;
+          const cov = resolveVoucherCoverage(reservedTickets, voucher.appliesTo);
+          if (!cov.hasApplicable) {
+            throw new AppUnprocessableException(
+              'VOUCHER_NOT_APPLICABLE',
+              'Voucher não aplicável aos ingressos do pedido',
+            );
+          }
+          voucherDiscount = cov.discount;
         }
         voucherId = voucher.id;
       }
