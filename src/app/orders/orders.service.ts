@@ -1397,20 +1397,6 @@ export class OrdersService {
 
     const w: any = this.prisma.getWriteClient();
 
-    this.logger.log(
-      `[PATCH-PARTICIPANTS-DEBUG] orderId=${orderId} ` +
-      `dto.participants=${JSON.stringify((dto.participants as any[]).map((p) => ({
-        keys: Object.keys(p),
-        country: (p as any).country,
-        nationality: (p as any).nationality,
-        documentType: (p as any).documentType,
-        documentNumber: (p as any).documentNumber,
-        cpf: (p as any).cpf,
-        phone: (p as any).phone,
-        email: (p as any).email,
-      })))}`
-    );
-
     const reservedTickets = (order.reservedTickets ?? []) as any[];
     // Normaliza documento de cada participante ANTES de persistir no JSONB
     // `pendingParticipants`. Garante que a versão visual ("123.456.789-00")
@@ -2049,17 +2035,22 @@ export class OrdersService {
       include: ORDER_INCLUDE,
     });
 
-    // Espelha o endereço de cobrança COMPLETO no perfil do DONO do pedido
+    // Espelha o endereço de cobrança no perfil do DONO do pedido
     // (`updated.userId`, não o caller — admin pode editar em nome de terceiro
     // via `findOrderForWrite`). O `billingStateUf` mapeia para `user.state`;
     // os demais campos têm correspondência 1:1 com as colunas do perfil.
     //
+    // IMPORTANTE: NUNCA sincronizar `country` do billing pro User. country no
+    // User representa NACIONALIDADE (escolhida no cadastro/checkout), nao pais
+    // do endereço de cobrança. Um argentino comprando no BR (endereço de cobrança
+    // brasileiro) nao pode ter conta convertida pra Brasil — quebra formatação
+    // de telefone, label de documento (CPF vs Documento), etc.
+    //
     // Best-effort: persistir o billing é o caminho crítico do checkout; uma
     // falha aqui (improvável — colunas sem constraints) não deve abortar o
     // pedido. Só incluímos campos com valor não-vazio para nunca apagar dado
-    // já existente no perfil (country/complement/neighborhood são opcionais).
+    // já existente no perfil (complement/neighborhood são opcionais).
     const profileAddress: Record<string, string> = {};
-    if (b.country?.trim()) profileAddress.country = b.country.trim();
     if (b.stateUf?.trim()) profileAddress.state = b.stateUf.trim();
     if (b.city?.trim()) profileAddress.city = b.city.trim();
     if (b.postalCode?.trim()) profileAddress.postalCode = b.postalCode.trim();
@@ -3061,18 +3052,6 @@ export class OrdersService {
                   ?? (pData as any).nationality
                   ?? null,
               };
-              this.logger.log(
-                `[SNAPSHOT-DEBUG] regId=${reg.id} ` +
-                `pData.keys=${JSON.stringify(Object.keys(pData))} ` +
-                `pData.country=${JSON.stringify((pData as any).country)} ` +
-                `pData.nationality=${JSON.stringify((pData as any).nationality)} ` +
-                `pData.phone=${JSON.stringify(pData.phone)} ` +
-                `pData.cpf=${JSON.stringify(pData.cpf)} ` +
-                `pData.documentType=${JSON.stringify((pData as any).documentType)} ` +
-                `pData.documentNumber=${JSON.stringify((pData as any).documentNumber)} ` +
-                `snap.country=${JSON.stringify(snap.country)} ` +
-                `snap.documentType=${JSON.stringify(snap.documentType)}`
-              );
               return snap;
             })(),
             billing: {
@@ -3212,15 +3191,6 @@ export class OrdersService {
             const ticketName = ticket?.name ?? '';
             const fullTicketName = catName && ticketName && catName !== ticketName
               ? `${catName} - ${ticketName}` : ticketName || catName;
-            this.logger.log(
-              `[PDF-COUNTRY-DEBUG] reg=${reg.id} ` +
-              `snapshot.country=${JSON.stringify((reg.receiptSnapshot as any)?.participant?.country)} ` +
-              `snapshot.documentType=${JSON.stringify((reg.receiptSnapshot as any)?.participant?.documentType)} ` +
-              `user.country=${JSON.stringify(reg.user?.country)} ` +
-              `user.documentType=${JSON.stringify(reg.user?.documentType)} ` +
-              `participantPhone=${JSON.stringify(reg.participantPhone)} ` +
-              `participantCpf=${JSON.stringify(reg.participantCpf)}`
-            );
             return {
               index: idx + 1,
               qrCode: reg.qrCode ?? reg.id,
@@ -3228,13 +3198,20 @@ export class OrdersService {
               ticketName: fullTicketName,
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
-              /* Nacionalidade do participante usada pelo template do PDF pra
-               * decidir label (CPF/Documento) e formatacao do telefone.
-               * Prioriza snapshot do checkout (escolha do usuario no momento
-               * da compra) sobre User.country (perfil base, pode estar
-               * desatualizado ou em default). */
+              /* Nacionalidade pra decidir label (CPF/Documento) e formatacao
+               * do telefone. Prioridade:
+               *   1. snapshot.participant.country — escolha por-participante
+               *      no checkout (futuro: front mandar no patchParticipants).
+               *   2. order.billingCountry — nacionalidade do checkout (pais
+               *      escolhido no step de endereco/billing).
+               *   3. reg.user.country — perfil base (fallback, NAO billing).
+               *
+               * billingCountry tem prioridade sobre user.country porque o user
+               * pode estar com country desatualizado/default, enquanto a
+               * escolha do checkout reflete intencao da compra. */
               country:
                 (reg.receiptSnapshot as any)?.participant?.country
+                ?? order.billingCountry
                 ?? reg.user?.country
                 ?? null,
               documentType:

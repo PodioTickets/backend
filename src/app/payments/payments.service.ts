@@ -1019,11 +1019,14 @@ export class PaymentsService {
           ticketName: fullTicketName,
           email: reg.participantEmail ?? user.email,
           cpf: reg.participantCpf ?? user.documentNumber,
-          /* Nacionalidade do participante — usada pelo template do PDF pra
-           * decidir label (CPF/Documento) e formatacao do telefone.
-           * Prioriza snapshot do checkout sobre User.country (perfil base). */
+          /* Nacionalidade pra decidir label (CPF/Documento) e formatacao do
+           * telefone. Prioridade:
+           *   1. snapshot.participant.country — escolha por-participante.
+           *   2. order.billingCountry — nacionalidade do checkout.
+           *   3. user.country — perfil base (fallback). */
           country:
             (reg.receiptSnapshot as any)?.participant?.country
+            ?? order.billingCountry
             ?? user.country
             ?? null,
           documentType:

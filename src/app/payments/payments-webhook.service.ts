@@ -315,19 +315,6 @@ export class PaymentsWebhookService {
             const ticketName = ticket?.name ?? '';
             const fullTicketName = catName && ticketName && catName !== ticketName
               ? `${catName} - ${ticketName}` : ticketName || catName;
-            /* Diagnostico temporario — log de country/documentType pra
-             * descobrir por que esta vindo vazio em contas argentinas.
-             * Remover apos confirmar comportamento em homolog. */
-            const snapP = (reg.receiptSnapshot as any)?.participant;
-            this.logger.log(
-              `[PDF-COUNTRY-DEBUG] reg=${reg.id} ` +
-              `snapshot.country=${JSON.stringify(snapP?.country)} ` +
-              `snapshot.documentType=${JSON.stringify(snapP?.documentType)} ` +
-              `user.country=${JSON.stringify(reg.user?.country)} ` +
-              `user.documentType=${JSON.stringify(reg.user?.documentType)} ` +
-              `phone=${JSON.stringify(reg.participantPhone ?? reg.user?.phone)} ` +
-              `hasSnapshot=${!!snapP}`,
-            );
             return {
               index: idx + 1,
               qrCode: reg.qrCode ?? reg.id,
@@ -335,11 +322,13 @@ export class PaymentsWebhookService {
               ticketName: fullTicketName,
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
-              /* Prioriza nacionalidade do snapshot do checkout (o que o
-               * usuario escolheu na hora da compra) sobre o User.country
-               * (perfil base, pode estar desatualizado ou em default). */
+              /* Nacionalidade. Prioridade:
+               *   1. snapshot.participant.country — escolha por-participante.
+               *   2. order.billingCountry — nacionalidade do checkout.
+               *   3. reg.user.country — perfil base (fallback). */
               country:
                 (reg.receiptSnapshot as any)?.participant?.country
+                ?? order.billingCountry
                 ?? reg.user?.country
                 ?? null,
               /* documentType do snapshot tambem prevalece. PASSPORT explicito
@@ -642,11 +631,13 @@ export class PaymentsWebhookService {
                * label do documento (CPF vs Documento) e aplicar/pular formatação.
                * Pegamos sempre do user real (não só isBuyerReg) — convidado sem
                * conta cai em null e o template assume BR. */
-              /* Prioriza nacionalidade do snapshot do checkout (o que o
-               * usuario escolheu na hora da compra) sobre o User.country
-               * (perfil base, pode estar desatualizado ou em default). */
+              /* Nacionalidade. Prioridade:
+               *   1. snapshot.participant.country — escolha por-participante.
+               *   2. order.billingCountry — nacionalidade do checkout.
+               *   3. reg.user.country — perfil base (fallback). */
               country:
                 (reg.receiptSnapshot as any)?.participant?.country
+                ?? order.billingCountry
                 ?? reg.user?.country
                 ?? null,
               /* documentType do snapshot tambem prevalece. PASSPORT explicito

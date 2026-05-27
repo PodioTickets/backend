@@ -48,3 +48,7 @@ uploads/*
 # Claude Code — notas locais do projeto
 .claude/notes/
 CLAUDE.md
+
+# Briefings/docs locais — nunca versionar
+BRIEFING-PAGAMENTO-REPASSE.md
+BRIEFING-*.md
