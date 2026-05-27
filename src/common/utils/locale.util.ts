@@ -178,35 +178,23 @@ export function formatPhoneByCountry(
   }
   if (iso) {
     try {
-      /* 1. parsePhoneNumberFromString → formatNational. Mais robusto que
-       * AsYouType — reconhece números nacionais válidos do país e formata
-       * com mascara oficial. */
+      /* 1. parsePhoneNumberFromString → formatNational. Reconhece numeros
+       * nacionais validos e formata com mascara oficial. */
       const parsed = parsePhoneNumberFromString(phone, iso);
       if (parsed && parsed.isValid()) {
         return parsed.formatNational();
       }
-      /* 2. AsYouType — formata mesmo input parcial; mas se retorna o input
-       * cru (libphonenumber nao reconhece formato), cai no fallback. */
+      /* 2. AsYouType — formata input parcial. Se libphonenumber nao
+       * reconhece (input == output), cai pra digitos crus. */
       const ayt = new AsYouType(iso).input(phone);
       if (ayt && ayt !== phone && ayt !== digits) {
         return ayt;
       }
     } catch {
-      /* libphonenumber falhou — cai no fallback generico abaixo. */
+      /* fall through pra digitos crus */
     }
   }
-  /* Fallback generico: numero nao reconhecido pelo libphonenumber pro pais
-   * (ex: usuario digitou numero BR mas escolheu AR como nacionalidade).
-   * Agrupa pra nao mostrar string crua de digitos. */
-  if (digits.length === 11) {
-    return `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`;
-  }
-  if (digits.length === 10) {
-    return `(${digits.slice(0, 2)}) ${digits.slice(2, 6)}-${digits.slice(6)}`;
-  }
-  if (digits.length >= 8) {
-    return digits.replace(/(\d{2,4})(\d{4})(\d{4})$/, '$1 $2-$3');
-  }
+  /* Sem formatacao reconhecida → digitos crus. */
   return digits;
 }
 

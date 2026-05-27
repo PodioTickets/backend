@@ -280,7 +280,7 @@ function fmtPhone(
       if (parsed && parsed.isValid()) {
         return parsed.formatNational();
       }
-      /* 2. AsYouType — formata input parcial. Se retorna cru, cai fallback. */
+      /* 2. AsYouType — formata input parcial. Se retorna cru, cai digitos. */
       const ayt = new AsYouType(iso).input(phone);
       if (ayt && ayt !== phone && ayt !== digits) {
         return ayt;
@@ -289,17 +289,7 @@ function fmtPhone(
       /* fall through */
     }
   }
-  /* Fallback generico: numero nao reconhecido pelo libphonenumber pro pais.
-   * Agrupa em (XX) XXXXX-XXXX / (XX) XXXX-XXXX pra evitar string crua. */
-  if (digits.length === 11) {
-    return `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`;
-  }
-  if (digits.length === 10) {
-    return `(${digits.slice(0, 2)}) ${digits.slice(2, 6)}-${digits.slice(6)}`;
-  }
-  if (digits.length >= 8) {
-    return digits.replace(/(\d{2,4})(\d{4})(\d{4})$/, '$1 $2-$3');
-  }
+  /* Sem formatacao reconhecida → digitos crus. */
   return digits;
 }
 
