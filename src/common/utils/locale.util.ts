@@ -193,12 +193,13 @@ export function formatPhoneByCountry(
       /* 2. formatIncompletePhoneNumber com prefixo +<calling-code><digits>.
        * Funciona pra QUALQUER pais mesmo se area code nao for valido —
        * libphonenumber aplica padrao de agrupamento do pais por tamanho.
-       * Ex: AR 9848984444 → '+54 9 848 984 444'. */
+       * Strip do '+CC ' depois pra mostrar so o nacional agrupado.
+       * Ex: AR 9848984444 → '+54 9 848 984 444' → '9 848 984 444'. */
       const cc = getCountryCallingCode(iso);
       const intl = formatIncompletePhoneNumber(`+${cc}${digits}`, iso);
       const raw = `+${cc}${digits}`;
       if (intl && intl !== raw) {
-        return intl;
+        return intl.replace(new RegExp(`^\\+${cc}\\s*`), '').trim();
       }
     } catch {
       /* fall through */

@@ -287,13 +287,13 @@ function fmtPhone(
         return parsed.formatNational();
       }
       /* 2. formatIncompletePhoneNumber com +<calling-code><digits>.
-       * Aplica padrao de agrupamento do pais por tamanho mesmo se area
-       * code nao for valido. Funciona pra QUALQUER pais. */
+       * Aplica padrao de agrupamento do pais por tamanho mesmo invalido.
+       * Strip do '+CC ' depois pra mostrar so o nacional agrupado. */
       const cc = getCountryCallingCode(iso);
       const intl = formatIncompletePhoneNumber(`+${cc}${digits}`, iso);
       const raw = `+${cc}${digits}`;
       if (intl && intl !== raw) {
-        return intl;
+        return intl.replace(new RegExp(`^\\+${cc}\\s*`), '').trim();
       }
     } catch {
       /* fall through */
