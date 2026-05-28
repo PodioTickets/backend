@@ -987,8 +987,10 @@ export class PaymentsService {
     const issuedAt = new Date();
     const orderNumber = orderId.slice(0, 8).toUpperCase();
 
-    // ID do comprador para distinguir inscrição própria de inscrição de convidado
-    const buyerUserId = regs.find((r: any) => r.user?.email)?.user?.id as string | undefined;
+    // Comprador = DONO do pedido (order.userId). NUNCA usar
+    // `regs.find(r => r.user?.email)` — pega a primeira inscrição com conta,
+    // que pode ser o terceiro quando o comprador compra pra outra pessoa.
+    const buyerUserId = order.userId as string | undefined;
 
     const ticketPdfData = {
       orderId,
@@ -1057,8 +1059,15 @@ export class PaymentsService {
     const eventAddress = formatEventAddress(event);
     const eventBannerUrl = event?.logoUrl ?? event?.bannerUrl ?? 'https://placehold.co/308x232';
 
-    // Comprador = primeira inscrição com conta vinculada
-    const buyerUser = regs.find((r: any) => r.user?.email)?.user;
+    // Comprador = dono do pedido. Pode nao ser participante (comprou so pra
+    // terceiros) — nesse caso busca o user direto.
+    let buyerUser = regs.find((r: any) => r.user?.id === order.userId)?.user;
+    if (!buyerUser && order.userId) {
+      buyerUser = await this.prisma.getReadClient().user.findUnique({
+        where: { id: order.userId },
+        select: { id: true, email: true, firstName: true, lastName: true },
+      });
+    }
     const buyerEmail: string | undefined = buyerUser?.email;
 
     // Gerar PDF individual por participante (sequencial — yoga-layout não suporta render paralelo)

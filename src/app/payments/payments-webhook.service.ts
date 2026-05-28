@@ -190,8 +190,9 @@ export class PaymentsWebhookService {
         const issuedAt = new Date();
         const orderNumber = orderId.slice(0, 8).toUpperCase();
 
-        // ID do comprador para distinguir inscrição própria de inscrição de convidado
-        const buyerUserIdForPdf = regs.find((r: any) => r.user?.email)?.user?.id as string | undefined;
+        // Comprador = DONO do pedido (order.userId), nunca a primeira inscricao
+        // com conta (pode ser o terceiro quando compra pra outra pessoa).
+        const buyerUserIdForPdf = order.userId as string | undefined;
 
         // Build TicketPdfData
         const ticketPdfData = {
@@ -260,7 +261,15 @@ export class PaymentsWebhookService {
         const eventBannerUrl = event?.logoUrl ?? event?.bannerUrl ?? 'https://placehold.co/308x232';
 
         // Comprador = primeira inscrição com conta vinculada
-        const buyerUser = regs.find((r: any) => r.user?.email)?.user;
+        // Comprador = dono do pedido. Pode nao ser participante (comprou so pra
+        // terceiros) — busca o user direto nesse caso.
+        let buyerUser = regs.find((r: any) => r.user?.id === order.userId)?.user;
+        if (!buyerUser && order.userId) {
+          buyerUser = await this.prisma.getReadClient().user.findUnique({
+            where: { id: order.userId },
+            select: { id: true, email: true, firstName: true, lastName: true },
+          });
+        }
         const buyerEmail: string | undefined = buyerUser?.email;
 
         // Gerar PDF individual por participante (sequencial — yoga-layout)
@@ -459,7 +468,7 @@ export class PaymentsWebhookService {
 
         const issuedAt = new Date();
         const orderNumber = oid.slice(0, 8).toUpperCase();
-        const buyerUserIdForEmail = regs.find((r: any) => r.user?.email)?.user?.id as string | undefined;
+        const buyerUserIdForEmail = order.userId as string | undefined;
 
         const ticketPdfData = {
           orderId: oid,
@@ -530,7 +539,15 @@ export class PaymentsWebhookService {
         const eventAddress = formatEventAddress(event);
         const eventBannerUrl = event?.logoUrl ?? event?.bannerUrl ?? 'https://placehold.co/308x232';
 
-        const buyerUser = regs.find((r: any) => r.user?.email)?.user;
+        // Comprador = dono do pedido. Pode nao ser participante (comprou so pra
+        // terceiros) — busca o user direto nesse caso.
+        let buyerUser = regs.find((r: any) => r.user?.id === order.userId)?.user;
+        if (!buyerUser && order.userId) {
+          buyerUser = await this.prisma.getReadClient().user.findUnique({
+            where: { id: order.userId },
+            select: { id: true, email: true, firstName: true, lastName: true },
+          });
+        }
         const buyerEmail: string | undefined = buyerUser?.email;
 
         // Gerar PDF individual por participante (sequencial — yoga-layout)
