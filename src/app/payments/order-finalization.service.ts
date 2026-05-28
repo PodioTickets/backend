@@ -93,7 +93,10 @@ export class OrderFinalizationService {
         where: { id: { in: ticketIds } },
         include: {
           category: { select: { id: true, name: true } },
-          batches: { select: { id: true, name: true, price: true, sortOrder: true } },
+          // TicketBatch não tem coluna `name` — não selecionar. O snapshot abaixo
+          // referencia `batchData.name` (sempre undefined → dropado pelo JSON.stringify);
+          // mantido por fidelidade com o finalize original do cartão.
+          batches: { select: { id: true, price: true, sortOrder: true } },
         },
       }),
       r.question.findMany({
