@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Variação alterada — PódioTicket</title>
+  <style>
+    body { margin: 0; padding: 0; background-color: #F0F0F0; }
+    table { border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { border: 0; display: block; }
+    a { color: inherit !important; text-decoration: none !important; }
+    a[x-apple-data-detectors] { color: inherit !important; text-decoration: none !important; }
+  </style>
+</head>
+<body style="margin:0;padding:0;background-color:#F0F0F0;">
+
+<table width="100%" cellpadding="0" cellspacing="0" border="0">
+  <tr>
+    <td align="center" style="padding:20px 0;">
+
+      <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background-color:#FCFCFC;border-radius:12px;overflow:hidden;border-collapse:separate;border-spacing:0;">
+
+        <!-- HEADER -->
+        <tr>
+          <td align="center" style="height:88px;padding:28px 24px;background:linear-gradient(180deg,#191919 0%,#2A2A2A 100%);">
+            <table cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="padding-right:7px;vertical-align:middle;">
+                  <img src="https://www.podioticket.com.br/images/email-logo-mark.png" alt="" width="33" height="32">
+                </td>
+                <td style="vertical-align:middle;">
+                  <img src="https://www.podioticket.com.br/images/email-logo-podio.png" alt="Pódio" width="69" height="22">
+                </td>
+                <td style="vertical-align:middle;">
+                  <img src="https://www.podioticket.com.br/images/email-logo-ticket.png" alt="Ticket" width="80" height="22">
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- BODY -->
+        <tr>
+          <td style="padding:60px 24px;border-bottom:1px solid #D9D9D9;background-color:#FCFCFC;">
+
+            <!-- Check icon + title + subtitle -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:40px;">
+              <tr>
+                <td align="center">
+                  <img src="https://www.podioticket.com.br/images/email-check-success.png" width="64" height="64" alt="" style="display:block;margin:0 auto 20px auto;">
+                  <p style="margin:0 0 20px 0;font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:24px;font-weight:800;color:#202020;line-height:26.4px;text-align:center;">Variação alterada com sucesso</p>
+                  <p style="margin:0 auto;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:400;color:#202020;line-height:20.8px;text-align:center;max-width:364px;">Atualizamos sua escolha. A nova variação já está vinculada ao seu ingresso.</p>
+                </td>
+              </tr>
+            </table>
+
+            <!-- Product card -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:40px;background-color:#F9F9F9;border:1px solid #D9D9D9;border-radius:12px;border-collapse:separate;border-spacing:0;overflow:hidden;">
+              <!-- top: image + name -->
+              <tr>
+                <td style="padding:16px;border-bottom:1px solid #D9D9D9;">
+                  <table cellpadding="0" cellspacing="0" border="0">
+                    <tr>
+                      <td style="padding-right:12px;vertical-align:top;width:84px;">
+                        {{#productImageUrl}}
+                        <img src="{{productImageUrl}}" alt="" width="84" height="84" style="display:block;width:84px;height:84px;object-fit:cover;border:1px solid #D9D9D9;border-radius:8px;">
+                        {{/productImageUrl}}
+                        {{^productImageUrl}}
+                        <table cellpadding="0" cellspacing="0" border="0" style="width:84px;height:84px;background-color:#EEEEEE;border:1px solid #D9D9D9;border-radius:8px;border-collapse:separate;border-spacing:0;">
+                          <tr><td style="width:84px;height:84px;">&nbsp;</td></tr>
+                        </table>
+                        {{/productImageUrl}}
+                      </td>
+                      <td style="vertical-align:top;padding:8px 0;">
+                        <p style="margin:0 0 12px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:600;color:#202020;line-height:18.2px;word-wrap:break-word;">{{productName}}</p>
+                        <p style="margin:0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:600;color:#646464;line-height:18.2px;">Incluso no ingresso</p>
+                      </td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+              <!-- bottom: previous | arrow (overlap) | current.
+                   Coluna do meio usa linear-gradient horizontal (50% cinza + 50% verde)
+                   pra que o badge circular pareca flutuar sobre o divisor entre os dois
+                   cards. bgcolor inline garante fallback solido em clientes que ignoram
+                   background-image (Outlook desktop). -->
+              <tr>
+                <td style="padding:0;">
+                  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:0;">
+                    <tr>
+                      <td width="44%" align="center" valign="middle" bgcolor="#F9F9F9" style="padding:20px 16px;background-color:#F9F9F9;">
+                        <p style="margin:0 0 20px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#202020;line-height:18.2px;">Variação anterior</p>
+                        <p style="margin:0;font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:24px;font-weight:700;color:#202020;line-height:26.4px;">{{previousVariationName}}</p>
+                      </td>
+                      <!-- arrow column: linha vertical 1px no centro acima e abaixo do badge,
+                           sem cruzar o circulo. PNG circular ja inclui borda e fundo branco. -->
+                      <td width="12%" align="center" valign="middle" bgcolor="#F9F9F9" style="padding:0;background-color:#F9F9F9;background-image:linear-gradient(90deg,#F9F9F9 50%,#F5FBF5 50%);">
+                        <table cellpadding="0" cellspacing="0" border="0" align="center" style="border-collapse:collapse;">
+                          <tr>
+                            <td align="center" style="line-height:1px;font-size:0;">
+                              <table cellpadding="0" cellspacing="0" border="0"><tr><td width="1" height="28" bgcolor="#D9D9D9" style="width:1px;height:28px;line-height:1px;font-size:0px;background-color:#D9D9D9;">&nbsp;</td></tr></table>
+                            </td>
+                          </tr>
+                          <tr>
+                            <td align="center" style="line-height:0;font-size:0;">
+                              <img src="https://www.podioticket.com.br/images/email-arrow-badge.png" alt="→" width="48" height="48" style="display:block;">
+                            </td>
+                          </tr>
+                          <tr>
+                            <td align="center" style="line-height:1px;font-size:0;">
+                              <table cellpadding="0" cellspacing="0" border="0"><tr><td width="1" height="28" bgcolor="#D9D9D9" style="width:1px;height:28px;line-height:1px;font-size:0px;background-color:#D9D9D9;">&nbsp;</td></tr></table>
+                            </td>
+                          </tr>
+                        </table>
+                      </td>
+                      <td width="44%" align="center" valign="middle" bgcolor="#F5FBF5" style="padding:20px 16px;background-color:#F5FBF5;">
+                        <p style="margin:0 0 20px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#202020;line-height:18.2px;">Variação atual</p>
+                        <p style="margin:0;font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:24px;font-weight:700;color:#202020;line-height:26.4px;">{{newVariationName}}</p>
+                      </td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+            </table>
+
+            <!-- Event / ticket / changedAt summary -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F9F9F9;border:1px solid #D9D9D9;border-radius:8px;border-collapse:separate;border-spacing:0;">
+              <tr>
+                <td style="padding:20px 24px;">
+                  <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                    <tr>
+                      <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:400;color:#202020;line-height:20.8px;">Evento</td>
+                      <td align="right" style="font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:600;color:#202020;line-height:17.6px;">{{eventName}}</td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+              <tr><td style="padding:0 24px;"><div style="height:1px;background-color:#D9D9D9;line-height:1px;font-size:0;">&nbsp;</div></td></tr>
+              <tr>
+                <td style="padding:20px 24px;">
+                  <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                    <tr>
+                      <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:400;color:#202020;line-height:20.8px;">Ingresso</td>
+                      <td align="right" style="font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:600;color:#202020;line-height:17.6px;">{{ticketName}}</td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+              <tr><td style="padding:0 24px;"><div style="height:1px;background-color:#D9D9D9;line-height:1px;font-size:0;">&nbsp;</div></td></tr>
+              <tr>
+                <td style="padding:20px 24px;">
+                  <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                    <tr>
+                      <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:400;color:#202020;line-height:20.8px;">Alterado em</td>
+                      <td align="right" style="font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:16px;font-weight:600;color:#202020;line-height:17.6px;">{{changedAt}}</td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+            </table>
+
+          </td>
+        </tr>
+
+        <!-- FOOTER -->
+        <tr>
+          <td align="center" style="padding:40px 24px;background:#FFFFFF;">
+            <img src="https://www.podioticket.com.br/images/email-logo-foot.png" alt="" width="37" height="36" style="display:block;margin:0 auto 20px auto;">
+            <p style="margin:0 0 12px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#202020;line-height:18.20px;text-align:center;">Plataforma de inscrições para eventos esportivos</p>
+            <p style="margin:0 0 52px 0;font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:500;color:#202020;line-height:18.20px;text-align:center;">Este é um e-mail automático. Para suporte, acesse a Central de Ajuda.</p>
+            <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+              <tr>
+                <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#202020;line-height:18.20px;text-align:center;padding-bottom:16px;">© 2026 Podioticket Ltda.</td>
+              </tr>
+              <tr>
+                <td style="font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:400;color:#202020;line-height:18.20px;text-align:center;">CNPJ 65.174.909/0001-01</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>
+
+</body>
+</html>

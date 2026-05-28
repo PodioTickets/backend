@@ -1,17 +1,21 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateRegistrationDto, CreateRegistrationWithInvitedUserDto } from './dto/create-registration.dto';
 import { FilterRegistrationsDto, RegistrationFilterStatus } from './dto/filter-registrations.dto';
 import { DocumentType, Prisma, RegistrationStatus, PaymentStatus } from '@prisma/client';
 // QR Code é gerado dinamicamente no frontend/backend usando o payload salvo em qrCode
 import { KitsService } from '../kits/kits.service';
+import { EmailService } from '../../common/services/email.service';
 import { isDocumentInList, resolveDocument } from '../../common/utils/document.util';
 
 @Injectable()
 export class RegistrationsService {
+  private readonly logger = new Logger(RegistrationsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly kitsService: KitsService,
+    private readonly emailService: EmailService,
   ) { }
 
   private async isAdminUser(userId: string): Promise<boolean> {
@@ -1263,6 +1267,9 @@ export class RegistrationsService {
       throw new BadRequestException('Variação inválida para este produto');
     }
 
+    // Captura nome da variacao anterior antes do update pro email.
+    const previousVariationId = regProduct?.variationId ?? null;
+
     if (regProduct) {
       await prismaWrite.registrationProduct.update({
         where: { id: regProduct.id },
@@ -1283,7 +1290,92 @@ export class RegistrationsService {
       });
     }
 
+    // Email best-effort — log warn em caso de falha, nao aborta a operacao.
+    void this.sendVariationChangedEmail({
+      registrationId,
+      productId,
+      variationId,
+      previousVariationId,
+    }).catch((err) => {
+      this.logger.warn(`Variation change email failed for reg ${registrationId}: ${err?.message ?? err}`);
+    });
+
     return { message: 'Variação atualizada com sucesso' };
+  }
+
+  private async sendVariationChangedEmail(args: {
+    registrationId: string;
+    productId: string;
+    variationId: string;
+    previousVariationId: string | null;
+  }) {
+    const prismaRead = this.prisma.getReadClient();
+
+    // Busca dados pro email — participante, evento, ingresso, produto, variacoes.
+    const reg = await prismaRead.registration.findUnique({
+      where: { id: args.registrationId },
+      select: {
+        participantEmail: true,
+        user: { select: { email: true } },
+        order: { select: { event: { select: { name: true } } } },
+        tickets: {
+          select: {
+            ticket: {
+              select: {
+                name: true,
+                category: { select: { name: true } },
+              },
+            },
+          },
+          take: 1,
+        },
+      },
+    });
+    const recipient = reg?.participantEmail || reg?.user?.email;
+    if (!recipient) return;
+
+    const product = await prismaRead.product.findUnique({
+      where: { id: args.productId },
+      select: { name: true, image: true, images: true, primaryImageIndex: true },
+    });
+    if (!product) return;
+
+    const primaryImage = (() => {
+      const images = (product.images ?? []) as string[];
+      const idx = product.primaryImageIndex ?? 0;
+      return images[idx] || product.image || images[0] || null;
+    })();
+
+    const [prevVar, newVar] = await Promise.all([
+      args.previousVariationId
+        ? prismaRead.productVariation.findUnique({
+            where: { id: args.previousVariationId },
+            select: { name: true },
+          })
+        : Promise.resolve(null),
+      prismaRead.productVariation.findUnique({
+        where: { id: args.variationId },
+        select: { name: true },
+      }),
+    ]);
+
+    const ticket = reg.tickets[0]?.ticket;
+    const ticketName = ticket
+      ? ticket.category?.name && ticket.category.name !== ticket.name
+        ? `${ticket.name} · ${ticket.category.name}`
+        : ticket.name
+      : '';
+
+    await this.emailService.sendProductVariationChanged({
+      email: recipient,
+      productName: product.name,
+      productImageUrl: primaryImage,
+      previousVariationName: prevVar?.name ?? '',
+      newVariationName: newVar?.name ?? '',
+      eventName: reg.order?.event?.name ?? '',
+      ticketName,
+      changedAt: new Date(),
+    });
   }
 
   async cancel(id: string, userId: string) {
