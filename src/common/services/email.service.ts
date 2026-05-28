@@ -387,6 +387,44 @@ export class EmailService {
     this.logger.log(`Registration confirmed email sent to: ${data.email}${attachments.length ? ` (${attachments.length} ticket PDF(s))` : ''}`);
   }
 
+  async sendProductVariationChanged(data: {
+    email: string;
+    productName: string;
+    productImageUrl?: string | null;
+    previousVariationName: string;
+    newVariationName: string;
+    eventName: string;
+    ticketName: string;
+    changedAt: Date;
+  }) {
+    const formatChangedAt = (d: Date) => {
+      const date = d.toLocaleDateString('pt-BR');
+      const time = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }).replace(':', 'h');
+      return `${date} · ${time}`;
+    };
+
+    const html = this.loadTemplate('variacao-alterada.html', {
+      productName: this.escapeHtml(data.productName),
+      productImageUrl: this.escapeHtml(data.productImageUrl ?? ''),
+      previousVariationName: this.escapeHtml(data.previousVariationName || '—'),
+      newVariationName: this.escapeHtml(data.newVariationName),
+      eventName: this.escapeHtml(data.eventName),
+      ticketName: this.escapeHtml(data.ticketName),
+      changedAt: this.escapeHtml(formatChangedAt(data.changedAt)),
+    });
+
+    const text = `Variação alterada com sucesso\n\nAtualizamos sua escolha. A nova variação já está vinculada ao seu ingresso.\n\nProduto: ${data.productName}\nVariação anterior: ${data.previousVariationName || '—'}\nVariação atual: ${data.newVariationName}\n\nEvento: ${data.eventName}\nIngresso: ${data.ticketName}\nAlterado em: ${formatChangedAt(data.changedAt)}\n\nPodioTicket — podioticket.com.br`;
+
+    await this.send({
+      from: this.from,
+      to: data.email,
+      subject: `Variação alterada — ${data.productName}`,
+      html,
+      text,
+    });
+    this.logger.log(`Product variation changed email sent to: ${data.email}`);
+  }
+
   async sendTransferRequested(data: {
     email: string;
     eventName: string;
