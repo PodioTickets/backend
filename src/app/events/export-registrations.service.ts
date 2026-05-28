@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import * as XLSX from 'xlsx';
 import PDFDocument from 'pdfkit';
 import { ExportField, EXPORT_FIELDS } from './dto/export-registrations.dto';
+import { formatCpfByCountry } from '../../common/utils/locale.util';
 
 /** Maps ExportField → human-readable column label */
 const FIELD_LABELS: Record<ExportField, string> = {
@@ -68,8 +69,27 @@ function extractField(reg: any, field: ExportField): string {
       return `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim();
     case 'email':
       return user.email ?? '';
-    case 'cpf':
-      return user.documentNumber ?? '';
+    case 'cpf': {
+      // Doc cru: participante (guest/terceiro) tem prioridade sobre user.
+      const rawDoc = reg.participantCpf
+        ?? reg.participantDocumentNumber
+        ?? user.documentNumber
+        ?? '';
+      if (!rawDoc) return '';
+      // Nacionalidade pra decidir se formata como CPF (BR) ou deixa cru.
+      // Mesma prioridade do PDF: snapshot → billingCountry → user.country.
+      const country =
+        (reg.receiptSnapshot as any)?.participant?.country
+        ?? order.billingCountry
+        ?? user.country
+        ?? null;
+      const documentType =
+        (reg.receiptSnapshot as any)?.participant?.documentType
+        ?? reg.participantDocumentType
+        ?? user.documentType
+        ?? null;
+      return formatCpfByCountry(rawDoc, country, documentType);
+    }
     case 'dataNascimento':
       return formatDate(user.dateOfBirth);
     case 'telefone':
