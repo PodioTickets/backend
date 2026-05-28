@@ -895,10 +895,11 @@ model Voucher {
   cpfList       Json? // LEGACY — array de CPFs (clean). Mantido pra retrocompat.
   // Lista internacionalizada: [{ type, numberClean }]. Ver Coupon.documentList.
   documentList  Json?
-  status        VoucherStatus @default(ACTIVE)
-  usedAt        DateTime? // Data em que foi usado
-  usedBy        String?       @db.Uuid // ID do usuário que usou
-  deletedAt     DateTime? // Soft delete — grupo removido quando há vendas
+  status          VoucherStatus @default(ACTIVE)
+  applyToProducts Boolean       @default(false) // Espelha Coupon.applyToProducts: o ingresso grátis cobre também os produtos adicionais (kits/extras) do pedido
+  usedAt          DateTime? // Data em que foi usado
+  usedBy          String?       @db.Uuid // ID do usuário que usou
+  deletedAt       DateTime? // Soft delete — grupo removido quando há vendas
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 

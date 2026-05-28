@@ -4,7 +4,8 @@ import { CieloService } from './cielo.service';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
 import { PaymentGateway } from './payment.gateway';
-import { PaymentMethod, PaymentStatus, Prisma } from '@prisma/client';
+import { OrderFinalizationService } from './order-finalization.service';
+import { PaymentMethod, PaymentStatus } from '@prisma/client';
 
 function formatEventDate(date: Date | string | null | undefined): string {
   if (!date) return '';
@@ -46,69 +47,8 @@ export class PaymentsWebhookService {
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
     private readonly gateway: PaymentGateway,
+    private readonly orderFinalization: OrderFinalizationService,
   ) {}
-
-  /**
-   * Fills in ticketSnapshot for RegistrationTicket rows that have none.
-   * Called when a reservation-flow PIX/Boleto order is confirmed via webhook:
-   * those registrations were created as PENDING placeholders without a snapshot.
-   */
-  private async backfillTicketSnapshots(prisma: any, orderId: string): Promise<void> {
-    const regTickets = await prisma.registrationTicket.findMany({
-      where: {
-        registration: { orderId },
-        ticketSnapshot: { equals: Prisma.AnyNull },
-      },
-      select: {
-        id: true,
-        ticketId: true,
-        batchId: true,
-      },
-    });
-
-    if (regTickets.length === 0) return;
-
-    const ticketIds = [...new Set(regTickets.map((rt: any) => rt.ticketId as string))];
-    const tickets = await prisma.ticket.findMany({
-      where: { id: { in: ticketIds } },
-      include: {
-        category: { select: { id: true, name: true } },
-        batches: { select: { id: true, price: true, sortOrder: true } },
-      },
-    });
-    const ticketById = new Map<string, any>(tickets.map((t: any) => [t.id, t]));
-
-    for (const rt of regTickets) {
-      const t = ticketById.get(rt.ticketId);
-      if (!t) continue;
-
-      const batch = rt.batchId
-        ? t.batches.find((b: any) => b.id === rt.batchId) ?? null
-        : null;
-
-      const ticketSnapshot = {
-        id: t.id,
-        name: t.name,
-        description: t.description ?? null,
-        modality: t.modality ?? null,
-        distance: t.distance ?? null,
-        distanceUnit: t.distanceUnit ?? null,
-        gender: t.gender ?? null,
-        ageLimitMin: t.ageLimitMin ?? null,
-        ageLimitMax: t.ageLimitMax ?? null,
-        category: t.category ?? null,
-        batch: batch ? { id: batch.id, price: batch.price } : null,
-        products: [],
-      };
-
-      await prisma.registrationTicket.update({
-        where: { id: rt.id },
-        data: { ticketSnapshot },
-      });
-    }
-
-    this.logger.log(`Backfilled ticketSnapshot for ${regTickets.length} RegistrationTicket(s) on order ${orderId}`);
-  }
 
   async handleWebhook(event: CieloWebhookEvent) {
     this.logger.log(`Processing Cielo webhook: PaymentId ${event.PaymentId}, Status ${event.Status}`);
@@ -200,53 +140,11 @@ export class PaymentsWebhookService {
           return;
         }
 
-        await prisma.registration.updateMany({
-          where: { orderId: fresh.orderId },
-          data: { status: 'CONFIRMED' },
-        });
-
-        await this.backfillTicketSnapshots(prisma, fresh.orderId);
-
-        // Marcar cupom/voucher como usados (mesmo padrão do pagamento por crédito)
-        const paidOrder = await prisma.order.findUnique({
-          where: { id: fresh.orderId },
-          select: { couponId: true, voucherId: true, userId: true, reservedTickets: true },
-        });
-        if (paidOrder?.couponId) {
-          const coupon = await prisma.coupon.findUnique({
-            where: { id: paidOrder.couponId },
-            select: { couponType: true, maxUsage: true, usageCount: true },
-          });
-          if (coupon) {
-            const tickets = (paidOrder.reservedTickets ?? []) as any[];
-            const ticketCount = tickets.reduce((s: number, rt: any) => s + (rt.quantity ?? 1), 0);
-            const remaining = coupon.maxUsage != null
-              ? Math.max(0, coupon.maxUsage - coupon.usageCount)
-              : ticketCount;
-            const increment = coupon.couponType === 'QUANTITY'
-              ? 1
-              : Math.min(remaining, ticketCount);
-            if (increment > 0) {
-              await prisma.coupon.update({
-                where: { id: paidOrder.couponId },
-                data: { usageCount: { increment } },
-              });
-            }
-          }
-        }
-        if (paidOrder?.voucherId) {
-          // Transição atômica: só marca USED se ainda estiver ACTIVE.
-          // Evita sobrescrever usedBy/usedAt em corrida de dois pedidos com o mesmo voucher.
-          const voucherResult = await prisma.voucher.updateMany({
-            where: { id: paidOrder.voucherId, status: 'ACTIVE' },
-            data: { status: 'USED', usedAt: new Date(), usedBy: paidOrder.userId },
-          });
-          if (voucherResult.count === 0) {
-            this.logger.error(
-              `[VOUCHER-RACE] Webhook: voucher ${paidOrder.voucherId} já estava USED quando order ${fresh.orderId} foi confirmada — possível dupla utilização, requer estorno manual`,
-            );
-          }
-        }
+        // Finalize compartilhado: deleta placeholders + cria inscrições definitivas
+        // (participante/produtos/qrCode/ticketSnapshot/receiptSnapshot) e aplica uso de
+        // cupom/voucher. Mesma fonte de verdade do pagamento por cartão — antes o PIX só
+        // marcava status=CONFIRMED, deixando as inscrições vazias.
+        await this.orderFinalization.finalizePaidOrder(prisma, fresh.orderId);
 
         // Captura orderId para envio de email fora da transação
         confirmedOrderId = fresh.orderId;
@@ -523,49 +421,9 @@ export class PaymentsWebhookService {
         return;
       }
 
-      await prisma.registration.updateMany({
-        where: { orderId, status: 'PENDING' },
-        data: { status: 'CONFIRMED' },
-      });
-
-      await this.backfillTicketSnapshots(prisma, orderId);
-
-      // Marcar cupom/voucher como usados
-      const paidOrder3ds = await prisma.order.findUnique({
-        where: { id: orderId },
-        select: { couponId: true, voucherId: true, userId: true, reservedTickets: true },
-      });
-      if (paidOrder3ds?.couponId) {
-        const coupon = await prisma.coupon.findUnique({
-          where: { id: paidOrder3ds.couponId },
-          select: { couponType: true, maxUsage: true, usageCount: true },
-        });
-        if (coupon) {
-          const tickets = (paidOrder3ds.reservedTickets ?? []) as any[];
-          const ticketCount = tickets.reduce((s: number, rt: any) => s + (rt.quantity ?? 1), 0);
-          const remaining = coupon.maxUsage != null
-            ? Math.max(0, coupon.maxUsage - coupon.usageCount)
-            : ticketCount;
-          const increment = coupon.couponType === 'QUANTITY' ? 1 : Math.min(remaining, ticketCount);
-          if (increment > 0) {
-            await prisma.coupon.update({
-              where: { id: paidOrder3ds.couponId },
-              data: { usageCount: { increment } },
-            });
-          }
-        }
-      }
-      if (paidOrder3ds?.voucherId) {
-        const voucherResult3ds = await prisma.voucher.updateMany({
-          where: { id: paidOrder3ds.voucherId, status: 'ACTIVE' },
-          data: { status: 'USED', usedAt: new Date(), usedBy: paidOrder3ds.userId },
-        });
-        if (voucherResult3ds.count === 0) {
-          this.logger.error(
-            `[VOUCHER-RACE] 3DS callback: voucher ${paidOrder3ds.voucherId} já estava USED quando order ${orderId} foi confirmada — possível dupla utilização, requer estorno manual`,
-          );
-        }
-      }
+      // Finalize compartilhado (mesma fonte do cartão/PIX): cria inscrições definitivas
+      // e aplica uso de cupom/voucher. Antes só marcava status=CONFIRMED (inscrições vazias).
+      await this.orderFinalization.finalizePaidOrder(prisma, orderId);
 
       confirmedOrderId = orderId;
       this.logger.log(`3DS callback confirmed order ${orderId}`);

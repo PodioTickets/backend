@@ -11,6 +11,7 @@ import {
 import { DocumentType, PaymentMethod, PaymentStatus, RegistrationStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from '../payments/cielo.service';
+import { OrderFinalizationService } from '../payments/order-finalization.service';
 import { OrdersRedisService } from './orders-redis.service';
 import { ReserveOrderDto } from './dto/reserve-order.dto';
 import { PatchParticipantsDto } from './dto/patch-participants.dto';
@@ -27,6 +28,7 @@ import {
   resolveDocument,
 } from '../../common/utils/document.util';
 import { computeAgeAt } from '../../common/utils/age.util';
+import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
 
 // ─── helpers de formatação ────────────────────────────────────────────────────
 
@@ -110,7 +112,7 @@ const MAX_TICKETS_PER_ORDER = 20;
 const ORDER_INCLUDE = {
   reservedTickets: true,
   coupon: { select: { id: true, code: true, couponType: true, type: true, value: true, appliesTo: true, minAge: true, maxAge: true, applyToProducts: true } },
-  voucher: { select: { id: true, code: true, name: true, status: true, appliesTo: true } },
+  voucher: { select: { id: true, code: true, name: true, status: true, appliesTo: true, applyToProducts: true } },
   payment: { select: { id: true, method: true, status: true, amount: true, transactionId: true, paymentDate: true, createdAt: true, metadata: true } },
   // participantFeePercent é necessário para calcular serviceFee em pedidos PENDING
   // (em que order.serviceFee ainda é 0). eventDate é usado como referência para validar
@@ -307,13 +309,9 @@ function computePendingProductsSubtotal(order: any): number {
  * - Variação com `price === 0` (e nome ≠ "Sem interesse") → fallback para basePrice.
  *   Cobre o caso de organizer cadastrar variações P/M/G sem preencher price,
  *   esperando que o basePrice prevaleça.
+ * (Implementação movida para `common/utils/product-price.util.ts` — fonte única
+ *  compartilhada com o finalize do PIX/3DS via OrderFinalizationService.)
  */
-function resolveProductUnitPrice(product: any, variation: any | null | undefined): number {
-  const basePrice = product?.basePrice ?? 0;
-  if (!variation) return basePrice;
-  if (variation.name === 'Sem interesse') return 0;
-  return variation.price > 0 ? variation.price : basePrice;
-}
 
 function inferEffectiveUsage(
   reservedTickets: any[],
@@ -446,7 +444,11 @@ function orderShape(order: any, discountOverride?: number, extra?: Record<string
     if (cov.hasApplicable && cov.qualifyingSlot >= 0) {
       resolvedEffectiveUsage = 1;
       resolvedQualifyingSlots = resolvedQualifyingSlots ?? [cov.qualifyingSlot];
-      voucherDerivedDiscount = cov.discount;
+      // applyToProducts espelha o cupom: o ingresso grátis cobre também os produtos.
+      // distributeDiscount clampa a porção do ingresso por slot; o excedente
+      // (produtos) fica implícito em order.discount — mesmo comportamento do cupom.
+      voucherDerivedDiscount =
+        cov.discount + (voucher.applyToProducts ? computePendingProductsSubtotal(order) : 0);
     }
   }
 
@@ -557,6 +559,7 @@ export class OrdersService {
     private readonly redisService: OrdersRedisService,
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
+    private readonly orderFinalization: OrderFinalizationService,
   ) {}
 
   private async isAdminUser(userId: string): Promise<boolean> {
@@ -1122,9 +1125,27 @@ export class OrdersService {
                 code: primaryReceipt.pricing.coupon.code,
                 type: primaryReceipt.pricing.coupon.type,
                 value: primaryReceipt.pricing.coupon.value,
+                // Prioridade da verdade histórica: snapshot do recibo →
+                // metadata do pagamento (congelado no pay, cobre PIX que não tem
+                // receiptSnapshot) → flag atual do cupom (fallback p/ recibos
+                // legados pré-feature). `??` preserva `false` legítimo.
+                applyToProducts:
+                  primaryReceipt.pricing.coupon.applyToProducts
+                  ?? metadata.coupon?.applyToProducts
+                  ?? order.coupon?.applyToProducts
+                  ?? false,
               }
             : order.coupon
-              ? { id: order.coupon.id, code: order.coupon.code, type: order.coupon.type, value: order.coupon.value }
+              ? {
+                  id: order.coupon.id,
+                  code: order.coupon.code,
+                  type: order.coupon.type,
+                  value: order.coupon.value,
+                  applyToProducts:
+                    metadata.coupon?.applyToProducts
+                    ?? order.coupon.applyToProducts
+                    ?? false,
+                }
               : null,
           voucher: primaryReceipt?.pricing?.voucher
             ? {
@@ -1133,9 +1154,25 @@ export class OrdersService {
                 name: primaryReceipt.pricing.voucher.name,
                 // Recibo grava apenas vouchers usados — status implícito é USED.
                 status: 'USED',
+                // Verdade histórica: snapshot → metadata do pagamento (cobre PIX
+                // sem receiptSnapshot) → flag live. `??` preserva `false`.
+                applyToProducts:
+                  primaryReceipt.pricing.voucher.applyToProducts
+                  ?? metadata.voucher?.applyToProducts
+                  ?? order.voucher?.applyToProducts
+                  ?? false,
               }
             : order.voucher
-              ? { id: order.voucher.id, code: order.voucher.code, name: order.voucher.name, status: order.voucher.status }
+              ? {
+                  id: order.voucher.id,
+                  code: order.voucher.code,
+                  name: order.voucher.name,
+                  status: order.voucher.status,
+                  applyToProducts:
+                    metadata.voucher?.applyToProducts
+                    ?? order.voucher.applyToProducts
+                    ?? false,
+                }
               : null,
         },
         event: primaryReceipt?.event
@@ -1560,7 +1597,9 @@ export class OrdersService {
               'Voucher não aplicável aos ingressos do pedido',
             );
           }
-          discount = cov.discount;
+          // applyToProducts: o ingresso grátis cobre também os produtos adicionais
+          // (espelha o cupom). Voucher isolado aqui → sem risco de double-count.
+          discount = cov.discount + (voucherByCode.applyToProducts ? productsSubtotal : 0);
           voucherId = voucherByCode.id;
           const finalAmountV = Math.max(0, order.totalAmount - discount);
           const updatedV = await w.order.update({
@@ -1630,7 +1669,7 @@ export class OrdersService {
       if (nonApplicableTickets.length > 0 && order.voucherId) {
         const existingVoucher = await r.voucher.findUnique({
           where: { id: order.voucherId },
-          select: { id: true, status: true, expiryDate: true, eventId: true, appliesTo: true },
+          select: { id: true, status: true, expiryDate: true, eventId: true, appliesTo: true, applyToProducts: true },
         });
         if (
           existingVoucher &&
@@ -1642,7 +1681,11 @@ export class OrdersService {
           // cupom (combinado). Não erra aqui se nada sobrar — o cupom já cobre tudo.
           const cov = resolveVoucherCoverage(reservedTickets, existingVoucher.appliesTo, applicableTicketIds);
           if (cov.hasApplicable) {
-            discount += cov.discount;
+            // Produtos entram no desconto NO MÁXIMO uma vez: se o cupom já os incluiu
+            // (applyToProducts), o voucher cobre só o ingresso — evita double-count.
+            const voucherProductsExtra =
+              existingVoucher.applyToProducts && !coupon.applyToProducts ? productsSubtotal : 0;
+            discount += cov.discount + voucherProductsExtra;
             voucherId = order.voucherId;
           }
         }
@@ -1682,7 +1725,8 @@ export class OrdersService {
           'Voucher não aplicável aos ingressos do pedido',
         );
       }
-      discount = cov.discount;
+      // applyToProducts: o ingresso grátis cobre também os produtos (espelha o cupom).
+      discount = cov.discount + (voucher.applyToProducts ? productsSubtotal : 0);
       voucherId = voucher.id;
 
     } else {
@@ -1979,6 +2023,15 @@ export class OrdersService {
         const applicableBase = applicableSubtotal + Math.round(productsContribution * applicableRatio);
         newDiscount = Math.floor(applicableBase * (activeCoupon.value / 100));
         newDiscount = Math.min(newDiscount, applicableBase);
+      } else if ((order as any).voucherId && !(order as any).couponId && (order as any).voucher) {
+        // Voucher isolado: recomputa a cobertura (ingressos podem ter mudado) e, se
+        // applyToProducts, soma o subtotal de produtos. Espelha o cupom e o que o
+        // `pay` calcula — mantém o total exibido coerente com o cobrado. Sem cupom
+        // no pedido → sem risco de double-count dos produtos.
+        const v = (order as any).voucher;
+        const cov = resolveVoucherCoverage(reservedTickets, v.appliesTo);
+        const vProductsExtra = v.applyToProducts ? productsSubtotal : 0;
+        newDiscount = Math.min(cov.discount + vProductsExtra, totalAmount);
       }
     }
 
@@ -2188,8 +2241,18 @@ export class OrdersService {
 
     let couponDiscount = 0;
     let couponId: string | undefined;
+    // Flag do cupom efetivamente aplicado neste pagamento: indica se o desconto
+    // incidiu também sobre os produtos adicionais (kits/extras). Capturada aqui
+    // (do objeto cupom já carregado, sem query extra) para congelar a intenção
+    // histórica no snapshot e no metadata do pagamento — o organizador pode
+    // alterar `applyToProducts` do cupom após a venda, e o recibo deve refletir
+    // o que valeu no momento da compra.
+    let couponAppliedToProducts = false;
     let voucherDiscount = 0;
     let voucherId: string | undefined;
+    // Mesma semântica de couponAppliedToProducts, para o voucher: o ingresso grátis
+    // cobriu também os produtos adicionais. Congelada no snapshot/metadata do pagamento.
+    let voucherAppliedToProducts = false;
     // IDs dos tickets cobertos pelo cupom — usado pelo bloco do voucher para cobrir o restante
     let couponApplicableTicketIds: Set<string> | undefined;
 
@@ -2219,6 +2282,7 @@ export class OrdersService {
         const productsExtraPay = coupon.applyToProducts ? productsSubtotal : 0;
         couponDiscount = computePartialCouponDiscount(applicableTicketsPay, coupon.type, coupon.value, effectiveUsage, productsExtraPay);
         couponId = coupon.id;
+        couponAppliedToProducts = coupon.applyToProducts;
       }
     }
 
@@ -2258,6 +2322,7 @@ export class OrdersService {
               ? Math.floor(quantityBase * (coupon.value / 100))
               : Math.min(coupon.value, quantityBase);
           couponId = coupon.id;
+          couponAppliedToProducts = coupon.applyToProducts;
           break;
         } else if (coupon.couponType === 'AGE') {
           // Validar idade dos participantes na data do evento — aplica apenas
@@ -2288,6 +2353,7 @@ export class OrdersService {
           const ageProductsExtra = coupon.applyToProducts ? productsSubtotal : 0;
           couponDiscount = computePartialCouponDiscount(ageApplicableTickets, coupon.type, coupon.value, effectiveUsage, ageProductsExtra);
           couponId = coupon.id;
+          couponAppliedToProducts = coupon.applyToProducts;
           break;
         }
       }
@@ -2303,12 +2369,17 @@ export class OrdersService {
         voucher.status === 'ACTIVE' &&
         (!voucher.expiryDate || new Date(voucher.expiryDate) > new Date())
       ) {
+        // applyToProducts: o ingresso grátis cobre também os produtos adicionais.
+        // Produtos entram NO MÁXIMO uma vez — se o cupom já os incluiu (combinado),
+        // o voucher não soma de novo (evita double-count). Espelha o cupom.
+        const voucherProductsExtra =
+          voucher.applyToProducts && !couponAppliedToProducts ? productsSubtotal : 0;
         // Voucher = 1 ingresso grátis (a unidade aplicável mais cara), nunca todos.
         if (couponApplicableTicketIds && couponApplicableTicketIds.size > 0) {
           // Combinado: voucher cobre 1 ingresso entre os NÃO cobertos pelo cupom
           // (0 se nenhum sobrar — o cupom já cobre tudo; não erra no pay).
           const cov = resolveVoucherCoverage(reservedTickets, voucher.appliesTo, couponApplicableTicketIds);
-          voucherDiscount = cov.discount;
+          voucherDiscount = cov.discount + voucherProductsExtra;
         } else {
           const cov = resolveVoucherCoverage(reservedTickets, voucher.appliesTo);
           if (!cov.hasApplicable) {
@@ -2317,9 +2388,10 @@ export class OrdersService {
               'Voucher não aplicável aos ingressos do pedido',
             );
           }
-          voucherDiscount = cov.discount;
+          voucherDiscount = cov.discount + voucherProductsExtra;
         }
         voucherId = voucher.id;
+        voucherAppliedToProducts = voucher.applyToProducts;
       }
     }
 
@@ -2338,6 +2410,15 @@ export class OrdersService {
     const discountedTotal = feeBase + serviceFee;
     const pixDiscount = 0;
     const finalTotal = discountedTotal;
+
+    // Fragmento de auditoria de desconto para o metadata do pagamento. Persistido em
+    // TODOS os métodos (PIX/cartão/débito), inclusive nas confirmações via webhook —
+    // o webhook faz spread do metadata existente, então o campo sobrevive ao PAID.
+    // Cada chave só aparece quando há o respectivo desconto (ausência = não aplicado);
+    // evita gravar lixo e o strip de null do ResponseCompressionInterceptor não interfere.
+    const discountMeta: Record<string, any> = {};
+    if (couponId) discountMeta.coupon = { id: couponId, applyToProducts: couponAppliedToProducts };
+    if (voucherId) discountMeta.voucher = { id: voucherId, applyToProducts: voucherAppliedToProducts };
 
     // Pedido grátis (voucher 100% ou cupom integral): não chama gateway, finaliza direto.
     // Cielo rejeita amount=0, então qualquer cobrança aqui falharia. Pulamos o gateway,
@@ -2442,13 +2523,22 @@ export class OrdersService {
         debitReturnUrl = `${serverUrl}/api/v1/payments/3ds-callback?orderId=${orderId}`;
       }
 
+      // Customer.Name é OBRIGATÓRIO no Cielo (erro 105 "Customer Name is required",
+      // inclusive em PIX). O comprador pode estar sem firstName/lastName preenchidos
+      // (ex.: conta criada por fluxo que não exige nome) — então caímos no nome do
+      // 1º participante e, em último caso, num rótulo genérico, para nunca enviar vazio.
+      const customerName =
+        `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim()
+        || (participants[0]?.name ?? '').toString().trim()
+        || 'Cliente';
+
       cieloResult = await this.cieloService.createPayment(
         finalTotal,
         'BRL',
         dto.method,
         merchantOrderId,
         {
-          name: `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim(),
+          name: customerName,
           email: user?.email,
           identity: firstCpf,
           identityType: firstCpf ? 'CPF' : undefined,
@@ -2512,6 +2602,7 @@ export class OrdersService {
               qrCode: cieloResult.qrCode,
               pixCode: cieloResult.pixCode,
               expiresAt: cieloResult.expiresAt?.toISOString() ?? null,
+              ...discountMeta,
             },
           },
           update: {
@@ -2523,6 +2614,7 @@ export class OrdersService {
               qrCode: cieloResult.qrCode,
               pixCode: cieloResult.pixCode,
               expiresAt: cieloResult.expiresAt?.toISOString() ?? null,
+              ...discountMeta,
             },
           },
         });
@@ -2587,6 +2679,7 @@ export class OrdersService {
                 last4Digits: dto.card!.number.replace(/\s/g, '').slice(-4),
                 holder: dto.card!.name,
               },
+              ...discountMeta,
             },
           },
           update: {
@@ -2600,6 +2693,7 @@ export class OrdersService {
                 last4Digits: dto.card!.number.replace(/\s/g, '').slice(-4),
                 holder: dto.card!.name,
               },
+              ...discountMeta,
             },
           },
         });
@@ -2633,33 +2727,19 @@ export class OrdersService {
       throw new HttpException(errBody, 402);
     }
 
-    // 6.13 Pré-carregar dados para receipt snapshot (fora da tx para não bloquear locks)
-    const ticketIds = reservedTickets.map((rt: any) => rt.ticketId);
-    const [snapshotTickets, snapshotEvent, snapshotQuestions] = await Promise.all([
-      r.ticket.findMany({
-        where: { id: { in: ticketIds } },
-        include: {
-          category: { select: { id: true, name: true } },
-          batches: { select: { id: true, price: true, sortOrder: true } },
-        },
-      }),
-      r.event.findUnique({
-        where: { id: order.eventId },
-        select: {
-          id: true, name: true, slug: true, description: true,
-          eventDate: true, registrationStartDate: true, registrationEndDate: true,
-          location: true, city: true, state: true, country: true, zipCode: true, neighborhood: true,
-          googleMapsLink: true, bannerUrl: true, logoUrl: true,
-          organization: { select: { id: true, name: true, logoUrl: true, email: true, phone: true } },
-        },
-      }),
-      r.question.findMany({
-        where: { eventId: order.eventId, isActive: true },
-        select: { id: true, question: true, description: true, type: true, options: true, isRequired: true },
-      }),
-    ]);
-    const snapshotTicketById = new Map(snapshotTickets.map((t: any) => [t.id, t]));
-    const snapshotQuestionById = new Map<any, any>(snapshotQuestions.map((q: any) => [q.id, q]));
+    // 6.13 Pré-carregar o evento para o e-mail de confirmação (fora da tx p/ não
+    // bloquear locks). Os snapshots de ingresso/produto/recibo são montados dentro
+    // do finalize compartilhado (OrderFinalizationService), que carrega o que precisa.
+    const snapshotEvent = await r.event.findUnique({
+      where: { id: order.eventId },
+      select: {
+        id: true, name: true, slug: true, description: true,
+        eventDate: true, registrationStartDate: true, registrationEndDate: true,
+        location: true, city: true, state: true, country: true, zipCode: true, neighborhood: true,
+        googleMapsLink: true, bannerUrl: true, logoUrl: true,
+        organization: { select: { id: true, name: true, logoUrl: true, email: true, phone: true } },
+      },
+    });
 
     // 6.14 Finalize: mark PAID, create Payment, create Registrations
     const registrations: any[] = await w.$transaction(async (tx: any) => {
@@ -2704,6 +2784,7 @@ export class OrdersService {
           authorizationCode: cieloResult.authorizationCode,
           proofOfSale: cieloResult.proofOfSale,
           cieloStatus: cieloResult.cieloStatus,
+          ...discountMeta,
           ...(dto.card && dto.method === PaymentMethod.CREDIT_CARD && {
             creditCard: {
               brand: cieloResult.cardBrand ?? null,
@@ -2734,368 +2815,7 @@ export class OrdersService {
         },
       });
 
-      // Apply coupon usage — atomic SQL to prevent race condition on concurrent orders
-      if (couponId) {
-        const couponForUsage = await tx.coupon.findUnique({
-          where: { id: couponId },
-          select: { couponType: true, maxUsage: true, usageCount: true },
-        });
-        const ticketCount = reservedTickets.reduce((sum: number, rt: any) => sum + (rt.quantity ?? 1), 0);
-
-        if (couponForUsage?.couponType === 'QUANTITY') {
-          // QUANTITY: all-or-nothing — atomic check-and-increment
-          const rows: any[] = await tx.$queryRaw`
-            UPDATE "Coupon"
-            SET "usageCount" = "usageCount" + 1
-            WHERE id = ${couponId}::uuid
-              AND ("maxUsage" IS NULL OR "usageCount" + 1 <= "maxUsage")
-            RETURNING id
-          `;
-          if (rows.length === 0) {
-            throw new BadRequestException('Cupom esgotado. Prossiga sem desconto ou escolha outro cupom.');
-          }
-        } else {
-          // DISCOUNT/AGE: cap at maxUsage atomically — never goes over even under concurrency
-          const delta = couponForUsage?.maxUsage != null
-            ? Math.min(ticketCount, Math.max(0, couponForUsage.maxUsage - couponForUsage.usageCount))
-            : ticketCount;
-          if (delta > 0) {
-            await tx.$queryRaw`
-              UPDATE "Coupon"
-              SET "usageCount" = LEAST("usageCount" + ${delta}, COALESCE("maxUsage", "usageCount" + ${delta}))
-              WHERE id = ${couponId}::uuid
-            `;
-          }
-        }
-      }
-      // Mark voucher as used — atomic ACTIVE → USED to evitar sobrescrita em corrida
-      if (voucherId) {
-        const voucherResult = await tx.voucher.updateMany({
-          where: { id: voucherId, status: 'ACTIVE' },
-          data: { status: 'USED', usedAt: new Date(), usedBy: userId },
-        });
-        if (voucherResult.count === 0) {
-          this.logger.error(
-            `[VOUCHER-RACE] pay/CC: voucher ${voucherId} já estava USED para order ${orderId} — Cielo já autorizou, requer estorno manual`,
-          );
-        }
-      }
-
-      // Remove placeholder PENDING registrations criadas na reserva
-      await tx.registration.deleteMany({
-        where: { orderId, status: RegistrationStatus.PENDING },
-      });
-
-      // Create Registrations from pendingParticipants
-      const createdRegs: any[] = [];
-      const buyerUser = await tx.user.findUnique({
-        where: { id: userId },
-        select: { email: true },
-      });
-
-      let pIdx = 0;
-      for (const rt of reservedTickets) {
-        for (let i = 0; i < rt.quantity; i++) {
-          const pData = participants[pIdx];
-          if (!pData) break;
-
-          // Resolve participant — nunca cria User fantasma
-          let participantUserId: string | null = userId;
-          let guestSnapshot:
-            | {
-                name: string;
-                email: string;
-                documentType: DocumentType | null;
-                documentNumber: string;
-                documentNumberClean: string;
-                phone: string;
-                dateOfBirth: Date | null;
-                gender: string | null;
-              }
-            | null = null;
-
-          if (pData.email?.toLowerCase() !== buyerUser?.email?.toLowerCase()) {
-            const existingUser = await tx.user.findFirst({ where: { email: pData.email } });
-            if (existingUser) {
-              participantUserId = existingUser.id;
-            } else {
-              // Resolve documento aceitando ambos formatos do DTO
-              // (documentType+documentNumber novo OU cpf legacy).
-              const doc = resolveDocument(pData);
-              participantUserId = null;
-              guestSnapshot = {
-                name: pData.name ?? '',
-                email: pData.email ?? '',
-                documentType: doc.type,
-                documentNumber: doc.number,
-                documentNumberClean: doc.clean,
-                phone: pData.phone ?? '',
-                dateOfBirth: pData.birthDate ? new Date(pData.birthDate) : null,
-                gender: pData.gender ?? null,
-              };
-            }
-          }
-
-          const isGuest = participantUserId === null;
-          const isDifferentUser = participantUserId !== null && participantUserId !== userId;
-
-          const reg = await tx.registration.create({
-            data: {
-              eventId: order.eventId,
-              orderId,
-              userId: participantUserId,
-              invitedById: (isDifferentUser || isGuest) ? userId : null,
-              status: RegistrationStatus.CONFIRMED,
-              termsAccepted: true,
-              rulesAccepted: true,
-              emergencyContactName: pData.emergencyContactName?.trim() || null,
-              emergencyContactPhone: pData.emergencyPhone?.trim() || null,
-              ...(guestSnapshot && {
-                participantName: guestSnapshot.name,
-                participantEmail: guestSnapshot.email,
-                // Legacy: mantido em paralelo durante a transição. Fase E remove.
-                participantCpf: guestSnapshot.documentNumber,
-                participantCpfClean:
-                  guestSnapshot.documentType === DocumentType.CPF
-                    ? guestSnapshot.documentNumberClean
-                    : '',
-                // Fonte de verdade nova
-                participantDocumentType: guestSnapshot.documentType,
-                participantDocumentNumber: guestSnapshot.documentNumber,
-                participantDocumentNumberClean: guestSnapshot.documentNumberClean,
-                participantPhone: guestSnapshot.phone,
-                participantDateOfBirth: guestSnapshot.dateOfBirth,
-                participantGender: guestSnapshot.gender,
-              }),
-            },
-          });
-
-          const frontendUrl = (process.env.FRONTEND_URL ?? '').replace(/\/$/, '');
-          const qrPayload = `${frontendUrl}/user/tickets/${reg.id}`;
-          const updatedReg = await tx.registration.update({
-            where: { id: reg.id },
-            data: { qrCode: qrPayload },
-            select: { id: true, qrCode: true, status: true },
-          });
-
-          const ticketData = snapshotTicketById.get(rt.ticketId) as any;
-          const batchData = ticketData?.batches?.find((b: any) => b.id === rt.batchId) ?? null;
-          const ticketSnapshot = ticketData ? {
-            id: ticketData.id,
-            name: ticketData.name,
-            description: ticketData.description ?? null,
-            modality: ticketData.modality ?? null,
-            distance: ticketData.distance ?? null,
-            distanceUnit: ticketData.distanceUnit ?? null,
-            gender: ticketData.gender ?? null,
-            ageLimitMin: ticketData.ageLimitMin ?? null,
-            ageLimitMax: ticketData.ageLimitMax ?? null,
-            category: ticketData.category ?? null,
-            batch: batchData ? { id: batchData.id, name: batchData.name, price: batchData.price } : null,
-          } : null;
-
-          await tx.registrationTicket.create({
-            data: {
-              registrationId: reg.id,
-              ticketId: rt.ticketId,
-              batchId: rt.batchId,
-              ticketSnapshot,
-            },
-          });
-
-          // Create RegistrationProduct records para este participante
-          const participantProducts = (pendingProducts ?? []).filter(
-            (item: any) => item.participantEmail?.toLowerCase() === pData.email?.toLowerCase(),
-          );
-          const participantProductMap = new Map<string, any>();
-          if (participantProducts.length > 0) {
-            for (const item of participantProducts) {
-              const product = await r.product.findUnique({
-                where: { id: item.productId },
-                include: { variations: true },
-              });
-              if (product) participantProductMap.set(product.id, product);
-              if (!product) continue;
-              const selectedVariation = item.variationId
-                ? (product.variations ?? []).find((v: any) => v.id === item.variationId)
-                : null;
-              const unitPrice = resolveProductUnitPrice(product, selectedVariation);
-              const productSnapshot = {
-                id: product.id,
-                name: product.name,
-                images: (product as any).images ?? [],
-                primaryImageIndex: (product as any).primaryImageIndex ?? 0,
-                basePrice: product.basePrice,
-                isIncludedInTicket: (product as any).isIncludedInTicket,
-                isRequired: (product as any).isRequired,
-                variationType: (product as any).variationType ?? null,
-                selectedVariation: selectedVariation
-                  ? { id: selectedVariation.id, name: selectedVariation.name, price: (selectedVariation as any).price }
-                  : null,
-              };
-              await tx.registrationProduct.create({
-                data: {
-                  registrationId: reg.id,
-                  productId: item.productId,
-                  variationId: item.variationId ?? null,
-                  quantity: item.quantity ?? 1,
-                  unitPrice,
-                  totalPrice: unitPrice * (item.quantity ?? 1),
-                  productSnapshot,
-                },
-              });
-            }
-          }
-
-          // Question answers com snapshot da pergunta
-          const snapshotedAnswers: any[] = [];
-          if (pData.questionAnswers?.length) {
-            for (const qa of pData.questionAnswers) {
-              const questionData = snapshotQuestionById.get(qa.questionId);
-              const questionSnapshot = questionData ? {
-                id: questionData.id,
-                question: questionData.question,
-                description: questionData.description ?? null,
-                type: questionData.type,
-                options: questionData.options ?? null,
-                isRequired: questionData.isRequired,
-              } : null;
-              await tx.questionAnswer.create({
-                data: {
-                  registrationId: reg.id,
-                  questionId: qa.questionId,
-                  answer: String(qa.answer),
-                  questionSnapshot,
-                },
-              });
-              snapshotedAnswers.push({
-                question: questionSnapshot ?? { id: qa.questionId },
-                answer: String(qa.answer),
-              });
-            }
-          }
-
-          // Construir receipt snapshot completo
-          const participantProductSnapshots = (participantProducts ?? []).map((item: any) => {
-            const prod = participantProductMap?.get(item.productId) as any;
-            return prod ? {
-              id: prod.id,
-              name: prod.name,
-              images: prod.images ?? [],
-              primaryImageIndex: prod.primaryImageIndex ?? 0,
-              basePrice: prod.basePrice,
-              variationType: prod.variationType ?? null,
-              quantity: item.quantity ?? 1,
-              unitPrice: prod.basePrice,
-              selectedVariation: item.variationId
-                ? (prod.variations ?? []).find((v: any) => v.id === item.variationId) ?? null
-                : null,
-            } : { id: item.productId, quantity: item.quantity ?? 1 };
-          });
-
-          const receiptSnapshot = {
-            event: snapshotEvent ? {
-              id: snapshotEvent.id,
-              name: snapshotEvent.name,
-              slug: snapshotEvent.slug,
-              description: snapshotEvent.description ?? null,
-              // Event tem apenas eventDate (data única). Mantemos também a janela
-              // de inscrição porque ajuda a auditar quando o pedido foi feito.
-              eventDate: snapshotEvent.eventDate,
-              registrationStartDate: snapshotEvent.registrationStartDate ?? null,
-              registrationEndDate: snapshotEvent.registrationEndDate ?? null,
-              bannerUrl: snapshotEvent.bannerUrl ?? null,
-              logoUrl: snapshotEvent.logoUrl ?? null,
-              organization: (snapshotEvent as any).organization
-                ? {
-                    id: (snapshotEvent as any).organization.id,
-                    name: (snapshotEvent as any).organization.name,
-                    logoUrl: (snapshotEvent as any).organization.logoUrl ?? null,
-                    email: (snapshotEvent as any).organization.email ?? null,
-                    phone: (snapshotEvent as any).organization.phone ?? null,
-                  }
-                : null,
-              location: {
-                // `Event.location` é uma string livre com o nome do local (ex: "Parque do Ibirapuera").
-                // O endereço estruturado (street/number) vive em `EventLocation` (1:N) — fora do escopo do recibo.
-                name: snapshotEvent.location ?? null,
-                neighborhood: snapshotEvent.neighborhood ?? null,
-                city: snapshotEvent.city ?? null,
-                state: snapshotEvent.state ?? null,
-                country: snapshotEvent.country ?? null,
-                zipCode: snapshotEvent.zipCode ?? null,
-                googleMapsLink: snapshotEvent.googleMapsLink ?? null,
-              },
-            } : null,
-            ticket: ticketSnapshot,
-            products: participantProductSnapshots,
-            questionAnswers: snapshotedAnswers,
-            participant: (() => {
-              // Snapshot completo do participante. Doc resolvido pelo util
-              // pra suportar CPF legacy + documentType/documentNumber novos.
-              // country snapshotado pra preservar a nacionalidade escolhida
-              // no checkout (PDF/email usam essa info pra formatar telefone
-              // e decidir label do documento — User.country pode mudar e
-              // nao representa a escolha feita no momento da compra).
-              const participantDoc = resolveDocument(pData);
-              const snap = {
-                name: pData.name ?? null,
-                email: pData.email ?? null,
-                cpf: pData.cpf ?? null,
-                documentType: participantDoc.type ?? null,
-                documentNumber: participantDoc.number || null,
-                phone: pData.phone ?? null,
-                birthDate: pData.birthDate ?? null,
-                gender: pData.gender ?? null,
-                country:
-                  (pData as any).country
-                  ?? (pData as any).nationality
-                  ?? null,
-              };
-              return snap;
-            })(),
-            billing: {
-              postalCode: order.billingPostalCode ?? null,
-              street: order.billingStreet ?? null,
-              number: order.billingNumber ?? null,
-              complement: order.billingComplement ?? null,
-              neighborhood: order.billingNeighborhood ?? null,
-              city: order.billingCity ?? null,
-              state: order.billingState ?? null,
-              country: order.billingCountry ?? null,
-            },
-            pricing: {
-              ticketsSubtotal,
-              productsSubtotal,
-              discount: couponDiscount + voucherDiscount,
-              pixDiscount,
-              finalTotal,
-              coupon: order.coupon ? {
-                id: order.coupon.id,
-                code: order.coupon.code,
-                type: order.coupon.type,
-                value: order.coupon.value,
-              } : null,
-              voucher: order.voucher ? {
-                id: order.voucher.id,
-                code: order.voucher.code,
-                name: order.voucher.name,
-              } : null,
-            },
-            paidAt: new Date().toISOString(),
-          };
-
-          await tx.registration.update({
-            where: { id: reg.id },
-            data: { receiptSnapshot },
-          });
-
-          createdRegs.push(updatedReg);
-          pIdx++;
-        }
-      }
-
-      return createdRegs;
+      return await this.orderFinalization.finalizePaidOrder(tx, orderId);
     });
 
     const body: Record<string, any> = {

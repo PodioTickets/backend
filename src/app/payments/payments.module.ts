@@ -6,6 +6,7 @@ import { CieloService } from './cielo.service';
 import { PaymentsWebhookService } from './payments-webhook.service';
 import { PaymentsChargebackService } from './payments-chargeback.service';
 import { PaymentsRefundService } from './payments-refund.service';
+import { OrderFinalizationService } from './order-finalization.service';
 import { PaymentGateway } from './payment.gateway';
 import { ConfigModule } from '@nestjs/config';
 import { EmailService } from '../../common/services/email.service';
@@ -21,11 +22,12 @@ import { RepasseModule } from '../repasse/repasse.module';
     PaymentsWebhookService,
     PaymentsChargebackService,
     PaymentsRefundService,
+    OrderFinalizationService,
     PaymentGateway,
     EmailService,
     TicketPdfService,
   ],
-  exports: [PaymentsService, CieloService, PaymentsRefundService],
+  exports: [PaymentsService, CieloService, PaymentsRefundService, OrderFinalizationService],
 })
 export class PaymentsModule {}
 

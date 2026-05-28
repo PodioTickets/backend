@@ -48,7 +48,20 @@
       "Bash(curl *)",
       "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d['data']['registrations'][0]['participant'], indent=2\\)\\)\")",
       "Bash(redis-cli -h localhost -p 6379 -a podiogo123 --no-auth-warning EXISTS perf:monitor:v1)",
-      "Bash(npx nest *)"
+      "Bash(npx nest *)",
+      "Bash(git --no-pager diff --stat)",
+      "Bash(git --no-pager diff)",
+      "Bash(git --no-pager diff --numstat src/app/orders/orders.service.ts)",
+      "Bash(git --no-pager diff src/app/orders/orders.service.ts)",
+      "Bash(xxd)",
+      "Bash(grep -nA1 \"formatEventDate\\(date\")",
+      "Bash(grep -cP ' $')",
+      "Bash(grep -cP ' $' src/app/orders/orders.service.ts)",
+      "Bash(unix2dos src/app/orders/orders.service.ts)",
+      "Bash(git --no-pager status --short)",
+      "Bash(git --no-pager diff --stat --ignore-all-space)",
+      "Bash(git --no-pager diff --stat src/app/payments/cielo.service.ts)",
+      "Bash(git --no-pager diff --stat --ignore-all-space src/app/payments/cielo.service.ts)"
     ]
   }
 }

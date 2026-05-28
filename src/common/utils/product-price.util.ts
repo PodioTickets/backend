@@ -1,0 +1,23 @@
+/**
+ * Resolve o preço unitário efetivo de um produto adicional considerando a variação
+ * selecionada. Fonte ÚNICA de verdade — usada pelo checkout (orders.service) e pelo
+ * finalize compartilhado (OrderFinalizationService), garantindo que o preço gravado
+ * no pedido e o gravado nas inscrições (RegistrationProduct/snapshot) nunca divirjam.
+ *
+ * Regras:
+ * - Sem variação → `basePrice`.
+ * - Variação "Sem interesse" → 0 (opt-out de produto opcional; convenção do projeto).
+ * - Variação com `price > 0` → usa o price da variação (sobrescreve basePrice).
+ * - Variação com `price === 0` (e nome ≠ "Sem interesse") → fallback para basePrice.
+ *   Cobre o caso de organizer cadastrar variações P/M/G sem preencher price,
+ *   esperando que o basePrice prevaleça.
+ */
+export function resolveProductUnitPrice(
+  product: any,
+  variation: any | null | undefined,
+): number {
+  const basePrice = product?.basePrice ?? 0;
+  if (!variation) return basePrice;
+  if (variation.name === 'Sem interesse') return 0;
+  return variation.price > 0 ? variation.price : basePrice;
+}

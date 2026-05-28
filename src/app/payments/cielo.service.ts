@@ -401,23 +401,22 @@ export class CieloService {
 
       // Adicionar Customer ao request body.
       //
-      // Regra por método:
-      //   - PIX: Cielo exige Customer com Identity (CPF). Sem identity, não
-      //     monta Customer (o PIX vai falhar antes, mas mantemos a semântica
-      //     antiga pra não inventar identity falsa).
-      //   - CREDIT_CARD / DEBIT_CARD: Cielo exige Customer.Name (erro 105
-      //     "Customer Name is required" quando ausente). Identity é opcional —
-      //     participantes estrangeiros (PASSPORT) chegam sem CPF, então só
-      //     enviamos Name. Não passamos passaporte como Identity porque
-      //     IdentityType da Cielo é estritamente CPF/CNPJ; mandar passaporte
-      //     como CPF causaria recusa por algoritmo de validação.
+      // Cielo exige `Customer.Name` em TODOS os métodos — inclui PIX (erro 105
+      // "Customer Name is required" quando ausente). O caller garante um Name
+      // não-vazio. `Identity` (CPF) é OPCIONAL e antifraude: participantes
+      // estrangeiros (PASSPORT) chegam sem CPF e seguem só com Name. Não passamos
+      // passaporte como Identity porque IdentityType da Cielo é estritamente
+      // CPF/CNPJ — mandar passaporte como CPF causaria recusa por validação.
       //
       // Estrutura: Name + (Identity, IdentityType opcionais) + Email
       // (Email omitido em PIX por convenção da documentação Cielo).
       const isPix = paymentMethod === PaymentMethod.PIX;
       const hasIdentity = !!customerData?.identity;
       const hasName = !!customerData?.name?.trim();
-      const shouldSendCustomer = isPix ? hasIdentity : (hasName || hasIdentity);
+      // Envia Customer sempre que houver Name OU Identity. Antes o PIX só montava
+      // Customer quando havia Identity, o que omitia o Name obrigatório quando o
+      // comprador não tinha CPF (ou quando só o nome estava disponível) → erro 105.
+      const shouldSendCustomer = hasName || hasIdentity;
 
       if (customerData && shouldSendCustomer) {
         requestBody.Customer = {

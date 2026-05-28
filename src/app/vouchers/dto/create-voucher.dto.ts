@@ -6,6 +6,7 @@ import {
   Min,
   IsEnum,
   IsArray,
+  IsBoolean,
   IsNotEmpty,
   ValidateNested,
 } from 'class-validator';
@@ -93,6 +94,15 @@ export class CreateVoucherDto {
     type: [DocumentListItemDto],
   })
   documentList?: DocumentListItemDto[];
+
+  @IsOptional()
+  @IsBoolean()
+  @ApiPropertyOptional({
+    description:
+      'Se true, o ingresso grátis do voucher cobre TAMBÉM os produtos adicionais (kits/extras) do pedido. Espelha Coupon.applyToProducts. Default: false.',
+    default: false,
+  })
+  applyToProducts?: boolean;
 }
 
 export class UpdateVoucherDto {
@@ -129,6 +139,10 @@ export class UpdateVoucherDto {
   @ValidateNested({ each: true })
   @Type(() => DocumentListItemDto)
   documentList?: DocumentListItemDto[];
+
+  @IsOptional()
+  @IsBoolean()
+  applyToProducts?: boolean;
 
   @IsOptional()
   @IsEnum(VoucherStatus)

@@ -980,10 +980,10 @@ export class RegistrationsService {
               },
             },
             coupon: {
-              select: { id: true, code: true, type: true, value: true },
+              select: { id: true, code: true, type: true, value: true, applyToProducts: true },
             },
             voucher: {
-              select: { id: true, code: true, name: true, status: true },
+              select: { id: true, code: true, name: true, status: true, applyToProducts: true },
             },
           },
         },
@@ -1115,12 +1115,17 @@ export class RegistrationsService {
           code: reg.order.coupon.code,
           type: reg.order.coupon.type,
           value: reg.order.coupon.value,
+          // Flag atual do cupom (este bloco já lê live). Para a verdade histórica
+          // congelada na compra, ver GET /orders/:id/details (snapshot + metadata).
+          applyToProducts: reg.order.coupon.applyToProducts ?? false,
         } : null,
         voucher: reg.order.voucher ? {
           id: reg.order.voucher.id,
           code: reg.order.voucher.code,
           name: reg.order.voucher.name,
           status: reg.order.voucher.status,
+          // Flag atual (live). Verdade histórica em GET /orders/:id/details.
+          applyToProducts: reg.order.voucher.applyToProducts ?? false,
         } : null,
         buyer: reg.order.user ? {
           id: reg.order.user.id,

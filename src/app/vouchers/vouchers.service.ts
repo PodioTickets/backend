@@ -64,6 +64,7 @@ export class VouchersService {
         cpfList: createVoucherDto.cpfList ? (createVoucherDto.cpfList as any) : null,
         documentList: (documentListValue as any) ?? null,
         cpfListStatus: createVoucherDto.cpfListStatus || 'DISABLED',
+        applyToProducts: createVoucherDto.applyToProducts ?? false,
         status,
       })),
     });
@@ -111,6 +112,7 @@ export class VouchersService {
       expiryDate: Date | null;
       cpfListStatus: string;
       cpfList: Prisma.JsonValue | null;
+      applyToProducts: boolean;
       totalCount: number;
       activeCount: number;
       usedCount: number;
@@ -135,6 +137,7 @@ export class VouchersService {
           (array_agg("expiryDate" ORDER BY "createdAt" ASC))[1]   AS "expiryDate",
           (array_agg("cpfListStatus" ORDER BY "createdAt" ASC))[1]::text AS "cpfListStatus",
           (array_agg("cpfList" ORDER BY "createdAt" ASC))[1]      AS "cpfList",
+          bool_or("applyToProducts")                              AS "applyToProducts",
           COUNT(*)::int                                           AS "totalCount",
           COUNT(*) FILTER (WHERE status::text = 'ACTIVE')::int    AS "activeCount",
           COUNT(*) FILTER (WHERE status::text = 'USED')::int      AS "usedCount",
@@ -167,6 +170,7 @@ export class VouchersService {
       expiryDate: r.expiryDate,
       cpfListStatus: r.cpfListStatus,
       cpfList: r.cpfList,
+      applyToProducts: r.applyToProducts ?? false,
       totalCount: r.totalCount,
       activeCount: r.activeCount,
       usedCount: r.usedCount,
@@ -456,6 +460,8 @@ export class VouchersService {
     }
     if (updateVoucherDto.appliesTo !== undefined) groupSyncData.appliesTo = updateData.appliesTo;
     if (updateVoucherDto.expiryDate !== undefined) groupSyncData.expiryDate = updateData.expiryDate;
+    // applyToProducts é atributo do lote inteiro (como appliesTo) — propaga p/ todo o grupo.
+    if (updateVoucherDto.applyToProducts !== undefined) groupSyncData.applyToProducts = updateVoucherDto.applyToProducts;
 
     if (Object.keys(groupSyncData).length > 0) {
       await prismaWrite.voucher.updateMany({
