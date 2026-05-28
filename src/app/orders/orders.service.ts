@@ -2907,8 +2907,11 @@ export class OrdersService {
             participantCount: regs.length,
           },
           registrations: regs.map((reg: any, idx: number) => {
-            const isBuyerReg = buyerUserIdForPdf && reg.user?.id === buyerUserIdForPdf && !reg.participantName;
-            const user = isBuyerReg ? (reg.user ?? {}) : {};
+            // Sempre usa reg.user como fallback dos dados do participante.
+            // Convidado COM conta tem participantEmail/Cpf null mas os dados
+            // ficam em reg.user — zerar o user (gate isBuyerReg antigo) escondia
+            // a secao "Informacoes do participante" no PDF do terceiro.
+            const user = reg.user ?? {};
             const ticket = reg.tickets?.[0]?.ticket;
             const catName = ticket?.category?.name ?? '';
             const ticketName = ticket?.name ?? '';

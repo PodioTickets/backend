@@ -207,8 +207,9 @@ export class PaymentsWebhookService {
             participantCount: regs.length,
           },
           registrations: regs.map((reg: any, idx: number) => {
-            const isBuyerReg = buyerUserIdForPdf && reg.user?.id === buyerUserIdForPdf && !reg.participantName;
-            const user = isBuyerReg ? (reg.user ?? {}) : {};
+            // Sempre usa reg.user como fallback — convidado COM conta tem
+            // participantX null mas dados em reg.user; zerar escondia a secao.
+            const user = reg.user ?? {};
             const ticket = reg.tickets?.[0]?.ticket;
             const catName = ticket?.category?.name ?? '';
             const ticketName = ticket?.name ?? '';
@@ -482,8 +483,9 @@ export class PaymentsWebhookService {
             participantCount: regs.length,
           },
           registrations: regs.map((reg: any, idx: number) => {
-            const isBuyerReg = buyerUserIdForEmail && reg.user?.id === buyerUserIdForEmail && !reg.participantName;
-            const user = isBuyerReg ? (reg.user ?? {}) : {};
+            // Sempre usa reg.user como fallback — convidado COM conta tem
+            // participantX null mas dados em reg.user; zerar escondia a secao.
+            const user = reg.user ?? {};
             const ticket = reg.tickets?.[0]?.ticket;
             const catName = ticket?.category?.name ?? '';
             const ticketName = ticket?.name ?? '';
