@@ -38,12 +38,13 @@ export class AdminOrdersController {
     description:
       'Inicia um estorno total na Cielo (PUT /v2/sales/{paymentId}/void) e propaga os ' +
       'efeitos para o sistema: marca pagamento como REFUNDED (refundType=REFUND), ' +
-      'cancela o pedido, cancela inscrições associadas, decrementa uso do cupom e ' +
-      'libera o voucher para reuso. Audit log em OrganizationAuditLog.\n\n' +
+      'cancela o pedido, cancela inscrições associadas, reverte uso do cupom/voucher ' +
+      '(fonte única OrderFinalizationService.reverseSaleSideEffects) e cobra a taxa de ' +
+      'refund (2%) do organizador. Audit log em OrganizationAuditLog.\n\n' +
       'Métodos suportados: PIX, CREDIT_CARD, DEBIT_CARD. BOLETO e CRYPTO retornam 422.\n\n' +
-      'Por padrão, retorna 409 se o saldo do organizador no evento não cobrir o valor ' +
-      'do estorno — passe `force: true` para sobrescrever (uso típico: chargeback ' +
-      'inevitável, mesmo com saldo organizador insuficiente).',
+      'O estorno NÃO é bloqueado por saldo do organizador (o saldo pode ficar negativo, ' +
+      'e isso é esperado quando o valor já foi sacado). `force` é aceito por ' +
+      'compatibilidade mas não altera o comportamento.',
   })
   @ApiParam({ name: 'id', type: String, description: 'UUID do pedido a estornar' })
   @ApiBody({ type: RefundOrderDto })
@@ -52,8 +53,7 @@ export class AdminOrdersController {
   @ApiResponse({ status: 404, description: 'Pedido não encontrado' })
   @ApiResponse({
     status: 409,
-    description:
-      'Pedido não está PAID, pagamento já estornado, ou saldo do organizador insuficiente (use force=true)',
+    description: 'Pedido não está PAID ou pagamento já estornado',
   })
   @ApiResponse({ status: 422, description: 'Método de pagamento não suporta estorno via API' })
   refundOrder(

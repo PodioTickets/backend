@@ -125,33 +125,20 @@ export class PaymentsWebhookService {
       });
 
       if (paymentStatus === PaymentStatus.PAID) {
-        // Promove Order para PAID de forma atômica e idempotente.
-        // Se já estiver PAID (entrega dupla de webhook), o UPDATE retorna 0 linhas
-        // e os efeitos colaterais abaixo não duplicam.
-        const orderRows: any[] = await prisma.$queryRaw`
-          UPDATE "Order"
-          SET "status" = 'PAID'::"OrderStatus", "updatedAt" = NOW()
-          WHERE id = ${fresh.orderId}::uuid AND "status" = 'PENDING'::"OrderStatus"
-          RETURNING id
-        `;
-
-        if (!orderRows?.length) {
-          this.logger.warn(`Webhook: Order ${fresh.orderId} not in PENDING when confirming PAID — skipping side effects`);
+        // Fonte ÚNICA: promove Order PENDING→PAID (atômico/idempotente) + finalize
+        // compartilhado (deleta placeholders + cria inscrições completas + aplica
+        // cupom/voucher). Se já não estava PENDING (entrega dupla), finalized=false.
+        const { finalized } = await this.orderFinalization.confirmAndFinalizeOrder(prisma, fresh.orderId);
+        if (!finalized) {
+          this.logger.warn(`Webhook: Order ${fresh.orderId} não estava PENDING ao confirmar PAID — efeitos ignorados`);
           return;
         }
-
-        // Finalize compartilhado: deleta placeholders + cria inscrições definitivas
-        // (participante/produtos/qrCode/ticketSnapshot/receiptSnapshot) e aplica uso de
-        // cupom/voucher. Mesma fonte de verdade do pagamento por cartão — antes o PIX só
-        // marcava status=CONFIRMED, deixando as inscrições vazias.
-        await this.orderFinalization.finalizePaidOrder(prisma, fresh.orderId);
-
         // Captura orderId para envio de email fora da transação
         confirmedOrderId = fresh.orderId;
       }
 
       this.logger.log(`Payment ${fresh.id} updated via webhook to status ${paymentStatus}`);
-    });
+    }, { timeout: 30000, maxWait: 10000 });
 
     // Notify connected frontend clients immediately
     if (confirmedOrderId) {
@@ -409,25 +396,16 @@ export class PaymentsWebhookService {
         return;
       }
 
-      const orderRows: any[] = await prisma.$queryRaw`
-        UPDATE "Order"
-        SET "status" = 'PAID'::"OrderStatus", "updatedAt" = NOW()
-        WHERE id = ${orderId}::uuid AND "status" = 'PENDING'::"OrderStatus"
-        RETURNING id
-      `;
-
-      if (!orderRows?.length) {
-        this.logger.warn(`3DS callback: order ${orderId} was not PENDING when confirming`);
+      // Fonte ÚNICA: promove Order PENDING→PAID + finalize compartilhado.
+      const { finalized } = await this.orderFinalization.confirmAndFinalizeOrder(prisma, orderId);
+      if (!finalized) {
+        this.logger.warn(`3DS callback: order ${orderId} não estava PENDING ao confirmar`);
         return;
       }
 
-      // Finalize compartilhado (mesma fonte do cartão/PIX): cria inscrições definitivas
-      // e aplica uso de cupom/voucher. Antes só marcava status=CONFIRMED (inscrições vazias).
-      await this.orderFinalization.finalizePaidOrder(prisma, orderId);
-
       confirmedOrderId = orderId;
       this.logger.log(`3DS callback confirmed order ${orderId}`);
-    });
+    }, { timeout: 30000, maxWait: 10000 });
 
     if (confirmedOrderId) {
       this.gateway.emitPaymentConfirmed(confirmedOrderId);

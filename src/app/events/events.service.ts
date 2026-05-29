@@ -47,6 +47,7 @@ import { TicketCategoriesService } from '../ticket-categories/ticket-categories.
 import { EmailService } from '../../common/services/email.service';
 import { RepasseService } from '../repasse/repasse.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
+import { isChargeback } from '../../common/utils/refund.util';
 
 @Injectable()
 export class EventsService {
@@ -2599,16 +2600,14 @@ export class EventsService {
     // Convenção do projeto (alinhada com queryRegistrationIdsPageForRefundedMetadataFilter):
     //   - CHARGEBACK: metadata.refundType === 'CHARGEBACK'
     //   - REFUND:     metadata.refundType ∈ {'REFUND', null, '', undefined}
-    const isChargeback = (o: any) =>
-      (o.payment?.metadata as any)?.refundType === 'CHARGEBACK';
-
+    // Classificação ÚNICA (common/utils/refund.util): chargeback = refundType==='CHARGEBACK'.
     let totalRefunded = 0;
     let refundedCount = 0;
     let totalChargebacks = 0;
     let chargebackCount = 0;
     for (const o of refundedOrders) {
       const amount = o.finalAmount ?? 0;
-      if (isChargeback(o)) {
+      if (isChargeback(o.payment?.metadata)) {
         totalChargebacks += amount;
         chargebackCount += 1;
       } else {
@@ -4355,7 +4354,8 @@ export class EventsService {
             email: reg.user.email,
             avatarUrl: reg.user.avatarUrl,
           } : null,
-          reason: metadata?.reason || 'Estorno solicitado pelo cliente',
+          // O estorno grava `refundReason`; mantém fallback p/ `reason` (legados).
+          reason: metadata?.refundReason || metadata?.reason || 'Estorno solicitado pelo cliente',
         };
       });
 
@@ -4371,7 +4371,16 @@ export class EventsService {
       },
     });
 
-    const totalAmount = refunded.reduce((sum, r) => sum + r.amount, 0);
+    // Soma por ORDER única — `finalAmount` se repete por inscrição no mesmo pedido;
+    // somar por registration triplicava o total em pedidos multi-ingresso.
+    const seenOrders = new Set<string>();
+    let totalAmount = 0;
+    for (const r of refunded) {
+      if (r.orderId && !seenOrders.has(r.orderId)) {
+        seenOrders.add(r.orderId);
+        totalAmount += r.amount;
+      }
+    }
 
     return {
       message: 'Refunded payments fetched successfully',
@@ -4481,7 +4490,7 @@ export class EventsService {
             email: reg.user.email,
             avatarUrl: reg.user.avatarUrl,
           } : null,
-          reason: metadata?.reason || 'Chargeback solicitado pelo banco',
+          reason: metadata?.refundReason || metadata?.reason || 'Chargeback solicitado pelo banco',
         };
       });
 
@@ -4510,7 +4519,15 @@ export class EventsService {
       return metadata?.refundType === 'CHARGEBACK';
     }).length;
 
-    const totalAmount = chargebacks.reduce((sum, c) => sum + c.amount, 0);
+    // Soma por ORDER única (evita inflar o total em pedidos multi-ingresso).
+    const seenOrders = new Set<string>();
+    let totalAmount = 0;
+    for (const c of chargebacks) {
+      if (c.orderId && !seenOrders.has(c.orderId)) {
+        seenOrders.add(c.orderId);
+        totalAmount += c.amount;
+      }
+    }
 
     return {
       message: 'Chargebacks fetched successfully',

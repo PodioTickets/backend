@@ -8,6 +8,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { OrganizerMemberAccessService } from '../organizations/organizer-member-access.service';
 import { EmailService } from '../../common/services/email.service';
 import { PaymentMethod, PaymentStatus, WithdrawalStatus } from '@prisma/client';
+import { computeRefundImpact } from '../../common/utils/refund.util';
 
 // Prazo (dias) até que os 90% sejam liberados para saldo disponível
 const RETENTION_DAYS: Record<string, number> = {
@@ -17,6 +18,9 @@ const RETENTION_DAYS: Record<string, number> = {
   [PaymentMethod.BOLETO]: 3,
   [PaymentMethod.CRYPTO]: 30,
 };
+
+// REFUND_FEE_RATE e computeRefundImpact agora vivem em common/utils/refund.util.ts
+// (fonte única compartilhada com EventsService e PaymentsRefundService).
 
 function addDays(date: Date, days: number): Date {
   const d = new Date(date);
@@ -258,18 +262,19 @@ export class RepasseService {
    *                         migra para saldoDisponivel quando vence.
    *   saldoDisponivel     — montante já liberado; pode ser negativo em caso de estorno
    *
-   * Dedução por estorno (à vista, evento auditado):
-   *   - 100% do orgNet sai de saldoDisponivel (pode ficar negativo).
-   *
-   * Dedução por estorno (à vista, evento NÃO auditado):
-   *   - 10% (retained) sai primeiro de aguardandoLiberacao, depois de valorRetido.
-   *     Ambos têm clamp em 0 — aguardando/retido NUNCA fica negativo.
-   *   - O que não couber no 10% (déficit) é somado ao 90% e sai de saldoDisponivel.
-   *   - 90% (+ déficit) sai de saldoDisponivel (pode ficar negativo).
-   *
-   * Dedução por estorno (parcelado):
-   *   - Deduz de parceladosAReceber primeiro (clamp em 0).
-   *   - Restante sai de saldoDisponivel (pode ficar negativo).
+   * Estorno (todos os métodos — à vista, PIX, débito, parcelado):
+   *   - O orgNet do pedido NÃO é subtraído aqui. Pedidos com payment REFUNDED não
+   *     entram em `paidOrders`, então a contribuição positiva deles já sai do bucket
+   *     de origem (aguardando / retido / saldo / parcelas). Subtrair de novo causaria
+   *     dedução dupla (o organizador apareceria devendo valor que nunca recebeu).
+   *   - Valor ainda preso (aguardando/parcelas): impacto ZERO no saldoDisponivel — o
+   *     dinheiro apenas some do bucket onde estava, exatamente como manda a regra
+   *     ("se ainda não recebeu, tira de aguardando liberação").
+   *   - Valor já SACADO: o saque permanece em `totalWithdrawn` enquanto a receita
+   *     correspondente some → `saldoParaSaque` fica negativo naturalmente
+   *     ("se já sacou e não tem nada em aguardando, o saldo disponível fica negativo").
+   *   - Única dedução explícita: TAXA DE REFUND (`REFUND_FEE_RATE`) sobre o subtotal
+   *     (finalAmount − serviceFee), sempre do saldoDisponivel (pode ficar negativo).
    *
    * @param committedWithdrawals — COMPLETED + PENDING withdrawals (both reduce saldoParaSaque)
    */
@@ -335,44 +340,15 @@ export class RepasseService {
     }
 
     // ── Deduções por estorno ────────────────────────────────────────────────
+    // Ver o JSDoc do método: o orgNet já foi revertido por exclusão dos REFUNDED de
+    // `paidOrders`, e o negativo "por já ter sacado" vem de `totalWithdrawn`. A única
+    // dedução explícita é a taxa de refund fixa sobre o subtotal — sai do saldo
+    // disponível em qualquer método/auditoria (pode ficar negativo).
     for (const order of refundedOrders) {
-      const payment = order.payment;
-      if (!payment) continue;
-
-      // Same fee deduction as positive side — spec: "pegamos o valor que o organizador iria receber"
-      const refundedGross = order.finalAmount ?? 0;
-      const refundedParticipantFee = order.serviceFee ?? 0;
-      const refundedOrganizerBase = Math.max(0, refundedGross - refundedParticipantFee);
-      const orgNet = Math.round(refundedOrganizerBase * (1 - organizerFeePercent / 100));
-      const metadata = payment.metadata as any;
-
-      if (isInstallment(metadata)) {
-        // Parcelado: deduz de parceladosAReceber primeiro (clamp em 0), restante de saldo.
-        const fromParcelados = Math.min(orgNet, Math.max(0, parceladosAReceber));
-        parceladosAReceber -= fromParcelados;
-        saldoDisponivel -= orgNet - fromParcelados;
-      } else if (isAudited) {
-        // Auditado: 10% já foi liberado — não existe mais bucket de retenção.
-        // 100% do orgNet sai direto do saldo (pode ficar negativo).
-        saldoDisponivel -= orgNet;
-      } else {
-        // Não-auditado: tira 10% de aguardando/retido (clamp em 0) + 90% do saldo.
-        const retained = Math.round(orgNet * retentionRate); // 10%
-        const toRelease = orgNet - retained;                  // 90%
-
-        // 10% sai primeiro de aguardandoLiberacao, depois de valorRetido. Ambos clamp em 0.
-        const fromAL = Math.min(retained, Math.max(0, aguardandoLiberacao));
-        aguardandoLiberacao -= fromAL;
-        const remaining10 = retained - fromAL;
-        const fromVR = Math.min(remaining10, Math.max(0, valorRetido));
-        valorRetido -= fromVR;
-        const deficit10 = remaining10 - fromVR;
-
-        // 90% + déficit do 10% sai do saldo (pode ficar negativo).
-        // Diferente da regra antiga: NÃO há recovery do aguardando/retido —
-        // se saldo ficou negativo, ele permanece negativo até nova receita entrar.
-        saldoDisponivel -= toRelease + deficit10;
-      }
+      if (!order.payment) continue;
+      // computeRefundImpact retorna refundFee = 0 para CHARGEBACK (reversão involuntária),
+      // e o valor congelado (ou 2% do subtotal) para estorno proativo. Fonte única.
+      saldoDisponivel -= computeRefundImpact(order, organizerFeePercent).refundFee;
     }
 
     // Use netAmount so both old records (amount=gross, netAmount=net) and new records
@@ -473,6 +449,16 @@ export class RepasseService {
       event.organizerFeePercent,
     );
 
+    // Transparência do estorno para o organizador: total revertido (venda perdida)
+    // e total de taxa de refund debitada do saldo. Soma per-order (bate com o saldo).
+    let refundOrgNetReverted = 0;
+    let refundFeesTotal = 0;
+    for (const o of refundedOrders) {
+      const impact = computeRefundImpact(o, event.organizerFeePercent);
+      refundOrgNetReverted += impact.organizerNetReversed;
+      refundFeesTotal += impact.refundFee;
+    }
+
     return {
       message: 'Repasse summary fetched successfully',
       data: {
@@ -480,6 +466,8 @@ export class RepasseService {
           ...breakdown,
           pendingWithdrawalsAmount,
           refundedOrders: refundedOrders.length,
+          refundOrgNetReverted,
+          refundFeesTotal,
           isAudited: !!audit,
           auditedAt: audit?.createdAt ?? null,
           retentionReleased: audit?.retentionReleased ?? 0,
@@ -853,25 +841,26 @@ export class RepasseService {
     await this.assertAdminOrOwner(adminUserId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
-    const withdrawal = await prismaWrite.eventWithdrawal.findUnique({
-      where: { id: withdrawalId },
-    });
 
-    if (!withdrawal || withdrawal.eventId !== eventId) {
-      throw new NotFoundException('Saque não encontrado');
-    }
-    if (withdrawal.status !== WithdrawalStatus.PENDING) {
+    // Transição ATÔMICA: só completa se ainda PENDING. Evita TOCTOU (duplo-clique / dois
+    // admins) que disparava dois e-mails e dupla sinalização de pagamento.
+    const res = await prismaWrite.eventWithdrawal.updateMany({
+      where: { id: withdrawalId, eventId, status: WithdrawalStatus.PENDING },
+      data: { status: WithdrawalStatus.COMPLETED, completedAt: new Date() },
+    });
+    if (res.count === 0) {
+      const existing = await prismaWrite.eventWithdrawal.findUnique({ where: { id: withdrawalId } });
+      if (!existing || existing.eventId !== eventId) {
+        throw new NotFoundException('Saque não encontrado');
+      }
       throw new BadRequestException('Saque não está com status PENDENTE');
     }
 
-    const updated = await prismaWrite.eventWithdrawal.update({
-      where: { id: withdrawalId },
-      data: { status: WithdrawalStatus.COMPLETED, completedAt: new Date() },
-    });
+    const updated = await prismaWrite.eventWithdrawal.findUnique({ where: { id: withdrawalId } });
 
-    // Fire-and-forget: send transfer confirmed email to organizer
+    // Fire-and-forget: send transfer confirmed email to organizer (só roda quem venceu a transição)
     this.loadEventWithOrg(eventId, prismaWrite).then((evtOrg) => {
-      if (!evtOrg?.organization?.email) return;
+      if (!evtOrg?.organization?.email || !updated) return;
       const org = evtOrg.organization;
       const { pixKey, bankAccount } = this.resolvePixDestination(
         (updated as any).pixKeySnapshot,
@@ -884,7 +873,7 @@ export class RepasseService {
         orgName: org.name ?? org.email,
         bankAccount,
         pixKey,
-        requestDate: this.formatDateBR(withdrawal.createdAt),
+        requestDate: this.formatDateBR(updated.createdAt),
         sentDate: this.formatDateTimeBR(updated.completedAt ?? new Date()),
         approvedDate: this.formatDateTimeBR(updated.completedAt ?? new Date()),
       });
@@ -897,21 +886,21 @@ export class RepasseService {
     await this.assertAdminOrOwner(adminUserId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
-    const withdrawal = await prismaWrite.eventWithdrawal.findUnique({
-      where: { id: withdrawalId },
-    });
 
-    if (!withdrawal || withdrawal.eventId !== eventId) {
-      throw new NotFoundException('Saque não encontrado');
-    }
-    if (withdrawal.status !== WithdrawalStatus.PENDING) {
+    // Transição ATÔMICA: só cancela se ainda PENDING (mesma proteção do complete).
+    const res = await prismaWrite.eventWithdrawal.updateMany({
+      where: { id: withdrawalId, eventId, status: WithdrawalStatus.PENDING },
+      data: { status: WithdrawalStatus.CANCELLED },
+    });
+    if (res.count === 0) {
+      const existing = await prismaWrite.eventWithdrawal.findUnique({ where: { id: withdrawalId } });
+      if (!existing || existing.eventId !== eventId) {
+        throw new NotFoundException('Saque não encontrado');
+      }
       throw new BadRequestException('Somente saques pendentes podem ser cancelados');
     }
 
-    const updated = await prismaWrite.eventWithdrawal.update({
-      where: { id: withdrawalId },
-      data: { status: WithdrawalStatus.CANCELLED },
-    });
+    const updated = await prismaWrite.eventWithdrawal.findUnique({ where: { id: withdrawalId } });
 
     return { message: 'Withdrawal cancelled', data: { withdrawal: updated } };
   }
@@ -921,10 +910,12 @@ export class RepasseService {
 
     const prismaRead = this.prisma.getReadClient();
     const skip = (page - 1) * limit;
+    const where = { eventId, payment: { status: PaymentStatus.REFUNDED } };
 
-    const [orders, total] = await Promise.all([
+    const [event, orders, total, allRefunded] = await Promise.all([
+      this.loadEventConfig(eventId, prismaRead),
       prismaRead.order.findMany({
-        where: { eventId, payment: { status: PaymentStatus.REFUNDED } },
+        where,
         include: {
           payment: true,
           user: {
@@ -938,26 +929,54 @@ export class RepasseService {
         skip,
         take: limit,
       }),
-      prismaRead.order.count({
-        where: { eventId, payment: { status: PaymentStatus.REFUNDED } },
+      prismaRead.order.count({ where }),
+      // Todos os estornos do evento (select leve) p/ totais EXATOS via computeRefundImpact
+      // — chargeback-aware (fee=0) e batendo com getSummary. Estornos são raros vs. vendas.
+      prismaRead.order.findMany({
+        where,
+        select: { finalAmount: true, serviceFee: true, payment: { select: { metadata: true } } },
       }),
     ]);
 
-    const totalAmount = orders.reduce((s: number, o: any) => s + (o.finalAmount ?? 0), 0);
+    const items = orders.map((o: any) => {
+      const impact = computeRefundImpact(o, event.organizerFeePercent);
+      const meta = (o.payment?.metadata ?? {}) as any;
+      return {
+        orderId: o.id,
+        paymentId: o.payment?.id,
+        amount: o.finalAmount, // back-compat (== refundedToBuyer)
+        refundedToBuyer: o.finalAmount, // devolvido integralmente ao comprador
+        serviceFee: o.serviceFee ?? 0,
+        organizerNetReversed: impact.organizerNetReversed, // o organizador deixa de receber
+        refundFee: impact.refundFee, // 2% debitado do saldo disponível
+        reason: meta.refundReason ?? null,
+        paymentMethod: o.payment?.method,
+        purchaseDate: o.createdAt,
+        refundDate: o.payment?.updatedAt ?? o.payment?.paymentDate,
+        buyer: o.user,
+      };
+    });
+
+    // Totais do evento somados POR PEDIDO via computeRefundImpact (chargeback-aware) —
+    // batem exatamente com a soma dos items e com o refundFeesTotal do getSummary.
+    let totalRefundedToBuyer = 0;
+    let totalOrganizerNetReversed = 0;
+    let totalRefundFees = 0;
+    for (const o of allRefunded) {
+      totalRefundedToBuyer += o.finalAmount ?? 0;
+      const impact = computeRefundImpact(o, event.organizerFeePercent);
+      totalOrganizerNetReversed += impact.organizerNetReversed;
+      totalRefundFees += impact.refundFee;
+    }
 
     return {
       message: 'Refunded orders fetched successfully',
       data: {
-        items: orders.map((o: any) => ({
-          orderId: o.id,
-          paymentId: o.payment?.id,
-          amount: o.finalAmount,
-          paymentMethod: o.payment?.method,
-          purchaseDate: o.createdAt,
-          refundDate: o.payment?.updatedAt ?? o.payment?.paymentDate,
-          buyer: o.user,
-        })),
-        totalAmount,
+        items,
+        totalAmount: totalRefundedToBuyer, // back-compat (agora é do evento, não só da página)
+        totalRefundedToBuyer,
+        totalOrganizerNetReversed,
+        totalRefundFees,
         pagination: {
           page,
           limit,

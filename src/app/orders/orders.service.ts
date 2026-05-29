@@ -2816,7 +2816,7 @@ export class OrdersService {
       });
 
       return await this.orderFinalization.finalizePaidOrder(tx, orderId);
-    });
+    }, { timeout: 30000, maxWait: 10000 });
 
     const body: Record<string, any> = {
       orderId,

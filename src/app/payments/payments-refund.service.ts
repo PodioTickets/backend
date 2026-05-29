@@ -11,11 +11,11 @@ import {
   PaymentMethod,
   PaymentStatus,
   RegistrationStatus,
-  VoucherStatus,
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from './cielo.service';
-import { RepasseService } from '../repasse/repasse.service';
+import { OrderFinalizationService } from './order-finalization.service';
+import { REFUND_FEE_RATE } from '../../common/utils/refund.util';
 
 /**
  * Estorna pagamentos via Cielo a partir de uma ação administrativa interna.
@@ -44,7 +44,7 @@ export class PaymentsRefundService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cieloService: CieloService,
-    private readonly repasseService: RepasseService,
+    private readonly orderFinalization: OrderFinalizationService,
   ) {}
 
   /**
@@ -132,30 +132,21 @@ export class PaymentsRefundService {
       });
     }
 
-    // ── 3. Guard de saldo: estorno não pode jogar o saldo do organizador no negativo
-    //       sem confirmação explícita (force=true). Calcula via breakdown atualizado.
+    // ── 3. Valores do estorno (informativos para o audit log) ────────────────
+    // Guard de saldo REMOVIDO de propósito: a dedução real do estorno não é mais o
+    // orgNet (ele é revertido implicitamente no breakdown ao sair de `paidOrders`),
+    // então bloquear por "saldoParaSaque < orgNet" barrava estornos legítimos — ex.:
+    // pedido ainda em aguardando liberação, que sequer mexe no saldo disponível. O
+    // saldo pode ficar negativo quando o organizador já sacou o valor, e isso é o
+    // comportamento esperado. `force` segue aceito por compatibilidade de contrato,
+    // mas não há mais gate de saldo a sobrescrever.
     const refundOrgNet = this.computeOrganizerNet(
       order.finalAmount,
       order.serviceFee,
       order.event.organizerFeePercent,
     );
-
-    if (!force) {
-      const { breakdown } = await this.repasseService.computeBreakdownForEvent(order.event.id);
-      if (breakdown.saldoParaSaque < refundOrgNet) {
-        throw new ConflictException({
-          code: 'INSUFFICIENT_ORGANIZER_BALANCE',
-          message:
-            `Saldo disponível do organizador (R$ ${(breakdown.saldoParaSaque / 100).toFixed(2)}) ` +
-            `não cobre o valor a ser deduzido por este estorno (R$ ${(refundOrgNet / 100).toFixed(2)}). ` +
-            `Use force=true para prosseguir mesmo assim.`,
-          data: {
-            saldoParaSaque: breakdown.saldoParaSaque,
-            refundOrgNet,
-          },
-        });
-      }
-    }
+    const refundSubtotal = Math.max(0, order.finalAmount - order.serviceFee);
+    const refundFee = Math.round(refundSubtotal * REFUND_FEE_RATE);
 
     // ── 4. Chama a Cielo ─────────────────────────────────────────────────────
     // V1 = estorno total: não passamos amount, a Cielo estorna o valor cheio.
@@ -198,6 +189,11 @@ export class PaymentsRefundService {
             refundReason: reason,
             refundedByUserId: adminUserId,
             refundedAt: refundedAt.toISOString(),
+            // Congela o impacto p/ o organizador no momento do estorno (verdade
+            // histórica — organizerFeePercent pode mudar depois). Lido por
+            // RepasseService.getRefunded/getSummary.
+            organizerNetReversed: refundOrgNet,
+            refundFee,
             ...(isPending && { refundPendingConfirmation: true }),
           } as any,
           updatedAt: refundedAt,
@@ -232,31 +228,11 @@ export class PaymentsRefundService {
         data: { status: RegistrationStatus.CANCELLED, updatedAt: refundedAt },
       });
 
-      // 5d. Cupom: decrementa usageCount (clamp em 0 para defender contra inconsistência).
-      //     updateMany + filtro garante atomicidade ao nível do registro.
-      if (order.coupon?.id) {
-        await tx.$executeRaw`
-          UPDATE "Coupon"
-          SET "usageCount" = GREATEST(0, "usageCount" - 1),
-              "updatedAt" = ${refundedAt}
-          WHERE id = ${order.coupon.id}::uuid
-        `;
-      }
-
-      // 5e. Voucher: libera para reuso (USED → ACTIVE) se este pedido foi quem o consumiu.
-      //     updateMany com guard de status evita liberar um voucher que já foi reusado por
-      //     outra order após uma race condition improvável.
-      if (order.voucher?.id && order.voucher.status === VoucherStatus.USED) {
-        await tx.voucher.updateMany({
-          where: { id: order.voucher.id, status: VoucherStatus.USED },
-          data: {
-            status: VoucherStatus.ACTIVE,
-            usedAt: null,
-            usedBy: null,
-            updatedAt: refundedAt,
-          },
-        });
-      }
+      // 5d+5e. Reverte efeitos de venda (cupom/voucher) — FONTE ÚNICA compartilhada com
+      //        o chargeback (`OrderFinalizationService.reverseSaleSideEffects`):
+      //        decrementa o cupom espelhando o incremento do finalize (não −1 fixo) e
+      //        libera o voucher SOMENTE se foi este usuário quem o consumiu (guard usedBy).
+      await this.orderFinalization.reverseSaleSideEffects(tx, order.id);
 
       // 5f. Audit log para a organização do evento. Não bloqueante: rodamos dentro da tx
       //     para garantir que o registro só existe se o estorno também foi commitado.
@@ -274,7 +250,8 @@ export class PaymentsRefundService {
             method: payment.method,
             amount: order.finalAmount,
             serviceFee: order.serviceFee,
-            organizerNetDeducted: refundOrgNet,
+            organizerNetReversed: refundOrgNet,
+            refundFee,
             cieloPaymentId,
             cieloStatus: cieloStatusStr,
             reason,

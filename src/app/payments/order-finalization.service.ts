@@ -33,6 +33,84 @@ export class OrderFinalizationService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
+   * Promove o Order PENDING→PAID de forma ATÔMICA e, se foi este caller quem venceu a
+   * transição, finaliza (cria inscrições + aplica cupom/voucher). FONTE ÚNICA usada por
+   * webhook (PIX), 3DS e polling — antes cada caminho duplicava esse trecho (e o polling
+   * nem chamava o finalize, deixando inscrições vazias e o Order preso em PENDING).
+   *
+   * @returns `{ finalized }` — true se ESTE caller promoveu+finalizou; false se o pedido
+   *          já não estava PENDING (outro caminho/entrega dupla já finalizou) → idempotente.
+   */
+  async confirmAndFinalizeOrder(
+    tx: any,
+    orderId: string,
+  ): Promise<{ finalized: boolean; registrations: any[] }> {
+    const rows: any[] = await tx.$queryRaw`
+      UPDATE "Order"
+      SET "status" = 'PAID'::"OrderStatus", "updatedAt" = NOW()
+      WHERE id = ${orderId}::uuid AND "status" = 'PENDING'::"OrderStatus"
+      RETURNING id
+    `;
+    if (!rows?.length) {
+      this.logger.warn(`confirmAndFinalizeOrder: order ${orderId} não estava PENDING — finalize ignorado (idempotência)`);
+      return { finalized: false, registrations: [] };
+    }
+    const registrations = await this.finalizePaidOrder(tx, orderId);
+    return { finalized: true, registrations };
+  }
+
+  /**
+   * Reverte os efeitos colaterais de venda quando um pedido é estornado OU sofre
+   * chargeback. FONTE ÚNICA usada por `PaymentsRefundService` (estorno proativo) e
+   * `PaymentsChargebackService` (reversão pelo emissor) — antes só o refund revertia,
+   * deixando o chargeback com cupom/voucher consumidos indevidamente.
+   *
+   * - Cupom: decrementa o MESMO que o finalize incrementou — QUANTITY: −1; demais
+   *   (DISCOUNT/AGE): −ticketCount (espelha `delta = min(ticketCount, remaining)` do
+   *   finalize; o `GREATEST(0,...)` protege o raro caso de cupom capado na compra).
+   * - Voucher: libera USED→ACTIVE somente se foi ESTE usuário quem o consumiu
+   *   (`usedBy`) — evita "roubar" de volta um voucher consumido por outra order.
+   *
+   * Deve rodar dentro de uma transação (`tx`). Idempotente o suficiente: chamado após o
+   * caller vencer a transição de status do payment (guard de count==0 no caller).
+   */
+  async reverseSaleSideEffects(tx: any, orderId: string): Promise<void> {
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+      select: {
+        userId: true,
+        couponId: true,
+        voucherId: true,
+        reservedTickets: true,
+        coupon: { select: { couponType: true } },
+        voucher: { select: { status: true } },
+      },
+    });
+    if (!order) return;
+
+    if (order.couponId) {
+      const ticketCount = ((order.reservedTickets as any[]) ?? []).reduce(
+        (sum: number, rt: any) => sum + (rt.quantity ?? 1),
+        0,
+      );
+      const decrement = order.coupon?.couponType === 'QUANTITY' ? 1 : Math.max(1, ticketCount);
+      await tx.$executeRaw`
+        UPDATE "Coupon"
+        SET "usageCount" = GREATEST(0, "usageCount" - ${decrement}),
+            "updatedAt" = NOW()
+        WHERE id = ${order.couponId}::uuid
+      `;
+    }
+
+    if (order.voucherId) {
+      await tx.voucher.updateMany({
+        where: { id: order.voucherId, status: 'USED', usedBy: order.userId },
+        data: { status: 'ACTIVE', usedAt: null, usedBy: null, updatedAt: new Date() },
+      });
+    }
+  }
+
+  /**
    * Cria as inscrições definitivas do pedido e aplica o uso de cupom/voucher.
    * @param tx client da transação ativa (write).
    * @param orderId pedido já promovido a PAID pelo caller.

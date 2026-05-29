@@ -11,10 +11,9 @@ import { PaymentGateway } from './payment.gateway';
 import { ConfigModule } from '@nestjs/config';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
-import { RepasseModule } from '../repasse/repasse.module';
 
 @Module({
-  imports: [PrismaModule, ConfigModule, RepasseModule],
+  imports: [PrismaModule, ConfigModule],
   controllers: [PaymentsController],
   providers: [
     PaymentsService,

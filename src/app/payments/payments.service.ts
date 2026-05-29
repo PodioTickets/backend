@@ -5,6 +5,7 @@ import { CieloService } from './cielo.service';
 import { PaymentGateway } from './payment.gateway';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
+import { OrderFinalizationService } from './order-finalization.service';
 import {
   PAYMENT_DETAILS_STANDARD_INCLUDE,
   TICKET_CATEGORY_DETAIL_INCLUDE,
@@ -42,6 +43,7 @@ export class PaymentsService {
     private readonly gateway: PaymentGateway,
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
+    private readonly orderFinalization: OrderFinalizationService,
   ) { }
 
   private async isAdminUser(userId: string): Promise<boolean> {
@@ -720,7 +722,12 @@ export class PaymentsService {
       return { status: newStatus, paid: false };
     }
 
-    // Confirm atomically — same idempotency pattern as the webhook handler
+    // Confirm atomically — MESMA fonte de verdade do webhook/3DS: promove o payment,
+    // promove o Order PENDING→PAID e roda o finalize compartilhado (cria inscrições
+    // completas + aplica cupom/voucher). Antes este caminho só marcava registrations
+    // como CONFIRMED (placeholders VAZIOS) e nunca promovia o Order nem finalizava —
+    // deixando o pedido PIX pago porém quebrado quando o polling vencia a corrida.
+    // timeout estendido: o finalize de pedidos grandes faz muitas escritas seriais.
     await prismaWrite.$transaction(async (tx) => {
       const updated = await tx.payment.updateMany({
         where: { id: payment.id, status: { not: PaymentStatus.PAID } },
@@ -741,48 +748,8 @@ export class PaymentsService {
         },
       });
 
-      await tx.registration.updateMany({
-        where: { orderId },
-        data: { status: 'CONFIRMED' },
-      });
-
-      // Marcar cupom/voucher como usados
-      const paidOrder = await tx.order.findUnique({
-        where: { id: orderId },
-        select: { couponId: true, voucherId: true, userId: true, reservedTickets: true },
-      });
-      if (paidOrder?.couponId) {
-        const coupon = await tx.coupon.findUnique({
-          where: { id: paidOrder.couponId },
-          select: { couponType: true, maxUsage: true, usageCount: true },
-        });
-        if (coupon) {
-          const tickets = (paidOrder.reservedTickets ?? []) as any[];
-          const ticketCount = tickets.reduce((s: number, rt: any) => s + (rt.quantity ?? 1), 0);
-          const remaining = coupon.maxUsage != null
-            ? Math.max(0, coupon.maxUsage - coupon.usageCount)
-            : ticketCount;
-          const increment = coupon.couponType === 'QUANTITY' ? 1 : Math.min(remaining, ticketCount);
-          if (increment > 0) {
-            await tx.coupon.update({
-              where: { id: paidOrder.couponId },
-              data: { usageCount: { increment } },
-            });
-          }
-        }
-      }
-      if (paidOrder?.voucherId) {
-        const voucherResult = await tx.voucher.updateMany({
-          where: { id: paidOrder.voucherId, status: 'ACTIVE' },
-          data: { status: 'USED', usedAt: new Date(), usedBy: paidOrder.userId },
-        });
-        if (voucherResult.count === 0) {
-          this.logger.error(
-            `[VOUCHER-RACE] pollPixStatus: voucher ${paidOrder.voucherId} já estava USED para order ${orderId} — possível dupla utilização, requer estorno manual`,
-          );
-        }
-      }
-    });
+      await this.orderFinalization.confirmAndFinalizeOrder(tx, orderId);
+    }, { timeout: 30000, maxWait: 10000 });
 
     // Emit WebSocket event so the frontend updates immediately
     this.gateway.emitPaymentConfirmed(orderId);
