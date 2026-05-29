@@ -9,7 +9,6 @@ import {
   IsOptional,
   Matches,
   MaxLength,
-  MinLength,
 } from 'class-validator';
 import { DocumentType } from '@prisma/client';
 
@@ -96,17 +95,11 @@ export class CreateLinkedUserDto {
   documentNumber: string;
 
   @ApiProperty({
-    description: 'Telefone do usuário (apenas números, sem formatação)',
+    description: 'Telefone do usuário',
     example: '11988888888',
   })
   @IsString()
   @IsNotEmpty()
-  @MinLength(10, {
-    message: 'Telefone deve ter no mínimo 10 dígitos',
-  })
-  @Matches(/^\d+$/, {
-    message: 'Telefone deve conter apenas números',
-  })
   phone: string;
 
   @ApiProperty({
