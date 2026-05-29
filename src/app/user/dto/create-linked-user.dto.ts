@@ -13,11 +13,15 @@ import {
 } from 'class-validator';
 import { DocumentType } from '@prisma/client';
 
+// Valores CANÔNICOS de gênero do projeto — mesmos enviados pelo front e aceitos pelos
+// demais DTOs (create-user/auth usam o enum Prisma Gender MALE/FEMALE; OTHER e
+// PREFER_NOT_TO_SAY existem no domínio e são mapeados por UserService.mapGenderFromEnum).
+// LinkedUser.gender é String?, então persiste o valor mapeado p/ pt-BR (ver service).
 export enum GenderEnum {
-  MASCULINO = 'masculino',
-  FEMININO = 'feminino',
-  OUTRO = 'outro',
-  PREFIRO_NAO_DIZER = 'prefiro-nao-dizer',
+  MALE = 'MALE',
+  FEMALE = 'FEMALE',
+  OTHER = 'OTHER',
+  PREFER_NOT_TO_SAY = 'PREFER_NOT_TO_SAY',
 }
 
 const emptyToUndefined = ({ value }: { value: any }) =>
@@ -119,7 +123,7 @@ export class CreateLinkedUserDto {
     example: 'feminino',
   })
   @IsEnum(GenderEnum, {
-    message: 'Gênero deve ser: masculino, feminino, outro ou prefiro-nao-dizer',
+    message: 'Gênero deve ser: MALE, FEMALE, OTHER ou PREFER_NOT_TO_SAY',
   })
   @IsNotEmpty()
   gender: GenderEnum;

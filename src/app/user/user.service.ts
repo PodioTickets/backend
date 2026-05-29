@@ -470,7 +470,7 @@ export class UserService {
           email: dto.email ?? null,
           phone: dto.phone,
           dateOfBirth,
-          gender: dto.gender ?? null,
+          gender: this.mapGenderFromEnum(dto.gender ?? null),
           country: dto.country ?? undefined,
         },
         create: {
@@ -484,7 +484,7 @@ export class UserService {
           documentNumberClean,
           phone: dto.phone,
           dateOfBirth,
-          gender: dto.gender ?? null,
+          gender: this.mapGenderFromEnum(dto.gender ?? null),
           country: dto.country ?? null,
           relationshipType: 'outro',
         },
@@ -503,7 +503,7 @@ export class UserService {
         documentNumberClean: null,
         phone: dto.phone,
         dateOfBirth,
-        gender: dto.gender ?? null,
+        gender: this.mapGenderFromEnum(dto.gender ?? null),
         country: dto.country ?? null,
         relationshipType: 'outro',
       },
@@ -610,7 +610,7 @@ export class UserService {
   }
 
   private mapGenderFromEnum(
-    gender: 'MALE' | 'FEMALE' | 'OTHER' | 'PREFER_NOT_TO_SAY' | null,
+    gender: string | null,
   ): string | null {
     const mapping: Record<string, string> = {
       MALE: 'masculino',
