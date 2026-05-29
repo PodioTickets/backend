@@ -4578,6 +4578,8 @@ export class EventsService {
           email: true,
           phone: true,
           documentNumber: true,
+          documentType: true,
+          country: true,
           dateOfBirth: true,
           gender: true,
           avatarUrl: true,

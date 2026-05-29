@@ -2889,8 +2889,11 @@ export class OrdersService {
         const issuedAt = new Date();
         const orderNumber = orderId.slice(0, 8).toUpperCase();
 
-        // ID do comprador para distinguir inscrição própria de inscrição de convidado
-        const buyerUserIdForPdf = regs.find((r: any) => r.user?.email)?.user?.id as string | undefined;
+        // Comprador = DONO do pedido (order.userId). NUNCA usar
+        // `regs.find(r => r.user?.email)` — isso pega a primeira inscrição com
+        // conta, que pode ser o terceiro quando o comprador compra pra outra
+        // pessoa, invertendo quem recebe os PDFs e o badge "inscrição feita por".
+        const buyerUserIdForPdf = order.userId as string | undefined;
 
         const ticketPdfData = {
           orderId,
@@ -2904,8 +2907,11 @@ export class OrdersService {
             participantCount: regs.length,
           },
           registrations: regs.map((reg: any, idx: number) => {
-            const isBuyerReg = buyerUserIdForPdf && reg.user?.id === buyerUserIdForPdf && !reg.participantName;
-            const user = isBuyerReg ? (reg.user ?? {}) : {};
+            // Sempre usa reg.user como fallback dos dados do participante.
+            // Convidado COM conta tem participantEmail/Cpf null mas os dados
+            // ficam em reg.user — zerar o user (gate isBuyerReg antigo) escondia
+            // a secao "Informacoes do participante" no PDF do terceiro.
+            const user = reg.user ?? {};
             const ticket = reg.tickets?.[0]?.ticket;
             const catName = ticket?.category?.name ?? '';
             const ticketName = ticket?.name ?? '';
@@ -2960,8 +2966,16 @@ export class OrdersService {
         const eventDate = formatEventDate(snapshotEvent.eventDate ?? (event as any).eventDate);
         const eventBannerUrl = (snapshotEvent as any).logoUrl || (snapshotEvent as any).bannerUrl || '';
 
-        // Comprador = primeira inscrição com conta vinculada
-        const emailBuyer = regs.find((r: any) => r.user?.email)?.user;
+        // Comprador = dono do pedido. Pode nao ser participante (comprou so pra
+        // terceiros) — nesse caso busca o user direto, ja que nao ha inscricao
+        // com esse userId.
+        let emailBuyer = regs.find((r: any) => r.user?.id === order.userId)?.user;
+        if (!emailBuyer && order.userId) {
+          emailBuyer = await r2.user.findUnique({
+            where: { id: order.userId },
+            select: { id: true, email: true, firstName: true, lastName: true },
+          });
+        }
         const buyerEmail: string | undefined = emailBuyer?.email;
 
         // Gerar PDF individual por participante (sequencial — yoga-layout)

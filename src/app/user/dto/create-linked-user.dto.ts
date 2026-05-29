@@ -49,6 +49,16 @@ export class CreateLinkedUserDto {
   email?: string;
 
   @ApiPropertyOptional({
+    description: 'Nacionalidade do perfil vinculado (nome do país). Persistida no LinkedUser — não herda mais do usuário principal.',
+    example: 'Argentina',
+  })
+  @Transform(emptyToUndefined)
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  country?: string;
+
+  @ApiPropertyOptional({
     description: 'Tipo do documento. Default CPF para retrocompatibilidade.',
     enum: DocumentType,
     example: 'CPF',
