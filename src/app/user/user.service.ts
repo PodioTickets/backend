@@ -407,8 +407,8 @@ export class UserService {
         gender: this.mapGenderFromEnum(mainUser.gender),
         dateOfBirth: mainUser.dateOfBirth ? mainUser.dateOfBirth.toISOString().split('T')[0] : null,
       },
-      // Linked profiles ainda não têm country próprio — herdamos do mainUser
-      // como melhor aproximação até existir coluna `country` em LinkedUser.
+      // Country proprio do perfil vinculado; fallback pro mainUser nos
+      // registros antigos (coluna nova, null no legado).
       ...linkedProfiles.map((lp) => ({
         id: lp.id,
         firstName: lp.firstName,
@@ -416,7 +416,7 @@ export class UserService {
         email: lp.email,
         documentType: lp.documentType,
         documentNumber: lp.documentNumber,
-        country: mainUser.country,
+        country: (lp as any).country ?? mainUser.country,
         phone: lp.phone,
         dateOfBirth: lp.dateOfBirth ? lp.dateOfBirth.toISOString().split('T')[0] : null,
         gender: lp.gender,
@@ -471,6 +471,7 @@ export class UserService {
           phone: dto.phone,
           dateOfBirth,
           gender: dto.gender ?? null,
+          country: dto.country ?? undefined,
         },
         create: {
           mainUserId,
@@ -484,6 +485,7 @@ export class UserService {
           phone: dto.phone,
           dateOfBirth,
           gender: dto.gender ?? null,
+          country: dto.country ?? null,
           relationshipType: 'outro',
         },
       });
@@ -502,6 +504,7 @@ export class UserService {
         phone: dto.phone,
         dateOfBirth,
         gender: dto.gender ?? null,
+        country: dto.country ?? null,
         relationshipType: 'outro',
       },
     });
@@ -590,6 +593,7 @@ export class UserService {
     phone: string | null;
     dateOfBirth: Date | null;
     gender: string | null;
+    country?: string | null;
   }) {
     return {
       id: lp.id,
@@ -598,6 +602,7 @@ export class UserService {
       email: lp.email,
       documentType: lp.documentType ?? null,
       documentNumber: lp.documentNumber,
+      country: lp.country ?? null,
       phone: lp.phone,
       dateOfBirth: lp.dateOfBirth ? lp.dateOfBirth.toISOString().split('T')[0] : null,
       gender: lp.gender,

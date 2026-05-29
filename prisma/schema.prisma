@@ -828,6 +828,10 @@ model LinkedUser {
   phone               String?
   dateOfBirth         DateTime?
   gender              String?
+  // Nacionalidade propria do perfil vinculado. Antes herdava do mainUser
+  // (errado p/ vinculado estrangeiro). Null em registros antigos → fallback
+  // pro country do mainUser na leitura.
+  country             String?
   relationshipType    String?
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
