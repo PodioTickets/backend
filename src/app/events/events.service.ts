@@ -1117,24 +1117,142 @@ export class EventsService {
     };
   }
 
+  // ── Seleção pública enxuta (compartilhada por /events/:id e /events/slug/:slug) ──
+  // SOMENTE os campos consumidos pelo front público/checkout. Campos internos — taxas
+  // (organizerFeePercent/retentionRate), tracking de ads, e dados sensíveis da organização
+  // (bancários/documentos/endereço/owner) — NÃO entram no contrato público. Organizador/admin
+  // recebem o payload completo por um caminho separado (build*PrivilegedEvent*).
+  private static readonly PUBLIC_EVENT_SCALAR_SELECT = {
+    id: true,
+    name: true,
+    slug: true,
+    bannerUrl: true,
+    location: true,
+    city: true,
+    state: true,
+    neighborhood: true,
+    zipCode: true,
+    googleMapsLink: true,
+    instagram: true,
+    facebook: true,
+    youtube: true,
+    tiktok: true,
+    website: true,
+    regulationUrl: true,
+    eventDate: true,
+    registrationStartDate: true,
+    registrationEndDate: true,
+    status: true,
+    participantFeePercent: true,
+    maxInstallments: true,
+    kitSelectionDisplay: true,
+    // IDs de tracking: públicos por natureza (disparam no browser do visitante).
+    // Reagrupados em `tracking` por `withTracking` — não vão crus no topo do evento.
+    metaPixelId: true,
+    googleAnalyticsId: true,
+    googleAdsId: true,
+  } as const;
+
+  /** Seleção pública: escalares usados + organização enxuta + tópicos enxutos. */
+  private publicEventSelect(): Prisma.EventSelect {
+    return {
+      ...EventsService.PUBLIC_EVENT_SCALAR_SELECT,
+      // Organização: só o que a página pública/checkout lê (getEventOrganizer).
+      // Fecha o vazamento de dados bancários/documentos/endereço da org.
+      organization: {
+        select: {
+          id: true,
+          name: true,
+          tradeName: true,
+          logoUrl: true,
+          email: true,
+          phone: true,
+          description: true,
+        },
+      },
+      topics: {
+        where: { isEnabled: true },
+        orderBy: { order: 'asc' },
+        select: {
+          id: true,
+          title: true,
+          content: true,
+          isEnabled: true,
+          order: true,
+          isDefault: true,
+        },
+      },
+    };
+  }
+
+  /**
+   * Agrupa os IDs de tracking (Meta Pixel / GA / Google Ads) num objeto `tracking` e
+   * REMOVE as chaves cruas do topo do evento. Usado no caminho público (que seleciona
+   * os 3 campos). Mesma shape do endpoint dedicado `getAdsTracking`. Pixels são públicos
+   * por natureza (disparam client-side); chaves vazias somem pelo strip global do response.
+   */
+  private withTracking(event: any) {
+    const { metaPixelId, googleAnalyticsId, googleAdsId, ...rest } = event;
+    return {
+      ...rest,
+      tracking: this.eventToAdsTrackingPayload({
+        metaPixelId: metaPixelId ?? null,
+        googleAnalyticsId: googleAnalyticsId ?? null,
+        googleAdsId: googleAdsId ?? null,
+      }),
+    };
+  }
+
   async findOne(id: string, userId?: string) {
     this.validateUUID(id, 'event ID');
-
-    // Cache curto (30s) — invalida-se no update/delete. Reduz 39ms → ~3ms em hit.
-    // Fail-open: se Redis off, cai pra query normal sem degradar.
-    // Bypass quando há userId: organizadores recebem `registrationsCount` extra que
-    // não pode vazar no cache compartilhado de anônimos.
-    const cacheKey = this.eventCacheKeyById(id);
-    if (!userId) {
-      const cached = await this.cache.getJson<{ message: string; data: { event: Record<string, unknown> } }>(cacheKey);
-      if (cached) return cached;
-    }
-
-    // Usar read replica para query de leitura
     const prismaRead = this.prisma.getReadClient();
 
-    // Endpoint público: não traz email/phone do owner (vazamento desnecessário)
-    // e usa selects granulares pra reduzir payload e CPU de hidratação.
+    // Organizador/admin autenticado → payload COMPLETO (comportamento histórico, com
+    // organização inteira + owner + perguntas + registrationsCount). Demais (anônimo ou
+    // usuário comum) → contrato público enxuto. A decisão é por CALLER, não por rota.
+    if (userId) {
+      const base = await prismaRead.event.findUnique({
+        where: { id },
+        select: { id: true, organizationId: true },
+      });
+      if (!base) throw new NotFoundException('Evento não encontrado');
+      if (await this.isOrganizerCallerForEvent(userId, base.organizationId, id)) {
+        return this.buildPrivilegedEventById(id);
+      }
+    }
+
+    // Caminho público — cacheável (mesmo payload p/ todos os não-privilegiados).
+    // Cache curto (30s), invalidado no update/delete. Fail-open se Redis off.
+    const cacheKey = this.eventCacheKeyById(id);
+    const cached = await this.cache.getJson<{ message: string; data: { event: Record<string, unknown> } }>(cacheKey);
+    if (cached) return cached;
+
+    const event = await prismaRead.event.findUnique({
+      where: { id },
+      select: {
+        ...this.publicEventSelect(),
+        // Dashboards consomem só a CONTAGEM de perguntas; o array completo fica no
+        // payload do organizador. `event._count.questions` substitui `event.questions.length`.
+        _count: { select: { questions: true } },
+      },
+    });
+    if (!event) throw new NotFoundException('Evento não encontrado');
+
+    const response = {
+      message: 'Event fetched successfully',
+      data: { event: this.withTracking(event) },
+    };
+    await this.cache.setJson(cacheKey, response, EventsService.EVENT_CACHE_TTL_SECONDS);
+    return response;
+  }
+
+  /**
+   * Payload COMPLETO de evento por id — somente organizador/admin. Mantém o contrato
+   * histórico (organização inteira + owner + tópicos + perguntas + `registrationsCount`),
+   * continuando a remover taxas internas/tracking via `stripPublicEventForSlug`.
+   */
+  private async buildPrivilegedEventById(id: string) {
+    const prismaRead = this.prisma.getReadClient();
     const event = await prismaRead.event.findUnique({
       where: { id },
       include: {
@@ -1142,67 +1260,31 @@ export class EventsService {
           include: {
             members: {
               where: { role: 'OWNER' },
-              include: {
-                user: {
-                  select: {
-                    id: true,
-                    firstName: true,
-                    lastName: true,
-                  },
-                },
-              },
+              include: { user: { select: { id: true, firstName: true, lastName: true } } },
               take: 1,
             },
           },
         },
-        topics: {
-          where: { isEnabled: true },
-          orderBy: { order: 'asc' },
-        },
-        questions: {
-          orderBy: { order: 'asc' },
-        },
+        topics: { where: { isEnabled: true }, orderBy: { order: 'asc' } },
+        questions: { orderBy: { order: 'asc' } },
+        _count: { select: { questions: true } },
       },
     });
+    if (!event) throw new NotFoundException('Evento não encontrado');
 
-    if (!event) {
-      throw new NotFoundException('Evento não encontrado');
-    }
+    const registrationsCount = await prismaRead.registration.count({
+      where: { eventId: id, status: RegistrationStatus.CONFIRMED },
+    });
 
-    // Se autenticado, verifica se é organizador (OWNER/EMPLOYEE da org com acesso
-    // ao evento) ou admin. Em caso afirmativo, agrega `registrationsCount`.
-    // Não lança em falha — a rota é pública.
-    const isOrganizerCaller = userId
-      ? await this.isOrganizerCallerForEvent(userId, (event as any).organizationId, id)
-      : false;
-
-    let registrationsCount: number | undefined;
-    if (isOrganizerCaller) {
-      registrationsCount = await prismaRead.registration.count({
-        where: { eventId: id, status: RegistrationStatus.CONFIRMED },
-      });
-    }
-
+    // `tracking` calculado do evento cru (o strip abaixo remove as chaves cruas).
+    const tracking = this.eventToAdsTrackingPayload(event as any);
     const eventPublic = this.stripPublicEventForSlug(
       event as unknown as Record<string, unknown>,
     );
-
-    const response = {
+    return {
       message: 'Event fetched successfully',
-      data: {
-        event:
-          registrationsCount !== undefined
-            ? { ...eventPublic, registrationsCount }
-            : eventPublic,
-      },
+      data: { event: { ...eventPublic, tracking, registrationsCount } },
     };
-
-    // Só cacheia a resposta anônima — versão organizadora carrega contagem dinâmica
-    // (muda a cada inscrição) e não deve ser servida a outros consumidores.
-    if (!isOrganizerCaller) {
-      await this.cache.setJson(cacheKey, response, EventsService.EVENT_CACHE_TTL_SECONDS);
-    }
-    return response;
   }
 
   /**
@@ -1246,16 +1328,79 @@ export class EventsService {
     return !member.restrictedToEvents;
   }
 
-  async findBySlug(slug: string) {
+  async findBySlug(slug: string, userId?: string) {
     if (!slug || slug.trim().length === 0) {
       throw new BadRequestException('Slug is required');
     }
-
-    // Usar read replica para query de leitura
     const prismaRead = this.prisma.getReadClient();
 
-    // Duas queries: evita o mesmo ingresso ser carregado duas vezes (raiz + por categoria),
-    // o que gerava JOIN explosivo, resposta enorme e timeout ~10s no Nginx/proxy (502).
+    // Organizador/admin → payload COMPLETO (catálogo aninhado + organização inteira).
+    // Demais → contrato público enxuto (sem catálogo, organização enxuta, sem owner/perguntas).
+    if (userId) {
+      const base = await prismaRead.event.findUnique({
+        where: { slug },
+        select: { id: true, organizationId: true },
+      });
+      if (!base) throw new NotFoundException('Evento não encontrado');
+      if (await this.isOrganizerCallerForEvent(userId, base.organizationId, base.id)) {
+        return this.buildPrivilegedEventBySlug(slug);
+      }
+    }
+
+    return this.buildPublicEventBySlug(slug);
+  }
+
+  /**
+   * Payload público enxuto por slug: escalares usados + organização enxuta + tópicos +
+   * `hasRegistrationSlotsAvailable`. NÃO inclui o catálogo (tickets/categorias/produtos) —
+   * o checkout busca isso em endpoints dedicados (getTickets/getProducts). Os ingressos
+   * são lidos apenas internamente (enxutos) para o cálculo de vagas; não vão na resposta.
+   * Elimina os JOINs profundos do caminho público (maior fatia do tráfego).
+   */
+  private async buildPublicEventBySlug(slug: string) {
+    const prismaRead = this.prisma.getReadClient();
+
+    const event: any = await prismaRead.event.findUnique({
+      where: { slug },
+      select: this.publicEventSelect(),
+    });
+    if (!event) throw new NotFoundException('Evento não encontrado');
+
+    const now = new Date();
+    const eventDate = new Date(event.eventDate);
+    const status = eventDate < now ? EventStatus.COMPLETED : event.status;
+
+    // Ingressos enxutos SÓ para o cálculo de vagas (não retornados ao cliente).
+    const ticketsForSlots = await prismaRead.ticket.findMany({
+      where: { eventId: event.id, isActive: true },
+      select: {
+        id: true,
+        batches: { select: { id: true, quantity: true, startDate: true, endDate: true } },
+      },
+    });
+
+    const hasRegistrationSlotsAvailable =
+      await this.computeHasRegistrationSlotsAvailable(
+        prismaRead,
+        status,
+        eventDate,
+        ticketsForSlots,
+      );
+
+    return {
+      message: 'Event fetched successfully',
+      data: { event: { ...this.withTracking(event), status, hasRegistrationSlotsAvailable } },
+    };
+  }
+
+  /**
+   * Payload COMPLETO por slug — somente organizador/admin. Catálogo aninhado + organização
+   * inteira (comportamento histórico). Duas queries pra evitar o mesmo ingresso ser carregado
+   * duas vezes (raiz + por categoria), o que gerava JOIN explosivo e timeout no proxy.
+   */
+  private async buildPrivilegedEventBySlug(slug: string) {
+    const prismaRead = this.prisma.getReadClient();
+
     const eventBase = await prismaRead.event.findUnique({
       where: { slug },
       include: {
@@ -1264,102 +1409,52 @@ export class EventsService {
             members: {
               where: { role: 'OWNER' },
               include: {
-                user: {
-                  select: {
-                    id: true,
-                    firstName: true,
-                    lastName: true,
-                    email: true,
-                    phone: true,
-                  },
-                },
+                user: { select: { id: true, firstName: true, lastName: true, email: true, phone: true } },
               },
             },
           },
         },
-        topics: {
-          where: { isEnabled: true },
-          orderBy: { order: 'asc' },
-        },
-        questions: {
-          orderBy: { order: 'asc' },
-        },
-        ticketCategories: {
-          orderBy: { order: 'asc' },
-        },
+        topics: { where: { isEnabled: true }, orderBy: { order: 'asc' } },
+        questions: { orderBy: { order: 'asc' } },
+        ticketCategories: { orderBy: { order: 'asc' } },
         products: {
-          include: {
-            variations: {
-              orderBy: { name: 'asc' },
-            },
-          },
+          include: { variations: { orderBy: { name: 'asc' } } },
           orderBy: { createdAt: 'desc' },
         },
       },
     });
-
-    if (!eventBase) {
-      throw new NotFoundException('Evento não encontrado');
-    }
+    if (!eventBase) throw new NotFoundException('Evento não encontrado');
 
     const tickets = await prismaRead.ticket.findMany({
       where: { eventId: eventBase.id, isActive: true },
       include: {
-        batches: {
-          orderBy: { price: 'asc' },
-        },
+        batches: { orderBy: { price: 'asc' } },
         products: {
           orderBy: { sortOrder: 'asc' },
-          include: {
-            product: {
-              include: {
-                variations: true,
-              },
-            },
-          },
+          include: { product: { include: { variations: true } } },
         },
         category: true,
-        kit: {
-          include: {
-            items: {
-              include: {
-                product: true,
-              },
-            },
-          },
-        },
+        kit: { include: { items: { include: { product: true } } } },
       },
       orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
     });
 
-    const ticketSortCmp = (
-      a: (typeof tickets)[0],
-      b: (typeof tickets)[0],
-    ): number =>
-      a.sortOrder - b.sortOrder ||
-      a.createdAt.getTime() - b.createdAt.getTime();
+    const ticketSortCmp = (a: (typeof tickets)[0], b: (typeof tickets)[0]): number =>
+      a.sortOrder - b.sortOrder || a.createdAt.getTime() - b.createdAt.getTime();
 
     const ticketCategories = eventBase.ticketCategories.map((cat) => ({
       ...cat,
-      tickets: tickets
-        .filter((t) => t.categoryId === cat.id)
-        .sort(ticketSortCmp),
+      tickets: tickets.filter((t) => t.categoryId === cat.id).sort(ticketSortCmp),
     }));
 
     const ticketsOrdered = [
       ...eventBase.ticketCategories.flatMap((cat) =>
-        tickets
-          .filter((t) => t.categoryId === cat.id)
-          .sort(ticketSortCmp),
+        tickets.filter((t) => t.categoryId === cat.id).sort(ticketSortCmp),
       ),
       ...tickets.filter((t) => !t.categoryId).sort(ticketSortCmp),
     ];
 
-    const event = {
-      ...eventBase,
-      ticketCategories,
-      tickets: ticketsOrdered,
-    };
+    const event = { ...eventBase, ticketCategories, tickets: ticketsOrdered };
 
     const now = new Date();
     const eventDate = event.eventDate instanceof Date ? event.eventDate : new Date(event.eventDate);
@@ -1373,16 +1468,14 @@ export class EventsService {
         eventToReturn.tickets,
       );
 
-
+    const tracking = this.eventToAdsTrackingPayload(eventToReturn as any);
     const eventPublic = this.stripPublicEventForSlug(
       eventToReturn as unknown as Record<string, unknown>,
     );
 
     return {
       message: 'Event fetched successfully',
-      data: {
-        event: { ...eventPublic, hasRegistrationSlotsAvailable },
-      },
+      data: { event: { ...eventPublic, tracking, hasRegistrationSlotsAvailable } },
     };
   }
 

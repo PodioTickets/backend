@@ -177,12 +177,18 @@ export class EventsController {
 
   @Get('slug/:slug')
   @NoCache()
-  @ApiOperation({ summary: 'Get event by slug', description: 'Retrieves a single event by its slug (URL-friendly identifier)' })
+  @UseGuards(OptionalJwtAuthGuard)
+  @ApiOperation({
+    summary: 'Get event by slug',
+    description:
+      'Retrieves a single event by its slug. Organizador/admin autenticado (OWNER/EMPLOYEE da org ou admin) recebe o payload COMPLETO (catálogo de ingressos/produtos + organização inteira); demais recebem o contrato público enxuto.',
+  })
   @ApiParam({ name: 'slug', description: 'Event slug' })
   @ApiResponse({ status: 200, description: 'Event retrieved successfully' })
   @ApiResponse({ status: 404, description: 'Event not found' })
-  findBySlug(@Param('slug') slug: string) {
-    return this.eventsService.findBySlug(slug);
+  findBySlug(@Request() req, @Param('slug') slug: string) {
+    const userId = req.user?.id;
+    return this.eventsService.findBySlug(slug, userId);
   }
 
   @Get(':id')

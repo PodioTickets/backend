@@ -994,7 +994,20 @@ export class OrdersService {
               },
               products: {
                 include: {
-                  product: { select: { id: true, name: true, image: true, basePrice: true, variationType: true, buyerVariationEditAllowed: true, variationEditDeadlineDays: true } },
+                  product: {
+                    select: {
+                      id: true,
+                      name: true,
+                      image: true,
+                      basePrice: true,
+                      variationType: true,
+                      isIncludedInTicket: true,
+                      buyerVariationEditAllowed: true,
+                      variationEditDeadlineDays: true,
+                      // Opções vivas pra montar o seletor de variação no recibo.
+                      variations: { select: { id: true, name: true, price: true, stock: true } },
+                    },
+                  },
                   variation: true,
                 },
               },
@@ -1369,28 +1382,62 @@ export class OrdersService {
             };
           });
 
-          // Products: productSnapshot tem prioridade
+          // Products: dados do recibo (productSnapshot tem prioridade) + metadados de edição
+          // de variação em TEMPO REAL (mesma regra do ticket.includedProducts) — assim o front
+          // mostra o recibo E habilita a troca de variação no mesmo item, sem cruzar listas.
           const products = (reg.products ?? []).map((rp: any) => {
             const pSnap = (rp.productSnapshot ?? null) as any;
+            const liveP = rp.product as any;
             const selectedVar = pSnap?.selectedVariation ?? (rp.variation
               ? { id: rp.variation.id, name: rp.variation.name, price: rp.variation.price }
               : null);
+
+            // Janela de edição = config VIVA do produto (snapshot não serve: flags/prazo
+            // podem ter mudado e as opções de variação precisam ser as atuais). Espelha
+            // exatamente o cálculo de ticket.includedProducts pra não divergir do que o
+            // PATCH de variação aceita.
+            const variationEdited = rp.variationEdited ?? false;
+            const deadlineDays = liveP?.variationEditDeadlineDays ?? 0;
+            const deadlineMs = deadlineDays * 24 * 60 * 60 * 1000;
+            const variationEditDeadline = deadlineDays > 0
+              ? new Date(eventDate.getTime() - deadlineMs)
+              : null;
+            const editWindowOpen = variationEditDeadline ? now < variationEditDeadline : false;
+            const canEditVariation =
+              (liveP?.buyerVariationEditAllowed ?? false) &&
+              !variationEdited &&
+              editWindowOpen &&
+              liveP?.isIncludedInTicket === true;
+
             return {
               id: rp.id,
               product: {
-                id: rp.productId ?? pSnap?.id ?? rp.product?.id,
-                name: pSnap?.name ?? rp.product?.name ?? null,
+                id: rp.productId ?? pSnap?.id ?? liveP?.id,
+                name: pSnap?.name ?? liveP?.name ?? null,
                 image: pSnap
                   ? (pSnap.images?.[pSnap.primaryImageIndex ?? 0] ?? pSnap.image ?? null)
-                  : (rp.product?.image ?? null),
-                basePrice: pSnap?.basePrice ?? rp.product?.basePrice ?? rp.unitPrice,
-                variationType: pSnap?.variationType ?? rp.product?.variationType ?? null,
+                  : (liveP?.image ?? null),
+                basePrice: pSnap?.basePrice ?? liveP?.basePrice ?? rp.unitPrice,
+                variationType: pSnap?.variationType ?? liveP?.variationType ?? null,
+                isIncludedInTicket: liveP?.isIncludedInTicket ?? false,
               },
               variation: selectedVar,
               variationName: selectedVar?.name ?? null,
               quantity: rp.quantity,
               unitPrice: rp.unitPrice,
               totalPrice: rp.totalPrice,
+              // ── Edição de variação ──
+              buyerVariationEditAllowed: liveP?.buyerVariationEditAllowed ?? false,
+              variationEditDeadline,
+              variationEdited,
+              canEditVariation,
+              // Opções vivas pro seletor (vazio quando o produto não tem variações).
+              variations: (liveP?.variations ?? []).map((v: any) => ({
+                id: v.id,
+                name: v.name,
+                price: v.price,
+                stock: v.stock,
+              })),
             };
           });
 

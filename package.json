@@ -26,6 +26,7 @@
     "db:populate-simulation": "ts-node --project tsconfig.node.json prisma/populate-simulation-data.ts",
     "db:seed-repasse": "ts-node --project tsconfig.node.json prisma/seed-repasse.ts",
     "db:backfill-snapshots": "ts-node --project tsconfig.node.json prisma/backfill-ticket-snapshots.ts",
+    "reconcile:orphan-orders": "ts-node --project tsconfig.node.json prisma/reconcile-orphan-orders.ts",
     "create-admin": "ts-node --project tsconfig.node.json prisma/create-admin.ts",
     "time-travel": "ts-node --project tsconfig.node.json prisma/time-travel.ts",
     "db:studio": "prisma studio",
