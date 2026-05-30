@@ -68,7 +68,11 @@
       "PowerShell(npx tsc -p tsconfig.build.json --noEmit 2>&1 | Select-Object -First 30; \"EXIT=$LASTEXITCODE\")",
       "PowerShell(npx tsc -p tsconfig.build.json --noEmit 2>&1 | Select-Object -First 50; \"EXIT=$LASTEXITCODE\")",
       "PowerShell(npx jest src/app/repasse/__tests__/repasse.service.spec.ts 2>&1 | Select-String -Pattern \"Tests:|Test Suites:|✓|✕|×|FAIL|PASS|●\" | Select-Object -First 40; \"EXIT=$LASTEXITCODE\")",
-      "PowerShell(npx prisma generate 2>&1 | Select-Object -Last 15; \"EXIT=$LASTEXITCODE\")"
+      "PowerShell(npx prisma generate 2>&1 | Select-Object -Last 15; \"EXIT=$LASTEXITCODE\")",
+      "Bash(PGPASSWORD=podiogo123 psql -h localhost -p 5432 -U podiogo -d podiogo -c \"SELECT id, status, \\\\\"totalAmount\\\\\", discount, \\\\\"couponId\\\\\" FROM \\\\\"Order\\\\\" WHERE id='4c4519d8-ca34-4548-8a69-992c812a180a';\")",
+      "Bash(PGPASSWORD=podiogo123 psql -h localhost -p 5432 -U podiogo -d podiogo -c \"SELECT id, \\\\\"ticketId\\\\\", quantity, \\\\\"unitPrice\\\\\", \\\\\"ticketName\\\\\" FROM \\\\\"OrderReservedTicket\\\\\" WHERE \\\\\"orderId\\\\\"='4c4519d8-ca34-4548-8a69-992c812a180a';\")",
+      "Bash(PGPASSWORD=podiogo123 psql -h localhost -p 5432 -U podiogo -d podiogo -c \"SELECT id, status FROM \\\\\"Registration\\\\\" WHERE \\\\\"orderId\\\\\"='4c4519d8-ca34-4548-8a69-992c812a180a';\")",
+      "Bash(docker exec *)"
     ]
   }
 }

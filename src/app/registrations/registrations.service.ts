@@ -643,6 +643,121 @@ export class RegistrationsService {
   async findOne(id: string, userId: string) {
     const prismaRead = this.prisma.getReadClient();
 
+    // Fetch leve só com o necessário p/ access check + snapshot. O snapshot (receiptSnapshot)
+    // é o recibo IMUTÁVEL congelado no pagamento — esta rota expõe SOMENTE ele, sem joins ao
+    // vivo, garantindo que a inscrição apareça exatamente como comprada mesmo que o organizador
+    // edite evento/ingresso/produtos depois.
+    const registration: any = await prismaRead.registration.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        status: true,
+        qrCode: true,
+        userId: true,
+        invitedById: true,
+        participantCpfClean: true,
+        receiptSnapshot: true,
+        order: { select: { userId: true } },
+        event: { select: { organizationId: true } },
+        // RegistrationProduct é a fonte de verdade PÓS-compra da variação: `updateProductVariation`
+        // grava aqui (variationId + variationEdited) sem reescrever o snapshot. Lemos só este
+        // recorte mutável p/ expor `variationEdited` e refletir a variação ATUAL no produto.
+        products: {
+          select: {
+            productId: true,
+            variationEdited: true,
+            variation: { select: { id: true, name: true, price: true } },
+          },
+        },
+      },
+    });
+
+    if (!registration) {
+      throw new NotFoundException('Inscrição não encontrada');
+    }
+
+    // Controle de acesso (mesmo critério do findMyRegistration). O findOne anterior NÃO
+    // validava o dono — qualquer usuário autenticado lia qualquer inscrição (IDOR).
+    const currentUser = await prismaRead.user.findUnique({
+      where: { id: userId },
+      select: { documentNumberClean: true, role: true },
+    });
+    const isAdmin = currentUser?.role === 'PODIOGO_STAFF' || currentUser?.role === 'ADMIN';
+    const isBuyer = registration.order?.userId === userId;
+    const isParticipant = registration.userId === userId;
+    const isInviter = registration.invitedById === userId;
+    const isCpfMatch = !!(
+      currentUser?.documentNumberClean &&
+      registration.participantCpfClean === currentUser.documentNumberClean
+    );
+    if (!isAdmin && !isParticipant && !isInviter && !isBuyer && !isCpfMatch) {
+      // Organizador do evento: membro da organização dona do evento (mesmo critério de
+      // getPaymentDetails). Permite ao organizador inspecionar inscrições do seu evento.
+      const organizationId = registration.event?.organizationId;
+      const isOrganizer = organizationId
+        ? !!(await prismaRead.organizationMember.findFirst({
+            where: { organizationId, userId },
+            select: { id: true },
+          }))
+        : false;
+      if (!isOrganizer) {
+        throw new BadRequestException('Acesso negado — você só pode visualizar suas próprias inscrições');
+      }
+    }
+
+    const snapshot = registration.receiptSnapshot as Record<string, any> | null;
+
+    // Caminho principal: dados 100% do snapshot (event, ticket, products, participant,
+    // billing, pricing, questionAnswers, paidAt) + identidade/estado da própria inscrição.
+    if (snapshot) {
+      // Enriquece os produtos do snapshot com o estado MUTÁVEL de variação (RegistrationProduct):
+      //  - `variationEdited`: true se o comprador trocou a variação após a compra.
+      //  - `selectedVariation`: refletido p/ a variação ATUAL quando editada (o snapshot,
+      //    congelado no pagamento, mostraria a variação ORIGINAL — defasada).
+      // Casado por productId (o `id` do produto no snapshot é o productId).
+      const regProductByProductId = new Map<string, any>(
+        (registration.products ?? []).map((rp: any) => [rp.productId, rp]),
+      );
+      const snapshotProducts = Array.isArray(snapshot.products) ? snapshot.products : [];
+      const products = snapshotProducts.map((p: any) => {
+        const rp = regProductByProductId.get(p.id);
+        const variationEdited = rp?.variationEdited ?? false;
+        return {
+          ...p,
+          variationEdited,
+          selectedVariation:
+            variationEdited && rp?.variation
+              ? { id: rp.variation.id, name: rp.variation.name, price: rp.variation.price }
+              : p.selectedVariation,
+        };
+      });
+
+      return {
+        message: 'Registration fetched successfully',
+        data: {
+          registration: {
+            id: registration.id,
+            status: registration.status,
+            qrCode: registration.qrCode ?? `https://www.podioticket.com.br/user/tickets/${registration.id}`,
+            ...snapshot,
+            products,
+          },
+        },
+      };
+    }
+
+    // Fallback: inscrição legada/PENDING sem snapshot — mantém o build ao vivo apenas
+    // quando não há snapshot a retornar (do contrário a rota ficaria sem dados).
+    return this.findOneLive(id, userId);
+  }
+
+  /**
+   * Build "ao vivo" (joins atuais) — usado APENAS como fallback do findOne quando a
+   * inscrição não possui receiptSnapshot (legada ou ainda não paga).
+   */
+  private async findOneLive(id: string, userId: string) {
+    const prismaRead = this.prisma.getReadClient();
+
     const registration = await prismaRead.registration.findUnique({
       where: { id },
       include: {

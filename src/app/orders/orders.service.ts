@@ -671,17 +671,23 @@ export class OrdersService {
       );
     }
 
-    // 1.5 Validate event
-    const event = await r.event.findUnique({
-      where: { id: dto.eventId },
-      select: {
-        id: true,
-        name: true,
-        status: true,
-        registrationStartDate: true,
-        registrationEndDate: true,
-      },
-    });
+    // 1.5 Validate event + carrega a data de nascimento do comprador em paralelo
+    // (usada para auto-aplicar o cupom AGE já na reserva — ver passo 1.7b). `eventDate`
+    // é a referência de idade do cupom AGE (idade calculada na data do evento).
+    const [event, buyer] = await Promise.all([
+      r.event.findUnique({
+        where: { id: dto.eventId },
+        select: {
+          id: true,
+          name: true,
+          status: true,
+          registrationStartDate: true,
+          registrationEndDate: true,
+          eventDate: true,
+        },
+      }),
+      r.user.findUnique({ where: { id: userId }, select: { dateOfBirth: true } }),
+    ]);
     if (!event) throw new NotFoundException('Evento não encontrado');
     if (event.status !== 'PUBLISHED') {
       throw new AppConflictException(
@@ -837,6 +843,43 @@ export class OrdersService {
       });
     }
 
+    // 1.7b Auto-cupom AGE no reserve — aplica já na reserva quando os ingressos são
+    // elegíveis pela idade do COMPRADOR (proxy do participante 0, único dado de idade
+    // conhecido nesta etapa). Reutiliza a fonte única `evaluateAutoCoupons` restrita a
+    // AGE, aplicando a 1 slot. O PATCH /participants reavalia com os participantes reais
+    // e troca/remove/estende o cupom conforme necessário.
+    const reserveTotalAmount = batchInfos.reduce(
+      (sum, info) => sum + info.unitPrice * info.quantity,
+      0,
+    );
+    const reservedTicketsLite = batchInfos.map((info) => ({
+      ticketId: info.ticketId,
+      quantity: info.quantity,
+      unitPrice: info.unitPrice,
+    }));
+    const buyerAsParticipant = buyer?.dateOfBirth ? [{ birthDate: buyer.dateOfBirth }] : [];
+    const {
+      autoCouponId: ageCouponId,
+      autoEffectiveUsage: ageEffectiveUsage,
+      ageQualifyingSlots,
+      newDiscount: ageDiscount,
+    } = await this.evaluateAutoCoupons(
+      {
+        eventId: dto.eventId,
+        couponId: null,
+        voucherId: null,
+        discount: 0,
+        coupon: null,
+        voucher: null,
+        event: { eventDate: event.eventDate },
+      },
+      buyerAsParticipant,
+      reservedTicketsLite,
+      reserveTotalAmount,
+      0,
+      { autoApplyCouponTypes: ['AGE'] },
+    );
+
     // 1.8 Atomic stock decrement + order creation inside a single transaction
     const order = await w.$transaction(async (tx: any) => {
       // Decrement availableQuantity atomically; 0 rows → sold out → rollback
@@ -882,8 +925,11 @@ export class OrdersService {
           eventId: dto.eventId,
           totalAmount,
           serviceFee: 0,
-          discount: 0,
-          finalAmount: totalAmount,
+          // Cupom AGE auto-aplicado na reserva (passo 1.7b). Sem elegibilidade,
+          // ageDiscount=0 e ageCouponId=undefined — comportamento original preservado.
+          discount: ageDiscount,
+          finalAmount: Math.max(0, totalAmount - ageDiscount),
+          ...(ageCouponId && { couponId: ageCouponId }),
           status: 'PENDING',
           expiresAt: new Date(Date.now() + RESERVATION_TTL_MINUTES * 60 * 1000),
           reservedAt: new Date(),
@@ -936,8 +982,21 @@ export class OrdersService {
       });
     });
 
-    this.logger.log(`Reserved order ${order.id} for user ${userId}, event ${dto.eventId}`);
-    return orderShape(order);
+    this.logger.log(
+      `Reserved order ${order.id} for user ${userId}, event ${dto.eventId}` +
+        (ageCouponId ? ` (auto AGE coupon ${ageCouponId}, discount ${ageDiscount})` : ''),
+    );
+    // Quando o cupom AGE foi aplicado, passamos discount/effectiveUsage/slots explícitos
+    // para o orderShape distribuir o desconto no slot do comprador (não há
+    // pendingParticipants na reserva para re-derivar). Sem cupom, todos undefined → leitura padrão.
+    return orderShape(
+      order,
+      ageCouponId ? ageDiscount : undefined,
+      undefined,
+      ageCouponId ? ageEffectiveUsage : undefined,
+      undefined,
+      ageCouponId ? ageQualifyingSlots : undefined,
+    );
   }
 
   // ── 2. findOrder ───────────────────────────────────────────────────────────
@@ -1435,15 +1494,25 @@ export class OrdersService {
           const products = (reg.products ?? []).map((rp: any) => {
             const pSnap = (rp.productSnapshot ?? null) as any;
             const liveP = rp.product as any;
-            const selectedVar = pSnap?.selectedVariation ?? (rp.variation
+            const variationEdited = rp.variationEdited ?? false;
+
+            // Variação exibida: quando o comprador EDITOU a variação após a compra, o snapshot
+            // (congelado no pay e NÃO reescrito pela edição) ficaria defasado → usamos a variação
+            // ATUAL do RegistrationProduct (fallback p/ variação órfã quando o organizador recriou
+            // as opções). Sem edição, mantém o snapshot (verdade do recibo). Espelha a mesma regra
+            // de ticket.includedProducts pra não divergir.
+            const orphanVar = rp.variationId ? orphanVariationMap.get(rp.variationId) ?? null : null;
+            const liveVar = rp.variation
               ? { id: rp.variation.id, name: rp.variation.name, price: rp.variation.price }
-              : null);
+              : (orphanVar ? { id: orphanVar.id, name: orphanVar.name, price: orphanVar.price } : null);
+            const selectedVar = variationEdited
+              ? liveVar
+              : (pSnap?.selectedVariation ?? liveVar);
 
             // Janela de edição = config VIVA do produto (snapshot não serve: flags/prazo
             // podem ter mudado e as opções de variação precisam ser as atuais). Espelha
             // exatamente o cálculo de ticket.includedProducts pra não divergir do que o
             // PATCH de variação aceita.
-            const variationEdited = rp.variationEdited ?? false;
             const deadlineDays = liveP?.variationEditDeadlineDays ?? 0;
             const deadlineMs = deadlineDays * 24 * 60 * 60 * 1000;
             const variationEditDeadline = deadlineDays > 0
@@ -1537,6 +1606,7 @@ export class OrdersService {
     reservedTickets: any[],
     ticketsSubtotal: number,
     productsSubtotal: number,
+    opts: { autoApplyCouponTypes?: ('QUANTITY' | 'AGE')[] } = {},
   ): Promise<{
     autoCouponId?: string;
     autoEffectiveUsage?: number;
@@ -1601,7 +1671,12 @@ export class OrdersService {
       }
     }
 
-    // (b) Aplicação inicial — apenas se ainda não há cupom/voucher
+    // (b) Aplicação inicial — apenas se ainda não há cupom/voucher.
+    // `autoApplyCouponTypes` restringe quais tipos podem ser auto-aplicados nesta
+    // etapa. O `reserve` passa apenas ['AGE'] (idade do comprador como proxy); os
+    // PATCH /participants e /products usam o default (QUANTITY + AGE), pois já têm
+    // participantes/produtos reais para avaliar QUANTITY com segurança.
+    const autoApplyCouponTypes = opts.autoApplyCouponTypes ?? ['QUANTITY', 'AGE'];
     if (!order.couponId && !order.voucherId) {
       const totalQuantity = reservedTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
       const ticketIds = reservedTickets.map((rt: any) => rt.ticketId);
@@ -1611,7 +1686,7 @@ export class OrdersService {
           eventId: order.eventId,
           status: 'ACTIVE',
           deletedAt: null,
-          couponType: { in: ['QUANTITY', 'AGE'] },
+          couponType: { in: autoApplyCouponTypes },
           OR: [{ expiryDate: null }, { expiryDate: { gt: new Date() } }],
         },
       });
@@ -1767,7 +1842,6 @@ export class OrdersService {
 
     const w: any = this.prisma.getWriteClient();
 
-    const reservedTickets = (order.reservedTickets ?? []) as any[];
     // Normaliza documento de cada participante ANTES de persistir no JSONB
     // `pendingParticipants`. Garante que a versão visual ("123.456.789-00")
     // nunca chega ao banco — só letras/números. Mesma regra aplicada no
@@ -1796,32 +1870,84 @@ export class OrdersService {
     // reflete na hora no desconto. O subtotal de produtos vem de pendingProducts
     // (já gravado pelo /products anterior) p/ cupons com applyToProducts=true.
 
-    // Calcular vagas a liberar se participantes < reservados
-    // Participantes sem email são slots ainda não preenchidos — contam como reserva
-    const totalReserved = reservedTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
-    const totalParticipants = participants.length;
+    // ── Sincronização bidirecional reserva ↔ nº de participantes ───────────────────
+    // INVARIANTE do sistema: sum(OrderReservedTicket.quantity) == estoque retido
+    // (availableQuantity) == nº de registrations placeholder PENDING. cancel/expire
+    // (restauram estoque por reservedTickets) e a finalização (cria 1 inscrição por
+    // unidade reservada) dependem disso — então mantemos os 3 em lockstep AQUI, sem
+    // tocar nesses fluxos.
+    //
+    // As registrations placeholder criadas no reserve são a fonte canônica por-unidade:
+    //   PENDING   = unidade ativa (retida em estoque + cobrada)
+    //   CANCELLED = liberada, mas RE-ADQUIRÍVEL até o original (preserva o teto sem
+    //               coluna nova). Cada placeholder tem exatamente 1 RegistrationTicket
+    //               {ticketId, batchId}.
+    const placeholderRegs = await w.registration.findMany({
+      where: { orderId, status: { in: ['PENDING', 'CANCELLED'] } },
+      select: {
+        id: true,
+        status: true,
+        tickets: { select: { ticketId: true, batchId: true } },
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
 
-    if (totalParticipants > totalReserved) {
+    const originalReservedCount = placeholderRegs.length;
+    const targetCount = participants.length;
+    if (targetCount > originalReservedCount) {
       throw new AppUnprocessableException(
         'PARTICIPANTS_EXCEED_TICKETS',
-        `Número de participantes (${totalParticipants}) excede os ingressos reservados (${totalReserved}).`,
+        `Número de participantes (${targetCount}) excede os ingressos reservados (${originalReservedCount}).`,
       );
     }
 
-    // Calcular quais lotes liberar (remove do final da fila de reservas)
-    const releasedBatches: { batchId: string; quantity: number }[] = [];
-    let toRelease = totalReserved - totalParticipants;
-    const updatedReserved = reservedTickets.map((rt: any) => ({ ...rt })).reverse();
-    for (const rt of updatedReserved) {
-      if (toRelease <= 0) break;
-      const release = Math.min(rt.quantity, toRelease);
-      rt.quantity -= release;
-      toRelease -= release;
-      releasedBatches.push({ batchId: rt.batchId, quantity: release });
-    }
-    const newReservedTickets = updatedReserved.reverse().filter((rt: any) => rt.quantity > 0);
+    // Estado-alvo: as primeiras `targetCount` unidades (ordem de reserva) ficam PENDING,
+    // o restante CANCELLED. Deriva as transições por unidade (adquirir/liberar estoque).
+    const toAcquire: { regId: string; batchId: string }[] = []; // CANCELLED → PENDING
+    const toRelease: { regId: string; batchId: string }[] = []; // PENDING → CANCELLED
+    placeholderRegs.forEach((reg: any, idx: number) => {
+      const batchId = reg.tickets?.[0]?.batchId;
+      if (!batchId) return; // defensivo — placeholder do reserve sempre tem 1 ticket c/ batch
+      const shouldBePending = idx < targetCount;
+      if (shouldBePending && reg.status === 'CANCELLED') toAcquire.push({ regId: reg.id, batchId });
+      else if (!shouldBePending && reg.status === 'PENDING') toRelease.push({ regId: reg.id, batchId });
+    });
 
-    // Recalcular total com os ingressos restantes + produtos pendentes
+    // Preço/nome por lote (cobre lotes cuja linha de OrderReservedTicket foi removida numa
+    // liberação anterior) para reconstruir o OrderReservedTicket a partir do alvo PENDING.
+    const placeholderBatchIds = [
+      ...new Set(
+        placeholderRegs
+          .flatMap((reg: any) => reg.tickets.map((t: any) => t.batchId))
+          .filter(Boolean),
+      ),
+    ] as string[];
+    const batchRows = await w.ticketBatch.findMany({
+      where: { id: { in: placeholderBatchIds } },
+      select: { id: true, price: true, ticketId: true, ticket: { select: { name: true } } },
+    });
+    const batchInfoById = new Map<string, { price: number; ticketId: string; ticketName: string }>(
+      batchRows.map((b: any) => [b.id, { price: b.price, ticketId: b.ticketId, ticketName: b.ticket?.name ?? '' }]),
+    );
+
+    // OrderReservedTicket-alvo = unidades PENDING-alvo agrupadas por lote.
+    const targetQtyByBatch = new Map<string, number>();
+    placeholderRegs.slice(0, targetCount).forEach((reg: any) => {
+      const batchId = reg.tickets?.[0]?.batchId;
+      if (batchId) targetQtyByBatch.set(batchId, (targetQtyByBatch.get(batchId) ?? 0) + 1);
+    });
+    const newReservedTickets = [...targetQtyByBatch.entries()].map(([batchId, quantity]) => {
+      const info = batchInfoById.get(batchId);
+      return {
+        ticketId: info?.ticketId,
+        batchId,
+        quantity,
+        unitPrice: info?.price ?? 0,
+        ticketName: info?.ticketName ?? '',
+      };
+    });
+
+    // Recalcular total com os ingressos-alvo + produtos pendentes
     const newTicketsSubtotal = newReservedTickets.reduce(
       (sum: number, rt: any) => sum + rt.unitPrice * rt.quantity,
       0,
@@ -1832,8 +1958,8 @@ export class OrdersService {
     );
     const newTotalAmount = newTicketsSubtotal + productsSubtotal;
 
-    // Reavalia auto-cupom (AGE/QUANTITY) já com os ingressos PÓS-liberação e os novos
-    // participantes — fonte única compartilhada com PATCH /products.
+    // Reavalia auto-cupom (AGE/QUANTITY) já com os ingressos-alvo e os novos participantes
+    // — fonte única compartilhada com PATCH /products.
     const {
       autoCouponId,
       autoEffectiveUsage,
@@ -1850,26 +1976,77 @@ export class OrdersService {
     );
     const newFinalAmount = Math.max(0, newTotalAmount - newDiscount);
 
+    // Transições de estoque agrupadas por lote (1 UPDATE por lote, não por unidade).
+    const releaseQtyByBatch = new Map<string, number>();
+    for (const rel of toRelease) releaseQtyByBatch.set(rel.batchId, (releaseQtyByBatch.get(rel.batchId) ?? 0) + 1);
+    const acquireQtyByBatch = new Map<string, number>();
+    for (const acq of toAcquire) acquireQtyByBatch.set(acq.batchId, (acquireQtyByBatch.get(acq.batchId) ?? 0) + 1);
+
     const updated = await w.$transaction(async (tx: any) => {
-      // Restaurar availableQuantity nos lotes liberados
-      for (const released of releasedBatches) {
+      // 1) Liberar estoque das unidades que saem (PENDING → CANCELLED). LEAST evita
+      //    over-restore acima de quantity. Os regs liberados saem da subquery de vendas.
+      for (const [batchId, qty] of releaseQtyByBatch) {
         await tx.$executeRaw`
           UPDATE "TicketBatch"
-          SET "availableQuantity" = LEAST("availableQuantity" + ${released.quantity}, "quantity")
-          WHERE id = ${released.batchId}::uuid
+          SET "availableQuantity" = LEAST("availableQuantity" + ${qty}, "quantity")
+          WHERE id = ${batchId}::uuid
         `;
       }
+      if (toRelease.length > 0) {
+        await tx.registration.updateMany({
+          where: { id: { in: toRelease.map((rel) => rel.regId) } },
+          data: { status: 'CANCELLED' },
+        });
+      }
 
-      // Atualizar ou deletar os OrderReservedTicket afetados
-      for (const rt of updatedReserved) {
-        if (rt.quantity === 0) {
-          await tx.orderReservedTicket.delete({ where: { id: rt.id } });
-        } else if (releasedBatches.some((rb) => rb.batchId === rt.batchId)) {
-          await tx.orderReservedTicket.update({
-            where: { id: rt.id },
-            data: { quantity: rt.quantity },
-          });
+      // 2) Re-adquirir estoque das unidades que voltam (CANCELLED → PENDING) com o MESMO
+      //    decremento atômico do reserve (counter + contagem real de vendas). Os regs
+      //    ainda estão CANCELLED neste ponto, logo não inflam a subquery de vendas.
+      for (const [batchId, qty] of acquireQtyByBatch) {
+        const rows: any[] = await tx.$queryRaw`
+          UPDATE "TicketBatch" tb
+          SET "availableQuantity" = tb."availableQuantity" - ${qty}
+          WHERE tb.id = ${batchId}::uuid
+            AND tb."availableQuantity" >= ${qty}
+            AND (
+              tb."quantity" - (
+                SELECT COUNT(*)::int
+                FROM "RegistrationTicket" rt
+                JOIN "Registration" r ON rt."registrationId" = r.id
+                WHERE rt."batchId" = tb.id
+                  AND r.status != 'CANCELLED'
+              )
+            ) >= ${qty}
+          RETURNING tb.id
+        `;
+        if (!rows || rows.length === 0) {
+          throw new AppConflictException(
+            'SEAT_NO_LONGER_AVAILABLE',
+            'Uma das vagas que você havia liberado não está mais disponível. Reduza o número de participantes.',
+          );
         }
+      }
+      if (toAcquire.length > 0) {
+        await tx.registration.updateMany({
+          where: { id: { in: toAcquire.map((acq) => acq.regId) } },
+          data: { status: 'PENDING' },
+        });
+      }
+
+      // 3) Reconstrói OrderReservedTicket = conjunto PENDING-alvo (mantém o invariante
+      //    reservedTickets == estoque retido == placeholders PENDING).
+      await tx.orderReservedTicket.deleteMany({ where: { orderId } });
+      if (newReservedTickets.length > 0) {
+        await tx.orderReservedTicket.createMany({
+          data: newReservedTickets.map((rt: any) => ({
+            orderId,
+            ticketId: rt.ticketId,
+            batchId: rt.batchId,
+            quantity: rt.quantity,
+            unitPrice: rt.unitPrice,
+            ticketName: rt.ticketName,
+          })),
+        });
       }
 
       return tx.order.update({

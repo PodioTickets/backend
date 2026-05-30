@@ -284,4 +284,141 @@ describe('OrdersService', () => {
       );
     });
   });
+
+  // ── patchParticipants — sincronização bidirecional reserva ↔ participantes ───
+  // Invariante exercitado: reservedTickets == placeholders PENDING == estoque retido.
+  describe('patchParticipants (sync reserva ↔ participantes)', () => {
+    const buyerId = 'buyer-1';
+    const orderId = 'order-sync';
+
+    const baseOrder = {
+      id: orderId,
+      userId: buyerId,
+      status: 'PENDING',
+      eventId: 'evt-1',
+      couponId: null,
+      voucherId: null,
+      coupon: null,
+      voucher: null,
+      discount: 0,
+      pendingProducts: null,
+      reservedTickets: [],
+      event: { eventDate: null },
+    };
+
+    const batchRows = [
+      { id: 'batch-A', price: 10000, ticketId: 'tk-A', ticket: { name: '100 reais' } },
+      { id: 'batch-B', price: 10000, ticketId: 'tk-B', ticket: { name: 'Outro' } },
+    ];
+
+    function buildClient(placeholderRegs: any[], acquireRows: any[] = [{ id: 'batch-x' }]) {
+      const tx = {
+        $executeRaw: jest.fn().mockResolvedValue(1),
+        $queryRaw: jest.fn().mockResolvedValue(acquireRows),
+        registration: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+        orderReservedTicket: {
+          deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+          createMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        order: {
+          update: jest.fn().mockImplementation(({ data }: any) => ({
+            id: orderId,
+            status: 'PENDING',
+            reservedTickets: [],
+            coupon: null,
+            voucher: null,
+            payment: null,
+            event: null,
+            ...data,
+          })),
+        },
+      };
+      const client: any = {
+        order: { findUnique: jest.fn().mockResolvedValue(baseOrder) },
+        user: { findUnique: jest.fn().mockResolvedValue(null) },
+        registration: { findMany: jest.fn().mockResolvedValue(placeholderRegs) },
+        ticketBatch: { findMany: jest.fn().mockResolvedValue(batchRows) },
+        coupon: { findMany: jest.fn().mockResolvedValue([]), findUnique: jest.fn().mockResolvedValue(null) },
+        $transaction: jest.fn().mockImplementation((fn: (tx: any) => any) => fn(tx)),
+        _tx: tx,
+      };
+      mockPrisma.getWriteClient.mockReturnValue(client);
+      mockPrisma.getReadClient.mockReturnValue(client);
+      return client;
+    }
+
+    const totalCreatedQty = (client: any) =>
+      client._tx.orderReservedTicket.createMany.mock.calls[0][0].data.reduce(
+        (s: number, r: any) => s + r.quantity,
+        0,
+      );
+
+    it('encolhe: 2 reservados, 1 participante → libera 1 vaga e cancela 1 placeholder', async () => {
+      const client = buildClient([
+        { id: 'reg-1', status: 'PENDING', tickets: [{ ticketId: 'tk-A', batchId: 'batch-A' }] },
+        { id: 'reg-2', status: 'PENDING', tickets: [{ ticketId: 'tk-B', batchId: 'batch-B' }] },
+      ]);
+
+      await service.patchParticipants(buyerId, orderId, {
+        participants: [{ email: 'a@a.com' }],
+      } as any);
+
+      expect(client._tx.$executeRaw).toHaveBeenCalledTimes(1); // restaura estoque
+      expect(client._tx.$queryRaw).not.toHaveBeenCalled(); // nada a adquirir
+      expect(client._tx.registration.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: { in: ['reg-2'] } }, data: { status: 'CANCELLED' } }),
+      );
+      expect(totalCreatedQty(client)).toBe(1);
+    });
+
+    it('cresce de volta: 1 PENDING + 1 CANCELLED, 2 participantes → re-adquire e reativa', async () => {
+      const client = buildClient(
+        [
+          { id: 'reg-1', status: 'PENDING', tickets: [{ ticketId: 'tk-A', batchId: 'batch-A' }] },
+          { id: 'reg-2', status: 'CANCELLED', tickets: [{ ticketId: 'tk-B', batchId: 'batch-B' }] },
+        ],
+        [{ id: 'batch-B' }], // aquisição atômica bem-sucedida
+      );
+
+      await service.patchParticipants(buyerId, orderId, {
+        participants: [{ email: 'a@a.com' }, { email: 'b@b.com' }],
+      } as any);
+
+      expect(client._tx.$queryRaw).toHaveBeenCalledTimes(1); // re-adquire estoque
+      expect(client._tx.$executeRaw).not.toHaveBeenCalled(); // nada a liberar
+      expect(client._tx.registration.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: { in: ['reg-2'] } }, data: { status: 'PENDING' } }),
+      );
+      expect(totalCreatedQty(client)).toBe(2);
+    });
+
+    it('excede o original: 3 participantes para 2 reservados → PARTICIPANTS_EXCEED_TICKETS', async () => {
+      buildClient([
+        { id: 'reg-1', status: 'PENDING', tickets: [{ ticketId: 'tk-A', batchId: 'batch-A' }] },
+        { id: 'reg-2', status: 'PENDING', tickets: [{ ticketId: 'tk-B', batchId: 'batch-B' }] },
+      ]);
+
+      await expect(
+        service.patchParticipants(buyerId, orderId, {
+          participants: [{ email: 'a' }, { email: 'b' }, { email: 'c' }],
+        } as any),
+      ).rejects.toThrow(/excede os ingressos reservados/);
+    });
+
+    it('vaga esgotada ao crescer: aquisição atômica sem linha → SEAT_NO_LONGER_AVAILABLE', async () => {
+      buildClient(
+        [
+          { id: 'reg-1', status: 'PENDING', tickets: [{ ticketId: 'tk-A', batchId: 'batch-A' }] },
+          { id: 'reg-2', status: 'CANCELLED', tickets: [{ ticketId: 'tk-B', batchId: 'batch-B' }] },
+        ],
+        [], // estoque indisponível
+      );
+
+      await expect(
+        service.patchParticipants(buyerId, orderId, {
+          participants: [{ email: 'a' }, { email: 'b' }],
+        } as any),
+      ).rejects.toThrow(/não está mais disponível/);
+    });
+  });
 });
