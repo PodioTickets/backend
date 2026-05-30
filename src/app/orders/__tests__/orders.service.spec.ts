@@ -4,6 +4,9 @@ import { OrdersService } from '../orders.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { OrdersRedisService } from '../orders-redis.service';
 import { CieloService } from '../../payments/cielo.service';
+import { EmailService } from '../../../common/services/email.service';
+import { TicketPdfService } from '../../../common/services/ticket-pdf.service';
+import { OrderFinalizationService } from '../../payments/order-finalization.service';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -20,6 +23,10 @@ function makeWriteClient(overrides: Record<string, any> = {}) {
       findUnique: jest.fn(),
       update: jest.fn().mockResolvedValue({}),
       delete: jest.fn().mockResolvedValue({}),
+    },
+    // isAdminUser() consulta user.findUnique (via getReadClient); default = não-admin.
+    user: {
+      findUnique: jest.fn().mockResolvedValue(null),
     },
     $queryRaw: jest.fn(),
     $executeRaw: jest.fn().mockResolvedValue(1),
@@ -53,6 +60,15 @@ describe('OrdersService', () => {
     checkReserveRateLimit: jest.fn(),
   };
 
+  // Deps adicionais do construtor (não exercitadas pelos testes atuais de cancel/etc).
+  const mockEmailService = {};
+  const mockTicketPdfService = {};
+  const mockOrderFinalization = {
+    finalizePaidOrder: jest.fn().mockResolvedValue([]),
+    confirmAndFinalizeOrder: jest.fn().mockResolvedValue({ finalized: true, registrations: [] }),
+    reverseSaleSideEffects: jest.fn().mockResolvedValue(undefined),
+  };
+
   beforeEach(async () => {
     writeClient = makeWriteClient();
     mockPrisma.getWriteClient.mockReturnValue(writeClient);
@@ -64,6 +80,9 @@ describe('OrdersService', () => {
         { provide: PrismaService, useValue: mockPrisma },
         { provide: CieloService, useValue: mockCieloService },
         { provide: OrdersRedisService, useValue: mockRedisService },
+        { provide: EmailService, useValue: mockEmailService },
+        { provide: TicketPdfService, useValue: mockTicketPdfService },
+        { provide: OrderFinalizationService, useValue: mockOrderFinalization },
       ],
     }).compile();
 

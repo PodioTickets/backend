@@ -115,10 +115,11 @@ const ORDER_INCLUDE = {
   voucher: { select: { id: true, code: true, name: true, status: true, appliesTo: true, applyToProducts: true } },
   payment: { select: { id: true, method: true, status: true, amount: true, transactionId: true, paymentDate: true, createdAt: true, metadata: true } },
   // participantFeePercent é necessário para calcular serviceFee em pedidos PENDING
-  // (em que order.serviceFee ainda é 0). eventDate é usado como referência para validar
+  // (em que order.serviceFee ainda é 0). organizerFeePercent é congelado como snapshot no
+  // pagamento (Order.organizerFeePercent). eventDate é usado como referência para validar
   // cupons AGE — a idade do participante é calculada na data do evento, não na atual.
   // Nada disso é exposto no payload — orderShape retorna apenas eventId.
-  event: { select: { participantFeePercent: true, eventDate: true } },
+  event: { select: { participantFeePercent: true, organizerFeePercent: true, eventDate: true } },
 } as const;
 
 /**
@@ -514,6 +515,49 @@ function orderShape(order: any, discountOverride?: number, extra?: Record<string
     ? (order.finalAmount ?? 0)
     : Math.max(0, (order.totalAmount ?? 0) + serviceFee - discount);
 
+  // ── Breakdown rotulado de preço (checkout-coupons-server-spec §3.3) ──────────
+  // ADITIVO: não altera discount/serviceFee/finalAmount/totalAmount (valores cobrados).
+  // Classifica o `discount` (combinado) por ORIGEM, garantindo que a soma das parcelas
+  // == discount. O front lê `pricing` e renderiza as linhas sem recalcular nada.
+  const ticketsSubtotalCents = (order.reservedTickets ?? []).reduce(
+    (s: number, rt: any) => s + (rt.unitPrice ?? 0) * (rt.quantity ?? 0),
+    0,
+  );
+  const subtotalCents = order.totalAmount ?? 0;
+  const productsSubtotalCents = Math.max(0, subtotalCents - ticketsSubtotalCents);
+
+  // Porção do voucher: sem cupom → todo o desconto é do voucher; combinado → cobertura
+  // do voucher (ingresso aplicável mais caro + produtos quando applyToProducts). O restante
+  // vai pro balde do cupom. Cupom e voucher devem ser mutuamente exclusivos (spec); no caso
+  // combinado legado a divisão é aproximada, mas a SOMA sempre bate com `discount`.
+  let voucherDiscountCents = 0;
+  if (voucher && order.voucherId) {
+    if (!coupon) {
+      voucherDiscountCents = discount;
+    } else {
+      const cov = resolveVoucherCoverage(order.reservedTickets ?? [], voucher.appliesTo);
+      const voucherPortion = cov.hasApplicable
+        ? cov.discount + (voucher.applyToProducts ? productsSubtotalCents : 0)
+        : 0;
+      voucherDiscountCents = Math.min(discount, Math.max(0, voucherPortion));
+    }
+  }
+  // Cupom é cupom: o desconto de QUALQUER tipo (DISCOUNT/AGE/QUANTITY) entra em
+  // `couponDiscount`. O tipo específico fica em `coupon.couponType` (objeto `coupon`),
+  // se o front quiser rotular. Voucher é entidade à parte → `voucherDiscount`.
+  const couponDiscountCents = coupon ? Math.max(0, discount - voucherDiscountCents) : 0;
+
+  const pricing = {
+    ticketsSubtotal: ticketsSubtotalCents,
+    productsSubtotal: productsSubtotalCents,
+    subtotal: subtotalCents,
+    couponDiscount: couponDiscountCents,
+    voucherDiscount: voucherDiscountCents,
+    serviceFee,
+    total: finalAmount,
+    currency: 'BRL',
+  };
+
   return {
     id: order.id,
     eventId: order.eventId,
@@ -522,6 +566,9 @@ function orderShape(order: any, discountOverride?: number, extra?: Record<string
     serviceFee,
     discount,
     finalAmount,
+    pricing,
+    // Default; `...extra` (patchProducts) sobrescreve com true quando um auto-cupom cai.
+    couponAutoRemoved: false,
     coupon: order.coupon ?? null,
     voucher: order.voucher ?? null,
     expiresAt: order.expiresAt ?? null,
@@ -1471,6 +1518,245 @@ export class OrdersService {
 
   // ── 3. patchParticipants ──────────────────────────────────────────────────
 
+  /**
+   * Avalia e (re)aplica cupons AUTOMÁTICOS (AGE/QUANTITY) a partir dos participantes e
+   * ingressos ATUAIS — FONTE ÚNICA usada por `PATCH /participants` e `PATCH /products`.
+   * NÃO persiste nada: devolve os valores que o caller grava no `order.update` + os que o
+   * `orderShape` precisa pra exibir o desconto por unidade.
+   *
+   * Regras (espelham a aplicação no `pay`):
+   *  (a) cupom AGE já aplicado → re-avalia contra os participantes (remove se nenhum qualifica);
+   *  (b) sem cupom/voucher → tenta aplicar o 1º auto-cupom (QUANTITY/AGE) elegível;
+   *  (c) cupom QUANTITY aplicado → remove se a quantidade caiu abaixo do mínimo.
+   * Cupom MANUAL (DISCOUNT PERCENTAGE) e voucher isolado são RECALCULADOS sobre a nova base
+   * (sem trocar de cupom), mantendo o total coerente quando carrinho/participantes mudam.
+   */
+  private async evaluateAutoCoupons(
+    order: any,
+    participants: any[],
+    reservedTickets: any[],
+    ticketsSubtotal: number,
+    productsSubtotal: number,
+  ): Promise<{
+    autoCouponId?: string;
+    autoEffectiveUsage?: number;
+    shouldRemoveAgeCoupon: boolean;
+    shouldRemoveQuantityCoupon: boolean;
+    ageQualifyingSlots?: number[];
+    newDiscount: number;
+  }> {
+    const r: any = this.prisma.getReadClient();
+    const w: any = this.prisma.getWriteClient();
+    const totalAmount = ticketsSubtotal + productsSubtotal;
+
+    let autoCouponId: string | undefined;
+    let autoDiscount = 0;
+    let autoEffectiveUsage: number | undefined;
+    let shouldRemoveAgeCoupon = false;
+    let shouldRemoveQuantityCoupon = false;
+    let ageQualifyingSlots: number[] | undefined;
+
+    // (a) Re-avaliar cupom AGE já aplicado (depende dos participantes atuais)
+    if (order.couponId && !order.voucherId) {
+      const existingCoupon = await r.coupon.findUnique({
+        where: { id: order.couponId },
+        select: { id: true, couponType: true, type: true, value: true, minAge: true, maxAge: true, maxUsage: true, usageCount: true, appliesTo: true, applyToProducts: true },
+      });
+      if (existingCoupon?.couponType === 'AGE') {
+        const refDate = resolveAgeReferenceDate(order);
+        const min = existingCoupon.minAge ?? 0;
+        const max = existingCoupon.maxAge ?? Infinity;
+        const ageMatchCount = participants.filter((p: any) => {
+          if (!p.birthDate) return false;
+          const age = computeAgeAt(p.birthDate, refDate);
+          return age >= min && age <= max;
+        }).length;
+
+        if (ageMatchCount <= 0) {
+          shouldRemoveAgeCoupon = true;
+        } else {
+          let ageApplicableTickets = reservedTickets;
+          if (existingCoupon.appliesTo && existingCoupon.appliesTo !== 'all') {
+            const allowed = parseAppliesToArray(existingCoupon.appliesTo);
+            ageApplicableTickets = reservedTickets.filter((rt: any) => allowed.includes(rt.ticketId));
+          }
+          const ageApplicableQty = ageApplicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
+          const remaining = existingCoupon.maxUsage != null
+            ? Math.max(0, existingCoupon.maxUsage - existingCoupon.usageCount)
+            : ageMatchCount;
+          const effectiveUsage = Math.min(remaining, ageMatchCount, ageApplicableQty);
+          const totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
+          ageQualifyingSlots = participants
+            .map((p: any, i: number) => {
+              if (!p.birthDate || i >= totalUnits) return -1;
+              const age = computeAgeAt(p.birthDate, refDate);
+              return (age >= min && age <= max) ? i : -1;
+            })
+            .filter((i: number) => i >= 0);
+          autoCouponId = existingCoupon.id;
+          const productsExtra = existingCoupon.applyToProducts ? productsSubtotal : 0;
+          autoDiscount = computePartialCouponDiscount(ageApplicableTickets, existingCoupon.type, existingCoupon.value, effectiveUsage, productsExtra);
+          autoEffectiveUsage = effectiveUsage;
+        }
+      }
+    }
+
+    // (b) Aplicação inicial — apenas se ainda não há cupom/voucher
+    if (!order.couponId && !order.voucherId) {
+      const totalQuantity = reservedTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
+      const ticketIds = reservedTickets.map((rt: any) => rt.ticketId);
+
+      const autoCoupons = await w.coupon.findMany({
+        where: {
+          eventId: order.eventId,
+          status: 'ACTIVE',
+          deletedAt: null,
+          couponType: { in: ['QUANTITY', 'AGE'] },
+          OR: [{ expiryDate: null }, { expiryDate: { gt: new Date() } }],
+        },
+      });
+
+      for (const coupon of autoCoupons) {
+        // Verificar appliesTo
+        if (coupon.appliesTo && coupon.appliesTo !== 'all') {
+          const allowed = parseAppliesToArray(coupon.appliesTo);
+          if (!ticketIds.some((id: string) => allowed.includes(id))) continue;
+        }
+
+        if (coupon.minCartValue && ticketsSubtotal < coupon.minCartValue) continue;
+
+        if (coupon.couponType === 'QUANTITY') {
+          if (coupon.minQuantity && totalQuantity < coupon.minQuantity) continue;
+          // QUANTITY: all-or-nothing — se esgotado, não aplica
+          if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) continue;
+        } else if (coupon.couponType === 'AGE') {
+          const refDate = resolveAgeReferenceDate(order);
+          const min = coupon.minAge ?? 0;
+          const max = coupon.maxAge ?? Infinity;
+          const ageMatchCount = participants.filter((p: any) => {
+            if (!p.birthDate) return false;
+            const age = computeAgeAt(p.birthDate, refDate);
+            return age >= min && age <= max;
+          }).length;
+          if (ageMatchCount <= 0) continue;
+          (coupon as any)._ageMatchCount = ageMatchCount;
+        }
+
+        {
+          let autoApplicableTickets = reservedTickets;
+          if (coupon.appliesTo && coupon.appliesTo !== 'all') {
+            const allowedIds = parseAppliesToArray(coupon.appliesTo);
+            autoApplicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
+          }
+
+          if (coupon.couponType === 'QUANTITY') {
+            // QUANTITY: desconto sobre todo o pedido (all-or-nothing).
+            // Produtos adicionais entram na base apenas quando applyToProducts=true.
+            const autoApplicableSubtotal = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0);
+            const autoApplicableQty = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
+            const productsContribution = coupon.applyToProducts ? productsSubtotal : 0;
+            if (coupon.type === 'PERCENTAGE') {
+              const applicableRatio = ticketsSubtotal > 0 ? autoApplicableSubtotal / ticketsSubtotal : 1;
+              const applicableBase = autoApplicableSubtotal + Math.round(productsContribution * applicableRatio);
+              autoDiscount = Math.floor(applicableBase * (coupon.value / 100));
+            } else {
+              // FIXED: valor por unidade aplicável; cap definido abaixo.
+              autoDiscount = autoApplicableQty * coupon.value;
+            }
+            autoDiscount = Math.min(autoDiscount, autoApplicableSubtotal + productsContribution);
+          } else {
+            // AGE: desconto apenas nos ingressos dos participantes qualificados
+            const ageMatchCount: number = (coupon as any)._ageMatchCount ?? 0;
+            const autoApplicableQty = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
+            const remaining = coupon.maxUsage != null
+              ? Math.max(0, coupon.maxUsage - coupon.usageCount)
+              : ageMatchCount;
+            const effectiveUsage = Math.min(remaining, ageMatchCount, autoApplicableQty);
+            if (effectiveUsage <= 0) continue;
+            const productsExtra = coupon.applyToProducts ? productsSubtotal : 0;
+            autoDiscount = computePartialCouponDiscount(autoApplicableTickets, coupon.type, coupon.value, effectiveUsage, productsExtra);
+            autoEffectiveUsage = effectiveUsage;
+            const _ageRefDate = resolveAgeReferenceDate(order);
+            const _ageMin = coupon.minAge ?? 0;
+            const _ageMax = coupon.maxAge ?? Infinity;
+            const _totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
+            ageQualifyingSlots = participants
+              .map((p: any, i: number) => {
+                if (!p.birthDate || i >= _totalUnits) return -1;
+                const age = computeAgeAt(p.birthDate, _ageRefDate);
+                return (age >= _ageMin && age <= _ageMax) ? i : -1;
+              })
+              .filter((i: number) => i >= 0);
+          }
+
+          autoCouponId = coupon.id;
+          break;
+        }
+      }
+    }
+
+    // (c) Remover cupom QUANTITY se quantidade ficou abaixo do mínimo
+    if (order.couponId && !autoCouponId && !shouldRemoveAgeCoupon) {
+      const existingCoupon = await r.coupon.findUnique({
+        where: { id: order.couponId },
+        select: { couponType: true, minQuantity: true },
+      });
+      if (
+        existingCoupon?.couponType === 'QUANTITY' &&
+        existingCoupon.minQuantity &&
+        participants.length < existingCoupon.minQuantity
+      ) {
+        shouldRemoveQuantityCoupon = true;
+      }
+    }
+
+    // Discount final — prioridade: auto-aplicado > remoção > recálculo PERCENTAGE não-AGE > existente.
+    let newDiscount: number;
+    if (autoCouponId) {
+      newDiscount = autoDiscount;
+    } else if (shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon) {
+      newDiscount = 0;
+    } else {
+      newDiscount = (order as any).discount ?? 0;
+      const activeCoupon = (order as any).coupon;
+      if (
+        activeCoupon &&
+        activeCoupon.type === 'PERCENTAGE' &&
+        activeCoupon.couponType !== 'AGE' &&
+        !(order as any).voucherId
+      ) {
+        let applicableTickets = reservedTickets;
+        if (activeCoupon.appliesTo && activeCoupon.appliesTo !== 'all') {
+          const allowed = parseAppliesToArray(activeCoupon.appliesTo);
+          applicableTickets = reservedTickets.filter((rt: any) => allowed.includes(rt.ticketId));
+        }
+        const applicableSubtotal = applicableTickets.reduce(
+          (s: number, rt: any) => s + rt.unitPrice * rt.quantity,
+          0,
+        );
+        const productsContribution = activeCoupon.applyToProducts ? productsSubtotal : 0;
+        const applicableRatio = ticketsSubtotal > 0 ? applicableSubtotal / ticketsSubtotal : 1;
+        const applicableBase = applicableSubtotal + Math.round(productsContribution * applicableRatio);
+        newDiscount = Math.floor(applicableBase * (activeCoupon.value / 100));
+        newDiscount = Math.min(newDiscount, applicableBase);
+      } else if ((order as any).voucherId && !(order as any).couponId && (order as any).voucher) {
+        const v = (order as any).voucher;
+        const cov = resolveVoucherCoverage(reservedTickets, v.appliesTo);
+        const vProductsExtra = v.applyToProducts ? productsSubtotal : 0;
+        newDiscount = Math.min(cov.discount + vProductsExtra, totalAmount);
+      }
+    }
+
+    return {
+      autoCouponId,
+      autoEffectiveUsage,
+      shouldRemoveAgeCoupon,
+      shouldRemoveQuantityCoupon,
+      ageQualifyingSlots,
+      newDiscount,
+    };
+  }
+
   async patchParticipants(
     userId: string,
     orderId: string,
@@ -1505,10 +1791,10 @@ export class OrdersService {
       };
     });
 
-    // Cupons automáticos (QUANTITY/AGE) NÃO são aplicados aqui — toda aplicação,
-    // re-avaliação e remoção automática acontece em PATCH /products, que é
-    // chamado logo após este endpoint pelo frontend e tem acesso ao subtotal
-    // de produtos (necessário p/ cupons com applyToProducts=true).
+    // Cupons automáticos (QUANTITY/AGE) SÃO reavaliados aqui também (fonte única
+    // evaluateAutoCoupons, mesma do PATCH /products) — atribuir/editar participante
+    // reflete na hora no desconto. O subtotal de produtos vem de pendingProducts
+    // (já gravado pelo /products anterior) p/ cupons com applyToProducts=true.
 
     // Calcular vagas a liberar se participantes < reservados
     // Participantes sem email são slots ainda não preenchidos — contam como reserva
@@ -1545,10 +1831,24 @@ export class OrdersService {
       0,
     );
     const newTotalAmount = newTicketsSubtotal + productsSubtotal;
-    // Discount permanece o que estava — PATCH /products é quem re-avalia
-    // cupom automático após esta operação.
-    const currentDiscount = order.discount ?? 0;
-    const newFinalAmount = Math.max(0, newTotalAmount - currentDiscount);
+
+    // Reavalia auto-cupom (AGE/QUANTITY) já com os ingressos PÓS-liberação e os novos
+    // participantes — fonte única compartilhada com PATCH /products.
+    const {
+      autoCouponId,
+      autoEffectiveUsage,
+      shouldRemoveAgeCoupon,
+      shouldRemoveQuantityCoupon,
+      ageQualifyingSlots,
+      newDiscount,
+    } = await this.evaluateAutoCoupons(
+      order,
+      participants,
+      newReservedTickets,
+      newTicketsSubtotal,
+      productsSubtotal,
+    );
+    const newFinalAmount = Math.max(0, newTotalAmount - newDiscount);
 
     const updated = await w.$transaction(async (tx: any) => {
       // Restaurar availableQuantity nos lotes liberados
@@ -1578,13 +1878,23 @@ export class OrdersService {
           // Usa a versão normalizada (documento limpo), não o dto cru.
           pendingParticipants: participants,
           totalAmount: newTotalAmount,
+          discount: newDiscount,
           finalAmount: newFinalAmount,
+          ...(autoCouponId && { couponId: autoCouponId }),
+          ...((shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon) && { couponId: null }),
           updatedAt: new Date(),
         },
         include: ORDER_INCLUDE,
       });
     });
-    return orderShape(updated);
+    return orderShape(
+      updated,
+      newDiscount > 0 ? newDiscount : undefined,
+      { couponAutoRemoved: shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon },
+      autoEffectiveUsage,
+      undefined,
+      ageQualifyingSlots,
+    );
   }
 
   // ── 3b. patchCoupon ───────────────────────────────────────────────────────
@@ -1604,6 +1914,11 @@ export class OrdersService {
       );
     }
 
+    // #3 (checkout-coupons-server-spec §3.5): cupom/voucher inválido/expirado/abaixo do
+    // mínimo NÃO quebra o checkout — vira rejeição SUAVE (`couponRejected`), mantendo o
+    // pedido como está. Só o conflito cupom-vs-voucher (acima, uso indevido do cliente)
+    // segue como erro. O bloco fica indentado um nível por estar dentro do try.
+    try {
     const w: any = this.prisma.getWriteClient();
     const r: any = this.prisma.getReadClient();
     const reservedTickets = (order.reservedTickets ?? []) as any[];
@@ -1804,6 +2119,21 @@ export class OrdersService {
         discount,
       },
     };
+    } catch (e) {
+      // Falha de validação de cupom/voucher → não quebra o fluxo: devolve o pedido
+      // INALTERADO + o motivo, pro front exibir o aviso e seguir o checkout.
+      if (e instanceof AppUnprocessableException) {
+        const resp = e.getResponse() as { code?: string; message?: string };
+        return {
+          ...orderShape(order),
+          couponRejected: {
+            code: resp?.code ?? 'COUPON_REJECTED',
+            reason: resp?.message ?? 'Cupom não pôde ser aplicado',
+          },
+        };
+      }
+      throw e;
+    }
   }
 
   // ── 4. patchProducts ──────────────────────────────────────────────────────
@@ -1870,217 +2200,15 @@ export class OrdersService {
     const totalAmount = ticketsSubtotal + productsSubtotal;
 
     // ── Cupons automáticos (QUANTITY/AGE) ──────────────────────────────────
-    // Aplicados aqui (não mais em PATCH /participants) porque dependem do
-    // subtotal de produtos quando `applyToProducts=true`. O front sempre chama
-    // este endpoint depois de /participants, mesmo com `products: []`.
-
-    let autoCouponId: string | undefined;
-    let autoDiscount = 0;
-    let autoEffectiveUsage: number | undefined;
-    let shouldRemoveAgeCoupon = false;
-    let shouldRemoveQuantityCoupon = false;
-    let ageQualifyingSlots: number[] | undefined;
-
-    // (a) Re-avaliar cupom AGE já aplicado (depende dos participantes atuais)
-    if (order.couponId && !order.voucherId) {
-      const existingCoupon = await r.coupon.findUnique({
-        where: { id: order.couponId },
-        select: { id: true, couponType: true, type: true, value: true, minAge: true, maxAge: true, maxUsage: true, usageCount: true, appliesTo: true, applyToProducts: true },
-      });
-      if (existingCoupon?.couponType === 'AGE') {
-        const refDate = resolveAgeReferenceDate(order);
-        const min = existingCoupon.minAge ?? 0;
-        const max = existingCoupon.maxAge ?? Infinity;
-        const ageMatchCount = participants.filter((p: any) => {
-          if (!p.birthDate) return false;
-          const age = computeAgeAt(p.birthDate, refDate);
-          return age >= min && age <= max;
-        }).length;
-
-        if (ageMatchCount <= 0) {
-          shouldRemoveAgeCoupon = true;
-        } else {
-          let ageApplicableTickets = reservedTickets;
-          if (existingCoupon.appliesTo && existingCoupon.appliesTo !== 'all') {
-            const allowed = parseAppliesToArray(existingCoupon.appliesTo);
-            ageApplicableTickets = reservedTickets.filter((rt: any) => allowed.includes(rt.ticketId));
-          }
-          const ageApplicableQty = ageApplicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-          const remaining = existingCoupon.maxUsage != null
-            ? Math.max(0, existingCoupon.maxUsage - existingCoupon.usageCount)
-            : ageMatchCount;
-          const effectiveUsage = Math.min(remaining, ageMatchCount, ageApplicableQty);
-          const totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-          ageQualifyingSlots = participants
-            .map((p: any, i: number) => {
-              if (!p.birthDate || i >= totalUnits) return -1;
-              const age = computeAgeAt(p.birthDate, refDate);
-              return (age >= min && age <= max) ? i : -1;
-            })
-            .filter((i: number) => i >= 0);
-          autoCouponId = existingCoupon.id;
-          const productsExtra = existingCoupon.applyToProducts ? productsSubtotal : 0;
-          autoDiscount = computePartialCouponDiscount(ageApplicableTickets, existingCoupon.type, existingCoupon.value, effectiveUsage, productsExtra);
-          autoEffectiveUsage = effectiveUsage;
-        }
-      }
-    }
-
-    // (b) Aplicação inicial — apenas se ainda não há cupom/voucher
-    if (!order.couponId && !order.voucherId) {
-      const totalQuantity = reservedTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
-      const ticketIds = reservedTickets.map((rt: any) => rt.ticketId);
-
-      const autoCoupons = await w.coupon.findMany({
-        where: {
-          eventId: order.eventId,
-          status: 'ACTIVE',
-          deletedAt: null,
-          couponType: { in: ['QUANTITY', 'AGE'] },
-          OR: [{ expiryDate: null }, { expiryDate: { gt: new Date() } }],
-        },
-      });
-
-      for (const coupon of autoCoupons) {
-        // Verificar appliesTo
-        if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-          const allowed = parseAppliesToArray(coupon.appliesTo);
-          if (!ticketIds.some((id: string) => allowed.includes(id))) continue;
-        }
-
-        if (coupon.minCartValue && ticketsSubtotal < coupon.minCartValue) continue;
-
-        if (coupon.couponType === 'QUANTITY') {
-          if (coupon.minQuantity && totalQuantity < coupon.minQuantity) continue;
-          // QUANTITY: all-or-nothing — se esgotado, não aplica
-          if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) continue;
-        } else if (coupon.couponType === 'AGE') {
-          const refDate = resolveAgeReferenceDate(order);
-          const min = coupon.minAge ?? 0;
-          const max = coupon.maxAge ?? Infinity;
-          const ageMatchCount = participants.filter((p: any) => {
-            if (!p.birthDate) return false;
-            const age = computeAgeAt(p.birthDate, refDate);
-            return age >= min && age <= max;
-          }).length;
-          if (ageMatchCount <= 0) continue;
-          (coupon as any)._ageMatchCount = ageMatchCount;
-        }
-
-        {
-          let autoApplicableTickets = reservedTickets;
-          if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-            const allowedIds = parseAppliesToArray(coupon.appliesTo);
-            autoApplicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
-          }
-
-          if (coupon.couponType === 'QUANTITY') {
-            // QUANTITY: desconto sobre todo o pedido (all-or-nothing).
-            // Produtos adicionais entram na base apenas quando applyToProducts=true.
-            const autoApplicableSubtotal = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0);
-            const autoApplicableQty = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
-            const productsContribution = coupon.applyToProducts ? productsSubtotal : 0;
-            if (coupon.type === 'PERCENTAGE') {
-              const applicableRatio = ticketsSubtotal > 0 ? autoApplicableSubtotal / ticketsSubtotal : 1;
-              const applicableBase = autoApplicableSubtotal + Math.round(productsContribution * applicableRatio);
-              autoDiscount = Math.floor(applicableBase * (coupon.value / 100));
-            } else {
-              // FIXED: valor por unidade aplicável; cap definido abaixo.
-              autoDiscount = autoApplicableQty * coupon.value;
-            }
-            autoDiscount = Math.min(autoDiscount, autoApplicableSubtotal + productsContribution);
-          } else {
-            // AGE: desconto apenas nos ingressos dos participantes qualificados
-            const ageMatchCount: number = (coupon as any)._ageMatchCount ?? 0;
-            const autoApplicableQty = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
-            const remaining = coupon.maxUsage != null
-              ? Math.max(0, coupon.maxUsage - coupon.usageCount)
-              : ageMatchCount;
-            const effectiveUsage = Math.min(remaining, ageMatchCount, autoApplicableQty);
-            if (effectiveUsage <= 0) continue;
-            const productsExtra = coupon.applyToProducts ? productsSubtotal : 0;
-            autoDiscount = computePartialCouponDiscount(autoApplicableTickets, coupon.type, coupon.value, effectiveUsage, productsExtra);
-            autoEffectiveUsage = effectiveUsage;
-            const _ageRefDate = resolveAgeReferenceDate(order);
-            const _ageMin = coupon.minAge ?? 0;
-            const _ageMax = coupon.maxAge ?? Infinity;
-            const _totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-            ageQualifyingSlots = participants
-              .map((p: any, i: number) => {
-                if (!p.birthDate || i >= _totalUnits) return -1;
-                const age = computeAgeAt(p.birthDate, _ageRefDate);
-                return (age >= _ageMin && age <= _ageMax) ? i : -1;
-              })
-              .filter((i: number) => i >= 0);
-          }
-
-          autoCouponId = coupon.id;
-          break;
-        }
-      }
-    }
-
-    // (c) Remover cupom QUANTITY se quantidade ficou abaixo do mínimo
-    if (order.couponId && !autoCouponId && !shouldRemoveAgeCoupon) {
-      const existingCoupon = await r.coupon.findUnique({
-        where: { id: order.couponId },
-        select: { couponType: true, minQuantity: true },
-      });
-      if (
-        existingCoupon?.couponType === 'QUANTITY' &&
-        existingCoupon.minQuantity &&
-        participants.length < existingCoupon.minQuantity
-      ) {
-        shouldRemoveQuantityCoupon = true;
-      }
-    }
-
-    // Discount final — prioridade: auto-aplicado > remoção > recálculo PERCENTAGE não-AGE > existente.
-    // AGE existente com participantes intactos cai no caminho (a) acima; PERCENTAGE/FIXED
-    // de cupons DISCOUNT são recalculados aqui para refletir a nova base com produtos.
-    let newDiscount: number;
-    if (autoCouponId) {
-      newDiscount = autoDiscount;
-    } else if (shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon) {
-      newDiscount = 0;
-    } else {
-      newDiscount = (order as any).discount ?? 0;
-      const activeCoupon = (order as any).coupon;
-      if (
-        activeCoupon &&
-        activeCoupon.type === 'PERCENTAGE' &&
-        activeCoupon.couponType !== 'AGE' &&
-        !(order as any).voucherId
-      ) {
-        // Espelha a fórmula da aplicação inicial QUANTITY PERCENTAGE: respeita
-        // `appliesTo` (só ingressos cobertos) e `applyToProducts` (produtos só
-        // entram na base se o flag estiver ligado). Antes usava totalAmount cru
-        // e cobrava desconto sobre produtos quando applyToProducts=false.
-        let applicableTickets = reservedTickets;
-        if (activeCoupon.appliesTo && activeCoupon.appliesTo !== 'all') {
-          const allowed = parseAppliesToArray(activeCoupon.appliesTo);
-          applicableTickets = reservedTickets.filter((rt: any) => allowed.includes(rt.ticketId));
-        }
-        const applicableSubtotal = applicableTickets.reduce(
-          (s: number, rt: any) => s + rt.unitPrice * rt.quantity,
-          0,
-        );
-        const productsContribution = activeCoupon.applyToProducts ? productsSubtotal : 0;
-        const applicableRatio = ticketsSubtotal > 0 ? applicableSubtotal / ticketsSubtotal : 1;
-        const applicableBase = applicableSubtotal + Math.round(productsContribution * applicableRatio);
-        newDiscount = Math.floor(applicableBase * (activeCoupon.value / 100));
-        newDiscount = Math.min(newDiscount, applicableBase);
-      } else if ((order as any).voucherId && !(order as any).couponId && (order as any).voucher) {
-        // Voucher isolado: recomputa a cobertura (ingressos podem ter mudado) e, se
-        // applyToProducts, soma o subtotal de produtos. Espelha o cupom e o que o
-        // `pay` calcula — mantém o total exibido coerente com o cobrado. Sem cupom
-        // no pedido → sem risco de double-count dos produtos.
-        const v = (order as any).voucher;
-        const cov = resolveVoucherCoverage(reservedTickets, v.appliesTo);
-        const vProductsExtra = v.applyToProducts ? productsSubtotal : 0;
-        newDiscount = Math.min(cov.discount + vProductsExtra, totalAmount);
-      }
-    }
+    // FONTE ÚNICA (evaluateAutoCoupons), compartilhada com PATCH /participants.
+    const {
+      autoCouponId,
+      autoEffectiveUsage,
+      shouldRemoveAgeCoupon,
+      shouldRemoveQuantityCoupon,
+      ageQualifyingSlots,
+      newDiscount,
+    } = await this.evaluateAutoCoupons(order, participants, reservedTickets, ticketsSubtotal, productsSubtotal);
 
     const finalAmount = Math.max(0, totalAmount - newDiscount);
 
@@ -2449,6 +2577,10 @@ export class OrdersService {
     // (ver computeServiceFee, computeFinalAmount e sessão 2026-05-11).
     const participantFeePercent: number =
       (order as any).event?.participantFeePercent ?? 0;
+    // Snapshot da taxa do organizador (Podio↔organizador) no MESMO instante — congela a
+    // alíquota usada no repasse/financeiro pra este pedido, mesmo que o evento mude depois.
+    const organizerFeePercent: number =
+      (order as any).event?.organizerFeePercent ?? 0;
     const feeBase = Math.max(0, preDiscountTotal - couponDiscount - voucherDiscount);
     const serviceFee = Math.round(feeBase * (participantFeePercent / 100));
 
@@ -2627,6 +2759,8 @@ export class OrdersService {
             expiresAt: newExpiresAt,
             discount: couponDiscount + voucherDiscount,
             serviceFee,
+            participantFeePercent,
+            organizerFeePercent,
             finalAmount: finalTotal,
             totalAmount: preDiscountTotal,
             ...(couponId && { couponId }),
@@ -2703,6 +2837,8 @@ export class OrdersService {
             expiresAt: newExpiresAt,
             discount: couponDiscount + voucherDiscount,
             serviceFee,
+            participantFeePercent,
+            organizerFeePercent,
             finalAmount: finalTotal,
             totalAmount: preDiscountTotal,
             ...(couponId && { couponId }),
@@ -2809,6 +2945,8 @@ export class OrdersService {
         data: {
           discount: couponDiscount + voucherDiscount,
           serviceFee,
+          participantFeePercent,
+          organizerFeePercent,
           finalAmount: finalTotal,
           totalAmount: preDiscountTotal,
           ...(couponId && { couponId }),

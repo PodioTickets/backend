@@ -15,7 +15,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from './cielo.service';
 import { OrderFinalizationService } from './order-finalization.service';
-import { REFUND_FEE_RATE } from '../../common/utils/refund.util';
+import { REFUND_FEE_RATE, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 
 /**
  * Estorna pagamentos via Cielo a partir de uma ação administrativa interna.
@@ -140,10 +140,13 @@ export class PaymentsRefundService {
     // saldo pode ficar negativo quando o organizador já sacou o valor, e isso é o
     // comportamento esperado. `force` segue aceito por compatibilidade de contrato,
     // mas não há mais gate de saldo a sobrescrever.
+    // Alíquota EFETIVA: snapshot congelado no pagamento (order.organizerFeePercent) com
+    // fallback ao vivo. Congelado abaixo em payment.metadata.organizerNetReversed → o
+    // repasse reverte EXATAMENTE o que foi creditado na venda (simetria venda↔estorno).
     const refundOrgNet = this.computeOrganizerNet(
       order.finalAmount,
       order.serviceFee,
-      order.event.organizerFeePercent,
+      resolveOrderOrganizerFeePercent(order, order.event.organizerFeePercent),
     );
     const refundSubtotal = Math.max(0, order.finalAmount - order.serviceFee);
     const refundFee = Math.round(refundSubtotal * REFUND_FEE_RATE);

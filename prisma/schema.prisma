@@ -707,9 +707,18 @@ model Order {
   userId      String   @db.Uuid // Usuário que fez o pedido (comprador)
   eventId     String   @db.Uuid // Evento ao qual o pedido pertence
   totalAmount Int // Valor total do pedido em centavos
-  serviceFee  Int // Taxa de serviço total em centavos
+  serviceFee  Int // Taxa de serviço total em centavos (snapshot do valor pago)
   discount    Int      @default(0) // Desconto total (cupom/voucher) em centavos
   finalAmount Int // Valor final a pagar em centavos
+  /// Snapshot do % da taxa de serviço (participante) congelado no instante do pagamento.
+  /// Complementa `serviceFee` (valor) com a alíquota usada. null em pedidos legados →
+  /// consumidores caem no valor vivo do evento (event.participantFeePercent).
+  participantFeePercent Float?
+  /// Snapshot do % da taxa do organizador (Podio↔organizador) congelado no pagamento.
+  /// Hoje o repasse/financeiro lê esse % ao vivo do evento (pode mudar e distorcer pedidos
+  /// antigos); o snapshot preserva a verdade histórica. null em pedidos legados →
+  /// consumidores caem no valor vivo do evento (event.organizerFeePercent).
+  organizerFeePercent   Float?
   couponId        String?  @db.Uuid // Cupom aplicado no pedido
   voucherId       String?  @db.Uuid // Voucher aplicado no pedido
   idempotencyKey  String?  @unique  // Chave de idempotência para evitar pedidos duplicados

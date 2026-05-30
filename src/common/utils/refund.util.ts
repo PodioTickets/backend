@@ -27,10 +27,24 @@ export function isChargeback(metadata: any): boolean {
 }
 
 /**
+ * % do organizador EFETIVO de um pedido: prioriza o snapshot congelado no pagamento
+ * (`order.organizerFeePercent`, gravado no `pay`) e cai para o valor vivo do evento
+ * (`eventOrganizerFeePercent`) em pedidos legados (snapshot null). Centraliza a regra de
+ * fallback usada por repasse/refund — garante que o cálculo use a alíquota que de fato
+ * vigorava na venda, não a config atual (que pode ter mudado).
+ */
+export function resolveOrderOrganizerFeePercent(
+  order: any,
+  eventOrganizerFeePercent: number,
+): number {
+  return order?.organizerFeePercent ?? eventOrganizerFeePercent;
+}
+
+/**
  * Impacto financeiro de um pedido estornado PARA O ORGANIZADOR.
- * Prioriza valores congelados em `payment.metadata` no momento do estorno (verdade
- * histórica — `organizerFeePercent` pode mudar depois); cai para o cálculo ao vivo em
- * estornos legados (sem os campos congelados).
+ * Prioriza valores congelados em `payment.metadata` no momento do estorno; senão recalcula
+ * com a alíquota EFETIVA do pedido (snapshot do pagamento, com fallback ao vivo via
+ * `resolveOrderOrganizerFeePercent`) — verdade histórica mesmo que o evento mude depois.
  *
  *   organizerNetReversed — orgNet que o organizador DEIXA de receber (venda revertida).
  *   refundFee            — taxa de refund (2%) DEBITADA do saldo. Vale para refund E chargeback.
@@ -42,10 +56,11 @@ export function computeRefundImpact(
   const meta = (order.payment?.metadata ?? {}) as any;
   const subtotal = Math.max(0, (order.finalAmount ?? 0) - (order.serviceFee ?? 0));
 
+  const effectivePercent = resolveOrderOrganizerFeePercent(order, organizerFeePercent);
   const organizerNetReversed =
     typeof meta.organizerNetReversed === 'number'
       ? meta.organizerNetReversed
-      : Math.round(subtotal * (1 - organizerFeePercent / 100));
+      : Math.round(subtotal * (1 - effectivePercent / 100));
 
   // 2% sobre o subtotal em qualquer estorno. Usa o valor congelado se houver, senão recalcula.
   const refundFee =

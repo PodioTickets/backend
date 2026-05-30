@@ -8,7 +8,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { OrganizerMemberAccessService } from '../organizations/organizer-member-access.service';
 import { EmailService } from '../../common/services/email.service';
 import { PaymentMethod, PaymentStatus, WithdrawalStatus } from '@prisma/client';
-import { computeRefundImpact } from '../../common/utils/refund.util';
+import { computeRefundImpact, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 
 // Prazo (dias) até que os 90% sejam liberados para saldo disponível
 const RETENTION_DAYS: Record<string, number> = {
@@ -305,7 +305,9 @@ export class RepasseService {
       // Em cima do que sobrou (parte do organizador), aplicamos organizerFeePercent.
       const participantFeeAmount: number = order.serviceFee ?? 0;
       const organizerBase = Math.max(0, gross - participantFeeAmount);
-      const orgNet = Math.round(organizerBase * (1 - organizerFeePercent / 100));
+      // Alíquota EFETIVA: snapshot do pagamento (order.organizerFeePercent) com fallback ao vivo.
+      const effPercent = resolveOrderOrganizerFeePercent(order, organizerFeePercent);
+      const orgNet = Math.round(organizerBase * (1 - effPercent / 100));
       const paymentDate = new Date(payment.paymentDate);
       const metadata = payment.metadata as any;
 
@@ -509,7 +511,10 @@ export class RepasseService {
         0,
         (order.finalAmount ?? 0) - (order.serviceFee ?? 0),
       );
-      const netAmount = Math.round(organizerBase * (1 - event.organizerFeePercent / 100));
+      // Alíquota EFETIVA: snapshot do pagamento (order.organizerFeePercent) com fallback ao vivo.
+      const netAmount = Math.round(
+        organizerBase * (1 - resolveOrderOrganizerFeePercent(order, event.organizerFeePercent) / 100),
+      );
 
       if (!released) {
         items.push({
@@ -601,7 +606,10 @@ export class RepasseService {
         0,
         (order.finalAmount ?? 0) - (order.serviceFee ?? 0),
       );
-      const netAmount = Math.round(organizerBase * (1 - event.organizerFeePercent / 100));
+      // Alíquota EFETIVA: snapshot do pagamento (order.organizerFeePercent) com fallback ao vivo.
+      const netAmount = Math.round(
+        organizerBase * (1 - resolveOrderOrganizerFeePercent(order, event.organizerFeePercent) / 100),
+      );
       const baseInstallment = Math.floor(netAmount / count);
       const lastExtra = netAmount - baseInstallment * count;
 
@@ -934,7 +942,7 @@ export class RepasseService {
       // — chargeback-aware (fee=0) e batendo com getSummary. Estornos são raros vs. vendas.
       prismaRead.order.findMany({
         where,
-        select: { finalAmount: true, serviceFee: true, payment: { select: { metadata: true } } },
+        select: { finalAmount: true, serviceFee: true, organizerFeePercent: true, payment: { select: { metadata: true } } },
       }),
     ]);
 

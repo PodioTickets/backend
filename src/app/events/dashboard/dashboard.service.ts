@@ -324,7 +324,7 @@ export class DashboardService {
   ): Promise<MetricsAggregateRow> {
     const rows = await this.prisma.getReadClient().$queryRaw<MetricsAggregateRow[]>(Prisma.sql`
       WITH paid_orders AS (
-        SELECT DISTINCT o.id, o."finalAmount", o."serviceFee"
+        SELECT DISTINCT o.id, o."finalAmount", o."serviceFee", o."organizerFeePercent"
         FROM "Order" o
         INNER JOIN "Registration" r ON r."orderId" = o.id
         INNER JOIN "Payment" p ON p."orderId" = o.id
@@ -337,7 +337,7 @@ export class DashboardService {
       SELECT
         COUNT(*)::bigint AS order_count,
         COALESCE(
-          SUM(GREATEST("finalAmount" - "serviceFee", 0) * (1 - ${organizerFeeRate}::numeric))::bigint,
+          SUM(GREATEST("finalAmount" - "serviceFee", 0) * (1 - COALESCE("organizerFeePercent"::numeric / 100, ${organizerFeeRate}::numeric)))::bigint,
           0::bigint
         ) AS net_revenue
       FROM paid_orders;
@@ -408,6 +408,7 @@ export class DashboardService {
           ${bucketExpr} AS bucket_key,
           o."finalAmount",
           o."serviceFee",
+          o."organizerFeePercent",
           CASE
             WHEN BOOL_OR(p.status = 'REFUNDED'::"PaymentStatus") THEN 'refunded'
             WHEN BOOL_OR(
@@ -431,7 +432,7 @@ export class DashboardService {
         status_bucket,
         COUNT(*)::bigint AS order_count,
         COALESCE(
-          SUM(GREATEST("finalAmount" - "serviceFee", 0) * (1 - ${organizerFeeRate}::numeric))::bigint,
+          SUM(GREATEST("finalAmount" - "serviceFee", 0) * (1 - COALESCE("organizerFeePercent"::numeric / 100, ${organizerFeeRate}::numeric)))::bigint,
           0::bigint
         ) AS net_revenue
       FROM order_status
@@ -496,7 +497,7 @@ export class DashboardService {
   ): Promise<TicketRankingRow[]> {
     return this.prisma.getReadClient().$queryRaw<TicketRankingRow[]>(Prisma.sql`
       WITH paid_orders AS (
-        SELECT DISTINCT o.id, o."finalAmount", o."serviceFee"
+        SELECT DISTINCT o.id, o."finalAmount", o."serviceFee", o."organizerFeePercent"
         FROM "Order" o
         INNER JOIN "Registration" r ON r."orderId" = o.id
         INNER JOIN "Payment" p ON p."orderId" = o.id
@@ -554,7 +555,7 @@ export class DashboardService {
         COUNT(*)::bigint AS quantity,
         ROUND(SUM(
           CASE WHEN ipo.total_items > 0 THEN
-            (GREATEST(po."finalAmount" - po."serviceFee", 0) * (1 - ${organizerFeeRate}::numeric)) / ipo.total_items
+            (GREATEST(po."finalAmount" - po."serviceFee", 0) * (1 - COALESCE(po."organizerFeePercent"::numeric / 100, ${organizerFeeRate}::numeric))) / ipo.total_items
           ELSE 0 END
         ))::bigint AS total_net
       FROM all_items ai
@@ -768,7 +769,8 @@ export class DashboardService {
           o.id AS order_id,
           p.method::text AS method,
           o."finalAmount" AS final_amount,
-          o."serviceFee" AS service_fee
+          o."serviceFee" AS service_fee,
+          o."organizerFeePercent" AS organizer_fee_percent
         FROM "Order" o
         INNER JOIN "Payment" p ON p."orderId" = o.id
         INNER JOIN "Registration" r ON r."orderId" = o.id
@@ -783,7 +785,7 @@ export class DashboardService {
         COUNT(*)::bigint AS sales_count,
         COALESCE(
           SUM(
-            GREATEST(final_amount - service_fee, 0) * (1 - ${organizerFeeRate}::numeric)
+            GREATEST(final_amount - service_fee, 0) * (1 - COALESCE(organizer_fee_percent::numeric / 100, ${organizerFeeRate}::numeric))
           )::bigint,
           0::bigint
         ) AS total_amount
@@ -833,7 +835,7 @@ export class DashboardService {
         ROUND(SUM(
           rp."totalPrice" * (
             CASE WHEN o."finalAmount" > 0
-              THEN (GREATEST(o."finalAmount" - o."serviceFee", 0)::numeric / o."finalAmount") * (1 - ${organizerFeeRate}::numeric)
+              THEN (GREATEST(o."finalAmount" - o."serviceFee", 0)::numeric / o."finalAmount") * (1 - COALESCE(o."organizerFeePercent"::numeric / 100, ${organizerFeeRate}::numeric))
               ELSE 0
             END
           )

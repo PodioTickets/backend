@@ -47,7 +47,7 @@ import { TicketCategoriesService } from '../ticket-categories/ticket-categories.
 import { EmailService } from '../../common/services/email.service';
 import { RepasseService } from '../repasse/repasse.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
-import { isChargeback } from '../../common/utils/refund.util';
+import { isChargeback, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 
 @Injectable()
 export class EventsService {
@@ -2573,7 +2573,10 @@ export class EventsService {
           0,
           (r.order.finalAmount ?? 0) - (r.order.serviceFee ?? 0),
         );
-        total += Math.round(orgBase * (1 - organizerFeeRate));
+        // Alíquota EFETIVA: snapshot do pagamento com fallback ao vivo do evento.
+        total += Math.round(
+          orgBase * (1 - resolveOrderOrganizerFeePercent(r.order, eventConfig?.organizerFeePercent ?? 0) / 100),
+        );
       }
     }
 
@@ -2794,7 +2797,9 @@ export class EventsService {
       const gross = order.finalAmount ?? 0;
       const participantFee = order.serviceFee ?? 0;
       const organizerBase = Math.max(0, gross - participantFee);
-      return Math.round(organizerBase * (1 - organizerFeePercent / 100));
+      // Alíquota EFETIVA: snapshot do pagamento com fallback ao vivo (param = % do evento).
+      const effPercent = resolveOrderOrganizerFeePercent(order, organizerFeePercent);
+      return Math.round(organizerBase * (1 - effPercent / 100));
     };
 
     for (const order of paidOrders) {
@@ -3151,7 +3156,7 @@ export class EventsService {
           WITH paid_orders AS (
             SELECT DISTINCT r."orderId",
               GREATEST(0, o."finalAmount" - COALESCE(o."serviceFee", 0))::numeric
-                * (1 - COALESCE(e."organizerFeePercent", 0)::numeric / 100) AS "netCents"
+                * (1 - COALESCE(o."organizerFeePercent", e."organizerFeePercent", 0)::numeric / 100) AS "netCents"
             FROM "Registration" r
             INNER JOIN "Order" o ON o.id = r."orderId"
             INNER JOIN "Event" e ON e.id = o."eventId"
@@ -3193,7 +3198,7 @@ export class EventsService {
           WITH paid_orders AS (
             SELECT DISTINCT r."orderId",
               GREATEST(0, o."finalAmount" - COALESCE(o."serviceFee", 0))::numeric
-                * (1 - COALESCE(e."organizerFeePercent", 0)::numeric / 100) AS "netCents"
+                * (1 - COALESCE(o."organizerFeePercent", e."organizerFeePercent", 0)::numeric / 100) AS "netCents"
             FROM "Registration" r
             INNER JOIN "Order" o ON o.id = r."orderId"
             INNER JOIN "Event" e ON e.id = o."eventId"
@@ -4179,7 +4184,10 @@ export class EventsService {
         0,
         (order.finalAmount ?? 0) - (order.serviceFee ?? 0),
       );
-      const netAmount = Math.round(orgBase * (1 - organizerFeeRate));
+      // Alíquota EFETIVA: snapshot do pagamento com fallback ao vivo do evento.
+      const netAmount = Math.round(
+        orgBase * (1 - resolveOrderOrganizerFeePercent(order, eventConfig?.organizerFeePercent ?? 0) / 100),
+      );
       const installmentValue = Math.round(netAmount / count);
       const lastInstallmentValue = netAmount - installmentValue * (count - 1);
 
@@ -4295,7 +4303,10 @@ export class EventsService {
           0,
           (order.finalAmount || 0) - (order.serviceFee ?? 0),
         );
-        const netAmount = Math.round(orgBase * (1 - organizerFeeRate));
+        // Alíquota EFETIVA: snapshot do pagamento com fallback ao vivo do evento.
+        const netAmount = Math.round(
+          orgBase * (1 - resolveOrderOrganizerFeePercent(order, eventConfig?.organizerFeePercent ?? 0) / 100),
+        );
 
         allPending.push({
           orderId: order.id,
