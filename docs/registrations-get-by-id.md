@@ -23,7 +23,7 @@ Documento de referência do payload retornado por `GET /api/v1/registrations/:id
 | Auth | `JwtAuthGuard` (autenticado) |
 | Envelope | `{ message, data: { registration } }` |
 | Fonte dos dados | `Registration.receiptSnapshot` (snapshot) + `id`/`status`/`qrCode` |
-| Cache | sem `@NoCache` — sujeito ao `Cache-Control` global (`no-store` por default) |
+| Cache | **`@NoCache()`** — NÃO cacheada (o `HttpCacheInterceptor` global cacheia todo GET por ~10min/usuário; esta rota está isenta porque retorna dados mutáveis: `variationEdited`, snapshot) |
 
 > Rotas relacionadas (NÃO cobertas aqui): `GET /registrations/me/:id` (`findMyRegistration`,
 > shape mais rico, mistura snapshot + alguns campos ao vivo) e

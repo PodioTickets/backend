@@ -1431,7 +1431,7 @@ export class EventsService {
         batches: { orderBy: { price: 'asc' } },
         products: {
           orderBy: { sortOrder: 'asc' },
-          include: { product: { include: { variations: true } } },
+          include: { product: { include: { variations: { orderBy: { sortOrder: 'asc' } } } } },
         },
         category: true,
         kit: { include: { items: { include: { product: true } } } },

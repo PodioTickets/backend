@@ -1037,6 +1037,8 @@ model ProductVariation {
   name      String
   price     Int // Preço em centavos
   stock     Int      @default(0) // 0 = ilimitado
+  /// Ordem de exibição (0 = primeira). Gravada a partir do índice do array recebido no create/update.
+  sortOrder Int      @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

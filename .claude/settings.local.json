@@ -72,7 +72,8 @@
       "Bash(PGPASSWORD=podiogo123 psql -h localhost -p 5432 -U podiogo -d podiogo -c \"SELECT id, status, \\\\\"totalAmount\\\\\", discount, \\\\\"couponId\\\\\" FROM \\\\\"Order\\\\\" WHERE id='4c4519d8-ca34-4548-8a69-992c812a180a';\")",
       "Bash(PGPASSWORD=podiogo123 psql -h localhost -p 5432 -U podiogo -d podiogo -c \"SELECT id, \\\\\"ticketId\\\\\", quantity, \\\\\"unitPrice\\\\\", \\\\\"ticketName\\\\\" FROM \\\\\"OrderReservedTicket\\\\\" WHERE \\\\\"orderId\\\\\"='4c4519d8-ca34-4548-8a69-992c812a180a';\")",
       "Bash(PGPASSWORD=podiogo123 psql -h localhost -p 5432 -U podiogo -d podiogo -c \"SELECT id, status FROM \\\\\"Registration\\\\\" WHERE \\\\\"orderId\\\\\"='4c4519d8-ca34-4548-8a69-992c812a180a';\")",
-      "Bash(docker exec *)"
+      "Bash(docker exec *)",
+      "Bash(awk -F: '$1<1595')"
     ]
   }
 }

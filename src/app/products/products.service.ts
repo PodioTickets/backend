@@ -237,15 +237,17 @@ export class ProductsService {
         variationEditDeadlineDays: buyerVariation.variationEditDeadlineDays,
         eventId,
         variations: {
-          create: variations.map((v) => ({
+          // sortOrder = posição no array recebido (já vem na ordem desejada do front).
+          create: variations.map((v, i) => ({
             name: v.name,
             price: Math.round(v.price ?? 0), // entrada já em centavos (INT)
             stock: v.stock ?? 0,
+            sortOrder: i,
           })),
         },
       },
       include: {
-        variations: true,
+        variations: { orderBy: { sortOrder: 'asc' } },
       },
     });
 
@@ -314,7 +316,7 @@ export class ProductsService {
         take: limit,
         include: {
           variations: {
-            orderBy: { name: 'asc' },
+            orderBy: { sortOrder: 'asc' },
           },
         },
         orderBy: [{ name: 'asc' }, { id: 'asc' }],
@@ -348,7 +350,7 @@ export class ProductsService {
       where: { id },
       include: {
         variations: {
-          orderBy: { name: 'asc' },
+          orderBy: { sortOrder: 'asc' },
         },
         event: {
           select: {
@@ -392,7 +394,7 @@ export class ProductsService {
         tickets: true,
         variations: {
           select: { id: true, name: true, price: true, stock: true },
-          orderBy: { name: 'asc' },
+          orderBy: { sortOrder: 'asc' },
         },
       },
     });
@@ -475,7 +477,8 @@ export class ProductsService {
       // Upsert: atualiza variações existentes no lugar (por id ou por nome como fallback)
       // e cria as novas. Nunca recria com novo ID — preserva FKs em RegistrationProduct.
       const incomingIds = new Set(variations.map((v) => v.id).filter(Boolean) as string[]);
-      for (const v of variations) {
+      // `i` = posição na lista recebida → recomputa o sortOrder (permite reordenar arrastando).
+      for (const [i, v] of variations.entries()) {
         const price = Math.round(v.price ?? 0);
         const stock = v.stock ?? 0;
 
@@ -485,12 +488,12 @@ export class ProductsService {
           if (exists) {
             await prismaWrite.productVariation.update({
               where: { id: v.id },
-              data: { name: v.name, price, stock },
+              data: { name: v.name, price, stock, sortOrder: i },
             });
           } else {
             // ID enviado mas não existe — criar como nova
             await prismaWrite.productVariation.create({
-              data: { productId, name: v.name, price, stock },
+              data: { productId, name: v.name, price, stock, sortOrder: i },
             });
           }
         } else {
@@ -499,12 +502,12 @@ export class ProductsService {
           if (byName) {
             await prismaWrite.productVariation.update({
               where: { id: byName.id },
-              data: { price, stock },
+              data: { price, stock, sortOrder: i },
             });
             incomingIds.add(byName.id);
           } else {
             await prismaWrite.productVariation.create({
-              data: { productId, name: v.name, price, stock },
+              data: { productId, name: v.name, price, stock, sortOrder: i },
             });
           }
         }
@@ -536,7 +539,7 @@ export class ProductsService {
       where: { id: productId },
       data: updateData as Prisma.ProductUpdateInput,
       include: {
-        variations: true,
+        variations: { orderBy: { sortOrder: 'asc' } },
       },
     });
 
@@ -584,7 +587,7 @@ export class ProductsService {
     const product = await prismaWrite.product.findUnique({
       where: { id: productId },
       include: {
-        variations: { orderBy: { name: 'asc' } },
+        variations: { orderBy: { sortOrder: 'asc' } },
       },
     });
 

@@ -421,4 +421,405 @@ describe('OrdersService', () => {
       ).rejects.toThrow(/não está mais disponível/);
     });
   });
+
+  // ── patchCoupon — lista de documento validada POR PARTICIPANTE (não pelo comprador) ──
+  describe('patchCoupon (cupom/voucher c/ lista de documento por participante)', () => {
+    const buyerId = 'buyer-1';
+    const orderId = 'order-doc';
+
+    function buildClient({ order, coupon = null, voucher = null }: any) {
+      const captured: any = {};
+      const client: any = {
+        order: {
+          findUnique: jest.fn().mockResolvedValue(order),
+          update: jest.fn().mockImplementation(({ data }: any) => {
+            captured.update = data;
+            return {
+              ...order,
+              ...data,
+              coupon: data.couponId ? coupon : null,
+              voucher: data.voucherId ? voucher : null,
+              reservedTickets: order.reservedTickets,
+              pendingParticipants: order.pendingParticipants,
+              status: 'PENDING',
+            };
+          }),
+        },
+        user: { findUnique: jest.fn().mockResolvedValue(null) },
+        voucher: { findUnique: jest.fn().mockResolvedValue(voucher) },
+        coupon: {
+          findFirst: jest.fn().mockResolvedValue(coupon),
+          findUnique: jest.fn().mockResolvedValue(coupon),
+        },
+        $transaction: jest.fn().mockImplementation((fn: any) => fn(client)),
+        _captured: captured,
+      };
+      mockPrisma.getReadClient.mockReturnValue(client);
+      mockPrisma.getWriteClient.mockReturnValue(client);
+      return client;
+    }
+
+    // participante 0 elegível (CPF na lista), participante 1 NÃO elegível
+    const participants = [
+      { documentType: 'CPF', documentNumber: '11111111111' },
+      { documentType: 'CPF', documentNumber: '22222222222' },
+    ];
+
+    it('CUPOM: aplica o desconto só nos ingressos dos participantes elegíveis', async () => {
+      const order = {
+        id: orderId,
+        userId: buyerId,
+        status: 'PENDING',
+        eventId: 'evt-1',
+        totalAmount: 20000,
+        couponId: null,
+        voucherId: null,
+        coupon: null,
+        voucher: null,
+        event: { participantFeePercent: 0 },
+        reservedTickets: [{ ticketId: 'tk-A', quantity: 2, unitPrice: 10000 }],
+        pendingParticipants: participants,
+      };
+      const coupon = {
+        id: 'cpn-1',
+        code: 'DESC50',
+        status: 'ACTIVE',
+        couponType: 'DISCOUNT',
+        type: 'PERCENTAGE',
+        value: 50,
+        appliesTo: 'all',
+        maxUsage: null,
+        usageCount: 0,
+        applyToProducts: false,
+        cpfListStatus: 'ENABLED',
+        documentList: [{ type: 'CPF', numberClean: '11111111111' }],
+        cpfList: null,
+      };
+      const client = buildClient({ order, coupon });
+
+      const res: any = await service.patchCoupon(buyerId, orderId, { couponCode: 'DESC50' } as any);
+
+      // 1 elegível de 2 ingressos @100 → 50% sobre 1 ingresso = 5000 (não 10000).
+      expect(client._captured.update.discount).toBe(5000);
+      expect(client._captured.update.couponId).toBe('cpn-1');
+      expect(res.appliedDiscount.discount).toBe(5000);
+    });
+
+    it('CUPOM: nenhum participante elegível → rejeição soft (couponRejected), pedido inalterado', async () => {
+      const order = {
+        id: orderId,
+        userId: buyerId,
+        status: 'PENDING',
+        eventId: 'evt-1',
+        totalAmount: 20000,
+        couponId: null,
+        voucherId: null,
+        coupon: null,
+        voucher: null,
+        event: { participantFeePercent: 0 },
+        reservedTickets: [{ ticketId: 'tk-A', quantity: 2, unitPrice: 10000 }],
+        pendingParticipants: [{ documentType: 'CPF', documentNumber: '99999999999' }],
+      };
+      const coupon = {
+        id: 'cpn-1', code: 'DESC50', status: 'ACTIVE', couponType: 'DISCOUNT',
+        type: 'PERCENTAGE', value: 50, appliesTo: 'all', maxUsage: null, usageCount: 0,
+        applyToProducts: false, cpfListStatus: 'ENABLED',
+        documentList: [{ type: 'CPF', numberClean: '11111111111' }], cpfList: null,
+      };
+      const client = buildClient({ order, coupon });
+
+      const res: any = await service.patchCoupon(buyerId, orderId, { couponCode: 'DESC50' } as any);
+
+      expect(res.couponRejected?.code).toBe('COUPON_CPF_RESTRICTED');
+      expect(client._captured.update).toBeUndefined(); // pedido NÃO foi alterado
+    });
+
+    it('VOUCHER: o ingresso grátis cai no participante elegível (não no mais caro)', async () => {
+      const order = {
+        id: orderId,
+        userId: buyerId,
+        status: 'PENDING',
+        eventId: 'evt-1',
+        totalAmount: 15000,
+        couponId: null,
+        voucherId: null,
+        coupon: null,
+        voucher: null,
+        event: { participantFeePercent: 0 },
+        // slot0 = ticket A @5000 (participante 0, ELEGÍVEL); slot1 = ticket B @10000 (não elegível)
+        reservedTickets: [
+          { ticketId: 'tk-A', quantity: 1, unitPrice: 5000 },
+          { ticketId: 'tk-B', quantity: 1, unitPrice: 10000 },
+        ],
+        pendingParticipants: participants,
+      };
+      const voucher = {
+        id: 'vch-1', code: 'FREE', eventId: 'evt-1', status: 'ACTIVE', expiryDate: null,
+        appliesTo: 'all', applyToProducts: false, cpfListStatus: 'ENABLED',
+        documentList: [{ type: 'CPF', numberClean: '11111111111' }], cpfList: null,
+      };
+      const client = buildClient({ order, voucher });
+
+      const res: any = await service.patchCoupon(buyerId, orderId, { voucherCode: 'FREE' } as any);
+
+      // Cobre o ingresso do participante elegível (5000), NÃO o mais caro do pedido (10000).
+      expect(client._captured.update.discount).toBe(5000);
+      expect(client._captured.update.voucherId).toBe('vch-1');
+      expect(res.appliedDiscount.discount).toBe(5000);
+    });
+
+    // ── fluxos manuais (sem lista de documento) ──────────────────────────────
+    const plainOrder = (over: any = {}) => ({
+      id: orderId, userId: buyerId, status: 'PENDING', eventId: 'evt-1', totalAmount: 20000,
+      couponId: null, voucherId: null, coupon: null, voucher: null, event: { participantFeePercent: 0 },
+      reservedTickets: [{ ticketId: 'tk-A', quantity: 2, unitPrice: 10000 }], pendingParticipants: [], ...over,
+    });
+    const plainCoupon = (over: any = {}) => ({
+      id: 'd1', code: 'OFF50', status: 'ACTIVE', couponType: 'DISCOUNT', type: 'PERCENTAGE', value: 50,
+      appliesTo: 'all', maxUsage: null, usageCount: 0, applyToProducts: false, cpfListStatus: 'DISABLED',
+      documentList: null, cpfList: null, minCartValue: null, expiryDate: null, ...over,
+    });
+
+    it('CUPOM DISCOUNT PERCENTAGE (sem lista): aplica em todos os ingressos aplicáveis', async () => {
+      const client = buildClient({ order: plainOrder(), coupon: plainCoupon() });
+      await service.patchCoupon(buyerId, orderId, { couponCode: 'OFF50' } as any);
+      expect(client._captured.update.discount).toBe(10000); // 50% de 2 ingressos
+      expect(client._captured.update.couponId).toBe('d1');
+    });
+
+    it('CUPOM DISCOUNT FIXED: valor por uso, capado no subtotal', async () => {
+      const client = buildClient({ order: plainOrder(), coupon: plainCoupon({ type: 'FIXED', value: 3000 }) });
+      await service.patchCoupon(buyerId, orderId, { couponCode: 'OFF50' } as any);
+      expect(client._captured.update.discount).toBe(6000); // 3000 × 2
+    });
+
+    it('CUPOM expirado → rejeição soft (COUPON_EXPIRED), pedido inalterado', async () => {
+      const client = buildClient({ order: plainOrder(), coupon: plainCoupon({ expiryDate: new Date('2020-01-01') }) });
+      const res: any = await service.patchCoupon(buyerId, orderId, { couponCode: 'OFF50' } as any);
+      expect(res.couponRejected?.code).toBe('COUPON_EXPIRED');
+      expect(client._captured.update).toBeUndefined();
+    });
+
+    it('CUPOM abaixo do valor mínimo → rejeição soft (COUPON_MIN_VALUE)', async () => {
+      const client = buildClient({ order: plainOrder(), coupon: plainCoupon({ minCartValue: 50000 }) });
+      const res: any = await service.patchCoupon(buyerId, orderId, { couponCode: 'OFF50' } as any);
+      expect(res.couponRejected?.code).toBe('COUPON_MIN_VALUE');
+      expect(client._captured.update).toBeUndefined();
+    });
+
+    it('CUPOM inexistente → rejeição soft (COUPON_NOT_FOUND)', async () => {
+      const client = buildClient({ order: plainOrder(), coupon: null, voucher: null });
+      const res: any = await service.patchCoupon(buyerId, orderId, { couponCode: 'NOPE' } as any);
+      expect(res.couponRejected?.code).toBe('COUPON_NOT_FOUND');
+      expect(client._captured.update).toBeUndefined();
+    });
+
+    it('cupom + voucher juntos → erro DISCOUNT_CONFLICT (hard)', async () => {
+      buildClient({ order: plainOrder() });
+      await expect(
+        service.patchCoupon(buyerId, orderId, { couponCode: 'OFF50', voucherCode: 'FREE' } as any),
+      ).rejects.toThrow(/cupom e voucher ao mesmo tempo/);
+    });
+
+    it('sem código → remove cupom/voucher (discount 0)', async () => {
+      const client = buildClient({ order: plainOrder({ couponId: 'd1', discount: 10000 }) });
+      await service.patchCoupon(buyerId, orderId, {} as any);
+      expect(client._captured.update.discount).toBe(0);
+      expect(client._captured.update.couponId).toBeNull();
+      expect(client._captured.update.voucherId).toBeNull();
+    });
+  });
+
+  // ── findOrder — cupom AGE auto-aplicado respeita maxUsage na re-derivação (orderShape) ──
+  describe('findOrder (cupom AGE respeita maxUsage)', () => {
+    const buyerId = 'buyer-1';
+    const orderId = 'order-age';
+
+    it('maxUsage=1 + 2 ingressos elegíveis → desconto capado em 1 ingresso (não 2)', async () => {
+      const order = {
+        id: orderId,
+        userId: buyerId,
+        eventId: 'evt-1',
+        status: 'PENDING',
+        totalAmount: 20000,
+        // discount DEFASADO (simula o bug: persistido como 2 ingressos) — orderShape deve recapar.
+        discount: 10000,
+        serviceFee: 0,
+        finalAmount: 10000,
+        event: { participantFeePercent: 0, eventDate: new Date('2026-12-01') },
+        coupon: {
+          id: 'age-1', code: null, couponType: 'AGE', type: 'PERCENTAGE', value: 50,
+          appliesTo: 'all', minAge: 0, maxAge: 200, applyToProducts: false,
+          cpfListStatus: 'DISABLED', documentList: null, cpfList: null,
+          maxUsage: 1, usageCount: 0,
+        },
+        voucher: null,
+        payment: null,
+        reservedTickets: [{ ticketId: 'tk-A', quantity: 2, unitPrice: 10000 }],
+        pendingParticipants: [{ birthDate: '1990-01-01' }, { birthDate: '1992-01-01' }],
+      };
+      const client: any = {
+        order: { findUnique: jest.fn().mockResolvedValue(order) },
+        user: { findUnique: jest.fn().mockResolvedValue(null) },
+      };
+      mockPrisma.getReadClient.mockReturnValue(client);
+      mockPrisma.getWriteClient.mockReturnValue(client);
+
+      const res: any = await service.findOrder(buyerId, orderId);
+
+      // 50% sobre 1 ingresso (@100) = 5000 — capado por maxUsage=1, mesmo com 2 elegíveis.
+      expect(res.discount).toBe(5000);
+      // Só 1 unidade recebe desconto.
+      const discountedUnits = (res.reservedTickets as any[]).filter((u: any) => u.couponApplied);
+      expect(discountedUnits.length).toBe(1);
+    });
+  });
+
+  // ── evaluateAutoCoupons — auto-cupons QUANTITY/AGE (método privado, via `as any`) ──
+  describe('evaluateAutoCoupons (auto QUANTITY/AGE)', () => {
+    // findMany = candidatos da branch (b); findUnique = cupom existente (branch a/c).
+    function buildAutoClient(found: any[], existing: any = null) {
+      const client: any = {
+        coupon: {
+          findMany: jest.fn().mockResolvedValue(found),
+          findUnique: jest.fn().mockResolvedValue(existing),
+        },
+      };
+      mockPrisma.getReadClient.mockReturnValue(client);
+      mockPrisma.getWriteClient.mockReturnValue(client);
+      return client;
+    }
+    const order = (over: any = {}) => ({
+      eventId: 'evt-1', couponId: null, voucherId: null, coupon: null, voucher: null,
+      discount: 0, event: { eventDate: '2026-12-01' }, ...over,
+    });
+    const tickets2 = [{ ticketId: 'tk-A', quantity: 2, unitPrice: 10000 }];
+    const call = (o: any, parts: any[], rt: any[], opts?: any) =>
+      (service as any).evaluateAutoCoupons(o, parts, rt, rt.reduce((s: number, t: any) => s + t.unitPrice * t.quantity, 0), 0, opts);
+
+    it('QUANTITY: minQuantity atingido → aplica (PERCENTAGE sobre o subtotal)', async () => {
+      buildAutoClient([{ id: 'q1', couponType: 'QUANTITY', type: 'PERCENTAGE', value: 10, appliesTo: null, minQuantity: 2, maxUsage: null, usageCount: 0, minCartValue: null, applyToProducts: false }]);
+      const res = await call(order(), [{}, {}], tickets2);
+      expect(res.autoCouponId).toBe('q1');
+      expect(res.newDiscount).toBe(2000); // 10% de 20000
+    });
+
+    it('QUANTITY: abaixo do minQuantity → NÃO aplica', async () => {
+      buildAutoClient([{ id: 'q1', couponType: 'QUANTITY', type: 'PERCENTAGE', value: 10, appliesTo: null, minQuantity: 5, maxUsage: null, usageCount: 0, minCartValue: null, applyToProducts: false }]);
+      const res = await call(order(), [{}, {}], tickets2);
+      expect(res.autoCouponId).toBeUndefined();
+      expect(res.newDiscount).toBe(0);
+    });
+
+    it('QUANTITY: esgotado (usageCount >= maxUsage) → NÃO aplica', async () => {
+      buildAutoClient([{ id: 'q1', couponType: 'QUANTITY', type: 'PERCENTAGE', value: 10, appliesTo: null, minQuantity: 2, maxUsage: 1, usageCount: 1, minCartValue: null, applyToProducts: false }]);
+      const res = await call(order(), [{}, {}], tickets2);
+      expect(res.autoCouponId).toBeUndefined();
+    });
+
+    it('QUANTITY: minCartValue não atingido → NÃO aplica', async () => {
+      buildAutoClient([{ id: 'q1', couponType: 'QUANTITY', type: 'PERCENTAGE', value: 10, appliesTo: null, minQuantity: 2, maxUsage: null, usageCount: 0, minCartValue: 50000, applyToProducts: false }]);
+      const res = await call(order(), [{}, {}], tickets2);
+      expect(res.autoCouponId).toBeUndefined();
+    });
+
+    it('QUANTITY com cpfListStatus ENABLED → IGNORA a lista (aplica por quantidade, sem cpf)', async () => {
+      buildAutoClient([{ id: 'q1', couponType: 'QUANTITY', type: 'PERCENTAGE', value: 10, appliesTo: null, minQuantity: 2, maxUsage: null, usageCount: 0, minCartValue: null, applyToProducts: false, cpfListStatus: 'ENABLED', documentList: [{ type: 'CPF', numberClean: '11111111111' }], cpfList: null }]);
+      // participantes sem documento na lista — QUANTITY aplica mesmo assim
+      const res = await call(order(), [{ documentType: 'CPF', documentNumber: '99999999999' }, {}], tickets2);
+      expect(res.autoCouponId).toBe('q1');
+      expect(res.newDiscount).toBe(2000); // 10% de 20000, sem corte por cpf
+    });
+
+    it('QUANTITY FIXED: valor por unidade aplicável, capado no subtotal', async () => {
+      buildAutoClient([{ id: 'q1', couponType: 'QUANTITY', type: 'FIXED', value: 3000, appliesTo: null, minQuantity: 2, maxUsage: null, usageCount: 0, minCartValue: null, applyToProducts: false }]);
+      const res = await call(order(), [{}, {}], tickets2);
+      expect(res.newDiscount).toBe(6000); // 3000 × 2
+    });
+
+    it('AGE: participantes na faixa → aplica capado por maxUsage, com qualifyingSlots', async () => {
+      buildAutoClient([{ id: 'age1', couponType: 'AGE', type: 'PERCENTAGE', value: 50, appliesTo: null, minAge: 0, maxAge: 200, maxUsage: 1, usageCount: 0, minCartValue: null, applyToProducts: false }]);
+      const res = await call(order(), [{ birthDate: '1990-01-01' }, { birthDate: '1991-01-01' }], tickets2);
+      expect(res.autoCouponId).toBe('age1');
+      expect(res.autoEffectiveUsage).toBe(1); // capado por maxUsage=1
+      expect(res.newDiscount).toBe(5000); // 50% de 1 ingresso
+      expect(res.ageQualifyingSlots).toEqual([0, 1]);
+    });
+
+    it('AGE: ninguém na faixa → NÃO aplica', async () => {
+      buildAutoClient([{ id: 'age1', couponType: 'AGE', type: 'PERCENTAGE', value: 50, appliesTo: null, minAge: 60, maxAge: 70, maxUsage: null, usageCount: 0, minCartValue: null, applyToProducts: false }]);
+      const res = await call(order(), [{ birthDate: '2000-01-01' }], tickets2);
+      expect(res.autoCouponId).toBeUndefined();
+    });
+
+    it('AGE existente reavaliado: participantes saíram da faixa → marca remoção', async () => {
+      const existing = { id: 'age1', couponType: 'AGE', type: 'PERCENTAGE', value: 50, minAge: 60, maxAge: 70, maxUsage: null, usageCount: 0, appliesTo: null, applyToProducts: false };
+      buildAutoClient([], existing);
+      const res = await call(order({ couponId: 'age1', coupon: existing }), [{ birthDate: '2000-01-01' }], tickets2);
+      expect(res.shouldRemoveAgeCoupon).toBe(true);
+      expect(res.newDiscount).toBe(0);
+    });
+
+    it('QUANTITY existente: participantes abaixo do minQuantity → marca remoção', async () => {
+      const existing = { couponType: 'QUANTITY', minQuantity: 3 };
+      buildAutoClient([], existing);
+      const res = await call(order({ couponId: 'q1', coupon: { couponType: 'QUANTITY' } }), [{}], tickets2);
+      expect(res.shouldRemoveQuantityCoupon).toBe(true);
+    });
+
+    it('restrição autoApplyCouponTypes: a query de candidatos pede só os tipos informados', async () => {
+      const client = buildAutoClient([]);
+      await call(order(), [{}, {}], tickets2, { autoApplyCouponTypes: ['AGE'] });
+      const whereArg = client.coupon.findMany.mock.calls[0][0].where;
+      expect(whereArg.couponType).toEqual({ in: ['AGE'] });
+    });
+  });
+
+  // ── pay — cupom no PAGAMENTO (caminho de pedido grátis: cupom 100% → pula gateway) ──
+  describe('pay (cupom no pagamento — pedido grátis)', () => {
+    const buyerId = 'buyer-1';
+    const orderId = 'order-pay';
+
+    it('cupom 100% → discount = subtotal, finalTotal 0, pedido PAID', async () => {
+      const order = {
+        id: orderId, userId: buyerId, status: 'PENDING', eventId: 'evt-1',
+        expiresAt: null, totalAmount: 10000,
+        billingPostalCode: '11850000', billingStreet: 'Rua X', billingCity: 'Maceió',
+        coupon: null, voucher: null, couponId: null, voucherId: null,
+        event: { participantFeePercent: 0, organizerFeePercent: 0 },
+        reservedTickets: [{ ticketId: 'tk-A', quantity: 1, unitPrice: 10000 }],
+        pendingParticipants: [{ email: 'a@a.com', documentType: 'CPF', documentNumber: '11111111111' }],
+        pendingProducts: null,
+      };
+      const coupon100 = { id: 'c100', code: 'FREE100', status: 'ACTIVE', couponType: 'DISCOUNT', type: 'PERCENTAGE', value: 100, appliesTo: 'all', deletedAt: null, maxUsage: null, usageCount: 0, applyToProducts: false, cpfListStatus: 'DISABLED', documentList: null, cpfList: null, expiryDate: null };
+
+      const tx: any = {
+        $queryRaw: jest.fn().mockResolvedValue([{ id: orderId }]), // guard PENDING→PAID
+        order: { update: jest.fn().mockResolvedValue({}) },
+        payment: { upsert: jest.fn().mockResolvedValue({}) },
+      };
+      const client: any = {
+        order: { findUnique: jest.fn().mockResolvedValue(order) },
+        user: { findUnique: jest.fn().mockResolvedValue({ firstName: 'A', lastName: 'B', email: 'a@a.com' }) },
+        coupon: { findFirst: jest.fn().mockResolvedValue(coupon100) },
+        voucher: { findUnique: jest.fn().mockResolvedValue(null) },
+        event: { findUnique: jest.fn().mockResolvedValue(null) }, // snapshotEvent null → pula e-mail
+        $transaction: jest.fn().mockImplementation((fn: any) => fn(tx)),
+      };
+      mockPrisma.getReadClient.mockReturnValue(client);
+      mockPrisma.getWriteClient.mockReturnValue(client);
+      mockRedisService.getIdempotencyResult.mockResolvedValue(null);
+      mockOrderFinalization.finalizePaidOrder.mockResolvedValue([{ id: 'reg-1', status: 'CONFIRMED', qrCode: 'q' }]);
+
+      const res: any = await service.pay(buyerId, orderId, undefined, { method: 'PIX', couponCode: 'FREE100' } as any);
+
+      expect(res.status).toBe('PAID');
+      expect(res.pricing.discount).toBe(10000); // 100% do ingresso
+      expect(res.pricing.finalTotal).toBe(0);
+      // grava o snapshot financeiro coerente na tx
+      expect(tx.order.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ discount: 10000, finalAmount: 0, couponId: 'c100' }) }),
+      );
+    });
+  });
 });

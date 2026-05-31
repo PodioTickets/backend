@@ -88,6 +88,7 @@ export class RegistrationsController {
   }
 
   @Get(':id')
+  @NoCache()
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get registration by ID', description: 'Retrieves a single registration by ID.' })
@@ -102,6 +103,7 @@ export class RegistrationsController {
 
   @Get(':id/payment-details')
   @UseGuards(JwtAuthGuard)
+  @NoCache()
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get payment details by registration ID',

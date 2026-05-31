@@ -287,7 +287,7 @@ export class TicketsService {
             include: {
               product: {
                 include: {
-                  variations: true,
+                  variations: { orderBy: { sortOrder: 'asc' } },
                 },
               },
             },
@@ -399,7 +399,7 @@ export class TicketsService {
           include: {
             product: {
               include: {
-                variations: true,
+                variations: { orderBy: { sortOrder: 'asc' } },
               },
             },
           },

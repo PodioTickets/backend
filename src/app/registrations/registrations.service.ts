@@ -814,7 +814,7 @@ export class RegistrationsService {
                   include: {
                     product: {
                       include: {
-                        variations: true,
+                        variations: { orderBy: { sortOrder: 'asc' } },
                       },
                     },
                   },
@@ -856,7 +856,7 @@ export class RegistrationsService {
           include: {
             product: {
               include: {
-                variations: true,
+                variations: { orderBy: { sortOrder: 'asc' } },
               },
             },
             variation: true,
@@ -926,6 +926,7 @@ export class RegistrationsService {
                 name: v.name,
                 price: Math.round(v.price * 100),
                 stock: v.stock,
+                sortOrder: v.sortOrder,
               })),
             };
           }),
