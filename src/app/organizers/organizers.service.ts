@@ -90,8 +90,9 @@ export class OrganizersService {
       return { organization, member };
     });
 
+    // Boas-vindas vai pro e-mail de CONTATO da organização (fallback: e-mail do dono).
     this.emailService
-      .sendWelcomeOrganizer({ email: result.member.user.email, firstName: result.member.user.firstName })
+      .sendWelcomeOrganizer({ email: result.organization.email || result.member.user.email, firstName: result.member.user.firstName })
       .catch((err) => this.logger.warn('Failed to send welcome organizer email:', err));
 
     return {

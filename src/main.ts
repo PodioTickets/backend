@@ -61,6 +61,9 @@ async function bootstrap() {
     'https://www.podioticket.com.br',
     'https://app.podioticket.com.br',
     'https://test890.podioticket.com.br',
+    'https://homologacao.podioticket.com.br',
+    'https://homologacao.app.podioticket.com.br',
+    'https://homologacao.test890.podioticket.com.br',
   ];
 
   app.use((req, res, next) => {
