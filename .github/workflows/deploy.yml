@@ -1,99 +1,58 @@
-name: Deploy to Server
+name: Deploy Produção
 
 on:
   push:
     branches:
-      - main
       - master
+      - main
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # Build remoto (Docker + pnpm + Prisma + Nest) costuma passar de 15 min em VPS pequenas
     timeout-minutes: 60
 
     steps:
-      - name: Validate SSH Key Format
-        run: |
-          echo "🔍 Validando formato da chave SSH..."
-          if [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
-            echo "❌ SSH_PRIVATE_KEY não está configurado!"
-            exit 1
-          fi
-          echo "✅ SSH_PRIVATE_KEY está configurado"
-
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          passphrase: ${{ secrets.SSH_KEY_PASSPHRASE }}
-          port: ${{ secrets.SSH_PORT || 22 }}
-          # Conexão SSH (handshake); separado do tempo do script remoto
+          port: 22
           timeout: 120s
-          # Padrão da action é 10m — insuficiente para `docker compose build` na VPS
           command_timeout: 45m
           script_stop: true
-          debug: false
-          use_insecure_cipher: false
           script: |
             set -e
-            
-            echo "🚀 Iniciando deploy..."
-            cd /srv/backend
-            
-            # Carrega variáveis do .env se existir
-            if [ -f .env ]; then
-              set -a
-              source .env
-              set +a
-            fi
-            
-            # Atualiza código
-            echo "📥 Atualizando código do repositório..."
+
+            echo "🚀 Iniciando deploy produção..."
+            cd /home/deploy/backend
+
+            echo "📥 Atualizando código..."
             git fetch origin
-            git pull origin ${{ github.ref_name }} || {
-              echo "⚠️  Aviso: Falha no pull, tentando continuar..."
-            }
-            
-            # Habilita BuildKit para cache e builds mais rápidos
+            git reset --hard origin/master
+
             export DOCKER_BUILDKIT=1
             export COMPOSE_DOCKER_CLI_BUILD=1
 
-            # Garante que o script de deploy tenha permissão de execução e quebras de linha corretas
-            if [ -f deploy.sh ]; then
-              # Converte quebras de linha para Unix (LF) se necessário
-              sed -i 's/\r$//' deploy.sh 2>/dev/null || true
-              chmod +x deploy.sh
-            fi
+            # Build da nova imagem
+            echo "🔨 Fazendo build..."
+            DOCKER_BUILDKIT=1 docker compose build backend || exit 1
 
-            # Usa o script de deploy otimizado
-            # O script faz: build, sobe serviços, aguarda DB, executa migrações, reinicia
-            echo "🔨 Executando deploy automatizado..."
-            if [ -f deploy.sh ]; then
-              SKIP_GIT_PULL=1 bash deploy.sh || {
-                echo "❌ Deploy falhou!"
-                echo ""
-                echo "📋 Logs do backend:"
-                docker compose logs --tail=50 backend || true
-                echo ""
-                echo "📋 Status dos containers:"
-                docker compose ps || true
-                exit 1
-              }
-            else
-              echo "⚠️  Script deploy.sh não encontrado, executando comandos manualmente..."
-              docker compose build backend || exit 1
-              docker compose up -d postgres redis || exit 1
-              sleep 5
-              docker compose up -d backend || exit 1
-              sleep 3
-              docker compose exec backend pnpm prisma migrate deploy || {
-                echo "⚠️  Aviso: Falha nas migrações, continuando..."
-              }
-              docker compose restart backend
-            fi
-            
-            echo ""
-            echo "✅ Deploy concluído com sucesso!"
+            # Sobe Redis e backend (banco é Cloud SQL externo: podio-db-prod).
+            # docker-compose.override.yml (untracked na VM) aponta DATABASE_URL + entrypoint p/ produção.
+            echo "🚀 Subindo serviços..."
+            docker compose up -d redis
+            sleep 3
+            docker compose up -d --no-deps backend
+
+            sleep 5
+
+            echo "📋 Status dos containers:"
+            docker compose ps
+
+            echo "📋 Logs do backend:"
+            docker compose logs backend --tail=20
+
+            echo "✅ Deploy concluído!"
