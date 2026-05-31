@@ -416,17 +416,26 @@ export function resolveVoucherCoverage(
  * participante `i` ↔ `i`-ésima unidade reservada; só conta se `i < totalUnits` e o
  * documento do participante está na lista. Buyer só conta se for participante.
  */
+/**
+ * Slots (índices) elegíveis pela lista de documento. Participante PREENCHIDO (com documento)
+ * só conta se o doc estiver na lista. Participante AINDA SEM documento:
+ *   - `treatUnfilledAsEligible=true` (preenchimento/PENDING): conta como elegível → mantém o
+ *     cupom/voucher aplicado no slot enquanto o comprador não preenche aquele participante.
+ *   - `false` (default, momento do pay): NÃO conta — no commit final, só quem informou um
+ *     documento válido (na lista) recebe o desconto cpf.
+ */
 export function computeDocEligibleSlots(
   participants: any[],
   documentList: unknown,
   cpfList: unknown,
   totalUnits: number,
+  treatUnfilledAsEligible = false,
 ): number[] {
   return (participants ?? [])
     .map((p: any, i: number) => {
       if (i >= totalUnits) return -1;
       const doc = resolveDocument(p);
-      if (!doc.clean) return -1;
+      if (!doc.clean) return treatUnfilledAsEligible ? i : -1;
       return isDocumentInList(
         { documentType: doc.type, documentNumberClean: doc.clean },
         documentList,
@@ -498,12 +507,12 @@ export function orderShape(order: any, discountOverride?: number, extra?: Record
     order.pendingParticipants.length > 0
   ) {
     const totalUnits = (order.reservedTickets ?? []).reduce((s: number, rt: any) => s + (rt.quantity ?? 1), 0);
-    const derived = computeDocEligibleSlots(order.pendingParticipants as any[], coupon.documentList, coupon.cpfList, totalUnits);
-    if (derived.length > 0) {
-      // Capa pelo uso restante do cupom (mesma regra do AGE).
-      resolvedEffectiveUsage = capUsageByMax(derived.length, coupon);
-      resolvedQualifyingSlots = resolvedQualifyingSlots ?? derived;
-    }
+    const derived = computeDocEligibleSlots(order.pendingParticipants as any[], coupon.documentList, coupon.cpfList, totalUnits, true);
+    // Com participantes presentes, o cupom cpf é SEMPRE por-participante: effectiveUsage =
+    // nº de elegíveis (0 quando NINGUÉM elegível → desconto 0). Não cai no inferEffectiveUsage
+    // do order.discount provisório (que poderia mostrar o desconto cheio aplicado sem participantes).
+    resolvedEffectiveUsage = capUsageByMax(derived.length, coupon);
+    resolvedQualifyingSlots = resolvedQualifyingSlots ?? derived;
   }
 
   // Voucher = um ingresso grátis (a unidade aplicável mais cara). Sem cupom no
@@ -523,7 +532,7 @@ export function orderShape(order: any, discountOverride?: number, extra?: Record
     if (voucher.cpfListStatus === 'ENABLED') {
       const totalUnits = (order.reservedTickets ?? []).reduce((s: number, rt: any) => s + (rt.quantity ?? 1), 0);
       voucherEligibleSlots = new Set(
-        computeDocEligibleSlots(order.pendingParticipants ?? [], voucher.documentList, voucher.cpfList, totalUnits),
+        computeDocEligibleSlots(order.pendingParticipants ?? [], voucher.documentList, voucher.cpfList, totalUnits, true),
       );
     }
     const cov = resolveVoucherCoverage(order.reservedTickets ?? [], voucher.appliesTo, undefined, voucherEligibleSlots);
@@ -2211,11 +2220,11 @@ export class OrdersService {
       const voucherByCode = await r.voucher.findUnique({ where: { code: normalizedCode } });
       if (voucherByCode && voucherByCode.eventId === order.eventId && voucherByCode.status === 'ACTIVE') {
         if (!voucherByCode.expiryDate || new Date(voucherByCode.expiryDate) > new Date()) {
-          // Lista de documento (CPF + estrangeiros) validada POR PARTICIPANTE: o ingresso
-          // grátis só pode cair na unidade de um participante cujo documento está na lista.
+          // Lista de documento por-participante. SEM participantes (voucher do link no início
+          // do checkout) → aplica provisoriamente (sem gate); validação real no /participants e pay.
           let voucherEligibleSlots: Set<number> | undefined;
-          if (voucherByCode.cpfListStatus === 'ENABLED') {
-            const slots = computeDocEligibleSlots(participants, voucherByCode.documentList, voucherByCode.cpfList, totalUnits);
+          if (voucherByCode.cpfListStatus === 'ENABLED' && participants.length > 0) {
+            const slots = computeDocEligibleSlots(participants, voucherByCode.documentList, voucherByCode.cpfList, totalUnits, true);
             if (slots.length === 0) {
               throw new AppUnprocessableException('VOUCHER_CPF_RESTRICTED', 'Voucher não aplicável: nenhum participante elegível');
             }
@@ -2268,9 +2277,14 @@ export class OrdersService {
       // Lista de documento (CPF + estrangeiros) validada POR PARTICIPANTE (não mais pelo
       // comprador): só os ingressos dos participantes cujo documento está na lista recebem
       // o desconto — espelha o cupom AGE. Nenhum elegível → cupom rejeitado (soft).
+      //
+      // SEM participantes ainda (cupom do link aplicado no início do checkout, antes de
+      // /participants) → aplica PROVISORIAMENTE (sem gate de CPF): o desconto aparece no resumo.
+      // A validação por-participante real acontece no PATCH /participants e no pay (que exige
+      // participantes). Por isso o gate só roda quando já há participantes.
       let docEligibleSlots: number[] | undefined;
-      if (coupon.cpfListStatus === 'ENABLED') {
-        docEligibleSlots = computeDocEligibleSlots(participants, coupon.documentList, coupon.cpfList, totalUnits);
+      if (coupon.cpfListStatus === 'ENABLED' && participants.length > 0) {
+        docEligibleSlots = computeDocEligibleSlots(participants, coupon.documentList, coupon.cpfList, totalUnits, true);
         if (docEligibleSlots.length === 0) {
           throw new AppUnprocessableException('COUPON_CPF_RESTRICTED', 'Cupom não aplicável: nenhum participante elegível');
         }
@@ -2343,11 +2357,11 @@ export class OrdersService {
         throw new AppUnprocessableException('VOUCHER_EXPIRED', 'Voucher expirado');
       }
 
-      // Lista de documento validada POR PARTICIPANTE (não pelo comprador): o ingresso
-      // grátis só cai na unidade de um participante elegível.
+      // Lista de documento por-participante. SEM participantes (voucher do link no início do
+      // checkout) → aplica provisoriamente (sem gate); validação real no /participants e pay.
       let voucherEligibleSlots: Set<number> | undefined;
-      if (voucher.cpfListStatus === 'ENABLED') {
-        const slots = computeDocEligibleSlots(participants, voucher.documentList, voucher.cpfList, totalUnits);
+      if (voucher.cpfListStatus === 'ENABLED' && participants.length > 0) {
+        const slots = computeDocEligibleSlots(participants, voucher.documentList, voucher.cpfList, totalUnits, true);
         if (slots.length === 0) {
           throw new AppUnprocessableException('VOUCHER_CPF_RESTRICTED', 'Voucher não aplicável: nenhum participante elegível');
         }

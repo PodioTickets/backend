@@ -534,6 +534,47 @@ describe('OrdersService', () => {
       expect(client._captured.update).toBeUndefined(); // pedido NÃO foi alterado
     });
 
+    it('CUPOM cpf SEM participantes → aplica PROVISORIAMENTE (não rejeita; gate só com participantes)', async () => {
+      const order = {
+        id: orderId, userId: buyerId, status: 'PENDING', eventId: 'evt-1', totalAmount: 20000,
+        couponId: null, voucherId: null, coupon: null, voucher: null, event: { participantFeePercent: 0 },
+        reservedTickets: [{ ticketId: 'tk-A', quantity: 2, unitPrice: 10000 }],
+        pendingParticipants: [], // cupom do link, antes de /participants
+      };
+      const coupon = {
+        id: 'cpn-1', code: 'DESC50', status: 'ACTIVE', couponType: 'DISCOUNT', type: 'PERCENTAGE', value: 50,
+        appliesTo: 'all', maxUsage: null, usageCount: 0, applyToProducts: false, cpfListStatus: 'ENABLED',
+        documentList: [{ type: 'CPF', numberClean: '11111111111' }], cpfList: null,
+      };
+      const client = buildClient({ order, coupon });
+
+      const res: any = await service.patchCoupon(buyerId, orderId, { couponCode: 'DESC50' } as any);
+
+      expect(res.couponRejected).toBeUndefined();
+      expect(client._captured.update.couponId).toBe('cpn-1');
+      expect(client._captured.update.discount).toBe(10000); // 50% dos 2 ingressos (provisório, sem gate)
+    });
+
+    it('VOUCHER cpf SEM participantes → aplica PROVISORIAMENTE (ingresso mais caro)', async () => {
+      const order = {
+        id: orderId, userId: buyerId, status: 'PENDING', eventId: 'evt-1', totalAmount: 15000,
+        couponId: null, voucherId: null, coupon: null, voucher: null, event: { participantFeePercent: 0 },
+        reservedTickets: [{ ticketId: 'tk-A', quantity: 1, unitPrice: 5000 }, { ticketId: 'tk-B', quantity: 1, unitPrice: 10000 }],
+        pendingParticipants: [],
+      };
+      const voucher = {
+        id: 'vch-1', code: 'FREE', eventId: 'evt-1', status: 'ACTIVE', expiryDate: null, appliesTo: 'all',
+        applyToProducts: false, cpfListStatus: 'ENABLED', documentList: [{ type: 'CPF', numberClean: '11111111111' }], cpfList: null,
+      };
+      const client = buildClient({ order, voucher });
+
+      const res: any = await service.patchCoupon(buyerId, orderId, { voucherCode: 'FREE' } as any);
+
+      expect(res.couponRejected).toBeUndefined();
+      expect(client._captured.update.voucherId).toBe('vch-1');
+      expect(client._captured.update.discount).toBe(10000); // mais caro (provisório, sem slots elegíveis)
+    });
+
     it('VOUCHER: o ingresso grátis cai no participante elegível (não no mais caro)', async () => {
       const order = {
         id: orderId,

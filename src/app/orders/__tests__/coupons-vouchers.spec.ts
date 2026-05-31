@@ -445,5 +445,38 @@ describe('Cupons & Vouchers — motor de desconto', () => {
       expect(shaped.discount).toBe(2000); // desconto QUANTITY cheio, sem corte por cpf
       expect(discountedUnits(shaped.reservedTickets).length).toBe(2);
     });
+
+    it('HG4 cupom cpf com participantes mas NENHUM elegível → desconto 0 (não mostra o provisório)', () => {
+      const shaped = orderShape({
+        id: 'o', eventId: 'e', status: 'PENDING', totalAmount: 20000, discount: 10000 /* provisório cheio */,
+        serviceFee: 0, finalAmount: 10000, event: { participantFeePercent: 0, eventDate: '2026-12-01' },
+        coupon: { id: 'c', couponType: 'DISCOUNT', type: 'PERCENTAGE', value: 50, appliesTo: 'all', minAge: null, maxAge: null, applyToProducts: false, cpfListStatus: 'ENABLED', documentList: [cpfDoc('11111111111')], cpfList: null, maxUsage: null, usageCount: 0 },
+        couponId: 'c', voucher: null, voucherId: null, payment: null,
+        reservedTickets: [rt('A', 2, 10000)],
+        pendingParticipants: [participantCpf('99999999999'), participantCpf('88888888888')], // nenhum na lista
+      });
+      expect(shaped.discount).toBe(0);
+      expect(discountedUnits(shaped.reservedTickets).length).toBe(0);
+    });
+
+    it('HD6 participante SEM documento: lenient=true → elegível (mantém); default → não', () => {
+      const ps = [{ /* slot vazio, sem doc */ }];
+      expect(computeDocEligibleSlots(ps, [cpfDoc('11111111111')], null, 1, true)).toEqual([0]);
+      expect(computeDocEligibleSlots(ps, [cpfDoc('11111111111')], null, 1)).toEqual([]); // estrito (pay)
+    });
+
+    it('HG5 cupom cpf: 1 elegível + 1 slot vazio (preenchendo) → MANTÉM aplicado nos 2 (lenient)', () => {
+      const shaped = orderShape({
+        id: 'o', eventId: 'e', status: 'PENDING', totalAmount: 20000, discount: 10000,
+        serviceFee: 0, finalAmount: 10000, event: { participantFeePercent: 0, eventDate: '2026-12-01' },
+        coupon: { id: 'c', couponType: 'DISCOUNT', type: 'PERCENTAGE', value: 50, appliesTo: 'all', minAge: null, maxAge: null, applyToProducts: false, cpfListStatus: 'ENABLED', documentList: [cpfDoc('11111111111')], cpfList: null, maxUsage: null, usageCount: 0 },
+        couponId: 'c', voucher: null, voucherId: null, payment: null,
+        reservedTickets: [rt('A', 2, 10000)],
+        // participante 0 elegível; participante 1 ainda VAZIO (sem doc) → mantém aplicado
+        pendingParticipants: [participantCpf('11111111111'), {}],
+      });
+      expect(shaped.discount).toBe(10000); // 2 slots (elegível + vazio) — não cai pra 5000
+      expect(discountedUnits(shaped.reservedTickets).length).toBe(2);
+    });
   });
 });
