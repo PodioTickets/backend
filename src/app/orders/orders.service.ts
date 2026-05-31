@@ -448,6 +448,44 @@ export function computeDocEligibleSlots(
 }
 
 /**
+ * Slots elegíveis de um VOUCHER com lista de documento, em PENDING.
+ *
+ * Diferente do cupom DISCOUNT (que aplica desconto em CADA participante elegível,
+ * independentemente), o voucher é **um único ingresso grátis** — só pode cobrir UMA
+ * unidade por vez. Por isso o slot vazio NÃO é par-igual ao preenchido: ele é um
+ * **fallback provisório**, não um elegível concorrente.
+ *
+ * Prioridade (regra do produto):
+ *   1. Há ≥1 participante PREENCHIDO com documento na lista → elegíveis = só esses
+ *      (slots vazios são EXCLUÍDOS; o voucher "desaplica" deles).
+ *   2. Nenhum preenchido elegível → elegíveis = os slots AINDA VAZIOS (mantém o voucher
+ *      aplicado provisoriamente até o comprador preencher e revalidar).
+ *   3. Todos preenchidos e nenhum na lista → vazio (o caller rejeita com VOUCHER_CPF_RESTRICTED).
+ *
+ * Participante preenchido mas FORA da lista nunca entra (nem como fallback).
+ * `resolveVoucherCoverage` depois escolhe, entre os elegíveis, a unidade aplicável mais cara.
+ */
+export function computeVoucherEligibleSlots(
+  participants: any[],
+  documentList: unknown,
+  cpfList: unknown,
+  totalUnits: number,
+): number[] {
+  const filledEligible = computeDocEligibleSlots(participants, documentList, cpfList, totalUnits, false);
+  if (filledEligible.length > 0) return filledEligible;
+
+  // Fallback provisório: slots ainda sem documento (vazios). Preenchido-mas-fora-da-lista
+  // tem doc.clean e portanto NÃO entra aqui.
+  const unfilled: number[] = [];
+  for (let i = 0; i < totalUnits; i++) {
+    const p = (participants ?? [])[i];
+    const doc = p ? resolveDocument(p) : { clean: '' as string };
+    if (!doc.clean) unfilled.push(i);
+  }
+  return unfilled;
+}
+
+/**
  * Slots (índices) elegíveis pelo cupom AGE (idade na data do evento). Mesma semântica de
  * `computeDocEligibleSlots`, mas a validação é por idade:
  *   - Participante COM `birthDate`: conta só se a idade ∈ [minAge, maxAge].
@@ -552,8 +590,10 @@ export function orderShape(order: any, discountOverride?: number, extra?: Record
     let voucherEligibleSlots: Set<number> | undefined;
     if (voucher.cpfListStatus === 'ENABLED') {
       const totalUnits = (order.reservedTickets ?? []).reduce((s: number, rt: any) => s + (rt.quantity ?? 1), 0);
+      // Voucher = 1 ingresso: preenchido-elegível tem prioridade; vazio é só fallback
+      // provisório (nunca concorre com um participante já validado). Ver computeVoucherEligibleSlots.
       voucherEligibleSlots = new Set(
-        computeDocEligibleSlots(order.pendingParticipants ?? [], voucher.documentList, voucher.cpfList, totalUnits, true),
+        computeVoucherEligibleSlots(order.pendingParticipants ?? [], voucher.documentList, voucher.cpfList, totalUnits),
       );
     }
     const cov = resolveVoucherCoverage(order.reservedTickets ?? [], voucher.appliesTo, undefined, voucherEligibleSlots);
@@ -2232,7 +2272,8 @@ export class OrdersService {
           // do checkout) → aplica provisoriamente (sem gate); validação real no /participants e pay.
           let voucherEligibleSlots: Set<number> | undefined;
           if (voucherByCode.cpfListStatus === 'ENABLED' && participants.length > 0) {
-            const slots = computeDocEligibleSlots(participants, voucherByCode.documentList, voucherByCode.cpfList, totalUnits, true);
+            // 1 ingresso só: preenchido-elegível tem prioridade, vazio é fallback provisório.
+            const slots = computeVoucherEligibleSlots(participants, voucherByCode.documentList, voucherByCode.cpfList, totalUnits);
             if (slots.length === 0) {
               throw new AppUnprocessableException('VOUCHER_CPF_RESTRICTED', 'Voucher não aplicável: nenhum participante elegível');
             }
@@ -2369,7 +2410,8 @@ export class OrdersService {
       // checkout) → aplica provisoriamente (sem gate); validação real no /participants e pay.
       let voucherEligibleSlots: Set<number> | undefined;
       if (voucher.cpfListStatus === 'ENABLED' && participants.length > 0) {
-        const slots = computeDocEligibleSlots(participants, voucher.documentList, voucher.cpfList, totalUnits, true);
+        // 1 ingresso só: preenchido-elegível tem prioridade, vazio é fallback provisório.
+        const slots = computeVoucherEligibleSlots(participants, voucher.documentList, voucher.cpfList, totalUnits);
         if (slots.length === 0) {
           throw new AppUnprocessableException('VOUCHER_CPF_RESTRICTED', 'Voucher não aplicável: nenhum participante elegível');
         }

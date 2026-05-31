@@ -20,6 +20,7 @@ import {
   distributeDiscount,
   resolveVoucherCoverage,
   computeDocEligibleSlots,
+  computeVoucherEligibleSlots,
   computeAgeEligibleSlots,
   capUsageByMax,
   inferEffectiveUsage,
@@ -159,6 +160,45 @@ describe('Cupons & Vouchers — motor de desconto', () => {
     it('D7 múltiplos: retorna só os índices elegíveis', () => {
       const ps = [participantCpf('11111111111'), participantCpf('99999999999'), participantCpf('11111111111')];
       expect(computeDocEligibleSlots(ps, [cpfDoc('11111111111')], null, 3)).toEqual([0, 2]);
+    });
+  });
+
+  // ── D2. computeVoucherEligibleSlots (voucher = 1 ingresso; prioridade preenchido > vazio) ──
+  describe('D2. computeVoucherEligibleSlots', () => {
+    it('D2.1 preenchido-elegível tem prioridade: vazio NÃO concorre', () => {
+      // P1 elegível (slot 0), P2 vazio (slot 1) → só [0]; o vazio "desaplica".
+      const ps = [participantCpf('11111111111'), {}];
+      expect(
+        computeVoucherEligibleSlots(ps, [cpfDoc('11111111111')], null, 2),
+      ).toEqual([0]);
+    });
+    it('D2.2 nenhum preenchido elegível + vazio → fallback no vazio (provisório)', () => {
+      // P1 preenchido mas FORA da lista, P2 vazio → fallback = só o vazio (slot 1).
+      const ps = [participantCpf('99999999999'), {}];
+      expect(
+        computeVoucherEligibleSlots(ps, [cpfDoc('11111111111')], null, 2),
+      ).toEqual([1]);
+    });
+    it('D2.3 todos preenchidos e nenhum na lista → vazio (caller rejeita)', () => {
+      const ps = [participantCpf('99999999999'), participantCpf('88888888888')];
+      expect(
+        computeVoucherEligibleSlots(ps, [cpfDoc('11111111111')], null, 2),
+      ).toEqual([]);
+    });
+    it('D2.4 ambos vazios (início do checkout) → ambos provisórios', () => {
+      expect(computeVoucherEligibleSlots([{}, {}], [cpfDoc('11111111111')], null, 2)).toEqual([0, 1]);
+    });
+    it('D2.5 dois preenchidos-elegíveis → retorna ambos (resolveVoucherCoverage escolhe o mais caro)', () => {
+      const ps = [participantCpf('11111111111'), participantCpf('11111111111')];
+      expect(computeVoucherEligibleSlots(ps, [cpfDoc('11111111111')], null, 2)).toEqual([0, 1]);
+    });
+    it('D2.6 preenchido-elegível + vazio → voucher cai no preenchido mesmo se o vazio é mais caro', () => {
+      // slot 0 (P1 elegível) @5000, slot 1 (vazio) @10000 → elegíveis=[0] → cobre o slot 0.
+      const ps = [participantCpf('11111111111'), {}];
+      const slots = new Set(computeVoucherEligibleSlots(ps, [cpfDoc('11111111111')], null, 2));
+      const cov = resolveVoucherCoverage([rt('A', 1, 5000), rt('B', 1, 10000)], 'all', undefined, slots);
+      expect(cov.qualifyingSlot).toBe(0);
+      expect(cov.discount).toBe(5000);
     });
   });
 

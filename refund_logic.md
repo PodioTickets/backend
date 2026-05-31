@@ -57,18 +57,18 @@ Primeira pergunta, qual o método de pagamento do pedido?
 1.4  - Tire o valor somado das parcelas que não liberou do parcelados a receber.
 1.5 -  Verificar se o pedido utilizou cupom.
 1.5.1- Se a resposta for SIM
-1.5.1.1- Verificar se o cupom considera produtos adicionais: 
+      1.5.1.1- Verificar se o cupom considera produtos adicionais: 
 
-1.5.1.1.1 - Se a resposta for SIM
+      1.5.1.1.1 - Se a resposta for SIM
 
-Descontar (0.02 * SUBTOTALBACK-COM-CUPOM-PRODUTO-ADD) no saldo disponível. 
+      Descontar (0.02 * SUBTOTALBACK-COM-CUPOM-PRODUTO-ADD) no saldo disponível. 
 
-1.5.1.1.1 - Se a resposta for NAO
+      1.5.1.1.1 - Se a resposta for NAO
 
-Descontar (0.02 * SUBTOTALBACK-SEM-CUPOM-PRODUTO-ADD) no saldo disponível.
+      Descontar (0.02 * SUBTOTALBACK-SEM-CUPOM-PRODUTO-ADD) no saldo disponível.
 
-1.5.1- Se a resposta for NÃO
-Descontar (0.02 * SUBTOTALBACK-SEM-CUPOM-PRODUTO-ADD) no saldo disponível.
+      1.5.1- Se a resposta for NÃO
+      Descontar (0.02 * SUBTOTALBACK-SEM-CUPOM-PRODUTO-ADD) no saldo disponível.
 
 
 2- CARTAO A VISTA
@@ -85,7 +85,8 @@ Descontar (0.02 * SUBTOTALBACK-SEM-CUPOM-PRODUTO-ADD) no saldo disponível.
 
 
 
- 
+
+
 2.2 Verificar se o evento ainda está aguardando auditoria de retenção para liberar os 10%.
 
 2.2.2 Se a resposta for NAO

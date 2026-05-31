@@ -6,6 +6,7 @@ import { PrismaModule } from '../../prisma/prisma.module';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { LocalStrategy } from './strategies/local.strategy';
 import { GoogleStrategy } from './strategies/google.strategy';
+import { OAuthStateService } from './oauth-state.service';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { HttpModule } from '@nestjs/axios';
@@ -33,7 +34,7 @@ import { CommonModule } from '../../common/common.module';
       },
     }),
   ],
-  providers: [AuthService, EmailService, JwtStrategy, LocalStrategy, GoogleStrategy, TurnstileGuard],
+  providers: [AuthService, EmailService, JwtStrategy, LocalStrategy, GoogleStrategy, OAuthStateService, TurnstileGuard],
   controllers: [AuthController],
   exports: [JwtModule, AuthService],
 })

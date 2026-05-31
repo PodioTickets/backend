@@ -10,21 +10,20 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
     private configService: ConfigService,
     private authService: AuthService,
   ) {
-    // Callback URL deve apontar para o frontend, não para o backend
-    // O frontend recebe o código e faz POST para /api/v1/auth/google/validate
-    const frontendUrl = configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
+    // Callback URL aponta para o BACKEND (GET /api/v1/auth/google/callback). O backend
+    // recebe o `code` + `state`, extrai o `redirect_to` saneado do state e redireciona
+    // para o frontend ({FRONTEND}/auth/callback?code=...&redirect_to=...). O front então
+    // troca o code por tokens via POST /api/v1/auth/google/validate (redirectUri = este
+    // mesmo callback do backend — o redirect_uri da troca precisa bater com o do consent).
+    // Este `callbackURL` vira o `redirect_uri` da URL de consent → DEVE estar autorizado
+    // no Google Cloud Console.
     const callbackUrl = configService.get<string>('GOOGLE_CALLBACK_URL');
-    
-    let finalCallbackUrl: string;
-    
-    if (callbackUrl) {
-      // Se já for uma URL completa, usar como está
-      finalCallbackUrl = callbackUrl;
-    } else {
-      // Usar URL do frontend + /auth/callback
-      finalCallbackUrl = `${frontendUrl}/auth/callback`;
-    }
-    
+    const port = configService.get<string>('PORT') || '3333';
+
+    // Se GOOGLE_CALLBACK_URL estiver setado, usa como está; senão, default local p/ o backend.
+    const finalCallbackUrl =
+      callbackUrl || `http://localhost:${port}/api/v1/auth/google/callback`;
+
     super({
       clientID: configService.get<string>('GOOGLE_CLIENT_ID'),
       clientSecret: configService.get<string>('GOOGLE_CLIENT_SECRET'),

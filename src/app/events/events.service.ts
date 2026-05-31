@@ -45,7 +45,7 @@ import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
 import { TicketsService } from '../tickets/tickets.service';
 import { TicketCategoriesService } from '../ticket-categories/ticket-categories.service';
 import { EmailService } from '../../common/services/email.service';
-import { RepasseService } from '../repasse/repasse.service';
+import { RepasseService, RETENTION_DAYS } from '../repasse/repasse.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { isChargeback, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 
@@ -1062,7 +1062,18 @@ export class EventsService {
           // Contadores úteis sem carregar relações completas
           _count: {
             select: {
-              registrations: true,
+              // Conta APENAS inscrições válidas/pagas: CONFIRMED (paga) e COMPLETED
+              // (paga, evento encerrado). Exclui PENDING (não paga) e CANCELLED — que
+              // também cobre estorno e chargeback (ambos rebaixam a inscrição p/ CANCELLED;
+              // ver payments-refund.service / payments-chargeback.service). Filtro DB-side
+              // (filtered relation count) — sem query extra. Mesma convenção do resto do service.
+              registrations: {
+                where: {
+                  status: {
+                    in: [RegistrationStatus.CONFIRMED, RegistrationStatus.COMPLETED],
+                  },
+                },
+              },
               modalities: true,
             },
           },
@@ -2823,14 +2834,6 @@ export class EventsService {
     return stats;
   }
 
-  // Prazos de retenção por método de pagamento (em dias)
-  private static readonly RETENTION_DAYS: Record<string, number> = {
-    [PaymentMethod.PIX]: 1,
-    [PaymentMethod.CREDIT_CARD]: 31,
-    [PaymentMethod.BOLETO]: 3,
-    [PaymentMethod.CRYPTO]: 30,
-  };
-
   /**
    * Calcula range de datas para financial
    */
@@ -4292,7 +4295,7 @@ export class EventsService {
 
       const paymentDate = new Date(order.payment.paymentDate);
       const releaseDate = new Date(paymentDate);
-      const retentionDays = EventsService.RETENTION_DAYS[order.payment.method as string] ?? 31;
+      const retentionDays = RETENTION_DAYS[order.payment.method as string] ?? 31;
       releaseDate.setDate(releaseDate.getDate() + retentionDays);
 
       // Se ainda não passou do prazo de retenção, está aguardando liberação
