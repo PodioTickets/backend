@@ -10,7 +10,6 @@ import {
   UseGuards,
   Request,
   BadRequestException,
-  Header,
   Res,
   StreamableFile,
 } from '@nestjs/common';
@@ -64,7 +63,7 @@ import {
 } from './dto/financial-settings.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
-import { CacheTTL, NoCache } from 'src/common/decorators/cache.decorator';
+import { NoCache } from 'src/common/decorators/cache.decorator';
 import { getClientIp as clientIp } from '../../common/utils/client-ip.util';
 
 function baseUrl(req: ExpressRequest): string {
@@ -103,8 +102,6 @@ export class EventsController {
   }
 
   @Get('search/locations')
-  @CacheTTL(300_000)
-  @Header('Cache-Control', 'public, max-age=300, s-maxage=300, stale-while-revalidate=120')
   @ApiOperation({
     summary: 'Facetas de local (estado → cidades)',
     description:
@@ -122,7 +119,6 @@ export class EventsController {
   }
 
   @Get('search')
-  @CacheTTL(120_000)
   @ApiOperation({
     summary: 'Search events',
     description: 'Advanced search for events with text search, location filters, and date ranges. Optimized for performance.'
@@ -591,16 +587,14 @@ export class EventsController {
   // ========== DASHBOARD (split em 3 rotas — overview/rankings/secondary) ==========
 
   /**
-   * Above-the-fold: KPIs + gráfico de tendência. Cache 30s.
+   * Above-the-fold: KPIs + gráfico de tendência.
    *
-   * `Cache-Control: private` — dados de organizador específico, NUNCA cachear em CDN/proxy.
-   * `max-age=30` espelha o TTL do Redis. `stale-while-revalidate=60` deixa o browser
-   * servir stale por mais 60s enquanto refaz em background — UX fluida no organizador
-   * que volta pra aba do dashboard.
+   * SEM cache de navegador (`@NoCache` → SecurityHeadersInterceptor aplica `no-store`). A
+   * absorção de carga fica por conta do cache Redis no DashboardService (fail-open, ~30s),
+   * server-side — o browser sempre recebe dado fresco, sem servir stale ao organizador.
    */
   @Get(':eventId/dashboard/overview')
   @NoCache()
-  @Header('Cache-Control', 'private, max-age=30, stale-while-revalidate=60')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get dashboard overview (KPIs + trend chart)' })
@@ -619,11 +613,11 @@ export class EventsController {
   }
 
   /**
-   * Tabelas paginadas: ticketRanking, tickets, topProductVariations, lotsNearDepletion. Cache 30s.
+   * Tabelas paginadas: ticketRanking, tickets, topProductVariations, lotsNearDepletion.
+   * Sem cache de navegador (no-store); absorção por cache Redis no service (~30s).
    */
   @Get(':eventId/dashboard/rankings')
   @NoCache()
-  @Header('Cache-Control', 'private, max-age=30, stale-while-revalidate=60')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get dashboard rankings (paginated tables)' })
@@ -646,12 +640,11 @@ export class EventsController {
   }
 
   /**
-   * Widgets secundários: topCities, salesHeatmap, mostAnsweredQuestions. Cache 60s.
-   * TTL maior (dados mudam mais devagar).
+   * Widgets secundários: topCities, salesHeatmap, mostAnsweredQuestions.
+   * Sem cache de navegador (no-store); absorção por cache Redis no service (~60s).
    */
   @Get(':eventId/dashboard/secondary')
   @NoCache()
-  @Header('Cache-Control', 'private, max-age=60, stale-while-revalidate=120')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get dashboard secondary widgets (geo + heatmap + Q&A)' })

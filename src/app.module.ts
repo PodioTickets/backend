@@ -2,7 +2,6 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
 import { UploadModule } from './app/upload/upload.module';
 import { UserModule } from './app/user/user.module';
-import { HttpCacheInterceptor } from './common/interceptors/http-cache.interceptor';
 import { ConcurrencyLimiterMiddleware } from './common/middleware/concurrency-limiter.middleware';
 import { PerformanceMonitoringMiddleware } from './common/middleware/performance-monitoring.middleware';
 import { AuthModule } from './app/auth/auth.module';
@@ -77,7 +76,11 @@ import { UserActivityModule } from './app/user-activity/user-activity.module';
     ResponseCompressionInterceptor,
     CdnService,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
-    { provide: APP_INTERCEPTOR, useClass: HttpCacheInterceptor },
+    // HttpCacheInterceptor REMOVIDO (2026-05-31): não cacheamos resposta de NENHUMA rota GET
+    // server-side. O cache-manager (CacheModule) continua para auth (rate-limit/MFA/reset) e os
+    // caches internos de domínio usam CacheRedisService. Toda resposta sai fresca + `no-store`
+    // (SecurityHeadersInterceptor). Para reativar cache de uma rota específica no futuro, re-registrar
+    // o interceptor e usar @CacheTTL — preferir cache no service (CacheRedisService) por slot.
     { provide: APP_INTERCEPTOR, useClass: ResponseCompressionInterceptor },
   ],
   exports: [],

@@ -51,6 +51,21 @@ export class ProductVariationDto {
   })
   @Type(() => Number)
   stock?: number;
+
+  /**
+   * Ordem de exibição (0-based). OPCIONAL — o backend usa o ÍNDICE do array recebido como
+   * fonte de verdade (recomputa o sortOrder em create/update). Aceito aqui só para o front
+   * poder ecoar o valor sem quebrar a validação (whitelist). O valor enviado é ignorado.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Type(() => Number)
+  @ApiPropertyOptional({
+    description: 'Ordem de exibição (0-based). Opcional — o backend usa o índice do array.',
+    minimum: 0,
+  })
+  sortOrder?: number;
 }
 
 export class CreateProductDto {
