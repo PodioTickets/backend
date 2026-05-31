@@ -448,6 +448,32 @@ export function computeDocEligibleSlots(
 }
 
 /**
+ * Slots (índices) elegíveis pelo cupom AGE (idade na data do evento). Mesma semântica de
+ * `computeDocEligibleSlots`, mas a validação é por idade:
+ *   - Participante COM `birthDate`: conta só se a idade ∈ [minAge, maxAge].
+ *   - Participante AINDA SEM `birthDate` (slot não preenchido):
+ *       `treatUnfilledAsEligible=true` (preenchimento/PENDING) → conta (mantém aplicado até preencher);
+ *       `false` (default, pay) → não conta (no commit só idade informada e válida recebe).
+ */
+export function computeAgeEligibleSlots(
+  participants: any[],
+  minAge: number,
+  maxAge: number,
+  refDate: Date,
+  totalUnits: number,
+  treatUnfilledAsEligible = false,
+): number[] {
+  return (participants ?? [])
+    .map((p: any, i: number) => {
+      if (i >= totalUnits) return -1;
+      if (!p.birthDate) return treatUnfilledAsEligible ? i : -1;
+      const age = computeAgeAt(p.birthDate, refDate);
+      return age >= minAge && age <= maxAge ? i : -1;
+    })
+    .filter((i: number) => i >= 0);
+}
+
+/**
  * Capa o nº de unidades cobertas por um cupom auto-aplicado (AGE / lista de documento) pelo
  * uso RESTANTE (`maxUsage − usageCount`). Em PENDING o `usageCount` ainda não conta o pedido
  * atual (só incrementa no finalize), logo é o remaining correto. Sem `maxUsage` → sem cap.
@@ -477,13 +503,8 @@ export function orderShape(order: any, discountOverride?: number, extra?: Record
     const max: number = coupon.maxAge ?? Infinity;
     const refDate = resolveAgeReferenceDate(order);
     const totalUnits = (order.reservedTickets ?? []).reduce((s: number, rt: any) => s + (rt.quantity ?? 1), 0);
-    const derived = participants
-      .map((p: any, i: number) => {
-        if (!p.birthDate || i >= totalUnits) return -1;
-        const age = computeAgeAt(p.birthDate, refDate);
-        return age >= min && age <= max ? i : -1;
-      })
-      .filter(i => i >= 0);
+    // Lenient (PENDING): slot ainda sem birthDate mantém o cupom aplicado até preencher.
+    const derived = computeAgeEligibleSlots(participants, min, max, refDate, totalUnits, true);
     if (derived.length > 0) {
       // Capa pelo uso RESTANTE do cupom (maxUsage − usageCount). Em PENDING o usageCount
       // ainda não conta este pedido (só incrementa no finalize), então é o remaining correto.
@@ -767,23 +788,21 @@ export class OrdersService {
       );
     }
 
-    // 1.5 Validate event + carrega a data de nascimento do comprador em paralelo
-    // (usada para auto-aplicar o cupom AGE já na reserva — ver passo 1.7b). `eventDate`
-    // é a referência de idade do cupom AGE (idade calculada na data do evento).
-    const [event, buyer] = await Promise.all([
-      r.event.findUnique({
-        where: { id: dto.eventId },
-        select: {
-          id: true,
-          name: true,
-          status: true,
-          registrationStartDate: true,
-          registrationEndDate: true,
-          eventDate: true,
-        },
-      }),
-      r.user.findUnique({ where: { id: userId }, select: { dateOfBirth: true } }),
-    ]);
+    // 1.5 Validate event. `eventDate` é a referência de idade do cupom AGE (idade na data do
+    // evento). O auto-cupom AGE no reserve (passo 1.7b) aplica PROVISORIAMENTE em TODOS os
+    // ingressos reservados (slots ainda vazios) — a validação por participante acontece no
+    // PATCH /participants conforme o comprador preenche.
+    const event = await r.event.findUnique({
+      where: { id: dto.eventId },
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        registrationStartDate: true,
+        registrationEndDate: true,
+        eventDate: true,
+      },
+    });
     if (!event) throw new NotFoundException('Evento não encontrado');
     if (event.status !== 'PUBLISHED') {
       throw new AppConflictException(
@@ -939,11 +958,11 @@ export class OrdersService {
       });
     }
 
-    // 1.7b Auto-cupom AGE no reserve — aplica já na reserva quando os ingressos são
-    // elegíveis pela idade do COMPRADOR (proxy do participante 0, único dado de idade
-    // conhecido nesta etapa). Reutiliza a fonte única `evaluateAutoCoupons` restrita a
-    // AGE, aplicando a 1 slot. O PATCH /participants reavalia com os participantes reais
-    // e troca/remove/estende o cupom conforme necessário.
+    // 1.7b Auto-cupom AGE no reserve — aplica PROVISORIAMENTE em TODOS os ingressos reservados.
+    // Como ainda não há participantes, tratamos cada unidade como um slot VAZIO (sem birthDate):
+    // o modo lenient do `computeAgeEligibleSlots` conta slot vazio como elegível, então o AGE
+    // cai nos N ingressos (capado por maxUsage). Conforme o comprador preenche os participantes,
+    // o PATCH /participants revalida cada slot (preenchido → valida idade; vazio → mantém).
     const reserveTotalAmount = batchInfos.reduce(
       (sum, info) => sum + info.unitPrice * info.quantity,
       0,
@@ -953,7 +972,9 @@ export class OrdersService {
       quantity: info.quantity,
       unitPrice: info.unitPrice,
     }));
-    const buyerAsParticipant = buyer?.dateOfBirth ? [{ birthDate: buyer.dateOfBirth }] : [];
+    const totalReservedUnits = batchInfos.reduce((sum, info) => sum + info.quantity, 0);
+    // Slots provisórios = uma "vaga vazia" por unidade reservada.
+    const provisionalParticipants = Array.from({ length: totalReservedUnits }, () => ({}));
     const {
       autoCouponId: ageCouponId,
       autoEffectiveUsage: ageEffectiveUsage,
@@ -969,7 +990,7 @@ export class OrdersService {
         voucher: null,
         event: { eventDate: event.eventDate },
       },
-      buyerAsParticipant,
+      provisionalParticipants,
       reservedTicketsLite,
       reserveTotalAmount,
       0,
@@ -1734,11 +1755,12 @@ export class OrdersService {
         const refDate = resolveAgeReferenceDate(order);
         const min = existingCoupon.minAge ?? 0;
         const max = existingCoupon.maxAge ?? Infinity;
-        const ageMatchCount = participants.filter((p: any) => {
-          if (!p.birthDate) return false;
-          const age = computeAgeAt(p.birthDate, refDate);
-          return age >= min && age <= max;
-        }).length;
+        const totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
+        // Lenient (PENDING): slot ainda sem birthDate MANTÉM o cupom aplicado até o comprador
+        // preencher; participante preenchido é validado pela idade. Só remove o cupom quando há
+        // participantes preenchidos e NENHUM (preenchido ou vazio) qualifica.
+        const ageSlots = computeAgeEligibleSlots(participants, min, max, refDate, totalUnits, true);
+        const ageMatchCount = ageSlots.length;
 
         if (ageMatchCount <= 0) {
           shouldRemoveAgeCoupon = true;
@@ -1753,14 +1775,7 @@ export class OrdersService {
             ? Math.max(0, existingCoupon.maxUsage - existingCoupon.usageCount)
             : ageMatchCount;
           const effectiveUsage = Math.min(remaining, ageMatchCount, ageApplicableQty);
-          const totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-          ageQualifyingSlots = participants
-            .map((p: any, i: number) => {
-              if (!p.birthDate || i >= totalUnits) return -1;
-              const age = computeAgeAt(p.birthDate, refDate);
-              return (age >= min && age <= max) ? i : -1;
-            })
-            .filter((i: number) => i >= 0);
+          ageQualifyingSlots = ageSlots;
           autoCouponId = existingCoupon.id;
           const productsExtra = existingCoupon.applyToProducts ? productsSubtotal : 0;
           autoDiscount = computePartialCouponDiscount(ageApplicableTickets, existingCoupon.type, existingCoupon.value, effectiveUsage, productsExtra);
@@ -1806,13 +1821,11 @@ export class OrdersService {
           const refDate = resolveAgeReferenceDate(order);
           const min = coupon.minAge ?? 0;
           const max = coupon.maxAge ?? Infinity;
-          const ageMatchCount = participants.filter((p: any) => {
-            if (!p.birthDate) return false;
-            const age = computeAgeAt(p.birthDate, refDate);
-            return age >= min && age <= max;
-          }).length;
-          if (ageMatchCount <= 0) continue;
-          (coupon as any)._ageMatchCount = ageMatchCount;
+          const totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
+          // Lenient (PENDING): slot vazio (sem birthDate) conta como elegível até preencher.
+          const ageSlots = computeAgeEligibleSlots(participants, min, max, refDate, totalUnits, true);
+          if (ageSlots.length <= 0) continue;
+          (coupon as any)._ageSlots = ageSlots;
         }
 
         {
@@ -1838,8 +1851,9 @@ export class OrdersService {
             }
             autoDiscount = Math.min(autoDiscount, autoApplicableSubtotal + productsContribution);
           } else {
-            // AGE: desconto apenas nos ingressos dos participantes qualificados
-            const ageMatchCount: number = (coupon as any)._ageMatchCount ?? 0;
+            // AGE: desconto apenas nos ingressos dos participantes qualificados (slots do stash).
+            const ageSlots: number[] = (coupon as any)._ageSlots ?? [];
+            const ageMatchCount = ageSlots.length;
             const autoApplicableQty = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
             const remaining = coupon.maxUsage != null
               ? Math.max(0, coupon.maxUsage - coupon.usageCount)
@@ -1849,17 +1863,7 @@ export class OrdersService {
             const productsExtra = coupon.applyToProducts ? productsSubtotal : 0;
             autoDiscount = computePartialCouponDiscount(autoApplicableTickets, coupon.type, coupon.value, effectiveUsage, productsExtra);
             autoEffectiveUsage = effectiveUsage;
-            const _ageRefDate = resolveAgeReferenceDate(order);
-            const _ageMin = coupon.minAge ?? 0;
-            const _ageMax = coupon.maxAge ?? Infinity;
-            const _totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-            ageQualifyingSlots = participants
-              .map((p: any, i: number) => {
-                if (!p.birthDate || i >= _totalUnits) return -1;
-                const age = computeAgeAt(p.birthDate, _ageRefDate);
-                return (age >= _ageMin && age <= _ageMax) ? i : -1;
-              })
-              .filter((i: number) => i >= 0);
+            ageQualifyingSlots = ageSlots;
           }
 
           autoCouponId = coupon.id;
@@ -1968,96 +1972,38 @@ export class OrdersService {
     // reflete na hora no desconto. O subtotal de produtos vem de pendingProducts
     // (já gravado pelo /products anterior) p/ cupons com applyToProducts=true.
 
-    // ── Sincronização bidirecional reserva ↔ nº de participantes ───────────────────
-    // INVARIANTE do sistema: sum(OrderReservedTicket.quantity) == estoque retido
-    // (availableQuantity) == nº de registrations placeholder PENDING. cancel/expire
-    // (restauram estoque por reservedTickets) e a finalização (cria 1 inscrição por
-    // unidade reservada) dependem disso — então mantemos os 3 em lockstep AQUI, sem
-    // tocar nesses fluxos.
-    //
-    // As registrations placeholder criadas no reserve são a fonte canônica por-unidade:
-    //   PENDING   = unidade ativa (retida em estoque + cobrada)
-    //   CANCELLED = liberada, mas RE-ADQUIRÍVEL até o original (preserva o teto sem
-    //               coluna nova). Cada placeholder tem exatamente 1 RegistrationTicket
-    //               {ticketId, batchId}.
-    const placeholderRegs = await w.registration.findMany({
-      where: { orderId, status: { in: ['PENDING', 'CANCELLED'] } },
-      select: {
-        id: true,
-        status: true,
-        tickets: { select: { ticketId: true, batchId: true } },
-      },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-    });
+    // ── Reserva FIXA: a quantidade reservada NÃO muda no /participants ──────────────
+    // O que foi reservado no `reserve` permanece intacto (OrderReservedTicket / estoque /
+    // registrations placeholder). Aqui só PREENCHEMOS os participantes nos slots existentes.
+    // Slots não enviados ficam VAZIOS ({}) — completamos `pendingParticipants` até o total
+    // reservado para que o cupom/AGE continue aplicado neles (modo lenient) até o comprador
+    // preencher. Mais participantes que ingressos → erro. Reduzir a quantidade = nova reserva.
+    const reservedTickets = (order.reservedTickets ?? []) as any[];
+    const totalReserved = reservedTickets.reduce((sum: number, rt: any) => sum + (rt.quantity ?? 0), 0);
 
-    const originalReservedCount = placeholderRegs.length;
-    const targetCount = participants.length;
-    if (targetCount > originalReservedCount) {
+    if (participants.length > totalReserved) {
       throw new AppUnprocessableException(
         'PARTICIPANTS_EXCEED_TICKETS',
-        `Número de participantes (${targetCount}) excede os ingressos reservados (${originalReservedCount}).`,
+        `Número de participantes (${participants.length}) excede os ingressos reservados (${totalReserved}).`,
       );
     }
 
-    // Estado-alvo: as primeiras `targetCount` unidades (ordem de reserva) ficam PENDING,
-    // o restante CANCELLED. Deriva as transições por unidade (adquirir/liberar estoque).
-    const toAcquire: { regId: string; batchId: string }[] = []; // CANCELLED → PENDING
-    const toRelease: { regId: string; batchId: string }[] = []; // PENDING → CANCELLED
-    placeholderRegs.forEach((reg: any, idx: number) => {
-      const batchId = reg.tickets?.[0]?.batchId;
-      if (!batchId) return; // defensivo — placeholder do reserve sempre tem 1 ticket c/ batch
-      const shouldBePending = idx < targetCount;
-      if (shouldBePending && reg.status === 'CANCELLED') toAcquire.push({ regId: reg.id, batchId });
-      else if (!shouldBePending && reg.status === 'PENDING') toRelease.push({ regId: reg.id, batchId });
-    });
+    // Completa com slots VAZIOS até o total reservado (mantém os N slots; vazios = provisórios).
+    const filledParticipants = [...participants];
+    while (filledParticipants.length < totalReserved) filledParticipants.push({});
 
-    // Preço/nome por lote (cobre lotes cuja linha de OrderReservedTicket foi removida numa
-    // liberação anterior) para reconstruir o OrderReservedTicket a partir do alvo PENDING.
-    const placeholderBatchIds = [
-      ...new Set(
-        placeholderRegs
-          .flatMap((reg: any) => reg.tickets.map((t: any) => t.batchId))
-          .filter(Boolean),
-      ),
-    ] as string[];
-    const batchRows = await w.ticketBatch.findMany({
-      where: { id: { in: placeholderBatchIds } },
-      select: { id: true, price: true, ticketId: true, ticket: { select: { name: true } } },
-    });
-    const batchInfoById = new Map<string, { price: number; ticketId: string; ticketName: string }>(
-      batchRows.map((b: any) => [b.id, { price: b.price, ticketId: b.ticketId, ticketName: b.ticket?.name ?? '' }]),
-    );
-
-    // OrderReservedTicket-alvo = unidades PENDING-alvo agrupadas por lote.
-    const targetQtyByBatch = new Map<string, number>();
-    placeholderRegs.slice(0, targetCount).forEach((reg: any) => {
-      const batchId = reg.tickets?.[0]?.batchId;
-      if (batchId) targetQtyByBatch.set(batchId, (targetQtyByBatch.get(batchId) ?? 0) + 1);
-    });
-    const newReservedTickets = [...targetQtyByBatch.entries()].map(([batchId, quantity]) => {
-      const info = batchInfoById.get(batchId);
-      return {
-        ticketId: info?.ticketId,
-        batchId,
-        quantity,
-        unitPrice: info?.price ?? 0,
-        ticketName: info?.ticketName ?? '',
-      };
-    });
-
-    // Recalcular total com os ingressos-alvo + produtos pendentes
-    const newTicketsSubtotal = newReservedTickets.reduce(
-      (sum: number, rt: any) => sum + rt.unitPrice * rt.quantity,
+    const ticketsSubtotalNew = reservedTickets.reduce(
+      (sum: number, rt: any) => sum + (rt.unitPrice ?? 0) * (rt.quantity ?? 0),
       0,
     );
     const productsSubtotal = ((order.pendingProducts as any[] | null) ?? []).reduce(
       (sum: number, p: any) => sum + (p.unitPrice ?? 0) * (p.quantity ?? 1),
       0,
     );
-    const newTotalAmount = newTicketsSubtotal + productsSubtotal;
+    const newTotalAmount = ticketsSubtotalNew + productsSubtotal;
 
-    // Reavalia auto-cupom (AGE/QUANTITY) já com os ingressos-alvo e os novos participantes
-    // — fonte única compartilhada com PATCH /products.
+    // Reavalia auto-cupom (AGE/QUANTITY) com os participantes (incl. slots vazios) sobre a
+    // reserva FIXA. Fonte única compartilhada com PATCH /products.
     const {
       autoCouponId,
       autoEffectiveUsage,
@@ -2067,91 +2013,152 @@ export class OrdersService {
       newDiscount,
     } = await this.evaluateAutoCoupons(
       order,
-      participants,
-      newReservedTickets,
-      newTicketsSubtotal,
+      filledParticipants,
+      reservedTickets,
+      ticketsSubtotalNew,
       productsSubtotal,
     );
     const newFinalAmount = Math.max(0, newTotalAmount - newDiscount);
 
-    // Transições de estoque agrupadas por lote (1 UPDATE por lote, não por unidade).
-    const releaseQtyByBatch = new Map<string, number>();
-    for (const rel of toRelease) releaseQtyByBatch.set(rel.batchId, (releaseQtyByBatch.get(rel.batchId) ?? 0) + 1);
-    const acquireQtyByBatch = new Map<string, number>();
-    for (const acq of toAcquire) acquireQtyByBatch.set(acq.batchId, (acquireQtyByBatch.get(acq.batchId) ?? 0) + 1);
+    // Só atualiza os dados do pedido — NÃO toca em reserva/estoque/placeholders (fixos).
+    const updated = await w.order.update({
+      where: { id: orderId },
+      data: {
+        pendingParticipants: filledParticipants, // versão normalizada + slots vazios
+        totalAmount: newTotalAmount,
+        discount: newDiscount,
+        finalAmount: newFinalAmount,
+        ...(autoCouponId && { couponId: autoCouponId }),
+        ...((shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon) && { couponId: null }),
+        updatedAt: new Date(),
+      },
+      include: ORDER_INCLUDE,
+    });
+    return orderShape(
+      updated,
+      newDiscount > 0 ? newDiscount : undefined,
+      { couponAutoRemoved: shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon },
+      autoEffectiveUsage,
+      undefined,
+      ageQualifyingSlots,
+    );
+  }
+
+  // ── 3a. removeReservedSlot ─────────────────────────────────────────────────
+
+  /**
+   * Remove UM ingresso/slot do pedido (reduz a quantidade reservada em 1) sem recriar o pedido.
+   * `slotIndex` = índice (0-based) do participante/unidade reservada (mesma ordem do orderShape).
+   * Ações atômicas: libera 1 vaga de estoque, cancela 1 placeholder PENDING daquele ingresso,
+   * decrementa o `OrderReservedTicket` (deleta a linha se zerar), apara o participante do slot e
+   * recalcula totais + cupom. Mantém o invariante reservedTickets == estoque retido == placeholders.
+   */
+  async removeReservedSlot(userId: string, orderId: string, slotIndex: number): Promise<Record<string, any>> {
+    const order = await this.findOrderForWrite(userId, orderId);
+    this.assertPending(order);
+
+    const w: any = this.prisma.getWriteClient();
+    const reservedTickets = (order.reservedTickets ?? []) as any[];
+
+    // Expande os ingressos reservados em unidades (1 por slot), na MESMA ordem das linhas.
+    const units: { ortId: string; ticketId: string; batchId: string }[] = [];
+    for (const rt of reservedTickets) {
+      for (let i = 0; i < (rt.quantity ?? 0); i++) {
+        units.push({ ortId: rt.id, ticketId: rt.ticketId, batchId: rt.batchId });
+      }
+    }
+
+    if (slotIndex < 0 || slotIndex >= units.length) {
+      throw new AppUnprocessableException('INVALID_SLOT', `Slot ${slotIndex} inválido (pedido tem ${units.length} ingressos).`);
+    }
+
+    // Remover o ÚLTIMO ingresso = ZERAR o pedido (recomeçar). Mesma regra do cancelExpiredOrders:
+    //   - JÁ preencheu endereço de cobrança (chegou ao billing) → mantém histórico como CANCELLED.
+    //   - NÃO preencheu nada (só reservou) → DELETA o pedido (cascade remove registrations/
+    //     reservedTickets); restaura estoque. Cupom/voucher PENDING não foram consumidos.
+    if (units.length <= 1) {
+      const reachedBilling = !!order.billingPostalCode;
+      if (reachedBilling) {
+        await this.cancelOrderAndRestoreStock(orderId, 'EMPTIED_BY_USER', w);
+        const cancelled = await this.prisma.getReadClient().order.findUnique({
+          where: { id: orderId },
+          include: ORDER_INCLUDE,
+        });
+        return orderShape(cancelled, undefined, { orderCancelled: true });
+      }
+      // Sem endereço → deleta (restaura estoque + delete em transação).
+      await w.$transaction(async (tx: any) => {
+        for (const rt of reservedTickets) {
+          await tx.$executeRaw`
+            UPDATE "TicketBatch"
+            SET "availableQuantity" = LEAST("availableQuantity" + ${rt.quantity}, "quantity")
+            WHERE id = ${rt.batchId}::uuid
+          `;
+        }
+        await tx.order.delete({ where: { id: orderId } });
+      });
+      return { id: orderId, status: 'DELETED', orderDeleted: true };
+    }
+
+    const target = units[slotIndex];
+
+    // Nova reserva = decrementa a quantidade do ticket-alvo em 1 (remove a linha se zerar).
+    const newReservedTickets = reservedTickets
+      .map((rt: any) => (rt.id === target.ortId ? { ...rt, quantity: (rt.quantity ?? 0) - 1 } : rt))
+      .filter((rt: any) => (rt.quantity ?? 0) > 0);
+
+    // Participantes: remove EXATAMENTE o slot pedido; depois completa com vazios até o novo total.
+    const existingParticipants = ((order.pendingParticipants as any[] | null) ?? []).filter((_: any, i: number) => i !== slotIndex);
+    const newTotalReserved = newReservedTickets.reduce((s: number, rt: any) => s + (rt.quantity ?? 0), 0);
+    const filledParticipants = existingParticipants.slice(0, newTotalReserved);
+    while (filledParticipants.length < newTotalReserved) filledParticipants.push({});
+
+    const ticketsSubtotal = newReservedTickets.reduce((s: number, rt: any) => s + (rt.unitPrice ?? 0) * (rt.quantity ?? 0), 0);
+    const productsSubtotal = ((order.pendingProducts as any[] | null) ?? []).reduce(
+      (s: number, p: any) => s + (p.unitPrice ?? 0) * (p.quantity ?? 1),
+      0,
+    );
+    const newTotalAmount = ticketsSubtotal + productsSubtotal;
+
+    const {
+      autoCouponId,
+      autoEffectiveUsage,
+      shouldRemoveAgeCoupon,
+      shouldRemoveQuantityCoupon,
+      ageQualifyingSlots,
+      newDiscount,
+    } = await this.evaluateAutoCoupons(order, filledParticipants, newReservedTickets, ticketsSubtotal, productsSubtotal);
+    const newFinalAmount = Math.max(0, newTotalAmount - newDiscount);
 
     const updated = await w.$transaction(async (tx: any) => {
-      // 1) Liberar estoque das unidades que saem (PENDING → CANCELLED). LEAST evita
-      //    over-restore acima de quantity. Os regs liberados saem da subquery de vendas.
-      for (const [batchId, qty] of releaseQtyByBatch) {
-        await tx.$executeRaw`
-          UPDATE "TicketBatch"
-          SET "availableQuantity" = LEAST("availableQuantity" + ${qty}, "quantity")
-          WHERE id = ${batchId}::uuid
-        `;
-      }
-      if (toRelease.length > 0) {
-        await tx.registration.updateMany({
-          where: { id: { in: toRelease.map((rel) => rel.regId) } },
-          data: { status: 'CANCELLED' },
-        });
+      // 1) libera 1 vaga do lote do slot removido (LEAST evita ultrapassar quantity).
+      await tx.$executeRaw`
+        UPDATE "TicketBatch" SET "availableQuantity" = LEAST("availableQuantity" + 1, "quantity")
+        WHERE id = ${target.batchId}::uuid
+      `;
+
+      // 2) cancela 1 placeholder PENDING desse ingresso (sai da contagem de vendas → vaga livre).
+      const placeholder = await tx.registration.findFirst({
+        where: { orderId, status: 'PENDING', tickets: { some: { ticketId: target.ticketId, batchId: target.batchId } } },
+        select: { id: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (placeholder) {
+        await tx.registration.update({ where: { id: placeholder.id }, data: { status: 'CANCELLED' } });
       }
 
-      // 2) Re-adquirir estoque das unidades que voltam (CANCELLED → PENDING) com o MESMO
-      //    decremento atômico do reserve (counter + contagem real de vendas). Os regs
-      //    ainda estão CANCELLED neste ponto, logo não inflam a subquery de vendas.
-      for (const [batchId, qty] of acquireQtyByBatch) {
-        const rows: any[] = await tx.$queryRaw`
-          UPDATE "TicketBatch" tb
-          SET "availableQuantity" = tb."availableQuantity" - ${qty}
-          WHERE tb.id = ${batchId}::uuid
-            AND tb."availableQuantity" >= ${qty}
-            AND (
-              tb."quantity" - (
-                SELECT COUNT(*)::int
-                FROM "RegistrationTicket" rt
-                JOIN "Registration" r ON rt."registrationId" = r.id
-                WHERE rt."batchId" = tb.id
-                  AND r.status != 'CANCELLED'
-              )
-            ) >= ${qty}
-          RETURNING tb.id
-        `;
-        if (!rows || rows.length === 0) {
-          throw new AppConflictException(
-            'SEAT_NO_LONGER_AVAILABLE',
-            'Uma das vagas que você havia liberado não está mais disponível. Reduza o número de participantes.',
-          );
-        }
-      }
-      if (toAcquire.length > 0) {
-        await tx.registration.updateMany({
-          where: { id: { in: toAcquire.map((acq) => acq.regId) } },
-          data: { status: 'PENDING' },
-        });
-      }
-
-      // 3) Reconstrói OrderReservedTicket = conjunto PENDING-alvo (mantém o invariante
-      //    reservedTickets == estoque retido == placeholders PENDING).
-      await tx.orderReservedTicket.deleteMany({ where: { orderId } });
-      if (newReservedTickets.length > 0) {
-        await tx.orderReservedTicket.createMany({
-          data: newReservedTickets.map((rt: any) => ({
-            orderId,
-            ticketId: rt.ticketId,
-            batchId: rt.batchId,
-            quantity: rt.quantity,
-            unitPrice: rt.unitPrice,
-            ticketName: rt.ticketName,
-          })),
-        });
+      // 3) decrementa (ou remove) a linha de OrderReservedTicket.
+      const stillExists = newReservedTickets.some((rt: any) => rt.id === target.ortId);
+      if (stillExists) {
+        await tx.orderReservedTicket.update({ where: { id: target.ortId }, data: { quantity: { decrement: 1 } } });
+      } else {
+        await tx.orderReservedTicket.delete({ where: { id: target.ortId } });
       }
 
       return tx.order.update({
         where: { id: orderId },
         data: {
-          // Usa a versão normalizada (documento limpo), não o dto cru.
-          pendingParticipants: participants,
+          pendingParticipants: filledParticipants,
           totalAmount: newTotalAmount,
           discount: newDiscount,
           finalAmount: newFinalAmount,
@@ -2162,6 +2169,7 @@ export class OrdersService {
         include: ORDER_INCLUDE,
       });
     });
+
     return orderShape(
       updated,
       newDiscount > 0 ? newDiscount : undefined,
@@ -2656,6 +2664,20 @@ export class OrdersService {
     const reservedTickets = order.reservedTickets as any[];
     const participants = order.pendingParticipants as any[];
 
+    // 6.5b Todos os slots preenchidos. No modelo de reserva FIXA, slots não preenchidos ficam
+    // como objetos vazios ({}) em pendingParticipants — pagar assim criaria inscrição "em branco".
+    // Um slot está preenchido se tem qualquer dado identificador (nome/email/documento).
+    const reservedUnits = reservedTickets.reduce((sum: number, rt: any) => sum + (rt.quantity ?? 0), 0);
+    const filledCount = participants.filter(
+      (p: any) => !!(p && (p.email || p.name || p.documentNumber || p.cpf)),
+    ).length;
+    if (filledCount < reservedUnits) {
+      throw new AppUnprocessableException(
+        'INCOMPLETE_PARTICIPANTS',
+        `Preencha os dados de todos os ${reservedUnits} participante(s) antes de pagar (${filledCount} preenchido(s)).`,
+      );
+    }
+
     // 6.6 Calculate final total
     const ticketsSubtotal = reservedTickets.reduce(
       (sum: number, rt: any) => sum + rt.unitPrice * rt.quantity,
@@ -2808,16 +2830,13 @@ export class OrdersService {
           couponAppliedToProducts = coupon.applyToProducts;
           break;
         } else if (coupon.couponType === 'AGE') {
-          // Validar idade dos participantes na data do evento — aplica apenas
-          // nos que passam no critério (ver computeAgeAt/resolveAgeReferenceDate).
+          // Validar idade na data do evento. ESTRITO no pay (lenient=false): slot sem birthDate
+          // NÃO recebe o desconto no commit — só idade informada e dentro da faixa.
           const refDate = resolveAgeReferenceDate(order);
           const minAge = coupon.minAge ?? 0;
           const maxAge = coupon.maxAge ?? Infinity;
-          const ageMatchCount = participants.filter((p: any) => {
-            if (!p.birthDate) return false;
-            const age = computeAgeAt(p.birthDate, refDate);
-            return age >= minAge && age <= maxAge;
-          }).length;
+          const totalUnitsAge = reservedTickets.reduce((s: number, rt: any) => s + (rt.quantity ?? 0), 0);
+          const ageMatchCount = computeAgeEligibleSlots(participants, minAge, maxAge, refDate, totalUnitsAge).length;
 
           if (ageMatchCount <= 0) continue;
 

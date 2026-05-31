@@ -1,10 +1,12 @@
 import {
   Body,
   Controller,
+  Delete,
   ForbiddenException,
   Get,
   Headers,
   Param,
+  ParseIntPipe,
   ParseUUIDPipe,
   Patch,
   Post,
@@ -106,6 +108,25 @@ export class OrdersController {
     @Body() dto: PatchParticipantsDto,
   ) {
     return this.ordersService.patchParticipants(req.user.id, orderId, dto);
+  }
+
+  // ── DELETE /orders/:orderId/participants/:slot ─────────────────────────
+  // Remove UM ingresso/slot do pedido (reduz a quantidade reservada em 1): libera estoque,
+  // cancela 1 placeholder, apara o participante daquele slot e recalcula cupom — SEM recriar
+  // o pedido. `slot` = índice (0-based) do participante/unidade reservada.
+  @Delete(':orderId/participants/:slot')
+  @ApiOperation({ summary: 'Remove a reserved ticket/participant slot (reduz a quantidade em 1)' })
+  @ApiParam({ name: 'orderId', type: String, format: 'uuid' })
+  @ApiParam({ name: 'slot', type: Number, description: 'Índice (0-based) do slot a remover' })
+  @ApiResponse({ status: 200, description: 'Slot removido' })
+  @ApiResponse({ status: 409, description: 'Pedido não está mais pendente' })
+  @ApiResponse({ status: 422, description: 'Índice inválido ou último ingresso (cancele o pedido)' })
+  async removeReservedSlot(
+    @Request() req: any,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Param('slot', ParseIntPipe) slot: number,
+  ) {
+    return this.ordersService.removeReservedSlot(req.user.id, orderId, slot);
   }
 
   // ── PATCH /orders/:orderId/products ────────────────────────────────────

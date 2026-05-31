@@ -287,138 +287,211 @@ describe('OrdersService', () => {
 
   // ── patchParticipants — sincronização bidirecional reserva ↔ participantes ───
   // Invariante exercitado: reservedTickets == placeholders PENDING == estoque retido.
-  describe('patchParticipants (sync reserva ↔ participantes)', () => {
+  describe('patchParticipants (reserva FIXA + slots vazios)', () => {
     const buyerId = 'buyer-1';
-    const orderId = 'order-sync';
+    const orderId = 'order-fix';
 
-    const baseOrder = {
-      id: orderId,
-      userId: buyerId,
-      status: 'PENDING',
-      eventId: 'evt-1',
-      couponId: null,
-      voucherId: null,
-      coupon: null,
-      voucher: null,
-      discount: 0,
-      pendingProducts: null,
-      reservedTickets: [],
-      event: { eventDate: null },
-    };
-
-    const batchRows = [
-      { id: 'batch-A', price: 10000, ticketId: 'tk-A', ticket: { name: '100 reais' } },
-      { id: 'batch-B', price: 10000, ticketId: 'tk-B', ticket: { name: 'Outro' } },
-    ];
-
-    function buildClient(placeholderRegs: any[], acquireRows: any[] = [{ id: 'batch-x' }]) {
-      const tx = {
-        $executeRaw: jest.fn().mockResolvedValue(1),
-        $queryRaw: jest.fn().mockResolvedValue(acquireRows),
-        registration: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
-        orderReservedTicket: {
-          deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
-          createMany: jest.fn().mockResolvedValue({ count: 1 }),
-        },
-        order: {
-          update: jest.fn().mockImplementation(({ data }: any) => ({
-            id: orderId,
-            status: 'PENDING',
-            reservedTickets: [],
-            coupon: null,
-            voucher: null,
-            payment: null,
-            event: null,
-            ...data,
-          })),
-        },
-      };
+    function build(order: any) {
+      const captured: any = {};
       const client: any = {
-        order: { findUnique: jest.fn().mockResolvedValue(baseOrder) },
+        order: {
+          findUnique: jest.fn().mockResolvedValue(order),
+          update: jest.fn().mockImplementation(({ data }: any) => {
+            captured.update = data;
+            return { ...order, ...data, coupon: null, voucher: null, payment: null, event: order.event ?? null };
+          }),
+        },
         user: { findUnique: jest.fn().mockResolvedValue(null) },
-        registration: { findMany: jest.fn().mockResolvedValue(placeholderRegs) },
-        ticketBatch: { findMany: jest.fn().mockResolvedValue(batchRows) },
         coupon: { findMany: jest.fn().mockResolvedValue([]), findUnique: jest.fn().mockResolvedValue(null) },
-        $transaction: jest.fn().mockImplementation((fn: (tx: any) => any) => fn(tx)),
-        _tx: tx,
+        // reserva/estoque/placeholders são FIXOS — estes NÃO podem ser chamados.
+        registration: { findMany: jest.fn(), updateMany: jest.fn() },
+        ticketBatch: { findMany: jest.fn() },
+        orderReservedTicket: { deleteMany: jest.fn(), createMany: jest.fn() },
+        $transaction: jest.fn(),
+        $executeRaw: jest.fn(),
+        $queryRaw: jest.fn(),
+        _captured: captured,
       };
-      mockPrisma.getWriteClient.mockReturnValue(client);
       mockPrisma.getReadClient.mockReturnValue(client);
+      mockPrisma.getWriteClient.mockReturnValue(client);
       return client;
     }
 
-    const totalCreatedQty = (client: any) =>
-      client._tx.orderReservedTicket.createMany.mock.calls[0][0].data.reduce(
-        (s: number, r: any) => s + r.quantity,
-        0,
-      );
-
-    it('encolhe: 2 reservados, 1 participante → libera 1 vaga e cancela 1 placeholder', async () => {
-      const client = buildClient([
-        { id: 'reg-1', status: 'PENDING', tickets: [{ ticketId: 'tk-A', batchId: 'batch-A' }] },
-        { id: 'reg-2', status: 'PENDING', tickets: [{ ticketId: 'tk-B', batchId: 'batch-B' }] },
-      ]);
-
-      await service.patchParticipants(buyerId, orderId, {
-        participants: [{ email: 'a@a.com' }],
-      } as any);
-
-      expect(client._tx.$executeRaw).toHaveBeenCalledTimes(1); // restaura estoque
-      expect(client._tx.$queryRaw).not.toHaveBeenCalled(); // nada a adquirir
-      expect(client._tx.registration.updateMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { id: { in: ['reg-2'] } }, data: { status: 'CANCELLED' } }),
-      );
-      expect(totalCreatedQty(client)).toBe(1);
+    const order2 = (over: any = {}) => ({
+      id: orderId, userId: buyerId, status: 'PENDING', eventId: 'evt-1',
+      couponId: null, voucherId: null, coupon: null, voucher: null, discount: 0,
+      pendingProducts: null, event: { eventDate: null },
+      reservedTickets: [{ ticketId: 'tk-A', quantity: 2, unitPrice: 10000 }], // 2 reservados
+      ...over,
     });
 
-    it('cresce de volta: 1 PENDING + 1 CANCELLED, 2 participantes → re-adquire e reativa', async () => {
-      const client = buildClient(
-        [
-          { id: 'reg-1', status: 'PENDING', tickets: [{ ticketId: 'tk-A', batchId: 'batch-A' }] },
-          { id: 'reg-2', status: 'CANCELLED', tickets: [{ ticketId: 'tk-B', batchId: 'batch-B' }] },
-        ],
-        [{ id: 'batch-B' }], // aquisição atômica bem-sucedida
-      );
+    it('reservou 2, manda 1 participante → reserva INTACTA + pendingParticipants completado a 2 (1 + vazio)', async () => {
+      const client = build(order2());
+
+      await service.patchParticipants(buyerId, orderId, { participants: [{ email: 'a@a.com' }] } as any);
+
+      const data = client._captured.update;
+      expect(data.pendingParticipants).toHaveLength(2); // completou com slot vazio
+      expect(data.pendingParticipants[0].email).toBe('a@a.com');
+      expect(data.pendingParticipants[1]).toEqual({}); // slot 2 vazio (mantido)
+      // NÃO toca em reserva/estoque/placeholders
+      expect(client.$transaction).not.toHaveBeenCalled();
+      expect(client.orderReservedTicket.deleteMany).not.toHaveBeenCalled();
+      expect(client.registration.updateMany).not.toHaveBeenCalled();
+      expect(client.$executeRaw).not.toHaveBeenCalled();
+    });
+
+    it('manda os 2 participantes → ambos preenchidos, reserva intacta', async () => {
+      const client = build(order2());
 
       await service.patchParticipants(buyerId, orderId, {
         participants: [{ email: 'a@a.com' }, { email: 'b@b.com' }],
       } as any);
 
-      expect(client._tx.$queryRaw).toHaveBeenCalledTimes(1); // re-adquire estoque
-      expect(client._tx.$executeRaw).not.toHaveBeenCalled(); // nada a liberar
-      expect(client._tx.registration.updateMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { id: { in: ['reg-2'] } }, data: { status: 'PENDING' } }),
-      );
-      expect(totalCreatedQty(client)).toBe(2);
+      const data = client._captured.update;
+      expect(data.pendingParticipants).toHaveLength(2);
+      expect(data.pendingParticipants[1].email).toBe('b@b.com');
     });
 
-    it('excede o original: 3 participantes para 2 reservados → PARTICIPANTS_EXCEED_TICKETS', async () => {
-      buildClient([
-        { id: 'reg-1', status: 'PENDING', tickets: [{ ticketId: 'tk-A', batchId: 'batch-A' }] },
-        { id: 'reg-2', status: 'PENDING', tickets: [{ ticketId: 'tk-B', batchId: 'batch-B' }] },
-      ]);
-
+    it('mais participantes que ingressos (3 > 2) → PARTICIPANTS_EXCEED_TICKETS', async () => {
+      build(order2());
       await expect(
-        service.patchParticipants(buyerId, orderId, {
-          participants: [{ email: 'a' }, { email: 'b' }, { email: 'c' }],
-        } as any),
+        service.patchParticipants(buyerId, orderId, { participants: [{}, {}, {}] } as any),
       ).rejects.toThrow(/excede os ingressos reservados/);
     });
+  });
 
-    it('vaga esgotada ao crescer: aquisição atômica sem linha → SEAT_NO_LONGER_AVAILABLE', async () => {
-      buildClient(
-        [
-          { id: 'reg-1', status: 'PENDING', tickets: [{ ticketId: 'tk-A', batchId: 'batch-A' }] },
-          { id: 'reg-2', status: 'CANCELLED', tickets: [{ ticketId: 'tk-B', batchId: 'batch-B' }] },
-        ],
-        [], // estoque indisponível
+  describe('removeReservedSlot (remover 1 ingresso/slot)', () => {
+    const buyerId = 'buyer-1';
+    const orderId = 'order-rm';
+
+    function build(order: any) {
+      const captured: any = {};
+      const tx: any = {
+        $executeRaw: jest.fn().mockResolvedValue(1),
+        registration: { findFirst: jest.fn().mockResolvedValue({ id: 'reg-x' }), update: jest.fn().mockResolvedValue({}) },
+        orderReservedTicket: { update: jest.fn().mockResolvedValue({}), delete: jest.fn().mockResolvedValue({}) },
+        order: {
+          update: jest.fn().mockImplementation(({ data }: any) => {
+            captured.update = data;
+            return { ...order, ...data, coupon: null, voucher: null, payment: null, event: order.event ?? null };
+          }),
+        },
+      };
+      const client: any = {
+        order: { findUnique: jest.fn().mockResolvedValue(order) },
+        user: { findUnique: jest.fn().mockResolvedValue(null) },
+        coupon: { findMany: jest.fn().mockResolvedValue([]), findUnique: jest.fn().mockResolvedValue(null) },
+        $transaction: jest.fn().mockImplementation((fn: (tx: any) => any) => fn(tx)),
+        _tx: tx,
+        _captured: captured,
+      };
+      mockPrisma.getReadClient.mockReturnValue(client);
+      mockPrisma.getWriteClient.mockReturnValue(client);
+      return client;
+    }
+
+    const order2 = (over: any = {}) => ({
+      id: orderId, userId: buyerId, status: 'PENDING', eventId: 'evt-1',
+      couponId: null, voucherId: null, coupon: null, voucher: null, discount: 0,
+      pendingProducts: null, event: { eventDate: null },
+      reservedTickets: [{ id: 'ort-A', ticketId: 'tk-A', batchId: 'batch-A', quantity: 2, unitPrice: 10000 }],
+      pendingParticipants: [{ email: 'a@a.com' }, {}],
+      ...over,
+    });
+
+    it('remove o slot 1 → reserva 2→1, libera estoque, cancela placeholder, decrementa ORT', async () => {
+      const client = build(order2());
+
+      await service.removeReservedSlot(buyerId, orderId, 1);
+
+      expect(client._tx.$executeRaw).toHaveBeenCalledTimes(1); // libera 1 vaga
+      expect(client._tx.registration.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { status: 'CANCELLED' } }),
       );
+      expect(client._tx.orderReservedTicket.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'ort-A' }, data: { quantity: { decrement: 1 } } }),
+      );
+      expect(client._captured.update.pendingParticipants).toHaveLength(1);
+      expect(client._captured.update.totalAmount).toBe(10000);
+    });
 
-      await expect(
-        service.patchParticipants(buyerId, orderId, {
-          participants: [{ email: 'a' }, { email: 'b' }],
-        } as any),
-      ).rejects.toThrow(/não está mais disponível/);
+    it('remove slot que ZERA a linha (tickets diferentes) → delete da OrderReservedTicket', async () => {
+      const client = build(order2({
+        reservedTickets: [
+          { id: 'ort-A', ticketId: 'tk-A', batchId: 'batch-A', quantity: 1, unitPrice: 5000 },
+          { id: 'ort-B', ticketId: 'tk-B', batchId: 'batch-B', quantity: 1, unitPrice: 10000 },
+        ],
+        pendingParticipants: [{ email: 'a' }, { email: 'b' }],
+      }));
+
+      await service.removeReservedSlot(buyerId, orderId, 1); // slot 1 = ticket B
+
+      expect(client._tx.orderReservedTicket.delete).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'ort-B' } }),
+      );
+      expect(client._captured.update.totalAmount).toBe(5000); // sobrou só ticket A
+    });
+
+    it('último ingresso SEM endereço (só reservou) → DELETA o pedido', async () => {
+      const pendingOrder = order2({
+        // sem billingPostalCode → nunca chegou ao billing
+        reservedTickets: [{ id: 'ort-A', ticketId: 'tk-A', batchId: 'batch-A', quantity: 1, unitPrice: 10000 }],
+        pendingParticipants: [{ email: 'a' }],
+      });
+      const tx: any = { $executeRaw: jest.fn().mockResolvedValue(1), order: { delete: jest.fn().mockResolvedValue({}) } };
+      const client: any = {
+        order: { findUnique: jest.fn().mockResolvedValue(pendingOrder) },
+        user: { findUnique: jest.fn().mockResolvedValue(null) },
+        $transaction: jest.fn().mockImplementation((fn: any) => fn(tx)),
+      };
+      mockPrisma.getReadClient.mockReturnValue(client);
+      mockPrisma.getWriteClient.mockReturnValue(client);
+
+      const res: any = await service.removeReservedSlot(buyerId, orderId, 0);
+
+      expect(res.orderDeleted).toBe(true);
+      expect(tx.order.delete).toHaveBeenCalledWith(expect.objectContaining({ where: { id: orderId } }));
+      expect(tx.$executeRaw).toHaveBeenCalledTimes(1); // restaurou estoque
+    });
+
+    it('último ingresso COM endereço (chegou ao billing) → CANCELA (mantém histórico)', async () => {
+      const pendingOrder = order2({
+        billingPostalCode: '11850000', billingStreet: 'Rua X', billingCity: 'Maceió',
+        reservedTickets: [{ id: 'ort-A', ticketId: 'tk-A', batchId: 'batch-A', quantity: 1, unitPrice: 10000 }],
+        pendingParticipants: [{ email: 'a' }],
+      });
+      const cancelledOrder = { ...pendingOrder, status: 'CANCELLED', coupon: null, voucher: null, payment: null, event: { participantFeePercent: 0 } };
+      const cancelTx: any = {
+        $executeRaw: jest.fn().mockResolvedValue(1),
+        registration: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      };
+      const client: any = {
+        order: {
+          findUnique: jest.fn()
+            .mockResolvedValueOnce(pendingOrder)   // findOrderForWrite
+            .mockResolvedValueOnce(pendingOrder)   // load interno do cancelOrderAndRestoreStock
+            .mockResolvedValueOnce(cancelledOrder), // refetch pós-cancel
+        },
+        user: { findUnique: jest.fn().mockResolvedValue(null) },
+        $queryRaw: jest.fn().mockResolvedValue([{ id: orderId }]), // UPDATE → CANCELLED
+        $transaction: jest.fn().mockImplementation((fn: any) => fn(cancelTx)),
+      };
+      mockPrisma.getReadClient.mockReturnValue(client);
+      mockPrisma.getWriteClient.mockReturnValue(client);
+
+      const res: any = await service.removeReservedSlot(buyerId, orderId, 0);
+
+      expect(res.status).toBe('CANCELLED');
+      expect(res.orderCancelled).toBe(true);
+      expect(cancelTx.registration.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { status: 'CANCELLED' } }),
+      );
+    });
+
+    it('slot fora do range → INVALID_SLOT', async () => {
+      build(order2());
+      await expect(service.removeReservedSlot(buyerId, orderId, 5)).rejects.toThrow(/inválido/);
     });
   });
 
@@ -787,6 +860,16 @@ describe('OrdersService', () => {
       expect(res.ageQualifyingSlots).toEqual([0, 1]);
     });
 
+    it('AGE no RESERVE (sem participantes, slots vazios) → aplica nos 2 ingressos (provisório)', async () => {
+      buildAutoClient([{ id: 'age1', couponType: 'AGE', type: 'PERCENTAGE', value: 50, appliesTo: null, minAge: 18, maxAge: 200, maxUsage: null, usageCount: 0, minCartValue: null, applyToProducts: false }]);
+      // 2 unidades reservadas, ainda sem participante (slots vazios) → lenient aplica nos 2
+      const res = await call(order(), [{}, {}], tickets2);
+      expect(res.autoCouponId).toBe('age1');
+      expect(res.autoEffectiveUsage).toBe(2);
+      expect(res.newDiscount).toBe(10000); // 50% dos 2 ingressos
+      expect(res.ageQualifyingSlots).toEqual([0, 1]);
+    });
+
     it('AGE: ninguém na faixa → NÃO aplica', async () => {
       buildAutoClient([{ id: 'age1', couponType: 'AGE', type: 'PERCENTAGE', value: 50, appliesTo: null, minAge: 60, maxAge: 70, maxUsage: null, usageCount: 0, minCartValue: null, applyToProducts: false }]);
       const res = await call(order(), [{ birthDate: '2000-01-01' }], tickets2);
@@ -799,6 +882,15 @@ describe('OrdersService', () => {
       const res = await call(order({ couponId: 'age1', coupon: existing }), [{ birthDate: '2000-01-01' }], tickets2);
       expect(res.shouldRemoveAgeCoupon).toBe(true);
       expect(res.newDiscount).toBe(0);
+    });
+
+    it('AGE existente + participantes VAZIOS (preenchendo) → MANTÉM aplicado (lenient, não remove)', async () => {
+      const existing = { id: 'age1', couponType: 'AGE', type: 'PERCENTAGE', value: 50, minAge: 18, maxAge: 200, maxUsage: null, usageCount: 0, appliesTo: null, applyToProducts: false };
+      buildAutoClient([], existing);
+      const res = await call(order({ couponId: 'age1', coupon: existing }), [{}, {}], tickets2); // 2 slots ainda vazios
+      expect(res.shouldRemoveAgeCoupon).toBeFalsy();
+      expect(res.autoCouponId).toBe('age1');
+      expect(res.newDiscount).toBe(10000); // 50% dos 2 (slots vazios contam até preencher)
     });
 
     it('QUANTITY existente: participantes abaixo do minQuantity → marca remoção', async () => {
@@ -861,6 +953,35 @@ describe('OrdersService', () => {
       expect(tx.order.update).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ discount: 10000, finalAmount: 0, couponId: 'c100' }) }),
       );
+    });
+
+    it('slot ainda vazio (reservou 2, só 1 preenchido) → INCOMPLETE_PARTICIPANTS (não paga)', async () => {
+      const order = {
+        id: orderId, userId: buyerId, status: 'PENDING', eventId: 'evt-1',
+        expiresAt: null, totalAmount: 20000,
+        billingPostalCode: '11850000', billingStreet: 'Rua X', billingCity: 'Maceió',
+        coupon: null, voucher: null, couponId: null, voucherId: null,
+        event: { participantFeePercent: 0, organizerFeePercent: 0 },
+        reservedTickets: [{ ticketId: 'tk-A', quantity: 2, unitPrice: 10000 }],
+        pendingParticipants: [{ email: 'a@a.com', name: 'A' }, {}], // 2º slot vazio
+        pendingProducts: null,
+      };
+      const client: any = {
+        order: { findUnique: jest.fn().mockResolvedValue(order) },
+        user: { findUnique: jest.fn().mockResolvedValue({ firstName: 'A', lastName: 'B', email: 'a@a.com' }) },
+        coupon: { findFirst: jest.fn() },
+        voucher: { findUnique: jest.fn() },
+        event: { findUnique: jest.fn() },
+        $transaction: jest.fn(),
+      };
+      mockPrisma.getReadClient.mockReturnValue(client);
+      mockPrisma.getWriteClient.mockReturnValue(client);
+      mockRedisService.getIdempotencyResult.mockResolvedValue(null);
+
+      await expect(
+        service.pay(buyerId, orderId, undefined, { method: 'PIX' } as any),
+      ).rejects.toThrow(/Preencha os dados de todos/);
+      expect(client.$transaction).not.toHaveBeenCalled(); // não chegou a cobrar/finalizar
     });
   });
 });
