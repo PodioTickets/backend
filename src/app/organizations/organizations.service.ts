@@ -562,10 +562,11 @@ export class OrganizationsService {
 
     // Notifica o novo organizador por e-mail apenas se um member foi criado.
     if (result.member) {
-      const ownerEmail = result.member.user.email;
+      // Boas-vindas vai pro e-mail de CONTATO da organização (fallback: e-mail do dono se o contato vier vazio).
+      const recipientEmail = result.organization.email || result.member.user.email;
       const ownerFirstName = result.member.user.firstName;
       this.emailService
-        .sendWelcomeOrganizer({ email: ownerEmail, firstName: ownerFirstName })
+        .sendWelcomeOrganizer({ email: recipientEmail, firstName: ownerFirstName })
         .catch((err) =>
           this.logger.warn(
             `Falha ao enviar e-mail de boas-vindas ao organizador (org=${result.organization.id}): ${err?.message ?? err}`,
