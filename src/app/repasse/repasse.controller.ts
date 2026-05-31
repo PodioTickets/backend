@@ -1,7 +1,8 @@
 import {
   Controller, Get, Post, Patch, Param, Query, Body,
-  UseGuards, Request, DefaultValuePipe, ParseIntPipe,
+  UseGuards, Request, DefaultValuePipe, ParseIntPipe, ParseUUIDPipe,
 } from '@nestjs/common';
+import { RefundOrderDto } from '../payments/dto/refund-order.dto';
 import {
   ApiTags, ApiOperation, ApiBearerAuth, ApiParam,
   ApiQuery, ApiResponse,
@@ -145,6 +146,31 @@ export class RepasseController {
     @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit: number,
   ) {
     return this.repasseService.getRefunded(req.user.id, eventId, page, Math.min(limit, 100));
+  }
+
+  @Post('orders/:orderId/refund')
+  @ApiOperation({
+    summary: 'Estornar pedido (organizador c/ permissão financeira)',
+    description:
+      'Estorno TOTAL e imediato de um pedido pago do evento. Requer permissão `financial` sobre o ' +
+      'evento (não é admin). Reusa o MESMO engine do estorno admin: void na Cielo, marca REFUNDED, ' +
+      'cancela pedido + inscrições, reverte cupom/voucher e cobra a taxa de refund (2%). O pedido ' +
+      'precisa pertencer a este evento. Saldo pode ficar negativo (esperado). Só total e na hora.',
+  })
+  @ApiParam({ name: 'eventId', type: String })
+  @ApiParam({ name: 'orderId', type: String, description: 'UUID do pedido a estornar' })
+  @ApiResponse({ status: 201, description: 'Estorno realizado com sucesso' })
+  @ApiResponse({ status: 403, description: 'Sem permissão financeira sobre o evento' })
+  @ApiResponse({ status: 404, description: 'Pedido não encontrado neste evento' })
+  @ApiResponse({ status: 409, description: 'Pedido não está PAID ou já estornado' })
+  @ApiResponse({ status: 422, description: 'Método de pagamento não suporta estorno via API' })
+  refundOrder(
+    @Request() req,
+    @Param('eventId', new ParseUUIDPipe()) eventId: string,
+    @Param('orderId', new ParseUUIDPipe()) orderId: string,
+    @Body() dto: RefundOrderDto,
+  ) {
+    return this.repasseService.refundOrder(req.user.id, eventId, orderId, dto, req.ip);
   }
 
   @Get('audit')

@@ -368,12 +368,15 @@ export class FilterCouponsDto {
  * CreateCouponDto pra evitar drift.
  */
 export class PreviewCouponQueryDto {
-  @IsNotEmpty()
+  // Preview é SOMENTE exibição: nunca rejeita por causa do code. Ausente/inválido/com
+  // caracteres estranhos → o service simplesmente devolve `data: null` (sem 400). A
+  // validação real (formato, CPF, uso, mínimo) acontece no apply/pay quando logado.
+  @IsOptional()
   @IsString()
-  @MaxLength(25)
-  @Matches(/^[A-Za-z0-9]+$/, {
-    message: 'Code must contain only letters and numbers, no spaces',
+  @MaxLength(50)
+  @ApiPropertyOptional({
+    example: 'PODIO500',
+    description: 'Código do cupom OU voucher (case-insensitive). Ausente/inválido → data: null',
   })
-  @ApiProperty({ example: 'PODIO500', description: 'Coupon code (case-insensitive)' })
-  code: string;
+  code?: string;
 }

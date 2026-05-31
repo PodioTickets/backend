@@ -7,6 +7,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { OrganizerMemberAccessService } from '../organizations/organizer-member-access.service';
 import { EmailService } from '../../common/services/email.service';
+import { PaymentsRefundService } from '../payments/payments-refund.service';
 import { PaymentMethod, PaymentStatus, WithdrawalStatus } from '@prisma/client';
 import { computeRefundImpact, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 
@@ -73,6 +74,7 @@ export class RepasseService {
     private readonly prisma: PrismaService,
     private readonly organizerMemberAccess: OrganizerMemberAccessService,
     private readonly emailService: EmailService,
+    private readonly refundService: PaymentsRefundService,
   ) {}
 
   // ─── Email helpers ───────────────────────────────────────────────────────
@@ -141,6 +143,45 @@ export class RepasseService {
 
   private async assertAdminOrOwner(userId: string, eventId: string) {
     await this.organizerMemberAccess.assertCanAccessEvent(userId, eventId, 'financial');
+  }
+
+  // ─── Estorno (organizador c/ permissão financeira) ────────────────────────
+
+  /**
+   * Estorno TOTAL e imediato de um pedido pago, disparado pelo ORGANIZADOR.
+   *
+   * Reusa INTEGRALMENTE o engine do admin (`PaymentsRefundService.refundOrder`) — mesma
+   * lógica de void na Cielo, REFUNDED, cancelamento de pedido/inscrições, reversão de
+   * cupom/voucher, taxa de refund 2% e audit log; saldo pode ficar negativo (esperado).
+   * Diferença vs admin: a permissão é `financial` sobre o evento (não AdminGuard) e validamos
+   * que o pedido pertence ao evento da rota (organizador não estorna pedido de outro evento).
+   * Só total e na hora — sem parcial nem agendamento.
+   */
+  async refundOrder(
+    userId: string,
+    eventId: string,
+    orderId: string,
+    dto: { reason: string; force?: boolean },
+    ip?: string,
+  ) {
+    await this.assertAccess(userId, eventId);
+
+    // O pedido precisa pertencer a ESTE evento — fecha IDOR (estornar pedido de outro evento).
+    const order = await this.prisma.getReadClient().order.findUnique({
+      where: { id: orderId },
+      select: { eventId: true },
+    });
+    if (!order || order.eventId !== eventId) {
+      throw new NotFoundException('Pedido não encontrado neste evento');
+    }
+
+    return this.refundService.refundOrder({
+      orderId,
+      adminUserId: userId, // actor do audit log = organizador
+      reason: dto.reason,
+      force: dto.force,
+      ip,
+    });
   }
 
   // ─── Dados base ──────────────────────────────────────────────────────────

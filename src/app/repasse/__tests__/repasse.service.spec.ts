@@ -4,6 +4,7 @@ import { REFUND_FEE_RATE } from '../../../common/utils/refund.util';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { OrganizerMemberAccessService } from '../../organizations/organizer-member-access.service';
 import { EmailService } from '../../../common/services/email.service';
+import { PaymentsRefundService } from '../../payments/payments-refund.service';
 
 /**
  * Regra de dinheiro do repasse — foco no ESTORNO (refund) após a correção do
@@ -86,6 +87,7 @@ describe('RepasseService — lógica de estorno (calcBreakdown)', () => {
         { provide: PrismaService, useValue: mockPrisma },
         { provide: OrganizerMemberAccessService, useValue: mockAccess },
         { provide: EmailService, useValue: mockEmail },
+        { provide: PaymentsRefundService, useValue: { refundOrder: jest.fn() } },
       ],
     }).compile();
     service = module.get<RepasseService>(RepasseService);
@@ -230,6 +232,7 @@ describe('RepasseService.getSummary — integração pós-estorno (roteiro)', ()
         { provide: PrismaService, useValue: mockPrisma },
         { provide: OrganizerMemberAccessService, useValue: mockAccess },
         { provide: EmailService, useValue: mockEmail },
+        { provide: PaymentsRefundService, useValue: { refundOrder: jest.fn() } },
       ],
     }).compile();
     service = module.get<RepasseService>(RepasseService);
@@ -325,6 +328,7 @@ describe('RepasseService.getRefunded — detalhe do estorno p/ o organizador', (
         { provide: PrismaService, useValue: mockPrisma },
         { provide: OrganizerMemberAccessService, useValue: mockAccess },
         { provide: EmailService, useValue: mockEmail },
+        { provide: PaymentsRefundService, useValue: { refundOrder: jest.fn() } },
       ],
     }).compile();
     service = module.get<RepasseService>(RepasseService);
@@ -371,5 +375,72 @@ describe('RepasseService.getRefunded — detalhe do estorno p/ o organizador', (
     expect(item.organizerNetReversed).toBe(8000); // veio do metadata, não recalculado
     expect(item.refundFee).toBe(250);
     expect(item.reason).toBe('cliente desistiu');
+  });
+});
+
+describe('RepasseService.refundOrder (organizador c/ permissão financeira)', () => {
+  let service: RepasseService;
+  let refundService: { refundOrder: jest.Mock };
+  let readClient: any;
+
+  const mockAccess = { assertCanAccessEvent: jest.fn().mockResolvedValue(undefined) };
+
+  beforeEach(async () => {
+    refundService = { refundOrder: jest.fn().mockResolvedValue({ ok: true }) };
+    readClient = { order: { findUnique: jest.fn() } };
+    const mockPrisma = {
+      getReadClient: jest.fn().mockReturnValue(readClient),
+      getWriteClient: jest.fn().mockReturnValue(readClient),
+    };
+    mockAccess.assertCanAccessEvent.mockResolvedValue(undefined);
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        RepasseService,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: OrganizerMemberAccessService, useValue: mockAccess },
+        { provide: EmailService, useValue: {} },
+        { provide: PaymentsRefundService, useValue: refundService },
+      ],
+    }).compile();
+    service = module.get<RepasseService>(RepasseService);
+  });
+
+  it('checa permissão financeira e delega ao engine com o organizador como actor', async () => {
+    readClient.order.findUnique.mockResolvedValue({ eventId: 'evt-1' });
+
+    const res = await service.refundOrder('user-1', 'evt-1', 'order-1', { reason: 'cliente desistiu' }, '1.2.3.4');
+
+    expect(mockAccess.assertCanAccessEvent).toHaveBeenCalledWith('user-1', 'evt-1', 'financial');
+    expect(refundService.refundOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ orderId: 'order-1', adminUserId: 'user-1', reason: 'cliente desistiu', ip: '1.2.3.4' }),
+    );
+    expect(res).toEqual({ ok: true });
+  });
+
+  it('pedido de OUTRO evento → NotFound e NÃO estorna (fecha IDOR)', async () => {
+    readClient.order.findUnique.mockResolvedValue({ eventId: 'evt-OUTRO' });
+
+    await expect(
+      service.refundOrder('user-1', 'evt-1', 'order-1', { reason: 'x' }),
+    ).rejects.toThrow(/não encontrado/i);
+    expect(refundService.refundOrder).not.toHaveBeenCalled();
+  });
+
+  it('pedido inexistente → NotFound', async () => {
+    readClient.order.findUnique.mockResolvedValue(null);
+    await expect(
+      service.refundOrder('user-1', 'evt-1', 'order-1', { reason: 'x' }),
+    ).rejects.toThrow(/não encontrado/i);
+    expect(refundService.refundOrder).not.toHaveBeenCalled();
+  });
+
+  it('sem permissão financeira → propaga o erro e NÃO estorna', async () => {
+    mockAccess.assertCanAccessEvent.mockRejectedValueOnce(new Error('forbidden'));
+    await expect(
+      service.refundOrder('user-1', 'evt-1', 'order-1', { reason: 'x' }),
+    ).rejects.toThrow('forbidden');
+    expect(readClient.order.findUnique).not.toHaveBeenCalled();
+    expect(refundService.refundOrder).not.toHaveBeenCalled();
   });
 });

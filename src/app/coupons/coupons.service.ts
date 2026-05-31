@@ -192,11 +192,12 @@ export class CouponsService {
    * código. Garante que "validar" (preview) e "aplicar" (checkout) nunca
    * divirjam — se o checkout vai aplicar o voucher, o preview também o anuncia.
    *
-   * Erros:
-   *   - 404 Evento não encontrado
-   *   - 404 Cupom/voucher não encontrado (não existe, ou soft-deleted)
-   *   - 422 Cupom expirado / inativo / esgotado
-   *   - 422 Voucher expirado / inativo / já utilizado
+   * NUNCA lança: sempre `{ data: preview | null }` com HTTP 200 (anônimo via
+   * OptionalJwtAuthGuard no controller — nunca 401). Código ausente/inválido/
+   * inexistente/expirado/inativo/voucher-usado → `data: null`. AGE NÃO entra
+   * aqui (tem o endpoint `age-eligibility`, que depende do usuário). Preview é
+   * SÓ exibição: NÃO valida CPF / limite de uso / valor mínimo — isso fica pro
+   * apply/pay quando o usuário já está logado.
    *
    * Performance: cupom e voucher são buscados em paralelo com o evento
    * (Promise.all) — ambos por unique key `(eventId, code)`, point-lookups
@@ -207,15 +208,17 @@ export class CouponsService {
    * `@Throttle` (preview é alvo natural pra brute-force de códigos).
    * Code é uppercased antes do lookup pra match case-insensitive.
    */
-  async previewByCode(eventId: string, rawCode: string) {
-    const code = rawCode.trim().toUpperCase();
+  async previewByCode(eventId: string, rawCode: string | undefined) {
+    // SOMENTE exibição (link do checkout, anônimo). NUNCA lança / NUNCA 401/404/422:
+    // devolve sempre `{ data: preview | null }` com HTTP 200. Código ausente/inválido/
+    // inexistente/expirado/inativo → `data: null` (front trata como "sem preview").
+    const code = (rawCode ?? '').trim().toUpperCase();
+    if (!eventId || !code) return { data: null };
+
     const prismaRead = this.prisma.getReadClient();
 
     const [event, coupon, voucher] = await Promise.all([
-      prismaRead.event.findUnique({
-        where: { id: eventId },
-        select: { id: true },
-      }),
+      prismaRead.event.findUnique({ where: { id: eventId }, select: { id: true } }),
       prismaRead.coupon.findUnique({
         where: { eventId_code: { eventId, code } },
         select: {
@@ -226,8 +229,6 @@ export class CouponsService {
           applyToProducts: true,
           status: true,
           expiryDate: true,
-          usageCount: true,
-          maxUsage: true,
           deletedAt: true,
         },
       }),
@@ -244,107 +245,56 @@ export class CouponsService {
       }),
     ]);
 
-    if (!event) {
-      throw new NotFoundException({
-        code: 'EVENT_NOT_FOUND',
-        message: 'Evento não encontrado',
-      });
-    }
+    if (!event) return { data: null };
 
-    // Confiar tanto na data quanto no status: o cron de expiração pode não
-    // ter rodado ainda (ou expiração manual pelo organizador).
+    // Confia na data E no status (cron de expiração pode não ter rodado / expiração manual).
     const now = new Date();
 
-    // Soft-delete tratado como inexistente (consistente com leitura admin).
-    const voucherExists = !!voucher && !voucher.deletedAt;
+    // 1) Voucher usável → prioridade sobre cupom (espelha o checkout). Usado/expirado/
+    //    inativo/soft-deleted → ignora (cai pro cupom ou null).
     const voucherUsable =
-      voucherExists &&
-      voucher!.status === 'ACTIVE' &&
-      (!voucher!.expiryDate || voucher!.expiryDate >= now);
-
-    // 1) Voucher usável → prioridade sobre cupom (espelha o checkout).
+      !!voucher &&
+      !voucher.deletedAt &&
+      voucher.status === 'ACTIVE' &&
+      !voucher.usedAt &&
+      (!voucher.expiryDate || voucher.expiryDate >= now);
     if (voucherUsable) {
       return {
-        message: 'Voucher preview fetched successfully',
         data: {
-          kind: 'voucher',
+          kind: 'voucher' as const,
           code: voucher!.code,
-          appliesTo: voucher!.appliesTo ?? 'all',
+          // Normaliza pro shape ideal (array quando há lista de ingressos); 'all' quando irrestrito.
+          appliesTo: this.parseAppliesTo(voucher!.appliesTo) ?? 'all',
         },
       };
     }
 
-    // 2) Cupom válido (não soft-deletado) → valida e retorna.
-    if (coupon && !coupon.deletedAt) {
-      if (
-        coupon.status === 'EXPIRED' ||
-        (coupon.expiryDate && coupon.expiryDate < now)
-      ) {
-        throw new UnprocessableEntityException({
-          code: 'COUPON_EXPIRED',
-          message: 'Cupom expirado',
-        });
-      }
-
-      if (coupon.status === 'INACTIVE') {
-        throw new UnprocessableEntityException({
-          code: 'COUPON_INACTIVE',
-          message: 'Cupom inativo',
-        });
-      }
-
-      if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) {
-        throw new UnprocessableEntityException({
-          code: 'COUPON_USAGE_LIMIT_REACHED',
-          message: 'Cupom esgotado',
-        });
-      }
-
+    // 2) Cupom EXIBÍVEL: DISCOUNT/QUANTITY (AGE tem endpoint próprio — age-eligibility — e
+    //    depende do usuário, então fica FORA do preview do link). Preview é só exibição:
+    //    NÃO rejeita por CPF/uso/valor mínimo (validação real no apply/pay). Só esconde o
+    //    que jamais poderia aplicar: inexistente, soft-deleted, expirado (data/status) ou inativo.
+    const couponDisplayable =
+      !!coupon &&
+      !coupon.deletedAt &&
+      coupon.couponType !== 'AGE' &&
+      coupon.status !== 'EXPIRED' &&
+      coupon.status !== 'INACTIVE' &&
+      (!coupon.expiryDate || coupon.expiryDate >= now);
+    if (couponDisplayable) {
       return {
-        message: 'Coupon preview fetched successfully',
         data: {
-          kind: 'coupon',
-          code: coupon.code,
-          value: coupon.value,
-          type: coupon.type,
-          couponType: coupon.couponType,
-          applyToProducts: coupon.applyToProducts,
+          kind: 'coupon' as const,
+          code: coupon!.code,
+          couponType: coupon!.couponType,
+          type: coupon!.type,
+          value: coupon!.value, // PERCENTAGE: 1–100 | FIXED: centavos
+          applyToProducts: coupon!.applyToProducts,
         },
       };
     }
 
-    // 3) Não há cupom válido, mas existe um voucher não-usável → devolve o
-    //    erro específico do voucher (melhor UX que um 404 genérico).
-    if (voucherExists) {
-      if (voucher!.status === 'USED' || voucher!.usedAt) {
-        throw new UnprocessableEntityException({
-          code: 'VOUCHER_ALREADY_USED',
-          message: 'Voucher já utilizado',
-        });
-      }
-      if (
-        voucher!.status === 'EXPIRED' ||
-        (voucher!.expiryDate && voucher!.expiryDate < now)
-      ) {
-        throw new UnprocessableEntityException({
-          code: 'VOUCHER_EXPIRED',
-          message: 'Voucher expirado',
-        });
-      }
-      if (voucher!.status === 'INACTIVE') {
-        throw new UnprocessableEntityException({
-          code: 'VOUCHER_INACTIVE',
-          message: 'Voucher inativo',
-        });
-      }
-    }
-
-    // 4) Nem cupom nem voucher. Mantém o code `COUPON_NOT_FOUND` por
-    //    retrocompat com o tratamento de 404 já existente no front.
-    throw new NotFoundException({
-      code: 'COUPON_NOT_FOUND',
-      message: 'Cupom ou voucher não encontrado',
-    });
+    // 3) Nada exibível (inexistente / expirado / inativo / voucher usado / AGE) → null (HTTP 200).
+    return { data: null };
   }
 
   /**

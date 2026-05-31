@@ -84,30 +84,25 @@ export class CouponsController {
   // "/:id". Ambas as ordens funcionam no Express, mas mantemos rotas mais
   // específicas primeiro por consistência com o resto do projeto.
   @Get('events/:eventId/preview')
+  @UseGuards(OptionalJwtAuthGuard)
   @NoCache()
   @Throttle({ short: { limit: 20, ttl: 60_000 } })
   @ApiOperation({
-    summary: 'Preview coupon OR voucher by code (public)',
+    summary: 'Preview coupon OR voucher by code (público — funciona deslogado)',
     description:
-      'Endpoint público usado pelo checkout para validar um código de desconto (cupom OU voucher) e retornar dados de exibição. A resposta traz um campo `kind` (`"coupon"` | `"voucher"`): cupom retorna value/type/couponType/applyToProducts; voucher retorna appliesTo (ingresso grátis). Voucher tem prioridade sobre cupom de mesmo código (espelha o checkout). Não revela elegíveis, contadores de uso ou regras internas — checkout final aplica todas as regras no PATCH de cupom. Código case-insensitive.',
+      'Usado pela tela de checkout para exibir o cupom/voucher vindo do link (?coupon=/?voucher=) ANTES do login e da criação da order. `OptionalJwtAuthGuard`: anônimo recebe 200 (nunca 401). Resposta SEMPRE `{ data: preview | null }` (HTTP 200): código inexistente/expirado/inválido → `data: null`. `kind` discrimina o shape (`"coupon"` | `"voucher"`): cupom → couponType/type/value/applyToProducts; voucher → appliesTo (100% cortesia). Voucher tem prioridade sobre cupom de mesmo código. SOMENTE exibição: não valida CPF/uso/mínimo (isso é no apply/pay). AGE não entra aqui (ver age-eligibility). Código case-insensitive.',
   })
   @ApiParam({ name: 'eventId', description: 'Event UUID' })
   @ApiQuery({
     name: 'code',
-    required: true,
-    description: 'Coupon/voucher code (letras + números, sem espaços)',
+    required: false,
+    description: 'Código do cupom OU voucher. Ausente/inválido → data: null',
     example: 'PODIO500',
   })
   @ApiResponse({
     status: 200,
     description:
-      'Preview retornado. Cupom: `value` em centavos (FIXED) ou percentual inteiro 1-100 (PERCENTAGE). Voucher: `kind="voucher"` + `appliesTo`.',
-  })
-  @ApiResponse({ status: 404, description: 'Event, cupom ou voucher não encontrado (code: COUPON_NOT_FOUND)' })
-  @ApiResponse({
-    status: 422,
-    description:
-      'Cupom expirado/inativo/esgotado (COUPON_EXPIRED, COUPON_INACTIVE, COUPON_USAGE_LIMIT_REACHED) ou voucher expirado/inativo/já utilizado (VOUCHER_EXPIRED, VOUCHER_INACTIVE, VOUCHER_ALREADY_USED)',
+      'Sempre 200. `{ data: null }` quando não há preview. Cupom: `{ kind:"coupon", code, couponType, type, value, applyToProducts }` (value: percentual 1-100 ou centavos no FIXED). Voucher: `{ kind:"voucher", code, appliesTo }`.',
   })
   previewByCode(
     @Param('eventId', ParseUUIDPipe) eventId: string,
