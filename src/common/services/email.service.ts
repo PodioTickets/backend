@@ -637,6 +637,8 @@ export class EmailService {
       eventName: this.escapeHtml(data.eventName),
       orgName: this.escapeHtml(data.orgName),
       orgAvatarUrl: data.orgAvatarUrl ? this.escapeHtml(data.orgAvatarUrl) : '',
+      // Inicial do nome (fantasia) — fallback do avatar quando a org não tem logo.
+      orgInitial: this.escapeHtml(((data.orgName || 'O').trim().charAt(0) || 'O').toUpperCase()),
       subject: this.escapeHtml(data.subject),
       instagram: data.instagram ? this.escapeHtml(this.normalizeSocialUrl('instagram', data.instagram)) : '',
       facebook: data.facebook ? this.escapeHtml(this.normalizeSocialUrl('facebook', data.facebook)) : '',
