@@ -780,7 +780,9 @@ export class OrdersService {
 
     // 1.6 Idempotency: return existing PENDING order somente se os tickets/quantidades
     // forem idênticos ao pedido atual. Se forem diferentes, cancela o antigo e cria novo.
-    const existingPending = await r.order.findFirst({
+    // Lê do PRIMARY (write client): a réplica defasada poderia trazer uma versão antiga do
+    // pedido (qtde errada → replace indevido) ou não enxergar um pedido recém-criado (duplicata).
+    const existingPending = await w.order.findFirst({
       where: {
         userId,
         eventId: dto.eventId,
@@ -2094,14 +2096,19 @@ export class OrdersService {
         WHERE id = ${target.batchId}::uuid
       `;
 
-      // 2) cancela 1 placeholder PENDING desse ingresso (sai da contagem de vendas → vaga livre).
+      // 2) DELETA 1 placeholder PENDING desse ingresso (sai da contagem de vendas → vaga livre).
+      // Deletar (não cancelar): o placeholder é só um slot de reserva pré-pagamento, nunca foi
+      // uma inscrição real. Cancelar (status=CANCELLED) deixava uma Registration fantasma que o
+      // getOrderDetails (filtro `status != PENDING`) e o finalize (deleta só PENDING) não removiam
+      // → o pedido aparecia com 1 ingresso a mais no /details (bug: reservou 2, removeu 1, mostrava 2).
+      // O cascade remove o RegistrationTicket junto.
       const placeholder = await tx.registration.findFirst({
         where: { orderId, status: 'PENDING', tickets: { some: { ticketId: target.ticketId, batchId: target.batchId } } },
         select: { id: true },
         orderBy: { createdAt: 'desc' },
       });
       if (placeholder) {
-        await tx.registration.update({ where: { id: placeholder.id }, data: { status: 'CANCELLED' } });
+        await tx.registration.delete({ where: { id: placeholder.id } });
       }
 
       // 3) decrementa (ou remove) a linha de OrderReservedTicket.
@@ -2584,7 +2591,11 @@ export class OrdersService {
     }
 
     // 6.2 Ownership check
-    const order = await r.order.findUnique({
+    // PRIMARY (write client): o pay COBRA com base no que lê aqui (ticketsSubtotal/finalTotal
+    // recalculados de order.reservedTickets). Ler da RÉPLICA defasada cobrava a quantidade
+    // ANTIGA (ex.: 3 ingressos) mesmo após o cliente ter removido um slot (primary = 2) — o
+    // finalize roda em tx no primary e criava só 2 inscrições → cobrança divergente das inscrições.
+    const order = await w.order.findUnique({
       where: { id: orderId },
       include: ORDER_INCLUDE,
     });
@@ -3644,8 +3655,13 @@ export class OrdersService {
   // ── private helpers ───────────────────────────────────────────────────────
 
   private async findOrderForWrite(userId: string, orderId: string): Promise<any> {
-    const r: any = this.prisma.getReadClient();
-    const order = await r.order.findUnique({
+    // PRIMARY (write client) de propósito: todo caller é read-modify-write (patchParticipants,
+    // removeReservedSlot, patchCoupon, patchProducts, patchBilling). Ler da RÉPLICA aqui causa
+    // decisão sobre dado defasado — ex.: após DELETE de slot (primary = 2 ingressos), o
+    // PATCH /participants lia 3 da réplica e re-preenchia pendingParticipants/totalAmount errado.
+    // A réplica não é sincronizada em dev e pode ter lag em prod.
+    const w: any = this.prisma.getWriteClient();
+    const order = await w.order.findUnique({
       where: { id: orderId },
       include: ORDER_INCLUDE,
     });

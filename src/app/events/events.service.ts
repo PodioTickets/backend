@@ -1138,6 +1138,7 @@ export class EventsService {
     name: true,
     slug: true,
     bannerUrl: true,
+    logoUrl: true,
     location: true,
     city: true,
     state: true,
