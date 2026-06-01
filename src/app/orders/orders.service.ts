@@ -1282,6 +1282,16 @@ export class OrdersService {
     const eventDate = new Date((order as any).event?.eventDate ?? 0);
     const now = new Date();
 
+    // Preço do INGRESSO por (ticketId,batchId) — base do `ticket.unitPrice` por registration
+    // (fallback quando o snapshot não tem batch.price). Garante o invariante
+    // Σ(registrations[].ticket.unitPrice) == pricing.ticketsSubtotal.
+    const reservedPriceByKey = new Map<string, number>();
+    const reservedPriceByTicket = new Map<string, number>();
+    for (const rt of ((order.reservedTickets as any[]) ?? [])) {
+      reservedPriceByKey.set(`${rt.ticketId}:${rt.batchId}`, rt.unitPrice ?? 0);
+      if (!reservedPriceByTicket.has(rt.ticketId)) reservedPriceByTicket.set(rt.ticketId, rt.unitPrice ?? 0);
+    }
+
     return {
       message: 'Order details fetched successfully',
       data: {
@@ -1303,11 +1313,21 @@ export class OrdersService {
               0,
             );
             const productsSubtotal = Math.max(0, (order.totalAmount ?? 0) - ticketsSubtotal);
+            const discount = order.discount ?? 0;
+            // Split do desconto por origem (checkout-coupons-server-spec §2): cupom e voucher
+            // são mutuamente exclusivos no caso comum. Voucher só conta quando NÃO há cupom;
+            // o restante vai pro cupom → couponDiscount + voucherDiscount == discount sempre.
+            const hasCoupon = !!(primaryReceipt?.pricing?.coupon ?? order.coupon);
+            const hasVoucher = !!(primaryReceipt?.pricing?.voucher ?? order.voucher);
+            const voucherDiscount = hasVoucher && !hasCoupon ? discount : 0;
+            const couponDiscount = discount - voucherDiscount;
             return {
               ticketsSubtotal,
               productsSubtotal,
               subtotal: order.totalAmount,
-              discount: order.discount,
+              couponDiscount,
+              voucherDiscount,
+              discount,
               serviceFee,
               total: computeFinalAmount(order, serviceFee),
               currency: 'BRL',
@@ -1500,6 +1520,16 @@ export class OrdersService {
                 id: ticketSnap?.id ?? liveTicket?.id,
                 name: ticketSnap?.name ?? liveTicket?.name,
                 category: ticketSnap?.category ?? liveTicket?.category ?? null,
+                // ⭐ Preço SÓ do ingresso (sem produtos), centavos. Snapshot (batch.price congelado
+                // no pay) tem prioridade; fallback nos reservedTickets do pedido. É o campo que
+                // elimina a diluição do subtotal no front. Invariante: Σ == pricing.ticketsSubtotal.
+                unitPrice:
+                  ticketSnap?.batch?.price
+                  ?? reservedPriceByKey.get(`${regTicket.ticketId}:${regTicket.batchId}`)
+                  ?? reservedPriceByTicket.get(regTicket.ticketId)
+                  ?? 0,
+                distance: ticketSnap?.distance ?? liveTicket?.distance ?? null,
+                distanceUnit: ticketSnap?.distanceUnit ?? liveTicket?.distanceUnit ?? null,
                 includedProducts: (liveTicket?.products ?? []).map((tp: any) => {
                   const regProduct = (reg.products ?? []).find((rp: any) => rp.productId === tp.product.id);
                   const variationEdited = regProduct?.variationEdited ?? false;
@@ -1633,7 +1663,9 @@ export class OrdersService {
                 sortOrder: v.sortOrder,
               })),
             };
-          });
+          })
+          // "Sem interesse" = opt-out de produto opcional → NÃO exibir nem somar (spec §6.1).
+          .filter((p: any) => p.variationName !== 'Sem interesse');
 
           return {
             id: reg.id,

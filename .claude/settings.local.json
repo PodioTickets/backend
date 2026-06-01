@@ -96,7 +96,9 @@
       "PowerShell(npx jest src/app/orders/__tests__/orders.service.spec.ts 2>&1 | Select-Object -Last 8; \"----EXIT $LASTEXITCODE----\")",
       "PowerShell(npx tsc --noEmit -p tsconfig.build.json 2>&1 | Select-Object -First 6; \"====TSC $LASTEXITCODE====\"; npx jest src/app/orders/__tests__/ 2>&1 | Select-Object -Last 7; \"====JEST $LASTEXITCODE====\")",
       "PowerShell(npx tsc --noEmit -p tsconfig.build.json 2>&1 | Select-Object -First 6; \"----EXIT $LASTEXITCODE----\")",
-      "PowerShell(npx tsc --noEmit -p tsconfig.build.json 2>&1 | Select-Object -First 6; \"====TSC $LASTEXITCODE====\"; npx jest src/app/orders/__tests__/orders.service.spec.ts 2>&1 | Select-Object -Last 10; \"====JEST $LASTEXITCODE====\")"
+      "PowerShell(npx tsc --noEmit -p tsconfig.build.json 2>&1 | Select-Object -First 6; \"====TSC $LASTEXITCODE====\"; npx jest src/app/orders/__tests__/orders.service.spec.ts 2>&1 | Select-Object -Last 10; \"====JEST $LASTEXITCODE====\")",
+      "PowerShell(npx tsc --noEmit -p tsconfig.build.json 2>&1 | Select-Object -First 8; \"----EXIT $LASTEXITCODE----\")",
+      "PowerShell(npx jest src/app/orders/__tests__/order-details-response.spec.ts 2>&1 | Select-Object -Last 25; \"----EXIT $LASTEXITCODE----\")"
     ]
   }
 }
