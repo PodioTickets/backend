@@ -62,17 +62,35 @@ describe('OrderFinalizationService — métodos compartilhados', () => {
       expect(tx.voucher.updateMany).not.toHaveBeenCalled();
     });
 
-    it('cupom DISCOUNT → decrementa ticketCount (espelha o incremento do finalize)', async () => {
+    it('cupom DISCOUNT sem lista → decrementa todos os ingressos aplicáveis (espelha o finalize)', async () => {
       const tx: any = mkTx({
         userId: 'u1',
         couponId: 'c1',
         voucherId: null,
-        reservedTickets: [{ quantity: 2 }, { quantity: 1 }],
+        reservedTickets: [{ ticketId: 'A', quantity: 2 }, { ticketId: 'B', quantity: 1 }],
+        pendingParticipants: [],
         coupon: { couponType: 'DISCOUNT' },
+        event: { eventDate: '2020-01-01T00:00:00Z' },
         voucher: null,
       });
       await service.reverseSaleSideEffects(tx, 'o1');
       expect(tx.$executeRaw.mock.calls[0][1]).toBe(3);
+    });
+
+    it('BUG: cupom por ingresso (AGE) cobrindo 1 de 2 → decrementa 1 (não ticketCount)', async () => {
+      const tx: any = mkTx({
+        userId: 'u1',
+        couponId: 'c1',
+        voucherId: null,
+        reservedTickets: [{ ticketId: 'A', quantity: 2 }],
+        // p1 tem 20 (na faixa 18-25); p2 tem 40 (fora) → cobre só 1 ingresso.
+        pendingParticipants: [{ birthDate: '2000-01-01' }, { birthDate: '1980-01-01' }],
+        coupon: { couponType: 'AGE', minAge: 18, maxAge: 25 },
+        event: { eventDate: '2020-01-01T00:00:00Z' },
+        voucher: null,
+      });
+      await service.reverseSaleSideEffects(tx, 'o1');
+      expect(tx.$executeRaw.mock.calls[0][1]).toBe(1);
     });
 
     it('voucher só é liberado para ESTE usuário (guard usedBy)', async () => {

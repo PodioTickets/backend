@@ -83,7 +83,12 @@
       "PowerShell(npx jest src/app/repasse/__tests__/repasse.service.spec.ts 2>&1 | Select-Object -Last 15; \"----EXIT $LASTEXITCODE----\")",
       "Bash(awk -F: '$1>4180 && $1<4300')",
       "PowerShell(npx tsc --noEmit -p tsconfig.build.json 2>&1 | Select-Object -First 25; \"----EXIT $LASTEXITCODE----\")",
-      "PowerShell(npx jest src/common/utils/__tests__/safe-redirect.util.spec.ts src/app/auth/__tests__/oauth-state.service.spec.ts 2>&1 | Select-Object -Last 25; \"----EXIT $LASTEXITCODE----\")"
+      "PowerShell(npx jest src/common/utils/__tests__/safe-redirect.util.spec.ts src/app/auth/__tests__/oauth-state.service.spec.ts 2>&1 | Select-Object -Last 25; \"----EXIT $LASTEXITCODE----\")",
+      "PowerShell(npx jest src/app/orders/__tests__/coupons-vouchers.spec.ts src/app/orders/__tests__/orders.service.spec.ts src/app/payments/__tests__/order-finalization.service.spec.ts 2>&1 | Select-Object -Last 18; \"----EXIT $LASTEXITCODE----\")",
+      "PowerShell(npx jest src/common/utils/__tests__/coupon-eligibility.util.spec.ts src/app/payments/__tests__/order-finalization.service.spec.ts src/app/orders/__tests__/coupons-vouchers.spec.ts 2>&1 | Select-Object -Last 16; \"----EXIT $LASTEXITCODE----\")",
+      "PowerShell(npx tsc --noEmit -p tsconfig.build.json 2>&1 | Select-Object -First 15; \"----TSC EXIT $LASTEXITCODE----\"; npx jest src/common/utils/__tests__/product-price.util.spec.ts src/app/orders/__tests__/orders.service.spec.ts src/app/payments/__tests__/order-finalization.service.spec.ts 2>&1 | Select-Object -Last 8; \"----JEST EXIT $LASTEXITCODE----\")",
+      "PowerShell(npx jest src/app/events/__tests__/events.service.spec.ts 2>&1 | Select-Object -Last 12; \"----EXIT $LASTEXITCODE----\")",
+      "PowerShell(npx jest src/app/auth/__tests__/google-auth.guard.spec.ts src/app/auth/__tests__/auth.controller.google.spec.ts src/app/events/__tests__/events.find-by-organizer-count.spec.ts 2>&1 | Select-Object -Last 35; \"----EXIT $LASTEXITCODE----\")"
     ]
   }
 }
