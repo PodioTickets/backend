@@ -2418,7 +2418,8 @@ export class EventsService {
         .sendEventUnderReview({
           recipientEmail: organizer.email,
           eventName: event.name,
-          eventBannerUrl: event.bannerUrl ?? '',
+          // Template usa imagem 308x308 = imagem do CARD (logoUrl), não o banner.
+          eventBannerUrl: (event as any).logoUrl ?? event.bannerUrl ?? '',
           eventDate: eventDateFormatted,
           eventLocation,
           submittedAt: submittedAtFormatted,
