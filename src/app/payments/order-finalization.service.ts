@@ -4,6 +4,7 @@ import { DocumentType, RegistrationStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { resolveDocument } from '../../common/utils/document.util';
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
+import { computeCouponCoveredUnits } from '../../common/utils/coupon-eligibility.util';
 
 /**
  * Finalize compartilhado de pedido PAGO — fonte ÚNICA de verdade.
@@ -66,8 +67,8 @@ export class OrderFinalizationService {
    * deixando o chargeback com cupom/voucher consumidos indevidamente.
    *
    * - Cupom: decrementa o MESMO que o finalize incrementou — QUANTITY: −1; demais
-   *   (DISCOUNT/AGE): −ticketCount (espelha `delta = min(ticketCount, remaining)` do
-   *   finalize; o `GREATEST(0,...)` protege o raro caso de cupom capado na compra).
+   *   (DISCOUNT/AGE): −nº de ingressos cobertos (`computeCouponCoveredUnits`, fonte única
+   *   com o finalize; o `GREATEST(0,...)` protege o raro caso de cupom capado na compra).
    * - Voucher: libera USED→ACTIVE somente se foi ESTE usuário quem o consumiu
    *   (`usedBy`) — evita "roubar" de volta um voucher consumido por outra order.
    *
@@ -82,18 +83,39 @@ export class OrderFinalizationService {
         couponId: true,
         voucherId: true,
         reservedTickets: true,
-        coupon: { select: { couponType: true } },
+        pendingParticipants: true,
+        coupon: {
+          select: {
+            couponType: true,
+            appliesTo: true,
+            cpfListStatus: true,
+            documentList: true,
+            cpfList: true,
+            minAge: true,
+            maxAge: true,
+          },
+        },
+        event: { select: { eventDate: true } },
         voucher: { select: { status: true } },
       },
     });
     if (!order) return;
 
     if (order.couponId) {
-      const ticketCount = ((order.reservedTickets as any[]) ?? []).reduce(
-        (sum: number, rt: any) => sum + (rt.quantity ?? 1),
-        0,
+      // Decrementa o MESMO que o finalize incrementou — via a fonte única
+      // computeCouponCoveredUnits (QUANTITY: 1; DISCOUNT/AGE: nº de ingressos cobertos).
+      // pendingParticipants/reservedTickets ficam congelados pós-pay → recomputa idêntico.
+      // GREATEST(0,...) protege o raro caso de cupom capado por maxUsage na compra.
+      const ageRefDate = order.event?.eventDate ? new Date(order.event.eventDate) : new Date();
+      const decrement = Math.max(
+        1,
+        computeCouponCoveredUnits(
+          order.coupon,
+          (order.reservedTickets as any[]) ?? [],
+          (order.pendingParticipants as any[]) ?? [],
+          ageRefDate,
+        ),
       );
-      const decrement = order.coupon?.couponType === 'QUANTITY' ? 1 : Math.max(1, ticketCount);
       await tx.$executeRaw`
         UPDATE "Coupon"
         SET "usageCount" = GREATEST(0, "usageCount" - ${decrement}),
@@ -191,7 +213,6 @@ export class OrderFinalizationService {
         where: { id: order.couponId },
         select: { couponType: true, maxUsage: true, usageCount: true },
       });
-      const ticketCount = reservedTickets.reduce((sum: number, rt: any) => sum + (rt.quantity ?? 1), 0);
 
       if (couponForUsage?.couponType === 'QUANTITY') {
         // QUANTITY: all-or-nothing — check-and-increment atômico
@@ -206,10 +227,15 @@ export class OrderFinalizationService {
           throw new BadRequestException('Cupom esgotado. Prossiga sem desconto ou escolha outro cupom.');
         }
       } else {
-        // DISCOUNT/AGE: cap em maxUsage atomicamente — nunca ultrapassa sob concorrência
+        // DISCOUNT/AGE: uso é POR INGRESSO — incrementa pelo nº de ingressos que de fato
+        // receberam o desconto (slots elegíveis), NÃO pelo total do pedido. Espelha o
+        // effectiveUsage do `pay` via fonte única `computeCouponCoveredUnits`. Cap em maxUsage
+        // atômico — nunca ultrapassa sob concorrência.
+        const ageRefDate = order.event?.eventDate ? new Date(order.event.eventDate) : new Date();
+        const coveredUnits = computeCouponCoveredUnits(order.coupon, reservedTickets, participants, ageRefDate);
         const delta = couponForUsage?.maxUsage != null
-          ? Math.min(ticketCount, Math.max(0, couponForUsage.maxUsage - couponForUsage.usageCount))
-          : ticketCount;
+          ? Math.min(coveredUnits, Math.max(0, couponForUsage.maxUsage - couponForUsage.usageCount))
+          : coveredUnits;
         if (delta > 0) {
           await tx.$queryRaw`
             UPDATE "Coupon"

@@ -343,7 +343,13 @@ export class UploadService {
   private async uploadToGcs(objectName: string, buffer: Buffer, contentType: string): Promise<void> {
     const gcsFile = this.bucket.file(objectName);
     await gcsFile.save(buffer, {
-      metadata: { contentType },
+      metadata: {
+        contentType,
+        // Nomes são únicos (timestamp+random) → imutável: navegador/CDN cacheiam
+        // "pra sempre", elimina o re-download nas próximas visitas. NÃO comprime
+        // nem altera a imagem — só muda o header de cache.
+        cacheControl: 'public, max-age=31536000, immutable',
+      },
       resumable: false,
     });
   }

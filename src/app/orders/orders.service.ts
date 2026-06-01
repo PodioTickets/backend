@@ -24,11 +24,24 @@ import { TicketPdfService } from '../../common/services/ticket-pdf.service';
 import { parseAppliesToArray } from '../../helpers/AppliesToHelper';
 import {
   cleanDocumentNumber,
-  isDocumentInList,
   resolveDocument,
 } from '../../common/utils/document.util';
-import { computeAgeAt } from '../../common/utils/age.util';
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
+import {
+  computeDocEligibleSlots,
+  computeVoucherEligibleSlots,
+  computeAgeEligibleSlots,
+  computeCouponCoveredUnits,
+} from '../../common/utils/coupon-eligibility.util';
+
+// Re-export dos helpers de elegibilidade (movidos p/ util neutro reusado pelo finalize sem
+// criar ciclo de módulo) — mantém os imports/specs que os consomem a partir deste arquivo.
+export {
+  computeDocEligibleSlots,
+  computeVoucherEligibleSlots,
+  computeAgeEligibleSlots,
+  computeCouponCoveredUnits,
+};
 
 // ─── helpers de formatação ────────────────────────────────────────────────────
 
@@ -410,106 +423,10 @@ export function resolveVoucherCoverage(
   };
 }
 
-/**
- * Slots (índices de unidade) dos participantes ELEGÍVEIS pela lista de documento de um
- * cupom/voucher (`documentList`/`cpfList`). Espelha a lógica por-slot do cupom AGE:
- * participante `i` ↔ `i`-ésima unidade reservada; só conta se `i < totalUnits` e o
- * documento do participante está na lista. Buyer só conta se for participante.
- */
-/**
- * Slots (índices) elegíveis pela lista de documento. Participante PREENCHIDO (com documento)
- * só conta se o doc estiver na lista. Participante AINDA SEM documento:
- *   - `treatUnfilledAsEligible=true` (preenchimento/PENDING): conta como elegível → mantém o
- *     cupom/voucher aplicado no slot enquanto o comprador não preenche aquele participante.
- *   - `false` (default, momento do pay): NÃO conta — no commit final, só quem informou um
- *     documento válido (na lista) recebe o desconto cpf.
- */
-export function computeDocEligibleSlots(
-  participants: any[],
-  documentList: unknown,
-  cpfList: unknown,
-  totalUnits: number,
-  treatUnfilledAsEligible = false,
-): number[] {
-  return (participants ?? [])
-    .map((p: any, i: number) => {
-      if (i >= totalUnits) return -1;
-      const doc = resolveDocument(p);
-      if (!doc.clean) return treatUnfilledAsEligible ? i : -1;
-      return isDocumentInList(
-        { documentType: doc.type, documentNumberClean: doc.clean },
-        documentList,
-        cpfList,
-      )
-        ? i
-        : -1;
-    })
-    .filter((i: number) => i >= 0);
-}
-
-/**
- * Slots elegíveis de um VOUCHER com lista de documento, em PENDING.
- *
- * Diferente do cupom DISCOUNT (que aplica desconto em CADA participante elegível,
- * independentemente), o voucher é **um único ingresso grátis** — só pode cobrir UMA
- * unidade por vez. Por isso o slot vazio NÃO é par-igual ao preenchido: ele é um
- * **fallback provisório**, não um elegível concorrente.
- *
- * Prioridade (regra do produto):
- *   1. Há ≥1 participante PREENCHIDO com documento na lista → elegíveis = só esses
- *      (slots vazios são EXCLUÍDOS; o voucher "desaplica" deles).
- *   2. Nenhum preenchido elegível → elegíveis = os slots AINDA VAZIOS (mantém o voucher
- *      aplicado provisoriamente até o comprador preencher e revalidar).
- *   3. Todos preenchidos e nenhum na lista → vazio (o caller rejeita com VOUCHER_CPF_RESTRICTED).
- *
- * Participante preenchido mas FORA da lista nunca entra (nem como fallback).
- * `resolveVoucherCoverage` depois escolhe, entre os elegíveis, a unidade aplicável mais cara.
- */
-export function computeVoucherEligibleSlots(
-  participants: any[],
-  documentList: unknown,
-  cpfList: unknown,
-  totalUnits: number,
-): number[] {
-  const filledEligible = computeDocEligibleSlots(participants, documentList, cpfList, totalUnits, false);
-  if (filledEligible.length > 0) return filledEligible;
-
-  // Fallback provisório: slots ainda sem documento (vazios). Preenchido-mas-fora-da-lista
-  // tem doc.clean e portanto NÃO entra aqui.
-  const unfilled: number[] = [];
-  for (let i = 0; i < totalUnits; i++) {
-    const p = (participants ?? [])[i];
-    const doc = p ? resolveDocument(p) : { clean: '' as string };
-    if (!doc.clean) unfilled.push(i);
-  }
-  return unfilled;
-}
-
-/**
- * Slots (índices) elegíveis pelo cupom AGE (idade na data do evento). Mesma semântica de
- * `computeDocEligibleSlots`, mas a validação é por idade:
- *   - Participante COM `birthDate`: conta só se a idade ∈ [minAge, maxAge].
- *   - Participante AINDA SEM `birthDate` (slot não preenchido):
- *       `treatUnfilledAsEligible=true` (preenchimento/PENDING) → conta (mantém aplicado até preencher);
- *       `false` (default, pay) → não conta (no commit só idade informada e válida recebe).
- */
-export function computeAgeEligibleSlots(
-  participants: any[],
-  minAge: number,
-  maxAge: number,
-  refDate: Date,
-  totalUnits: number,
-  treatUnfilledAsEligible = false,
-): number[] {
-  return (participants ?? [])
-    .map((p: any, i: number) => {
-      if (i >= totalUnits) return -1;
-      if (!p.birthDate) return treatUnfilledAsEligible ? i : -1;
-      const age = computeAgeAt(p.birthDate, refDate);
-      return age >= minAge && age <= maxAge ? i : -1;
-    })
-    .filter((i: number) => i >= 0);
-}
+// computeDocEligibleSlots / computeVoucherEligibleSlots / computeAgeEligibleSlots /
+// computeCouponCoveredUnits foram movidos para `common/utils/coupon-eligibility.util.ts`
+// (util neutro reusado pelo OrderFinalizationService sem criar ciclo de módulo). Re-exportados
+// no topo deste arquivo para manter os imports/specs existentes.
 
 /**
  * Capa o nº de unidades cobertas por um cupom auto-aplicado (AGE / lista de documento) pelo
