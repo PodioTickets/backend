@@ -289,7 +289,16 @@ export class AdminEventsService {
       where: { id: eventId },
       include: {
         organization: {
-          select: { email: true, name: true, tradeName: true },
+          select: {
+            email: true,
+            name: true,
+            tradeName: true,
+            members: {
+              where: { role: 'OWNER' },
+              select: { user: { select: { email: true } } },
+              take: 1,
+            },
+          },
         },
       },
     });
@@ -312,8 +321,11 @@ export class AdminEventsService {
 
     this.logger.log(`Admin ${adminUserId} aprovou evento ${eventId} (${event.name}) — status REVISION → PUBLISHED`);
 
-    // Notifica organizador por e-mail (fire-and-forget — falha não bloqueia resposta)
-    const organizerEmail = event.organization?.email;
+    // Notifica organizador por e-mail (fire-and-forget — falha não bloqueia resposta).
+    // Contato da org primeiro; fallback pro e-mail do dono — senão orgs sem
+    // e-mail de contato nunca recebiam o aviso de aprovação/publicação.
+    const organizerEmail =
+      event.organization?.email || event.organization?.members?.[0]?.user?.email;
     if (organizerEmail) {
       const weekdays = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
       const eventDt = new Date(event.eventDate);
@@ -331,7 +343,8 @@ export class AdminEventsService {
           recipientEmail: organizerEmail,
           organizerName,
           eventName: event.name,
-          eventBannerUrl: event.bannerUrl ?? '',
+          // Template usa imagem 308x308 = imagem do CARD (logoUrl), não o banner.
+          eventBannerUrl: (event as any).logoUrl ?? event.bannerUrl ?? '',
           eventDate: eventDateFormatted,
           eventLocation,
           submittedAt: submittedAtFormatted,

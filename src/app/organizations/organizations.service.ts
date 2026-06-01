@@ -560,13 +560,19 @@ export class OrganizationsService {
       return { organization, member };
     });
 
-    // Notifica o novo organizador por e-mail apenas se um member foi criado.
-    if (result.member) {
-      // Boas-vindas vai pro e-mail de CONTATO da organização (fallback: e-mail do dono se o contato vier vazio).
-      const recipientEmail = result.organization.email || result.member.user.email;
-      const ownerFirstName = result.member.user.firstName;
+    // Boas-vindas vai pro e-mail de CONTATO da organização (fallback: dono).
+    // Envia mesmo SEM member — criação via admin não tem owner logado, então
+    // antes o e-mail nunca saía. Basta haver um destinatário.
+    const welcomeRecipient = result.organization.email || result.member?.user.email;
+    if (welcomeRecipient) {
+      const ownerFirstName =
+        result.member?.user.firstName ||
+        result.organization.ownerName ||
+        result.organization.tradeName ||
+        result.organization.name ||
+        'Organizador';
       this.emailService
-        .sendWelcomeOrganizer({ email: recipientEmail, firstName: ownerFirstName })
+        .sendWelcomeOrganizer({ email: welcomeRecipient, firstName: ownerFirstName })
         .catch((err) =>
           this.logger.warn(
             `Falha ao enviar e-mail de boas-vindas ao organizador (org=${result.organization.id}): ${err?.message ?? err}`,
