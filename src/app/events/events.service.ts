@@ -2743,7 +2743,14 @@ export class EventsService {
           // alinhado com a nova regra do calcBreakdown (saldo permanece negativo até nova
           // receita compensar, sem recovery do aguardando/retido).
           availableBalance: breakdown.saldoParaSaque,
-          pendingRelease: breakdown.aguardandoLiberacao,
+          // "Aguardando liberação" do organizador = tudo que ainda NÃO é sacável e vai
+          // liberar: o que está na janela de compensação (aguardandoLiberacao) MAIS o 10%
+          // retido aguardando auditoria do admin (valorRetido). Vale pra todos os métodos à
+          // vista (PIX/débito/crédito à vista); parcelado não retém (vai pra parceladosAReceber),
+          // então fica naturalmente de fora. Sem double-count: um pedido à vista está OU na
+          // janela (aguardandoLiberacao) OU fora dela (saldo 90% + valorRetido 10%) — nunca nos dois.
+          pendingRelease: breakdown.aguardandoLiberacao + breakdown.valorRetido,
+          // Sub-detalhe: a parcela do "aguardando liberação" que está retida p/ auditoria do admin.
           awaitingAudit: breakdown.valorRetido,
           installmentsToReceive: breakdown.parceladosAReceber,
           grossRevenue: breakdown.grossRevenue,
