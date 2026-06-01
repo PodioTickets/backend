@@ -10,8 +10,7 @@ import {
   type ProductBeforeAudit,
   type ProductVariationAuditSnapshot,
 } from './product-audit.helpers';
-
-const DEFAULT_NO_INTEREST_VARIATION_NAME = 'Sem interesse';
+import { DEFAULT_NO_INTEREST_VARIATION_NAME } from './product.constants';
 
 @Injectable()
 export class ProductsService {
