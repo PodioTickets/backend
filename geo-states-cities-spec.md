@@ -1,6 +1,9 @@
 # Geo (Estados/Províncias e Cidades por país) — Contrato Backend
 
-Status: **proposto** (frontend já integrado com fallback; aguarda implementação no backend).
+Status: **implementado** (2026-06-01). Backend: módulo `src/app/geo` (`GeoController`/`GeoService`),
+dataset estático via pacote `country-state-city`, sem banco/rede/autenticação. Cache aplicado conforme
+abaixo — **exceção intencional** à política global `no-store` (decisão de 2026-05-31), por ser dado de
+referência imutável e público.
 
 ## Objetivo
 
