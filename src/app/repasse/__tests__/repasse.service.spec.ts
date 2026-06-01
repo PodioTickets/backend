@@ -128,6 +128,28 @@ describe('RepasseService — lógica de estorno (calcBreakdown)', () => {
       expect(b.valorRetido).toBe(0);
       expect(b.saldoDisponivel).toBe(0);
     });
+
+    // PIX e DÉBITO: janela 0 → liberação dos 90% IMEDIATA na confirmação (sem aguardando).
+    it('PIX recém-pago (mesmo dia), não auditado → 90% no saldo + 10% retido IMEDIATAMENTE', () => {
+      const b = calc([mkOrder({ daysAgo: 0, method: 'PIX' })], [], false);
+      expect(b.aguardandoLiberacao).toBe(0); // sem janela de espera
+      expect(b.valorRetido).toBe(Math.round(ORG_NET * RETENTION)); // 960 (aguardando auditoria)
+      expect(b.saldoDisponivel).toBe(ORG_NET - Math.round(ORG_NET * RETENTION)); // 8640 liberado
+    });
+
+    it('DÉBITO recém-pago (mesmo dia), não auditado → 90% no saldo + 10% retido IMEDIATAMENTE', () => {
+      const b = calc([mkOrder({ daysAgo: 0, method: 'DEBIT_CARD' })], [], false);
+      expect(b.aguardandoLiberacao).toBe(0);
+      expect(b.valorRetido).toBe(Math.round(ORG_NET * RETENTION));
+      expect(b.saldoDisponivel).toBe(ORG_NET - Math.round(ORG_NET * RETENTION));
+    });
+
+    it('PIX recém-pago, auditado → 100% no saldo (sem retenção, sem aguardando)', () => {
+      const b = calc([mkOrder({ daysAgo: 0, method: 'PIX' })], [], true);
+      expect(b.aguardandoLiberacao).toBe(0);
+      expect(b.valorRetido).toBe(0);
+      expect(b.saldoDisponivel).toBe(ORG_NET);
+    });
   });
 
   describe('estorno — roteiro de smoke', () => {

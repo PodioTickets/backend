@@ -44,6 +44,9 @@ import { Response } from 'express';
 import { LocalAuthGuard } from './guards/local-auth.guard';
 import { GoogleAuthGuard } from './guards/google-auth.guard';
 import { TurnstileGuard } from './guards/turnstile.guard';
+import { ConfigService } from '@nestjs/config';
+import { OAuthStateService } from './oauth-state.service';
+import { sanitizeRelativePath } from 'src/common/utils/safe-redirect.util';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { TrackActivity } from 'src/common/decorators/track-activity.decorator';
@@ -52,7 +55,11 @@ import { TrackActivityInterceptor } from 'src/common/interceptors/track-activity
 @ApiTags('Authentication')
 @Controller('api/v1/auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly oauthState: OAuthStateService,
+    private readonly configService: ConfigService,
+  ) {}
 
   @Get('email/availability')
   @Throttle({ short: { limit: 10, ttl: 60000 } })
@@ -189,15 +196,69 @@ export class AuthController {
 
   @Get('google')
   @UseGuards(GoogleAuthGuard)
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Initiate Google OAuth login',
-    description: 'Redirects to Google OAuth consent screen. Frontend should configure redirect_uri to point to frontend callback page.'
+    description:
+      'Redireciona para o consent do Google. O `redirect_to` (caminho relativo da SPA, ex.: ' +
+      '`/checkout/ingressos?eventId=XYZ`) é saneado e embutido no `state` do OAuth — o Google ' +
+      'devolve esse state no callback do backend, que repassa o destino ao frontend.',
+  })
+  @ApiQuery({
+    name: 'redirect_to',
+    required: false,
+    description: 'Caminho relativo de destino pós-login (URL-encoded). Apenas caminhos `/...` são aceitos.',
+    example: '/checkout/ingressos?eventId=XYZ',
   })
   @ApiResponse({ status: 302, description: 'Redirects to Google OAuth consent screen' })
   async googleAuth() {
-    // Guard handles the redirect to Google
-    // Google will redirect back to frontend with code
-  } 
+    // O GoogleAuthGuard monta a URL de consent e injeta o `state` (com o redirect_to saneado).
+    // O Google redireciona para GET /api/v1/auth/google/callback.
+  }
+
+  @Get('google/callback')
+  @NoCache()
+  @ApiOperation({
+    summary: 'Google OAuth callback (backend-mediated)',
+    description:
+      'Recebe o `code` + `state` do Google, extrai o `redirect_to` saneado do state e ' +
+      'redireciona para {FRONTEND_URL}/auth/callback?code=...&redirect_to=.... O frontend troca ' +
+      'o code por tokens via POST /api/v1/auth/google/validate.',
+  })
+  @ApiQuery({ name: 'code', required: false, description: 'Authorization code do Google' })
+  @ApiQuery({ name: 'state', required: false, description: 'State assinado emitido em /auth/google' })
+  @ApiQuery({ name: 'error', required: false, description: 'Erro do Google (ex.: access_denied)' })
+  @ApiResponse({ status: 302, description: 'Redireciona para o callback do frontend' })
+  async googleCallback(
+    @Query('code') code: string | undefined,
+    @Query('state') state: string | undefined,
+    @Query('error') error: string | undefined,
+    @Res() res: Response,
+  ) {
+    // Destino do frontend (página que finaliza o login). NUNCA confia no client para isto.
+    const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
+
+    // Valida o state e recupera o destino pós-login saneado (null se ausente/expirado/adulterado).
+    const { redirectTo } = this.oauthState.verify(state);
+
+    // Monta a URL de retorno via URL/searchParams → re-encoda tudo (neutraliza injeção).
+    const url = new URL('/auth/callback', frontendUrl);
+
+    if (error) {
+      // Usuário cancelou ou o Google recusou — repassa o erro pro front decidir a UX.
+      url.searchParams.set('error', error);
+    } else if (code) {
+      url.searchParams.set('code', code);
+    } else {
+      // Sem code e sem error: estado inesperado → trata como falha genérica.
+      url.searchParams.set('error', 'google_oauth_failed');
+    }
+
+    // redirectTo já saneado pelo OAuthStateService; sanitize de novo (defesa em profundidade).
+    const safe = sanitizeRelativePath(redirectTo);
+    if (safe) url.searchParams.set('redirect_to', safe);
+
+    return res.redirect(url.toString());
+  }
 
   @Post('google/validate')
   @HttpCode(HttpStatus.OK)

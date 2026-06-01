@@ -11,10 +11,18 @@ import { PaymentsRefundService } from '../payments/payments-refund.service';
 import { PaymentMethod, PaymentStatus, WithdrawalStatus } from '@prisma/client';
 import { computeRefundImpact, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 
-// Prazo (dias) até que os 90% sejam liberados para saldo disponível
-const RETENTION_DAYS: Record<string, number> = {
-  [PaymentMethod.PIX]: 1,
-  [PaymentMethod.DEBIT_CARD]: 2,
+// Prazo (dias) até que os 90% sejam liberados para saldo disponível.
+//
+// PIX e DÉBITO = 0: liquidam na hora na Cielo (não há janela de compensação a aguardar),
+// então os 90% são liberados IMEDIATAMENTE após a confirmação/processamento do pagamento
+// (releaseDate = paymentDate ≤ now → cai direto no branch "90% disponível + 10% retido").
+// Os 10% continuam retidos aguardando auditoria — só a janela de espera deixa de existir.
+// CRÉDITO (31d), BOLETO (3d) e CRYPTO (30d) mantêm a janela de compensação do método.
+// Exportado como FONTE ÚNICA: EventsService.getFinancialPending reusa esta tabela
+// (antes mantinha uma cópia divergente — PIX=1 e sem DEBIT_CARD → caía em 31 dias).
+export const RETENTION_DAYS: Record<string, number> = {
+  [PaymentMethod.PIX]: 0,
+  [PaymentMethod.DEBIT_CARD]: 0,
   [PaymentMethod.CREDIT_CARD]: 31,
   [PaymentMethod.BOLETO]: 3,
   [PaymentMethod.CRYPTO]: 30,
