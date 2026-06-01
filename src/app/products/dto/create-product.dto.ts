@@ -70,9 +70,9 @@ export class ProductVariationDto {
 
 export class CreateProductDto {
   @IsString()
-  @MaxLength(25)
+  @MaxLength(255)
   @ApiProperty({
-    description: 'Product name (max 25 characters)',
+    description: 'Product name (max 255 characters)',
     example: 'Camiseta',
   })
   name: string;
@@ -177,7 +177,7 @@ export class CreateProductDto {
 export class UpdateProductDto {
   @IsOptional()
   @IsString()
-  @MaxLength(25)
+  @MaxLength(255)
   name?: string;
 
   @IsOptional()
