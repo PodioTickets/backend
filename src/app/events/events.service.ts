@@ -49,6 +49,15 @@ import { RepasseService, RETENTION_DAYS } from '../repasse/repasse.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { isChargeback, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 
+/**
+ * Taxas padrão aplicadas na CRIAÇÃO de um evento (escala 0–100, ex.: 4 = 4%).
+ * - Organizador: percentual absorvido pelo organizador. Pode ser sobrescrito no payload de criação.
+ * - Participante: percentual repassado ao participante. Taxa interna — não é editável no create.
+ * Eventos já existentes não são afetados (default aplicado só no insert).
+ */
+export const DEFAULT_ORGANIZER_FEE_PERCENT = 4;
+export const DEFAULT_PARTICIPANT_FEE_PERCENT = 2;
+
 @Injectable()
 export class EventsService {
   private readonly logger = new Logger(EventsService.name);
@@ -320,6 +329,10 @@ export class EventsService {
         logoUrl: createEventDto.logoUrl ?? cardImageUrl,
         slug: null, // Será gerado depois com o ID
         organizationId: member.organizationId,
+        // Taxas padrão: organizador 4% (sobrescrevível) e participante 2% (interno).
+        organizerFeePercent:
+          createEventDto.organizerFeePercent ?? DEFAULT_ORGANIZER_FEE_PERCENT,
+        participantFeePercent: DEFAULT_PARTICIPANT_FEE_PERCENT,
         eventDate: new Date(createEventDto.eventDate),
         registrationStartDate: new Date(createEventDto.registrationStartDate),
         registrationEndDate: new Date(createEventDto.registrationEndDate),
@@ -1138,6 +1151,7 @@ export class EventsService {
     name: true,
     slug: true,
     bannerUrl: true,
+    logoUrl: true,
     location: true,
     city: true,
     state: true,
@@ -2404,7 +2418,8 @@ export class EventsService {
         .sendEventUnderReview({
           recipientEmail: organizer.email,
           eventName: event.name,
-          eventBannerUrl: event.bannerUrl ?? '',
+          // Template usa imagem 308x308 = imagem do CARD (logoUrl), não o banner.
+          eventBannerUrl: (event as any).logoUrl ?? event.bannerUrl ?? '',
           eventDate: eventDateFormatted,
           eventLocation,
           submittedAt: submittedAtFormatted,

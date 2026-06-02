@@ -61,14 +61,14 @@ export class SSRFProtectionMiddleware implements NestMiddleware {
     // Verificar parâmetros de query
     for (const [key, value] of Object.entries(req.query)) {
       if (this.isURLParameter(key) && typeof value === 'string') {
-        this.validateURL(value, `query parameter: ${key}`);
+        this.validateURL(value, key);
       }
     }
 
     // Verificar parâmetros de rota
     for (const [key, value] of Object.entries(req.params)) {
       if (this.isURLParameter(key) && typeof value === 'string') {
-        this.validateURL(value, `route parameter: ${key}`);
+        this.validateURL(value, key);
       }
     }
   }
@@ -76,7 +76,7 @@ export class SSRFProtectionMiddleware implements NestMiddleware {
   private validateRequestBody(body: any): void {
     this.traverseObject(body, '', (value: string, path: string) => {
       if (this.isURLLike(value)) {
-        this.validateURL(value, `request body: ${path}`);
+        this.validateURL(value, path);
       }
     });
   }
@@ -135,31 +135,33 @@ export class SSRFProtectionMiddleware implements NestMiddleware {
     }
   }
 
-  private validateURL(urlString: string, context: string): void {
+  private validateURL(urlString: string, field: string): void {
+    const label = this.friendlyFieldLabel(field);
+
     try {
       const url = new URL(urlString);
 
       // Verificar protocolo
       if (!['http:', 'https:'].includes(url.protocol)) {
         throw new BadRequestException(
-          `Invalid protocol in ${context}: ${url.protocol}. Only HTTP and HTTPS are allowed.`
+          `O endereço informado em ${label} usa um protocolo não permitido. Use apenas links que comecem com http:// ou https://.`
         );
       }
 
       // Verificar hostname
-      this.validateHostname(url.hostname, context);
+      this.validateHostname(url.hostname, label);
 
       // Verificar porta (se especificada)
       if (url.port) {
         const port = parseInt(url.port);
         if (port < 1 || port > 65535) {
           throw new BadRequestException(
-            `Invalid port in ${context}: ${port}. Port must be between 1 and 65535.`
+            `O endereço informado em ${label} contém uma porta inválida. Informe um link válido, sem porta personalizada.`
           );
         }
       }
 
-      this.logger.log(`✅ URL validated: ${urlString} (${context})`);
+      this.logger.log(`✅ URL validated: ${urlString} (${field})`);
 
     } catch (error) {
       if (error instanceof BadRequestException) {
@@ -167,11 +169,11 @@ export class SSRFProtectionMiddleware implements NestMiddleware {
       }
 
       // Se não conseguir fazer parse da URL, pode não ser uma URL válida
-      this.logger.warn(`⚠️ Could not parse URL in ${context}: ${urlString}`);
+      this.logger.warn(`⚠️ Could not parse URL in ${field}: ${urlString}`);
     }
   }
 
-  private validateHostname(hostname: string, context: string): void {
+  private validateHostname(hostname: string, label: string): void {
     // Primeiro verificar se está na lista de domínios permitidos
     if (this.allowedDomains.includes(hostname)) {
       return;
@@ -181,7 +183,7 @@ export class SSRFProtectionMiddleware implements NestMiddleware {
     if (this.isIPAddress(hostname)) {
       if (this.isBlockedIP(hostname)) {
         throw new BadRequestException(
-          `Access to private/internal IP blocked in ${context}: ${hostname}`
+          `O endereço informado em ${label} aponta para um servidor interno/privado e não é permitido. Informe um link público válido.`
         );
       }
       return;
@@ -190,9 +192,27 @@ export class SSRFProtectionMiddleware implements NestMiddleware {
     // Para domínios não listados, verificar se são domínios públicos válidos
     if (!this.isValidPublicDomain(hostname)) {
       throw new BadRequestException(
-        `Invalid or untrusted hostname in ${context}: ${hostname}`
+        `O endereço informado em ${label} não é válido. Verifique se digitou um link completo, por exemplo: https://www.exemplo.com.`
       );
     }
+  }
+
+  /**
+   * Converte o caminho técnico do campo (ex.: "socialLinks.instagram", "website",
+   * "url") em um rótulo legível para o usuário final. Mantém o nome do campo entre
+   * aspas para dar contexto sem expor a estrutura interna do payload.
+   */
+  private friendlyFieldLabel(field: string): string {
+    if (!field) {
+      return 'um dos campos enviados';
+    }
+
+    // Usa o último segmento do caminho (ex.: "socialLinks.instagram" -> "instagram")
+    // e remove índices de array (ex.: "links[0]" -> "links").
+    const lastSegment = field.split('.').pop() ?? field;
+    const cleaned = lastSegment.replace(/\[\d+\]$/, '').trim();
+
+    return cleaned ? `"${cleaned}"` : 'um dos campos enviados';
   }
 
   private isIPAddress(hostname: string): boolean {

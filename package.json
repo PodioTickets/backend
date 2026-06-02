@@ -73,6 +73,7 @@
     "class-validator": "^0.14.2",
     "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
+    "country-state-city": "^3.2.1",
     "csv-parser": "^3.2.0",
     "ethers": "^6.15.0",
     "express": "^5.1.0",

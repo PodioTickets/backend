@@ -91,6 +91,27 @@ describe('OrdersService', () => {
 
   afterEach(() => jest.clearAllMocks());
 
+  // ── findOrderForWrite lê do PRIMARY (regressão: cobrança do slot removido) ──
+  // Bug: pay/patch liam o pedido da RÉPLICA (não sincronizada em dev / com lag em prod).
+  // Após DELETE de slot (primary = 2 ingressos), a réplica ainda tinha 3 → o pay cobrava 3
+  // mesmo o pedido tendo 2. Operações read-modify-write DEVEM ler do primary.
+  describe('findOrderForWrite (read-modify-write usa o primary)', () => {
+    it('lê o pedido do write client (primary), nunca da réplica', async () => {
+      const primaryOrder = { id: 'o1', userId: 'u1', reservedTickets: [{ ticketId: 'T', quantity: 2 }] };
+      const replicaOrder = { id: 'o1', userId: 'u1', reservedTickets: [{ ticketId: 'T', quantity: 3 }] }; // stale
+      const primary: any = { order: { findUnique: jest.fn().mockResolvedValue(primaryOrder) } };
+      const replica: any = { order: { findUnique: jest.fn().mockResolvedValue(replicaOrder) }, user: { findUnique: jest.fn() } };
+      mockPrisma.getWriteClient.mockReturnValue(primary);
+      mockPrisma.getReadClient.mockReturnValue(replica);
+
+      const order = await (service as any).findOrderForWrite('u1', 'o1');
+
+      expect(order.reservedTickets[0].quantity).toBe(2); // primary, não os 3 defasados da réplica
+      expect(primary.order.findUnique).toHaveBeenCalledTimes(1);
+      expect(replica.order.findUnique).not.toHaveBeenCalled();
+    });
+  });
+
   // ── cancelExpiredOrders ───────────────────────────────────────────────────
 
   describe('cancelExpiredOrders', () => {
@@ -369,7 +390,7 @@ describe('OrdersService', () => {
       const captured: any = {};
       const tx: any = {
         $executeRaw: jest.fn().mockResolvedValue(1),
-        registration: { findFirst: jest.fn().mockResolvedValue({ id: 'reg-x' }), update: jest.fn().mockResolvedValue({}) },
+        registration: { findFirst: jest.fn().mockResolvedValue({ id: 'reg-x' }), update: jest.fn().mockResolvedValue({}), delete: jest.fn().mockResolvedValue({}) },
         orderReservedTicket: { update: jest.fn().mockResolvedValue({}), delete: jest.fn().mockResolvedValue({}) },
         order: {
           update: jest.fn().mockImplementation(({ data }: any) => {
@@ -400,15 +421,16 @@ describe('OrdersService', () => {
       ...over,
     });
 
-    it('remove o slot 1 → reserva 2→1, libera estoque, cancela placeholder, decrementa ORT', async () => {
+    it('remove o slot 1 → reserva 2→1, libera estoque, DELETA placeholder, decrementa ORT', async () => {
       const client = build(order2());
 
       await service.removeReservedSlot(buyerId, orderId, 1);
 
       expect(client._tx.$executeRaw).toHaveBeenCalledTimes(1); // libera 1 vaga
-      expect(client._tx.registration.update).toHaveBeenCalledWith(
-        expect.objectContaining({ data: { status: 'CANCELLED' } }),
-      );
+      // DELETA o placeholder (não cancela) — senão sobra Registration CANCELLED fantasma que
+      // o getOrderDetails (filtro != PENDING) conta como ingresso a mais.
+      expect(client._tx.registration.delete).toHaveBeenCalledWith({ where: { id: 'reg-x' } });
+      expect(client._tx.registration.update).not.toHaveBeenCalled();
       expect(client._tx.orderReservedTicket.update).toHaveBeenCalledWith(
         expect.objectContaining({ where: { id: 'ort-A' }, data: { quantity: { decrement: 1 } } }),
       );
