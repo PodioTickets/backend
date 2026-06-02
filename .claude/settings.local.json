@@ -101,7 +101,8 @@
       "PowerShell(npx jest src/app/orders/__tests__/order-details-response.spec.ts 2>&1 | Select-Object -Last 25; \"----EXIT $LASTEXITCODE----\")",
       "PowerShell(Get-CimInstance *)",
       "Bash(npm run *)",
-      "Bash(echo \"=== EXIT: $? ===\")"
+      "Bash(echo \"=== EXIT: $? ===\")",
+      "Bash(echo \"=== TSC EXIT: $? ===\")"
     ]
   }
 }

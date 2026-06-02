@@ -4,7 +4,52 @@ import { CreateQuestionDto, UpdateQuestionDto } from './dto/create-question.dto'
 
 @Injectable()
 export class QuestionsService {
+  // Tipos que EXIGEM/aceitam opções. Validados: ≥1 opção não-vazia, sem duplicadas.
+  private static readonly OPTION_TYPES = new Set(['select', 'multiple_choice']);
+  // Tipos que NÃO têm opções: qualquer valor enviado é ignorado (armazenado como null).
+  private static readonly NO_OPTION_TYPES = new Set(['text', 'true_false', 'number']);
+
   constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Valida/normaliza `options` conforme o tipo da pergunta.
+   *  - select / multiple_choice: exige array com **≥1 opção não-vazia**, sem duplicadas
+   *    (comparadas já com trim). Retorna as opções com trim aplicado.
+   *  - text / true_false / number: opções são ignoradas → retorna `null`.
+   *  - demais tipos (legado: radio/checkbox/…): mantém o comportamento atual (passa o array
+   *    recebido ou null), sem impor o piso, para não quebrar dados existentes.
+   * Lança BadRequestException em opção vazia, duplicada ou ausência de opção válida.
+   */
+  private resolveQuestionOptions(type: string, options: unknown): string[] | null {
+    if (QuestionsService.OPTION_TYPES.has(type)) {
+      if (!Array.isArray(options) || options.length === 0) {
+        throw new BadRequestException(
+          `Perguntas do tipo "${type}" exigem ao menos 1 opção.`,
+        );
+      }
+      const normalized: string[] = [];
+      const seen = new Set<string>();
+      for (const raw of options) {
+        if (typeof raw !== 'string' || raw.trim() === '') {
+          throw new BadRequestException('As opções não podem ser vazias.');
+        }
+        const value = raw.trim();
+        if (seen.has(value)) {
+          throw new BadRequestException(`Opção duplicada: "${value}".`);
+        }
+        seen.add(value);
+        normalized.push(value);
+      }
+      return normalized;
+    }
+
+    if (QuestionsService.NO_OPTION_TYPES.has(type)) {
+      return null;
+    }
+
+    // Tipos legados/desconhecidos: preserva o comportamento atual.
+    return Array.isArray(options) ? (options as string[]) : null;
+  }
 
   async create(userId: string, eventId: string, createQuestionDto: CreateQuestionDto) {
     await this.verifyOrganizerAccess(userId, eventId);
@@ -17,12 +62,15 @@ export class QuestionsService {
       prismaRead,
     );
 
+    const type = createQuestionDto.type || 'text';
+    const options = this.resolveQuestionOptions(type, createQuestionDto.options);
+
     const question = await prismaWrite.question.create({
       data: {
         ...createQuestionDto,
         eventId,
-        type: createQuestionDto.type || 'text',
-        options: createQuestionDto.options ? (createQuestionDto.options as any) : null,
+        type,
+        options: options as any,
         appliesTo,
       },
     });
@@ -101,8 +149,13 @@ export class QuestionsService {
     }
 
     const updateData: any = { ...updateQuestionDto };
-    if (updateQuestionDto.options) {
-      updateData.options = updateQuestionDto.options as any;
+    // Recalcula/valida options se o campo veio no payload OU se o tipo está mudando
+    // (o tipo efetivo decide a regra; sem options no payload, revalida as já gravadas).
+    if (updateQuestionDto.options !== undefined || updateQuestionDto.type !== undefined) {
+      const effectiveType = updateQuestionDto.type ?? question.type;
+      const optionsInput =
+        updateQuestionDto.options !== undefined ? updateQuestionDto.options : question.options;
+      updateData.options = this.resolveQuestionOptions(effectiveType, optionsInput) as any;
     }
     if (updateQuestionDto.appliesTo !== undefined) {
       updateData.appliesTo = await this.normalizeAndValidateAppliesTo(
