@@ -201,11 +201,9 @@ export class CieloService {
 
           paymentData.Type = 'CreditCard';
           paymentData.Capture = false;
-          // Crédito: em produção a Cielo não exige Provider explícito (mantido vazio);
-          // no sandbox usa o provider 'Simulado'. Respeita CIELO_PROVIDER quando definido.
-          if (this.isSandbox) {
-            paymentData.Provider = this.provider;
-          }
+          // Provider sempre enviado: sandbox -> simulador; produção -> 'Cielo30'.
+          // Antes ficava vazio em produção e a Cielo não recebia o Provider.
+          paymentData.Provider = this.isSandbox ? 'Simulado' : 'Cielo30';
 
           if (cardToken) {
             paymentData.Installments = cardToken.installments || 1;
