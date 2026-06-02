@@ -322,7 +322,8 @@ export class CieloService {
 
           paymentData.Type = 'DebitCard';
           paymentData.Installments = 1;
-          paymentData.Provider = this.provider;
+          // Provider: sandbox -> simulador; produção -> 'Cielo30' (igual crédito/PIX, não lê do .env).
+          paymentData.Provider = this.isSandbox ? 'Simulado' : 'Cielo30';
 
           {
             const debitBrand = this.detectCardBrand(cardData.number);
