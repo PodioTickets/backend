@@ -26,14 +26,18 @@ export class PaymentsController {
   @Post('webhook')
   @Throttle({ short: { limit: 60, ttl: 60000 } })
   @ApiOperation({ summary: 'Cielo webhook endpoint', description: 'Receives webhook events from Cielo for payment status updates' })
-  @ApiHeader({ name: 'cielo-signature', description: 'Cielo webhook signature' })
+  @ApiHeader({ name: 'cielosignature', description: 'Cielo webhook signature' })
   @ApiResponse({ status: 200, description: 'Webhook received successfully' })
   @ApiResponse({ status: 400, description: 'Bad request - Invalid signature or payload' })
   async handleWebhook(
     @Req() req: RawBodyRequest<Request>,
-    @Headers('cielo-signature') signature: string,
+    // Cielo NÃO aceita hífen em nome de header customizado no painel — usamos
+    // 'cielosignature'. Mantemos 'cielo-signature' como fallback p/ retrocompat.
+    @Headers('cielosignature') signature: string,
+    @Headers('cielo-signature') signatureLegacy: string,
     @Body() body: any,
   ) {
+    signature = signature || signatureLegacy;
     const payload = req.rawBody?.toString() || JSON.stringify(body);
     if (!payload || !signature) return { received: false };
     const event = await this.cieloService.handleWebhook(signature, payload);
