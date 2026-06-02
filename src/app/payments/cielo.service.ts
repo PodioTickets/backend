@@ -75,6 +75,7 @@ export class CieloService {
   private readonly threeDsEstablishmentCode: string;
   private readonly threeDsMerchantName: string;
   private readonly threeDsMcc: string;
+  private readonly provider: string;
 
   // Cache simples em memória: evita chamar o Braspag a cada request
   private threeDsTokenCache: { token: string; expiresAt: number } | null = null;
@@ -89,6 +90,11 @@ export class CieloService {
     this.threeDsEstablishmentCode = this.configService.get<string>('CIELO_3DS_ESTABLISHMENT_CODE') || '';
     this.threeDsMerchantName = this.configService.get<string>('CIELO_3DS_MERCHANT_NAME') || '';
     this.threeDsMcc = this.configService.get<string>('CIELO_3DS_MCC') || '';
+    // Provider da API Cielo. Configurável via .env (CIELO_PROVIDER).
+    // Fallback preserva o comportamento anterior: sandbox -> 'Simulado', produção -> 'Cielo2'.
+    this.provider =
+      this.configService.get<string>('CIELO_PROVIDER') ||
+      (this.isSandbox ? 'Simulado' : 'Cielo2');
 
     const baseURL = this.isSandbox
       ? 'https://apisandbox.braspag.com.br'
@@ -131,7 +137,7 @@ export class CieloService {
       timeout: 15000,
     });
 
-    this.logger.log(`Cielo service initialized (${this.isSandbox ? 'Sandbox' : 'Production'})`);
+    this.logger.log(`Cielo service initialized (${this.isSandbox ? 'Sandbox' : 'Production'}, provider=${this.provider})`);
   }
 
   async createPayment(
@@ -195,8 +201,10 @@ export class CieloService {
 
           paymentData.Type = 'CreditCard';
           paymentData.Capture = false;
+          // Crédito: em produção a Cielo não exige Provider explícito (mantido vazio);
+          // no sandbox usa o provider 'Simulado'. Respeita CIELO_PROVIDER quando definido.
           if (this.isSandbox) {
-            paymentData.Provider = 'Simulado';
+            paymentData.Provider = this.provider;
           }
 
           if (cardToken) {
@@ -316,11 +324,7 @@ export class CieloService {
 
           paymentData.Type = 'DebitCard';
           paymentData.Installments = 1;
-          if (this.isSandbox) {
-            paymentData.Provider = 'Simulado';
-          } else {
-            paymentData.Provider = 'Cielo2';
-          }
+          paymentData.Provider = this.provider;
 
           {
             const debitBrand = this.detectCardBrand(cardData.number);
@@ -368,7 +372,7 @@ export class CieloService {
 
         case PaymentMethod.PIX:
           paymentData.Type = 'Pix';
-          paymentData.Provider = this.isSandbox ? 'Simulado' : 'Cielo2';
+          paymentData.Provider = this.provider;
           paymentData.Amount = amountInCents;
           this.logger.debug('PIX payment data:', {
             type: paymentData.Type,
