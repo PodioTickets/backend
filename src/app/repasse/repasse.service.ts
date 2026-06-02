@@ -197,7 +197,7 @@ export class RepasseService {
   private async loadEventConfig(eventId: string, prisma: any) {
     const event = await prisma.event.findUnique({
       where: { id: eventId },
-      select: { id: true, organizerFeePercent: true, retentionRate: true },
+      select: { id: true, organizerFeePercent: true, retentionRate: true, refundFeeRate: true },
     });
     if (!event) throw new NotFoundException('Evento não encontrado');
     return event;
@@ -334,6 +334,7 @@ export class RepasseService {
     isAudited: boolean,
     committedWithdrawals: any[],
     organizerFeePercent: number,
+    refundFeeRate: number,
   ) {
     const now = getNow();
 
@@ -399,7 +400,7 @@ export class RepasseService {
       if (!order.payment) continue;
       // computeRefundImpact retorna refundFee = 0 para CHARGEBACK (reversão involuntária),
       // e o valor congelado (ou 2% do subtotal) para estorno proativo. Fonte única.
-      saldoDisponivel -= computeRefundImpact(order, organizerFeePercent).refundFee;
+      saldoDisponivel -= computeRefundImpact(order, organizerFeePercent, refundFeeRate).refundFee;
     }
 
     // Use netAmount so both old records (amount=gross, netAmount=net) and new records
@@ -457,6 +458,7 @@ export class RepasseService {
       !!audit,
       committedWithdrawals,
       event.organizerFeePercent,
+      event.refundFeeRate,
     );
 
     return {
@@ -498,6 +500,7 @@ export class RepasseService {
       !!audit,
       committedWithdrawals,
       event.organizerFeePercent,
+      event.refundFeeRate,
     );
 
     // Transparência do estorno para o organizador: total revertido (venda perdida)
@@ -505,7 +508,7 @@ export class RepasseService {
     let refundOrgNetReverted = 0;
     let refundFeesTotal = 0;
     for (const o of refundedOrders) {
-      const impact = computeRefundImpact(o, event.organizerFeePercent);
+      const impact = computeRefundImpact(o, event.organizerFeePercent, event.refundFeeRate);
       refundOrgNetReverted += impact.organizerNetReversed;
       refundFeesTotal += impact.refundFee;
     }
@@ -843,6 +846,7 @@ export class RepasseService {
         !!audit,
         committedWithdrawals,
         event.organizerFeePercent,
+        event.refundFeeRate,
       );
 
       if (amount > saldoParaSaque) {
@@ -996,7 +1000,7 @@ export class RepasseService {
     ]);
 
     const items = orders.map((o: any) => {
-      const impact = computeRefundImpact(o, event.organizerFeePercent);
+      const impact = computeRefundImpact(o, event.organizerFeePercent, event.refundFeeRate);
       const meta = (o.payment?.metadata ?? {}) as any;
       return {
         orderId: o.id,
@@ -1021,7 +1025,7 @@ export class RepasseService {
     let totalRefundFees = 0;
     for (const o of allRefunded) {
       totalRefundedToBuyer += o.finalAmount ?? 0;
-      const impact = computeRefundImpact(o, event.organizerFeePercent);
+      const impact = computeRefundImpact(o, event.organizerFeePercent, event.refundFeeRate);
       totalOrganizerNetReversed += impact.organizerNetReversed;
       totalRefundFees += impact.refundFee;
     }
@@ -1087,6 +1091,7 @@ export class RepasseService {
         false,
         committedWithdrawals,
         event.organizerFeePercent,
+        event.refundFeeRate,
       );
 
       return tx.eventAudit.create({
@@ -1134,6 +1139,7 @@ export class RepasseService {
           eventDate: true,
           organizerFeePercent: true,
           retentionRate: true,
+          refundFeeRate: true,
           organization: {
             select: { id: true, name: true, email: true, logoUrl: true },
           },
@@ -1192,6 +1198,7 @@ export class RepasseService {
           false,
           committedWithdrawals,
           event.organizerFeePercent,
+          event.refundFeeRate,
         );
 
         if (retainedAmount > 0) {
@@ -1267,6 +1274,7 @@ export class RepasseService {
         false,
         committedWithdrawals,
         event.organizerFeePercent,
+        event.refundFeeRate,
       );
 
       const created = await tx.eventAudit.create({

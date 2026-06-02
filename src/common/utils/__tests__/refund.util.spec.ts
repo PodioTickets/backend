@@ -38,10 +38,35 @@ describe('refund.util — fonte única de regra de estorno', () => {
       expect(r.refundFee).toBe(250);
     });
 
-    it('CHARGEBACK também cobra a taxa de 2% (é um tipo de estorno)', () => {
+    it('CHARGEBACK também cobra a taxa (é um tipo de estorno)', () => {
       const r = computeRefundImpact(order({ refundType: 'CHARGEBACK' }), 4);
       expect(r.refundFee).toBe(200);
       expect(r.organizerNetReversed).toBe(9600);
+    });
+
+    describe('refundFeeRate por evento (novo parâmetro)', () => {
+      it('usa a taxa do evento quando informada (sem valor congelado)', () => {
+        // 3% em vez do default 2%
+        const r = computeRefundImpact(order({}), 4, 0.03);
+        expect(r.refundFee).toBe(300); // 10000 * 0.03
+      });
+
+      it('omitido → fallback REFUND_FEE_RATE (2%)', () => {
+        expect(computeRefundImpact(order({}), 4).refundFee).toBe(200);
+      });
+
+      it('valor CONGELADO ainda prevalece sobre a taxa do evento', () => {
+        const r = computeRefundImpact(
+          order({ refundType: 'REFUND', refundFee: 250 }),
+          4,
+          0.05, // ignorado pois há valor congelado
+        );
+        expect(r.refundFee).toBe(250);
+      });
+
+      it('taxa inválida (NaN) cai no fallback de 2%', () => {
+        expect(computeRefundImpact(order({}), 4, NaN).refundFee).toBe(200);
+      });
     });
   });
 });

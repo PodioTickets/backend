@@ -8,7 +8,7 @@ import {
 } from '@nestjs/swagger';
 import {
   IsEnum, IsISO8601, IsNumber, IsNumberString, IsOptional,
-  IsString, IsUUID, IsIn, IsInt, Min,
+  IsString, IsUUID, IsIn, IsInt, Min, Max,
 } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { EventStatus } from '@prisma/client';
@@ -22,6 +22,9 @@ class AdminUpdateFinancialSettingsDto {
   @IsOptional() @IsNumber() @Min(0) participantFeePercent?: number;
   @IsOptional() @IsInt() @Min(1) maxInstallments?: number;
   @IsOptional() @IsNumber() @Min(0) totalFee?: number;
+  // Taxas Podio↔organizador por evento (frações 0–1: 0.10 = 10%, 0.02 = 2%).
+  @IsOptional() @IsNumber() @Min(0) @Max(1) retentionRate?: number;
+  @IsOptional() @IsNumber() @Min(0) @Max(1) refundFeeRate?: number;
 }
 
 class AdminEventsQueryDto {

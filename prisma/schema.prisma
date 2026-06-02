@@ -388,8 +388,14 @@ model Event {
   createdAt             DateTime    @default(now())
   updatedAt             DateTime    @updatedAt
 
-  /// Percentual retido até a auditoria pós-evento (ex: 0.10 = 10%)
+  /// Percentual retido até a auditoria pós-evento (ex: 0.10 = 10%). POR EVENTO:
+  /// snapshot na criação (default no service) e editável pelo admin antes do lock.
+  /// Alterar o default afeta só eventos futuros; existentes mantêm o valor gravado.
   retentionRate      Float       @default(0.10)
+  /// Taxa de estorno (refund) cobrada do organizador em qualquer estorno/chargeback
+  /// (ex: 0.02 = 2%). POR EVENTO, mesma semântica do retentionRate (snapshot na criação,
+  /// editável pelo admin antes do lock; alteração do default vale só p/ eventos futuros).
+  refundFeeRate      Float       @default(0.02)
 
   /// Percentual da taxa absorvido pelo organizador (0.0–100.0). Substitui o antigo `organizerFeeRate` (escala 0-1).
   organizerFeePercent         Float     @default(0.0)

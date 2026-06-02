@@ -58,6 +58,16 @@ import { isChargeback, resolveOrderOrganizerFeePercent } from '../../common/util
 export const DEFAULT_ORGANIZER_FEE_PERCENT = 4;
 export const DEFAULT_PARTICIPANT_FEE_PERCENT = 2;
 
+/**
+ * Taxas financeiras Podio↔organizador aplicadas na CRIAÇÃO do evento (frações 0–1).
+ * - Retenção: % do líquido do organizador retido até a auditoria pós-evento (0.10 = 10%).
+ * - Estorno: % cobrado do organizador em qualquer estorno/chargeback (0.02 = 2%).
+ * Snapshotadas por evento no create; editáveis pelo admin antes do lock. Alterar estes
+ * defaults afeta SOMENTE eventos futuros — eventos existentes mantêm o valor gravado.
+ */
+export const DEFAULT_RETENTION_RATE = 0.1;
+export const DEFAULT_REFUND_FEE_RATE = 0.02;
+
 @Injectable()
 export class EventsService {
   private readonly logger = new Logger(EventsService.name);
@@ -333,6 +343,10 @@ export class EventsService {
         organizerFeePercent:
           createEventDto.organizerFeePercent ?? DEFAULT_ORGANIZER_FEE_PERCENT,
         participantFeePercent: DEFAULT_PARTICIPANT_FEE_PERCENT,
+        // Taxas Podio↔organizador snapshotadas por evento (default code-controlled;
+        // admin pode editar antes do lock). Alterar o default vale só p/ eventos futuros.
+        retentionRate: DEFAULT_RETENTION_RATE,
+        refundFeeRate: DEFAULT_REFUND_FEE_RATE,
         eventDate: new Date(createEventDto.eventDate),
         registrationStartDate: new Date(createEventDto.registrationStartDate),
         registrationEndDate: new Date(createEventDto.registrationEndDate),
@@ -1939,8 +1953,8 @@ export class EventsService {
    * Sanitiza o payload do evento para resposta pública por slug/id.
    * Remove:
    *  - IDs de tracking de anúncios (Meta/GA/Ads) — não pertencem ao contrato público.
-   *  - `organizerFeePercent` e `retentionRate` — taxas internas (Podio↔organizador)
-   *    que o participante não deve conhecer.
+   *  - `organizerFeePercent`, `retentionRate` e `refundFeeRate` — taxas internas
+   *    (Podio↔organizador) que o participante não deve conhecer.
    *
    * `participantFeePercent` é PRESERVADO: o participante paga essa taxa e ela já
    * compõe o total exibido no checkout — o front precisa do valor para mostrar
@@ -1953,6 +1967,7 @@ export class EventsService {
       googleAdsId: _gad,
       organizerFeePercent: _ofp,
       retentionRate: _rr,
+      refundFeeRate: _rfr,
       ...rest
     } = event;
     return rest as E;
