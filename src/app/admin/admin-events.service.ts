@@ -362,7 +362,14 @@ export class AdminEventsService {
 
   async updateFinancialSettings(
     eventId: string,
-    dto: { organizerFeePercent?: number; participantFeePercent?: number; maxInstallments?: number; totalFee?: number },
+    dto: {
+      organizerFeePercent?: number;
+      participantFeePercent?: number;
+      maxInstallments?: number;
+      totalFee?: number;
+      retentionRate?: number;
+      refundFeeRate?: number;
+    },
   ) {
     const w = this.prisma.getWriteClient();
 
@@ -373,6 +380,10 @@ export class AdminEventsService {
     if (dto.organizerFeePercent !== undefined) data.organizerFeePercent = dto.organizerFeePercent;
     if (dto.participantFeePercent !== undefined) data.participantFeePercent = dto.participantFeePercent;
     if (dto.maxInstallments !== undefined) data.maxInstallments = dto.maxInstallments;
+    // Taxas Podio↔organizador por evento. Editar aqui afeta SÓ este evento (e seus
+    // cálculos vivos de repasse); novos eventos seguem o default do EventsService.create.
+    if (dto.retentionRate !== undefined) data.retentionRate = dto.retentionRate;
+    if (dto.refundFeeRate !== undefined) data.refundFeeRate = dto.refundFeeRate;
 
     const updated = await w.event.update({
       where: { id: eventId },
@@ -382,6 +393,8 @@ export class AdminEventsService {
         organizerFeePercent: true,
         participantFeePercent: true,
         maxInstallments: true,
+        retentionRate: true,
+        refundFeeRate: true,
         financialSettingsLockedAt: true,
       },
     });
@@ -393,6 +406,8 @@ export class AdminEventsService {
         organizerFeePercent: updated.organizerFeePercent,
         participantFeePercent: updated.participantFeePercent,
         maxInstallments: updated.maxInstallments,
+        retentionRate: updated.retentionRate,
+        refundFeeRate: updated.refundFeeRate,
         lockedAt: updated.financialSettingsLockedAt ?? null,
       },
     };

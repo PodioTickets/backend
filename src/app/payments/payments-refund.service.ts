@@ -79,6 +79,7 @@ export class PaymentsRefundService {
             name: true,
             organizationId: true,
             organizerFeePercent: true,
+            refundFeeRate: true,
           },
         },
       },
@@ -149,7 +150,9 @@ export class PaymentsRefundService {
       resolveOrderOrganizerFeePercent(order, order.event.organizerFeePercent),
     );
     const refundSubtotal = Math.max(0, order.finalAmount - order.serviceFee);
-    const refundFee = Math.round(refundSubtotal * REFUND_FEE_RATE);
+    // Taxa de estorno POR EVENTO (snapshot do evento); fallback à constante p/ legado.
+    const refundFeeRate = order.event.refundFeeRate ?? REFUND_FEE_RATE;
+    const refundFee = Math.round(refundSubtotal * refundFeeRate);
 
     // ── 4. Chama a Cielo ─────────────────────────────────────────────────────
     // V1 = estorno total: não passamos amount, a Cielo estorna o valor cheio.
