@@ -177,6 +177,11 @@ async function bootstrap() {
       req.path.startsWith('/api/v1/auth') ||
       req.path.startsWith('/api/v1/upload') ||
       req.path.startsWith('/api/v1/payments/sandbox/') ||
+      // Webhook da Cielo é server-to-server, SEM header Origin — não pode ser
+      // bloqueado pelo guard de origem (a autenticidade é validada via assinatura
+      // cielo-signature no handler). Sem esta isenção, a Cielo recebe 403 e o
+      // pagamento PIX nunca é confirmado.
+      req.path === '/api/v1/payments/webhook' ||
       req.headers['x-api-bypass'] ===
       configService.get<string>('API_BYPASS_SECRET')
     ) {

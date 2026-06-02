@@ -102,7 +102,11 @@
       "PowerShell(Get-CimInstance *)",
       "Bash(npm run *)",
       "Bash(echo \"=== EXIT: $? ===\")",
-      "Bash(echo \"=== TSC EXIT: $? ===\")"
+      "Bash(echo \"=== TSC EXIT: $? ===\")",
+      "Bash(docker version *)",
+      "Bash(docker compose *)",
+      "Bash(awk '/^model \\(User|Organization|OrganizationMember|Event|TicketCategory|Ticket\\) \\\\{/{f=1} f{print} /^\\\\}/{if\\(f\\)print \"----\"; f=0}' prisma/schema.prisma)",
+      "Bash(grep -vE \"^\\\\s*//|@@|@relation|@updatedAt\")"
     ]
   }
 }

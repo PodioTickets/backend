@@ -187,7 +187,9 @@ describe('QuestionsService', () => {
       expect(result.message).toBe('Question deleted successfully');
     });
 
-    it('should throw BadRequestException if question has answers', async () => {
+    it('should SOFT-delete (isActive=false) when question has answers', async () => {
+      // Comportamento atual: pergunta com respostas é desativada (mantém histórico),
+      // não deletada nem rejeitada.
       const mockOrganizer = { id: 'org-123', userId: 'user-123' };
       const mockEvent = { id: 'event-123', organizerId: mockOrganizer.id };
       const mockQuestion = {
@@ -200,10 +202,16 @@ describe('QuestionsService', () => {
       mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
       mockPrismaService.question.findUnique.mockResolvedValue(mockQuestion);
+      mockPrismaService.question.update.mockResolvedValue({ ...mockQuestion, isActive: false });
 
-      await expect(
-        service.remove('user-123', 'event-123', 'question-123'),
-      ).rejects.toThrow(BadRequestException);
+      const result = await service.remove('user-123', 'event-123', 'question-123');
+
+      expect(result.message).toBe('Question deleted successfully');
+      expect(mockPrismaService.question.update).toHaveBeenCalledWith({
+        where: { id: 'question-123' },
+        data: { isActive: false },
+      });
+      expect(mockPrismaService.question.delete).not.toHaveBeenCalled();
     });
   });
 });

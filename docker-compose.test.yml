@@ -1,0 +1,23 @@
+# Postgres DESCARTÁVEL só para testes de integração.
+# Porta 5433 (não conflita com o Postgres de dev em 5432). Dados em tmpfs (RAM):
+# rápidos e apagados quando o container para — nunca tocam dados reais.
+#
+#   docker compose -f docker-compose.test.yml up -d      # sobe
+#   docker compose -f docker-compose.test.yml down -v     # derruba e limpa
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: podio-postgres-test
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: podio_test
+    ports:
+      - '5434:5432'
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U test -d podio_test']
+      interval: 3s
+      timeout: 3s
+      retries: 20

@@ -2,6 +2,8 @@ module.exports = {
   moduleFileExtensions: ['js', 'json', 'ts'],
   rootDir: 'src',
   testRegex: '.*\\.spec\\.ts$',
+  // Testes de integração (*.int.spec.ts) rodam por jest-integration.config.js (precisam do banco de teste).
+  testPathIgnorePatterns: ['/node_modules/', '\\.int\\.spec\\.ts$'],
   transform: {
     '^.+\\.(t|j)s$': 'ts-jest',
   },
