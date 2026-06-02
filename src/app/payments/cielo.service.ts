@@ -372,7 +372,9 @@ export class CieloService {
 
         case PaymentMethod.PIX:
           paymentData.Type = 'Pix';
-          paymentData.Provider = this.provider;
+          // PIX: em PRODUÇÃO usa SEMPRE 'Cielo30' (não lê do .env/CIELO_PROVIDER).
+          // Sandbox segue no simulador.
+          paymentData.Provider = this.isSandbox ? 'Simulado' : 'Cielo30';
           paymentData.Amount = amountInCents;
           this.logger.debug('PIX payment data:', {
             type: paymentData.Type,
