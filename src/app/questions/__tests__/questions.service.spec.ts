@@ -11,6 +11,9 @@ describe('QuestionsService', () => {
     organizer: {
       findUnique: jest.fn(),
     },
+    user: {
+      findUnique: jest.fn(),
+    },
     event: {
       findUnique: jest.fn(),
     },
@@ -42,6 +45,8 @@ describe('QuestionsService', () => {
     // Mock getReadClient and getWriteClient to return the same mock
     mockPrismaService.getReadClient.mockReturnValue(mockPrismaService);
     mockPrismaService.getWriteClient.mockReturnValue(mockPrismaService);
+    // role ADMIN → verifyOrganizerAccess (que lê user.findUnique) dá bypass
+    mockPrismaService.user.findUnique.mockResolvedValue({ role: 'ADMIN' });
   });
 
   afterEach(() => {
@@ -65,6 +70,7 @@ describe('QuestionsService', () => {
         id: 'question-123',
         eventId,
         ...createDto,
+        appliesTo: null, // o service transforma appliesTo na resposta
       };
 
       mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
@@ -88,6 +94,7 @@ describe('QuestionsService', () => {
           question: 'Test Question',
           type: 'text',
           isRequired: false,
+          appliesTo: null,
         },
       ];
 
@@ -108,6 +115,7 @@ describe('QuestionsService', () => {
         question: 'Test Question',
         type: 'text',
         event: { id: 'event-123', name: 'Test Event' },
+        appliesTo: null,
       };
 
       mockPrismaService.question.findUnique.mockResolvedValue(mockQuestion);
@@ -137,7 +145,9 @@ describe('QuestionsService', () => {
       const mockQuestion = {
         id: questionId,
         eventId,
+        isActive: true, // update exige a pergunta ativa
         ...updateDto,
+        appliesTo: null,
       };
 
       mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
@@ -163,6 +173,7 @@ describe('QuestionsService', () => {
       const mockQuestion = {
         id: questionId,
         eventId,
+        isActive: true,
         answers: [],
       };
 
@@ -176,22 +187,31 @@ describe('QuestionsService', () => {
       expect(result.message).toBe('Question deleted successfully');
     });
 
-    it('should throw BadRequestException if question has answers', async () => {
+    it('should SOFT-delete (isActive=false) when question has answers', async () => {
+      // Comportamento atual: pergunta com respostas é desativada (mantém histórico),
+      // não deletada nem rejeitada.
       const mockOrganizer = { id: 'org-123', userId: 'user-123' };
       const mockEvent = { id: 'event-123', organizerId: mockOrganizer.id };
       const mockQuestion = {
         id: 'question-123',
         eventId: 'event-123',
+        isActive: true,
         answers: [{ id: 'answer-123' }],
       };
 
       mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
       mockPrismaService.question.findUnique.mockResolvedValue(mockQuestion);
+      mockPrismaService.question.update.mockResolvedValue({ ...mockQuestion, isActive: false });
 
-      await expect(
-        service.remove('user-123', 'event-123', 'question-123'),
-      ).rejects.toThrow(BadRequestException);
+      const result = await service.remove('user-123', 'event-123', 'question-123');
+
+      expect(result.message).toBe('Question deleted successfully');
+      expect(mockPrismaService.question.update).toHaveBeenCalledWith({
+        where: { id: 'question-123' },
+        data: { isActive: false },
+      });
+      expect(mockPrismaService.question.delete).not.toHaveBeenCalled();
     });
   });
 });

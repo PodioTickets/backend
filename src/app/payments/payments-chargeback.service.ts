@@ -28,7 +28,9 @@ export class PaymentsChargebackService {
     private readonly orderFinalization: OrderFinalizationService,
   ) {}
 
-  @Cron('0 * * * *') // todo início de hora
+  // Diariamente às 03:00 no horário de Brasília (America/Sao_Paulo, UTC-3 sem DST).
+  // timeZone explícito: independe do TZ do servidor (que pode ser UTC).
+  @Cron('0 3 * * *', { timeZone: 'America/Sao_Paulo' })
   @CronTimeout(5 * 60 * 1000) // timeout de 5 minutos
   async checkChargebacks(): Promise<void> {
     // Não executa em sandbox — não há chargebacks reais
@@ -42,6 +44,11 @@ export class PaymentsChargebackService {
 
     const payments = await this.prisma.getReadClient().payment.findMany({
       where: {
+        // SÓ pagamentos ainda PAID. Estorno/chargeback rebaixam o pagamento para
+        // REFUNDED (em refundOrder/processReversal), então pedidos JÁ estornados ou
+        // com chargeback nunca entram nesta verificação. (Os REFUNDED só voltam a ser
+        // olhados pelo reconcilePendingRefunds, e mesmo assim apenas os que ainda
+        // aguardam confirmação da Cielo — refundPendingConfirmation: true.)
         status: PaymentStatus.PAID,
         paymentDate: { gte: cutoff },
         transactionId: { not: null },
@@ -65,6 +72,11 @@ export class PaymentsChargebackService {
 
     for (const payment of payments) {
       const meta = payment.metadata as any;
+
+      // Defensivo: se por qualquer inconsistência um pagamento PAID já carregar
+      // classificação de estorno/chargeback no metadata, não re-verifica (já tratado).
+      if (meta?.refundType) continue;
+
       const cieloPaymentId: string | undefined = meta?.cieloPaymentId ?? payment.transactionId ?? undefined;
 
       if (!cieloPaymentId) continue;

@@ -9,10 +9,11 @@
  */
 
 /**
- * Taxa de refund: percentual FIXO (não configurável) cobrado do organizador em QUALQUER
- * estorno — chargeback INCLUSIVE (também é um tipo de estorno). Incide sobre o subtotal
- * (finalAmount − serviceFee, já com cupom aplicado), independente do método/auditoria/
- * organizerFeePercent.
+ * Taxa de refund PADRÃO (fallback). A taxa efetiva agora é POR EVENTO
+ * (`Event.refundFeeRate`, snapshot na criação) — passada explicitamente a
+ * `computeRefundImpact`. Esta constante é só o fallback para pedidos/eventos legados
+ * sem a taxa resolvida. Incide sobre o subtotal (finalAmount − serviceFee, já com cupom),
+ * em QUALQUER estorno — chargeback inclusive —, independente de método/auditoria/organizerFeePercent.
  */
 export const REFUND_FEE_RATE = 0.02;
 
@@ -47,11 +48,15 @@ export function resolveOrderOrganizerFeePercent(
  * `resolveOrderOrganizerFeePercent`) — verdade histórica mesmo que o evento mude depois.
  *
  *   organizerNetReversed — orgNet que o organizador DEIXA de receber (venda revertida).
- *   refundFee            — taxa de refund (2%) DEBITADA do saldo. Vale para refund E chargeback.
+ *   refundFee            — taxa de refund DEBITADA do saldo. Vale para refund E chargeback.
+ *
+ * @param refundFeeRate — taxa de estorno do EVENTO (fração 0–1). Default: REFUND_FEE_RATE
+ *   (fallback para chamadas legadas sem a taxa). Só é usada quando NÃO há valor congelado.
  */
 export function computeRefundImpact(
   order: any,
   organizerFeePercent: number,
+  refundFeeRate: number = REFUND_FEE_RATE,
 ): { subtotal: number; organizerNetReversed: number; refundFee: number } {
   const meta = (order.payment?.metadata ?? {}) as any;
   const subtotal = Math.max(0, (order.finalAmount ?? 0) - (order.serviceFee ?? 0));
@@ -62,11 +67,13 @@ export function computeRefundImpact(
       ? meta.organizerNetReversed
       : Math.round(subtotal * (1 - effectivePercent / 100));
 
-  // 2% sobre o subtotal em qualquer estorno. Usa o valor congelado se houver, senão recalcula.
+  // Taxa de estorno sobre o subtotal. Prioriza o valor CONGELADO no estorno (verdade
+  // histórica); senão recalcula com a taxa do evento (fallback à constante p/ legado).
+  const rate = Number.isFinite(refundFeeRate) ? refundFeeRate : REFUND_FEE_RATE;
   const refundFee =
     typeof meta.refundFee === 'number'
       ? meta.refundFee
-      : Math.round(subtotal * REFUND_FEE_RATE);
+      : Math.round(subtotal * rate);
 
   return { subtotal, organizerNetReversed, refundFee };
 }
