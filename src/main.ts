@@ -259,11 +259,8 @@ async function bootstrap() {
   }
 
   app.use('/api/v1/upload', bodyParser.raw({ limit: '200mb' }));
-  app.use(
-    new ConcurrencyLimiterMiddleware().use.bind(
-      new ConcurrencyLimiterMiddleware(),
-    ),
-  );
+  const concurrencyLimiter = new ConcurrencyLimiterMiddleware();
+  app.use(concurrencyLimiter.use.bind(concurrencyLimiter));
 
   app.use(
     new SSRFProtectionMiddleware().use.bind(new SSRFProtectionMiddleware()),
