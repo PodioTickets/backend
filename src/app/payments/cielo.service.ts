@@ -322,7 +322,8 @@ export class CieloService {
 
           paymentData.Type = 'DebitCard';
           paymentData.Installments = 1;
-          paymentData.Provider = this.provider;
+          // Provider: sandbox -> simulador; produção -> 'Cielo30' (igual crédito/PIX, não lê do .env).
+          paymentData.Provider = this.isSandbox ? 'Simulado' : 'Cielo30';
 
           {
             const debitBrand = this.detectCardBrand(cardData.number);
@@ -445,15 +446,20 @@ export class CieloService {
         }),
       });
 
-      // Log do request body completo (mascarando dados sensíveis apenas para cartão)
-      const maskedRequestBody = { ...requestBody };
+      // Log do request body completo (mascarando dados sensíveis apenas para cartão).
+      //
+      // BUGFIX CRÍTICO: `{ ...requestBody }` é shallow copy — o objeto aninhado
+      // `Payment` (e `Payment.CreditCard`) era COMPARTILHADO com o requestBody real.
+      // Mutar `maskedRequestBody.Payment.CreditCard` mascarava o número NO PAYLOAD
+      // ENVIADO À CIELO, que recebia "4066****1799" e rejeitava (ProviderReturnCode
+      // 001: "não é facet-valid com o pattern [0-9]"). Deep clone resolve.
+      const maskedRequestBody = JSON.parse(JSON.stringify(requestBody));
       if (maskedRequestBody.Payment?.CreditCard) {
         const card = maskedRequestBody.Payment.CreditCard;
-        maskedRequestBody.Payment.CreditCard = {
-          ...card,
-          CardNumber: card.CardNumber?.substring(0, 4) + '****' + card.CardNumber?.substring(card.CardNumber.length - 4),
-          SecurityCode: requestBody.Payment.CreditCard.SecurityCode,
-        };
+        if (card.CardNumber) {
+          card.CardNumber =
+            card.CardNumber.substring(0, 4) + '****' + card.CardNumber.substring(card.CardNumber.length - 4);
+        }
       }
       this.logger.debug('Request body (masked):', JSON.stringify(maskedRequestBody, null, 2));
 

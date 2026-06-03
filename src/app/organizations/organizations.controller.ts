@@ -139,7 +139,12 @@ export class OrganizationsController {
       throw new Error('Organizer not found');
     }
 
-    return this.organizationsService.updateOrganization(req.user.id, member.organizationId, updateDto);
+    // Contatos da organização (email/whatsapp/phone) NÃO podem ser alterados pelo
+    // organizador — só pelo admin (PATCH /admin/organizations/:id). Remove do payload
+    // antes do update, fechando o bypass via request forjado (UI já bloqueia os inputs).
+    const { email: _email, whatsapp: _whatsapp, phone: _phone, ...safeDto } = updateDto;
+
+    return this.organizationsService.updateOrganization(req.user.id, member.organizationId, safeDto);
   }
 
   @Patch('me/logo')
