@@ -33,6 +33,11 @@ import {
   computeAgeEligibleSlots,
   computeCouponCoveredUnits,
 } from '../../common/utils/coupon-eligibility.util';
+import { claimVoucher, releaseVoucherByOrder } from '../../common/utils/voucher-reservation.util';
+
+// Fallback de expiração da reserva de voucher quando o pedido (excepcionalmente) não tem
+// `expiresAt` — mantém a rede de segurança da reserva sem prendê-la para sempre.
+const VOUCHER_RESERVATION_FALLBACK_MS = 30 * 60 * 1000; // 30 min
 
 // Re-export dos helpers de elegibilidade (movidos p/ util neutro reusado pelo finalize sem
 // criar ciclo de módulo) — mantém os imports/specs que os consomem a partir deste arquivo.
@@ -2248,6 +2253,14 @@ export class OrdersService {
           // (espelha o cupom). Voucher isolado aqui → sem risco de double-count.
           discount = cov.discount + (voucherByCode.applyToProducts ? productsSubtotal : 0);
           voucherId = voucherByCode.id;
+          // Reserva de uso único: claim atômico antes de persistir. Indisponível (já reservado
+          // por outro pedido ativo) → rejeição SUAVE (cai no catch → couponRejected).
+          if (!(await this.reserveVoucherForOrder(w, order, voucherId))) {
+            throw new AppUnprocessableException(
+              'VOUCHER_UNAVAILABLE',
+              'Este voucher já está sendo usado em outro pedido.',
+            );
+          }
           const finalAmountV = Math.max(0, order.totalAmount - discount);
           const updatedV = await w.order.update({
             where: { id: orderId },
@@ -2392,6 +2405,16 @@ export class OrdersService {
       couponId = null;
       voucherId = null;
       discount = 0;
+    }
+
+    // Reserva de uso único do voucher: claim do novo (se houver) + liberação do anterior em
+    // troca/remoção/aplicação de cupom. `voucherId` null aqui já libera a reserva deste pedido.
+    // Indisponível → rejeição SUAVE (cai no catch → couponRejected).
+    if (!(await this.reserveVoucherForOrder(w, order, voucherId))) {
+      throw new AppUnprocessableException(
+        'VOUCHER_UNAVAILABLE',
+        'Este voucher já está sendo usado em outro pedido.',
+      );
     }
 
     const finalAmount = Math.max(0, order.totalAmount - discount);
@@ -2906,8 +2929,18 @@ export class OrdersService {
             }
             voucherDiscount = cov.discount + voucherProductsExtra;
           }
-          voucherId = voucher.id;
-          voucherAppliedToProducts = voucher.applyToProducts;
+          // Reserva de uso único: claim ATÔMICO ANTES de cobrar (o bloco do voucher roda antes
+          // da chamada à Cielo). Se o voucher já está reservado por outro pedido ativo, NÃO
+          // aplicamos o desconto — espelha o recheck de status logo acima e evita cobrar/finalizar
+          // com um voucher indisponível (o consumo no finalize abortaria a tx pós-captura).
+          const voucherReservedUntil =
+            (order.expiresAt as Date | null) ?? new Date(Date.now() + VOUCHER_RESERVATION_FALLBACK_MS);
+          if (await claimVoucher(w, voucher.id, orderId, voucherReservedUntil)) {
+            voucherId = voucher.id;
+            voucherAppliedToProducts = voucher.applyToProducts;
+          } else {
+            voucherDiscount = 0;
+          }
         }
       }
     }
@@ -3640,6 +3673,8 @@ export class OrdersService {
               where: { orderId: order.id, status: 'PENDING' },
               data: { status: 'CANCELLED' },
             });
+            // Libera a reserva de voucher (carrinho abandonado): volta o voucher pra disponível.
+            await releaseVoucherByOrder(tx, order.id);
           });
           cancelled++;
           this.logger.debug(`Cancelled expired order ${order.id}`);
@@ -3655,6 +3690,9 @@ export class OrdersService {
               WHERE id = ${rt.batchId}::uuid
             `;
           }
+          // `reservedByOrderId` não é FK (sem cascade) → libera ANTES de deletar o pedido,
+          // senão o voucher ficaria preso à reserva de um pedido inexistente até `reservedUntil`.
+          await releaseVoucherByOrder(tx, order.id);
           await tx.order.delete({ where: { id: order.id } });
         });
         cancelled++;
@@ -3713,6 +3751,31 @@ export class OrdersService {
     }
   }
 
+  /**
+   * Reserva (claim ATÔMICO) o voucher `newVoucherId` para o pedido, liberando antes qualquer
+   * reserva anterior que ESTE pedido mantivesse num voucher DIFERENTE (troca/remoção). Garante
+   * uso único: enquanto um pedido ativo detém a reserva, o mesmo voucher não pode ser aplicado a
+   * outro pedido. Retorna `false` quando o voucher já está reservado por outro pedido ativo —
+   * o caller decide a rejeição (suave no patchCoupon; "não aplica" no pay).
+   *
+   * `newVoucherId` null = sem voucher (só assegura a liberação da reserva anterior → retorna true).
+   * `reservedUntil` = `order.expiresAt` (rede de segurança: reserva vencida é tratada como livre).
+   */
+  private async reserveVoucherForOrder(
+    client: any,
+    order: any,
+    newVoucherId: string | null,
+  ): Promise<boolean> {
+    const oldVoucherId = (order.voucherId as string | null) ?? null;
+    if (oldVoucherId && oldVoucherId !== newVoucherId) {
+      await releaseVoucherByOrder(client, order.id);
+    }
+    if (!newVoucherId) return true;
+    const reservedUntil =
+      (order.expiresAt as Date | null) ?? new Date(Date.now() + VOUCHER_RESERVATION_FALLBACK_MS);
+    return claimVoucher(client, newVoucherId, order.id, reservedUntil);
+  }
+
   private async cancelOrderAndRestoreStock(
     orderId: string,
     reason: string,
@@ -3750,6 +3813,8 @@ export class OrdersService {
           where: { orderId, status: 'PENDING' },
           data: { status: 'CANCELLED' },
         });
+        // Libera a reserva de voucher do pedido cancelado → volta disponível pra outro pedido.
+        await releaseVoucherByOrder(tx, orderId);
       });
     }
   }

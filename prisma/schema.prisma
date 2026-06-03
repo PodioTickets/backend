@@ -918,6 +918,13 @@ model Voucher {
   applyToProducts Boolean       @default(false) // Espelha Coupon.applyToProducts: o ingresso grátis cobre também os produtos adicionais (kits/extras) do pedido
   usedAt          DateTime? // Data em que foi usado
   usedBy          String?       @db.Uuid // ID do usuário que usou
+  // Reserva de uso único: enquanto um pedido ATIVO (PENDING) detém o voucher, ele fica
+  // "claimed" por aquele pedido. Impede que o MESMO voucher seja aplicado a dois pedidos ao
+  // mesmo tempo (o furo de double-use). O status permanece ACTIVE durante a reserva — a
+  // exclusividade é dada por estes campos + claim atômico. `reservedUntil` (= order.expiresAt)
+  // é rede de segurança: reserva vencida é tratada como livre, mesmo se algum release falhar.
+  reservedByOrderId String?     @db.Uuid // Pedido que detém a reserva agora (null = livre)
+  reservedUntil     DateTime? // Expiração da reserva (auto-libera carrinho abandonado)
   deletedAt       DateTime? // Soft delete — grupo removido quando há vendas
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
@@ -932,6 +939,7 @@ model Voucher {
   @@index([eventId, status])
   @@index([deletedAt])
   @@index([code, status]) // Para busca rápida por código e status
+  @@index([reservedByOrderId]) // Release rápido por pedido (cancel/expire)
 }
 
 model TicketCategory {

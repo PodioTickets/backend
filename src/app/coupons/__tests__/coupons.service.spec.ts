@@ -30,7 +30,8 @@ describe('CouponsService.previewByCode', () => {
   const past = new Date('2000-01-01');
   const baseCoupon = (over: any = {}) => ({
     code: 'OFF50', value: 50, type: 'PERCENTAGE', couponType: 'DISCOUNT',
-    applyToProducts: false, status: 'ACTIVE', expiryDate: null, deletedAt: null, ...over,
+    applyToProducts: false, appliesTo: 'all', minCartValue: null, minQuantity: null,
+    status: 'ACTIVE', expiryDate: null, deletedAt: null, ...over,
   });
   const baseVoucher = (over: any = {}) => ({
     code: 'CORTESIA', appliesTo: '["t1","t2"]', status: 'ACTIVE',
@@ -45,12 +46,21 @@ describe('CouponsService.previewByCode', () => {
   });
   afterEach(() => jest.clearAllMocks());
 
-  it('CUPOM DISCOUNT → kind=coupon com couponType/type/value/applyToProducts', async () => {
+  it('CUPOM DISCOUNT → kind=coupon com couponType/type/value/applyToProducts + escopo/condições', async () => {
     setup({ coupon: baseCoupon() });
     const res = await service.previewByCode('evt-1', 'off50');
     expect(res.data).toEqual({
-      kind: 'coupon', code: 'OFF50', couponType: 'DISCOUNT', type: 'PERCENTAGE', value: 50, applyToProducts: false,
+      kind: 'coupon', code: 'OFF50', couponType: 'DISCOUNT', type: 'PERCENTAGE', value: 50,
+      applyToProducts: false, appliesTo: 'all', minCartValue: null, minQuantity: null,
     });
+  });
+
+  it('CUPOM com appliesTo (lista) + condições → retorna ingressos cobertos + minCartValue/minQuantity', async () => {
+    setup({ coupon: baseCoupon({ appliesTo: '["tk-A","tk-B"]', minCartValue: 5000, minQuantity: 2 }) });
+    const res: any = await service.previewByCode('evt-1', 'OFF50');
+    expect(res.data.appliesTo).toEqual(['tk-A', 'tk-B']); // normalizado de JSON string → array
+    expect(res.data.minCartValue).toBe(5000);
+    expect(res.data.minQuantity).toBe(2);
   });
 
   it('CUPOM QUANTITY → também previewável (kind=coupon)', async () => {

@@ -106,7 +106,11 @@
       "Bash(docker version *)",
       "Bash(docker compose *)",
       "Bash(awk '/^model \\(User|Organization|OrganizationMember|Event|TicketCategory|Ticket\\) \\\\{/{f=1} f{print} /^\\\\}/{if\\(f\\)print \"----\"; f=0}' prisma/schema.prisma)",
-      "Bash(grep -vE \"^\\\\s*//|@@|@relation|@updatedAt\")"
+      "Bash(grep -vE \"^\\\\s*//|@@|@relation|@updatedAt\")",
+      "Bash(tasklist)",
+      "Bash(awk 'NR>=2620 && NR<=2760 && \\(/const w\\\\b/ || /const w:/ || /const r\\\\b/ || /const r:/ || /getWriteClient/ || /getReadClient/ || /order.expiresAt/ || /order = await/\\)' src/app/orders/orders.service.ts)",
+      "Bash(awk 'NR>=2610 && NR<=2640 && \\(/async pay/ || /orderId/\\)' src/app/orders/orders.service.ts)",
+      "Bash(grep -n 'lista de documento por participante\\\\|aplica PROVISORIAMENTE\\\\|cai no participante elegível\\\\|$queryRaw\\\\|function build\\\\|const build\\\\|buildClient\\\\|=> {' src/app/orders/__tests__/orders.service.spec.ts)"
     ]
   }
 }
