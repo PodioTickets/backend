@@ -110,7 +110,11 @@ export class RepasseService {
           select: {
             name: true,
             email: true,
-            pix: true,
+            // `pix` NÃO existe na Organization (só a relação `pixKeys`). Selecionar
+            // campo inexistente fazia o Prisma lançar PrismaClientValidationError →
+            // `loadEventWithOrg` rejeitava → `.then()` não rodava e NENHUM email de
+            // repasse (solicitado/confirmado) era enviado. A chave PIX do e-mail vem
+            // do `pixKeySnapshot` do saque via `resolvePixDestination`.
             bankName: true,
             account: true,
           },
