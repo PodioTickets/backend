@@ -392,9 +392,18 @@ export class VouchersService {
       throw new NotFoundException('Voucher not found');
     }
 
-    // Não permitir atualizar vouchers que já foram utilizados
-    if (voucher.status === VoucherStatus.USED) {
-      throw new BadRequestException('Não é possível editar um voucher já utilizado');
+    // Vouchers USED são imutáveis individualmente. Mas editar a CONFIG DO LOTE através de um
+    // voucher já usado É permitido: não tocamos na linha usada (congelada) e aplicamos os campos
+    // de grupo aos vouchers ACTIVE do lote (a propagação abaixo já exclui os USED). Só barramos
+    // se NÃO houver nenhum voucher editável — aí não há o que alterar.
+    const isUsedTarget = voucher.status === VoucherStatus.USED;
+    if (isUsedTarget) {
+      const editableSiblings = await prismaWrite.voucher.count({
+        where: { eventId, name: voucher.name, deletedAt: null, status: { not: VoucherStatus.USED } },
+      });
+      if (editableSiblings === 0) {
+        throw new BadRequestException('Todos os vouchers deste lote já foram utilizados — não há o que editar.');
+      }
     }
 
     // Validar campos específicos
@@ -441,10 +450,15 @@ export class VouchersService {
     }
     updateData.status = status;
 
-    const updatedVoucher = await prismaWrite.voucher.update({
-      where: { id: voucherId },
-      data: updateData,
-    });
+    // A linha do voucher só é atualizada quando o alvo é editável (ACTIVE/EXPIRED/INACTIVE).
+    // Se o alvo está USED, ele permanece congelado e só a config de grupo é propagada abaixo.
+    let updatedVoucher = voucher;
+    if (!isUsedTarget) {
+      updatedVoucher = await prismaWrite.voucher.update({
+        where: { id: voucherId },
+        data: updateData,
+      });
+    }
 
     // Propagar configurações de grupo para todos os outros vouchers do mesmo lote.
     // cpfList, cpfListStatus, appliesTo e expiryDate são atributos do grupo inteiro —
@@ -476,10 +490,21 @@ export class VouchersService {
       });
     }
 
+    // Resposta: se o alvo estava USED, devolve um voucher ACTIVE do lote (já com a config nova
+    // propagada) — o alvo usado seguiu congelado e não representaria a config atualizada.
+    let representative = updatedVoucher;
+    if (isUsedTarget) {
+      const sibling = await prismaWrite.voucher.findFirst({
+        where: { eventId, name: voucher.name, deletedAt: null, status: { not: VoucherStatus.USED } },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (sibling) representative = sibling;
+    }
+
     // Converter appliesTo de JSON string para array quando necessário
     const transformedVoucher = {
-      ...updatedVoucher,
-      appliesTo: this.parseAppliesTo(updatedVoucher.appliesTo),
+      ...representative,
+      appliesTo: this.parseAppliesTo(representative.appliesTo),
     };
 
     return {
