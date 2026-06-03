@@ -8,6 +8,7 @@ import {
 import { Observable } from 'rxjs';
 import { tap } from 'rxjs/operators';
 import { Request } from 'express';
+import { getClientIp } from '../utils/client-ip.util';
 
 export enum SecurityEventType {
   CONTRACT_INTERACTION = 'contract_interaction',
@@ -82,7 +83,7 @@ export class SecurityLoggingInterceptor implements NestInterceptor {
       severity,
       metadata,
       requestInfo: request ? {
-        ip: request.ip || request.connection?.remoteAddress,
+        ip: getClientIp(request) || request.connection?.remoteAddress,
         userAgent: request.headers['user-agent'],
         origin: request.headers.origin,
         referer: request.headers.referer,

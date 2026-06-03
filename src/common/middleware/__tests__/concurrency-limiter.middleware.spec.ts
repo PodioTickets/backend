@@ -53,7 +53,17 @@ describe('ConcurrencyLimiterMiddleware (identificador por usuário/IP)', () => {
   });
 
   beforeEach(() => {
+    // Fake timers: o caminho in-memory agenda um setTimeout(30s) de auto-release por request.
+    // Sem isso, requests que não disparam `res.finish()` (ex.: a barrada com 429) deixariam o
+    // timer real pendente → open handle no Jest. Não avançamos o relógio: o release é controlado
+    // pelo `res.finish()` nos testes que precisam dele.
+    jest.useFakeTimers();
     mw = new ConcurrencyLimiterMiddleware(); // sem Redis → caminho in-memory
+  });
+
+  afterEach(() => {
+    jest.clearAllTimers();
+    jest.useRealTimers();
   });
 
   const tokenFor = (sub: string) => `Bearer ${jwt.sign({ sub })}`;
