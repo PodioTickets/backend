@@ -14,8 +14,14 @@ import { getClientIp } from '../utils/client-ip.util';
 export class ConcurrencyLimiterMiddleware implements NestMiddleware {
   private readonly logger = new Logger(ConcurrencyLimiterMiddleware.name);
   private readonly activeRequests = new Map<string, number>();
-  private readonly maxConcurrentRequests =
-    process.env.NODE_ENV === 'production' ? 50 : 1;
+  // Teto de requisições não-GET SIMULTÂNEAS por identificador (usuário/IP).
+  // Default 50 em TODOS os ambientes (não distingue mais dev/homolog/prod — o antigo
+  // `production ? 50 : 1` tratava homolog como dev → teto 1 → 429 em quase todo POST).
+  // Configurável via `MAX_CONCURRENT_REQUESTS` (ops ajusta sem deploy, se um dia precisar).
+  private readonly maxConcurrentRequests = (() => {
+    const fromEnv = parseInt(process.env.MAX_CONCURRENT_REQUESTS ?? '', 10);
+    return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 50;
+  })();
   private readonly requestTimeout = 30000;
   private readonly redisKeyTtlSeconds = 120;
   // Verificador de JWT para BUCKETAR o limite por USUÁRIO autenticado (não por IP).

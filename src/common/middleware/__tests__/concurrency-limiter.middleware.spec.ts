@@ -19,7 +19,8 @@
  *    • Ao terminar a requisição, o "slot" é liberado e a próxima passa.
  *    • GET/HEAD/OPTIONS não contam (passam direto).
  *
- *  Em ambiente de teste o limite é 1 (produção = 50), o que facilita exercitar o estouro.
+ *  Aqui fixamos o teto em 1 via MAX_CONCURRENT_REQUESTS=1 (default real: dev local=1, resto=50),
+ *  o que facilita exercitar o estouro (429) — e de quebra cobre o override por env.
  * ============================================================================
  */
 import { JwtService } from '@nestjs/jwt';
@@ -49,7 +50,12 @@ describe('ConcurrencyLimiterMiddleware (identificador por usuário/IP)', () => {
 
   beforeAll(() => {
     process.env.JWT_SECRET = SECRET; // lido no construtor do middleware
+    process.env.MAX_CONCURRENT_REQUESTS = '1'; // teto 1 facilita exercitar o estouro (429)
     jwt = new JwtService({ secret: SECRET });
+  });
+
+  afterAll(() => {
+    delete process.env.MAX_CONCURRENT_REQUESTS;
   });
 
   beforeEach(() => {
