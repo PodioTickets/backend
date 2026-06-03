@@ -8,7 +8,7 @@ import { AuthModule } from './app/auth/auth.module';
 import { ResponseCompressionInterceptor } from './common/interceptors/response-compression.interceptor';
 import { ScheduleModule } from '@nestjs/schedule';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
-import { ThrottlerGuard } from '@nestjs/throttler';
+import { IpThrottlerGuard } from './common/guards/ip-throttler.guard';
 import { ConfigModule } from '@nestjs/config';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { CommonModule } from './common/common.module';
@@ -77,7 +77,7 @@ import { GeoModule } from './app/geo/geo.module';
     PerformanceMonitoringMiddleware,
     ResponseCompressionInterceptor,
     CdnService,
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: IpThrottlerGuard },
     // HttpCacheInterceptor REMOVIDO (2026-05-31): não cacheamos resposta de NENHUMA rota GET
     // server-side. O cache-manager (CacheModule) continua para auth (rate-limit/MFA/reset) e os
     // caches internos de domínio usam CacheRedisService. Toda resposta sai fresca + `no-store`
