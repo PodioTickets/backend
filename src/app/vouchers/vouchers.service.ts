@@ -104,6 +104,12 @@ export class VouchersService {
     // Quando statusFilter é passado, filtra os vouchers antes do GROUP BY (semântica
     // mantida do código anterior: groups sem voucher daquele status não aparecem,
     // e contagens de outros statuses ficam zeradas — comportamento legado).
+    //
+    // REPRESENTANTE DO GRUPO: vouchers USED são congelados (imutáveis p/ auditoria) e
+    // NÃO recebem a propagação de edições do lote. Se a config viesse do voucher mais
+    // antigo e ele já tivesse sido usado, o grupo exibiria a config ANTIGA pra sempre.
+    // Por isso a config/representante vem do voucher mais antigo NÃO-usado (boolean
+    // ordena false < true); fallback: o mais antigo, quando todos já foram usados.
     type GroupRow = {
       name: string;
       representativeId: string;
@@ -131,13 +137,13 @@ export class VouchersService {
       prismaRead.$queryRaw<GroupRow[]>(Prisma.sql`
         SELECT
           name,
-          (array_agg(id ORDER BY "createdAt" ASC))[1]::text       AS "representativeId",
+          (array_agg(id ORDER BY (status::text = 'USED') ASC, "createdAt" ASC))[1]::text       AS "representativeId",
           "eventId",
-          (array_agg("appliesTo" ORDER BY "createdAt" ASC))[1]    AS "appliesTo",
-          (array_agg("expiryDate" ORDER BY "createdAt" ASC))[1]   AS "expiryDate",
-          (array_agg("cpfListStatus" ORDER BY "createdAt" ASC))[1]::text AS "cpfListStatus",
-          (array_agg("cpfList" ORDER BY "createdAt" ASC))[1]      AS "cpfList",
-          bool_or("applyToProducts")                              AS "applyToProducts",
+          (array_agg("appliesTo" ORDER BY (status::text = 'USED') ASC, "createdAt" ASC))[1]    AS "appliesTo",
+          (array_agg("expiryDate" ORDER BY (status::text = 'USED') ASC, "createdAt" ASC))[1]   AS "expiryDate",
+          (array_agg("cpfListStatus" ORDER BY (status::text = 'USED') ASC, "createdAt" ASC))[1]::text AS "cpfListStatus",
+          (array_agg("cpfList" ORDER BY (status::text = 'USED') ASC, "createdAt" ASC))[1]      AS "cpfList",
+          (array_agg("applyToProducts" ORDER BY (status::text = 'USED') ASC, "createdAt" ASC))[1] AS "applyToProducts",
           COUNT(*)::int                                           AS "totalCount",
           COUNT(*) FILTER (WHERE status::text = 'ACTIVE')::int    AS "activeCount",
           COUNT(*) FILTER (WHERE status::text = 'USED')::int      AS "usedCount",
@@ -226,7 +232,11 @@ export class VouchersService {
     ]);
 
     const now = new Date();
-    const firstVoucher = allGroupVouchers[0];
+    // Config do grupo vem do voucher mais antigo NÃO-usado: vouchers USED são congelados
+    // (não recebem propagação de edições do lote) — usar um deles como referência exibiria
+    // a config antiga pra sempre. Fallback: o mais antigo, quando todos já foram usados.
+    const firstVoucher =
+      allGroupVouchers.find((v) => v.status !== 'USED') ?? allGroupVouchers[0];
     const groupExpiryDate = firstVoucher?.expiryDate ?? null;
 
     // Estatísticas do grupo completo (independente do filtro de status)
@@ -392,9 +402,18 @@ export class VouchersService {
       throw new NotFoundException('Voucher not found');
     }
 
-    // Não permitir atualizar vouchers que já foram utilizados
-    if (voucher.status === VoucherStatus.USED) {
-      throw new BadRequestException('Não é possível editar um voucher já utilizado');
+    // Vouchers USED são imutáveis individualmente. Mas editar a CONFIG DO LOTE através de um
+    // voucher já usado É permitido: não tocamos na linha usada (congelada) e aplicamos os campos
+    // de grupo aos vouchers ACTIVE do lote (a propagação abaixo já exclui os USED). Só barramos
+    // se NÃO houver nenhum voucher editável — aí não há o que alterar.
+    const isUsedTarget = voucher.status === VoucherStatus.USED;
+    if (isUsedTarget) {
+      const editableSiblings = await prismaWrite.voucher.count({
+        where: { eventId, name: voucher.name, deletedAt: null, status: { not: VoucherStatus.USED } },
+      });
+      if (editableSiblings === 0) {
+        throw new BadRequestException('Todos os vouchers deste lote já foram utilizados — não há o que editar.');
+      }
     }
 
     // Validar campos específicos
@@ -441,10 +460,15 @@ export class VouchersService {
     }
     updateData.status = status;
 
-    const updatedVoucher = await prismaWrite.voucher.update({
-      where: { id: voucherId },
-      data: updateData,
-    });
+    // A linha do voucher só é atualizada quando o alvo é editável (ACTIVE/EXPIRED/INACTIVE).
+    // Se o alvo está USED, ele permanece congelado e só a config de grupo é propagada abaixo.
+    let updatedVoucher = voucher;
+    if (!isUsedTarget) {
+      updatedVoucher = await prismaWrite.voucher.update({
+        where: { id: voucherId },
+        data: updateData,
+      });
+    }
 
     // Propagar configurações de grupo para todos os outros vouchers do mesmo lote.
     // cpfList, cpfListStatus, appliesTo e expiryDate são atributos do grupo inteiro —
@@ -476,10 +500,21 @@ export class VouchersService {
       });
     }
 
+    // Resposta: se o alvo estava USED, devolve um voucher ACTIVE do lote (já com a config nova
+    // propagada) — o alvo usado seguiu congelado e não representaria a config atualizada.
+    let representative = updatedVoucher;
+    if (isUsedTarget) {
+      const sibling = await prismaWrite.voucher.findFirst({
+        where: { eventId, name: voucher.name, deletedAt: null, status: { not: VoucherStatus.USED } },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (sibling) representative = sibling;
+    }
+
     // Converter appliesTo de JSON string para array quando necessário
     const transformedVoucher = {
-      ...updatedVoucher,
-      appliesTo: this.parseAppliesTo(updatedVoucher.appliesTo),
+      ...representative,
+      appliesTo: this.parseAppliesTo(representative.appliesTo),
     };
 
     return {

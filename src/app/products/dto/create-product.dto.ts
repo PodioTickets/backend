@@ -13,7 +13,7 @@ import {
   IsInt,
   IsUUID,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Type, Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class ProductVariationDto {
@@ -255,4 +255,21 @@ export class FilterProductsDto {
   @Min(1)
   @Type(() => Number)
   limit?: number;
+
+  /**
+   * Código de voucher do link de checkout (?voucher=CODE). Quando presente, o service valida
+   * o voucher ANTES de listar — voucher já utilizado/expirado/inexistente devolve erro tipado
+   * amigável (422) em vez do 400 genérico de whitelist. String vazia é tratada como ausente.
+   */
+  @IsOptional()
+  @Transform(({ value }) =>
+    typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined,
+  )
+  @IsString()
+  @MaxLength(64)
+  @ApiPropertyOptional({
+    description: 'Voucher code from the checkout link. Validated before listing products.',
+    example: 'FVFJ0MAO',
+  })
+  voucher?: string;
 }

@@ -156,8 +156,9 @@ describe('OrdersService', () => {
       it('restores stock for each reserved ticket before deleting', async () => {
         await service.cancelExpiredOrders();
 
+        // +1: liberação da reserva de voucher (releaseVoucherByOrder) antes do delete.
         expect(writeClient._tx.$executeRaw).toHaveBeenCalledTimes(
-          reservedTickets.length,
+          reservedTickets.length + 1,
         );
       });
 
@@ -199,8 +200,9 @@ describe('OrdersService', () => {
         await service.cancelExpiredOrders();
 
         expect(writeClient.$transaction).toHaveBeenCalledTimes(1);
+        // +1: liberação da reserva de voucher (releaseVoucherByOrder) dentro da tx.
         expect(writeClient._tx.$executeRaw).toHaveBeenCalledTimes(
-          reservedTickets.length,
+          reservedTickets.length + 1,
         );
         expect(writeClient._tx.registration.updateMany).toHaveBeenCalledWith({
           where: { orderId: order.id, status: 'PENDING' },
@@ -546,6 +548,9 @@ describe('OrdersService', () => {
           findFirst: jest.fn().mockResolvedValue(coupon),
           findUnique: jest.fn().mockResolvedValue(coupon),
         },
+        // claimVoucher (reserva de uso único) faz UPDATE ... RETURNING id: 1 linha = claim OK.
+        $queryRaw: jest.fn().mockResolvedValue([{ id: voucher?.id ?? 'voucher' }]),
+        $executeRaw: jest.fn().mockResolvedValue(1),
         $transaction: jest.fn().mockImplementation((fn: any) => fn(client)),
         _captured: captured,
       };

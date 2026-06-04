@@ -5,6 +5,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { resolveDocument } from '../../common/utils/document.util';
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
 import { computeCouponCoveredUnits } from '../../common/utils/coupon-eligibility.util';
+import { tryConsumeVoucher } from '../../common/utils/voucher-reservation.util';
 
 /**
  * Finalize compartilhado de pedido PAGO — fonte ÚNICA de verdade.
@@ -125,9 +126,17 @@ export class OrderFinalizationService {
     }
 
     if (order.voucherId) {
+      // Libera USED→ACTIVE e zera a reserva — o voucher volta totalmente disponível.
       await tx.voucher.updateMany({
         where: { id: order.voucherId, status: 'USED', usedBy: order.userId },
-        data: { status: 'ACTIVE', usedAt: null, usedBy: null, updatedAt: new Date() },
+        data: {
+          status: 'ACTIVE',
+          usedAt: null,
+          usedBy: null,
+          reservedByOrderId: null,
+          reservedUntil: null,
+          updatedAt: new Date(),
+        },
       });
     }
   }
@@ -246,15 +255,21 @@ export class OrderFinalizationService {
       }
     }
 
-    // ── Marcar voucher como usado — atômico ACTIVE → USED (evita sobrescrita em corrida) ──
+    // ── Consumir voucher — atômico ACTIVE → USED, ESCOPADO à reserva deste pedido ──
+    // Uso único de verdade: o voucher só é consumido se ESTE pedido detinha a reserva (ou se
+    // estava livre — caso de pedido legado anterior à reserva). Se outro pedido já o consumiu,
+    // `tryConsumeVoucher` retorna false e ABORTAMOS o finalize (throw → rollback da tx), em vez
+    // de conceder o ingresso grátis duas vezes (o comportamento antigo apenas logava e seguia).
+    // Para PIX/webhook/R$0 concorrentes, isso fecha o furo de double-use no momento decisivo.
     if (order.voucherId) {
-      const voucherResult = await tx.voucher.updateMany({
-        where: { id: order.voucherId, status: 'ACTIVE' },
-        data: { status: 'USED', usedAt: new Date(), usedBy: userId },
-      });
-      if (voucherResult.count === 0) {
+      const consumed = await tryConsumeVoucher(tx, order.voucherId, orderId, userId);
+      if (!consumed) {
+        // Pagamento já capturado mas voucher indisponível → o caller deve estornar.
         this.logger.error(
-          `[VOUCHER-RACE] finalize: voucher ${order.voucherId} já estava USED para order ${orderId} — requer estorno manual`,
+          `[VOUCHER-DOUBLE-USE] finalize abortado: voucher ${order.voucherId} já consumido por outro pedido (order ${orderId}) — pagamento requer estorno`,
+        );
+        throw new BadRequestException(
+          'Este voucher já foi utilizado em outro pedido e não pode ser aplicado novamente.',
         );
       }
     }

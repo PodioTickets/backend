@@ -4,18 +4,32 @@ import {
   Logger,
   Optional,
 } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
 import { Request, Response, NextFunction } from 'express';
 import * as crypto from 'crypto';
 import { ConcurrencyRedisService } from '../services/concurrency-redis.service';
+import { getClientIp } from '../utils/client-ip.util';
 
 @Injectable()
 export class ConcurrencyLimiterMiddleware implements NestMiddleware {
   private readonly logger = new Logger(ConcurrencyLimiterMiddleware.name);
   private readonly activeRequests = new Map<string, number>();
-  private readonly maxConcurrentRequests =
-    process.env.NODE_ENV === 'production' ? 5 : 1;
+  // Teto de requisições não-GET SIMULTÂNEAS por identificador (usuário/IP).
+  // Default 50 em TODOS os ambientes (não distingue mais dev/homolog/prod — o antigo
+  // `production ? 50 : 1` tratava homolog como dev → teto 1 → 429 em quase todo POST).
+  // Configurável via `MAX_CONCURRENT_REQUESTS` (ops ajusta sem deploy, se um dia precisar).
+  private readonly maxConcurrentRequests = (() => {
+    const fromEnv = parseInt(process.env.MAX_CONCURRENT_REQUESTS ?? '', 10);
+    return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 50;
+  })();
   private readonly requestTimeout = 30000;
   private readonly redisKeyTtlSeconds = 120;
+  // Verificador de JWT para BUCKETAR o limite por USUÁRIO autenticado (não por IP).
+  // Verifica assinatura + expiração com o mesmo JWT_SECRET — assim um token forjado NÃO
+  // consegue criar buckets novos para furar o limite (cairia no IP). Null se não houver segredo.
+  private readonly jwt: JwtService | null = process.env.JWT_SECRET
+    ? new JwtService({ secret: process.env.JWT_SECRET })
+    : null;
 
   constructor(
     @Optional()
@@ -100,6 +114,7 @@ export class ConcurrencyLimiterMiddleware implements NestMiddleware {
   }
 
   private getUserIdentifier(req: Request): string | null {
+    // 1) Telegram (mini-app): identidade forte vinda do init data.
     if (req['telegramUserId']) return `telegram:${req['telegramUserId']}`;
     const telegramInitData = req.headers['x-telegram-init-data'] as string;
     if (telegramInitData) {
@@ -113,13 +128,40 @@ export class ConcurrencyLimiterMiddleware implements NestMiddleware {
         );
       }
     }
-    const clientIp =
-      req.ip || (req.headers['x-forwarded-for'] as string) || 'unknown';
-    if (clientIp !== 'unknown') {
+
+    // 2) Usuário autenticado (JWT VERIFICADO) → bucket POR PESSOA. Evita que usuários
+    //    distintos atrás do mesmo proxy/NAT compartilhem o limite (e o checkout, todo
+    //    autenticado, deixa de colidir no IP do load balancer).
+    const jwtUserId = this.extractJwtUserId(req);
+    if (jwtUserId) return `user:${jwtUserId}`;
+
+    // 3) Anônimo → IP REAL do cliente. getClientIp prioriza x-forwarded-for (proxy/LB à
+    //    frente do Node); cai pra req.ip só quando não há XFF. Antes usava req.ip primeiro,
+    //    que atrás de proxy é o IP do LB → TODOS caíam no mesmo bucket (teto global de 5).
+    const clientIp = getClientIp(req);
+    if (clientIp) {
       const ipHash = crypto.createHash('sha256').update(clientIp).digest('hex');
       return `ip:${ipHash}`;
     }
     return null;
+  }
+
+  /**
+   * Extrai o `sub` (userId) de um Bearer JWT VÁLIDO. Verifica assinatura e expiração —
+   * token ausente/forjado/expirado retorna null (cai pro IP). Não lança.
+   */
+  private extractJwtUserId(req: Request): string | null {
+    if (!this.jwt) return null;
+    const auth = req.headers['authorization'];
+    if (typeof auth !== 'string' || !auth.startsWith('Bearer ')) return null;
+    const token = auth.slice(7).trim();
+    if (!token) return null;
+    try {
+      const payload = this.jwt.verify<{ sub?: string }>(token);
+      return payload?.sub ? String(payload.sub) : null;
+    } catch {
+      return null;
+    }
   }
 
   private extractUserIdFromInitData(initData: string): number | null {

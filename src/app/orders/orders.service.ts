@@ -33,6 +33,11 @@ import {
   computeAgeEligibleSlots,
   computeCouponCoveredUnits,
 } from '../../common/utils/coupon-eligibility.util';
+import { claimVoucher, releaseVoucherByOrder } from '../../common/utils/voucher-reservation.util';
+
+// Fallback de expiração da reserva de voucher quando o pedido (excepcionalmente) não tem
+// `expiresAt` — mantém a rede de segurança da reserva sem prendê-la para sempre.
+const VOUCHER_RESERVATION_FALLBACK_MS = 30 * 60 * 1000; // 30 min
 
 // Re-export dos helpers de elegibilidade (movidos p/ util neutro reusado pelo finalize sem
 // criar ciclo de módulo) — mantém os imports/specs que os consomem a partir deste arquivo.
@@ -132,7 +137,9 @@ const ORDER_INCLUDE = {
   // pagamento (Order.organizerFeePercent). eventDate é usado como referência para validar
   // cupons AGE — a idade do participante é calculada na data do evento, não na atual.
   // Nada disso é exposto no payload — orderShape retorna apenas eventId.
-  event: { select: { participantFeePercent: true, organizerFeePercent: true, eventDate: true } },
+  // acceptedPaymentMethods é a whitelist configurada na tela financeira do evento,
+  // validada no pay() antes de chamar o gateway.
+  event: { select: { participantFeePercent: true, organizerFeePercent: true, eventDate: true, acceptedPaymentMethods: true } },
 } as const;
 
 /**
@@ -304,11 +311,90 @@ export function computePartialCouponDiscount(
 
 /**
  * Subtotal (centavos) dos produtos adicionais no carrinho do pedido (PENDING).
- * Lê `order.pendingProducts` (Json) — formato `{ productId, variationId?, quantity, unitPrice }`.
+ * Lê `order.pendingProducts` (Json) — formato `{ productId, variationId?, quantity, unitPrice, participantEmail }`.
  */
 function computePendingProductsSubtotal(order: any): number {
   return ((order?.pendingProducts as any[] | null) ?? []).reduce(
     (s: number, p: any) => s + (p?.unitPrice ?? 0) * (p?.quantity ?? 1),
+    0,
+  );
+}
+
+/**
+ * Mapa `email(lowercase) → ticketId` do participante, pela convenção POSICIONAL de slots:
+ * expande `reservedTickets` por `quantity` e o participante do slot `i` recebe aquele `ticketId`.
+ * É EXATAMENTE a regra usada no finalize (`OrderFinalizationService`) para materializar qual
+ * ingresso cada participante levou — então o escopo de desconto aqui nunca diverge da venda.
+ * Slots vazios (participante sem email) são ignorados.
+ */
+export function buildParticipantTicketMap(reservedTickets: any[], participants: any[]): Map<string, string> {
+  const map = new Map<string, string>();
+  let slot = 0;
+  for (const rt of reservedTickets ?? []) {
+    const qty = rt?.quantity ?? 0;
+    for (let i = 0; i < qty; i++) {
+      const email = (participants?.[slot]?.email ?? '').toString().trim().toLowerCase();
+      if (email) map.set(email, rt.ticketId);
+      slot++;
+    }
+  }
+  return map;
+}
+
+/**
+ * Subtotal (centavos) dos produtos cujo PARTICIPANTE escolheu um ingresso APLICÁVEL ao
+ * cupom/voucher (definido por `appliesTo`). Cada item de `pendingProducts` traz
+ * `participantEmail`; o ingresso vem do mapa posicional. Produto de participante em ingresso
+ * NÃO-aplicável (ex.: o ingresso do amigo) fica de fora — é o cerne do escopo por ingresso.
+ * Produto sem participante mapeável também não entra.
+ */
+export function computeApplicableProductsSubtotal(
+  pendingProducts: any[],
+  participantTicketMap: Map<string, string>,
+  applicableTicketIds: Set<string>,
+): number {
+  return (pendingProducts ?? []).reduce((s: number, pp: any) => {
+    const email = (pp?.participantEmail ?? '').toString().trim().toLowerCase();
+    const ticketId = email ? participantTicketMap.get(email) : undefined;
+    return ticketId && applicableTicketIds.has(ticketId)
+      ? s + (pp?.unitPrice ?? 0) * (pp?.quantity ?? 1)
+      : s;
+  }, 0);
+}
+
+/**
+ * Conjunto de ticketIds do pedido que o `appliesTo` cobre. `'all'`/null → todos os ingressos
+ * reservados; lista → interseção com os reservados. Base para escopar produtos por ingresso.
+ */
+export function resolveApplicableTicketIds(
+  appliesTo: string | null | undefined,
+  reservedTickets: any[],
+): Set<string> {
+  const all = new Set<string>((reservedTickets ?? []).map((rt: any) => rt.ticketId));
+  if (!appliesTo || appliesTo === 'all') return all;
+  const allowed = new Set(parseAppliesToArray(appliesTo));
+  return new Set([...all].filter((id) => allowed.has(id)));
+}
+
+/**
+ * Subtotal (centavos) dos produtos do PARTICIPANTE de um slot específico — usado pelo VOUCHER,
+ * que cobre UM ingresso (a unidade `qualifyingSlot`). O desconto de produto do voucher incide
+ * só nos produtos daquele participante (o "ingresso coberto"), nunca nos dos outros.
+ * `slot < 0` (nenhuma unidade aplicável) ou participante sem email → 0.
+ */
+export function computeSlotParticipantProductsSubtotal(
+  pendingProducts: any[],
+  participants: any[],
+  slot: number,
+): number {
+  if (slot == null || slot < 0) return 0;
+  const email = (participants?.[slot]?.email ?? '').toString().trim().toLowerCase();
+  if (!email) return 0;
+  return (pendingProducts ?? []).reduce(
+    (s: number, pp: any) =>
+      (pp?.participantEmail ?? '').toString().trim().toLowerCase() === email
+        ? s + (pp?.unitPrice ?? 0) * (pp?.quantity ?? 1)
+        : s,
     0,
   );
 }
@@ -517,11 +603,17 @@ export function orderShape(order: any, discountOverride?: number, extra?: Record
     if (cov.hasApplicable && cov.qualifyingSlot >= 0) {
       resolvedEffectiveUsage = 1;
       resolvedQualifyingSlots = resolvedQualifyingSlots ?? [cov.qualifyingSlot];
-      // applyToProducts espelha o cupom: o ingresso grátis cobre também os produtos.
-      // distributeDiscount clampa a porção do ingresso por slot; o excedente
-      // (produtos) fica implícito em order.discount — mesmo comportamento do cupom.
+      // applyToProducts: o ingresso grátis cobre os produtos SÓ do participante do ingresso
+      // coberto (slot `qualifyingSlot`), não os de todos — espelha o pay/patchCoupon.
       voucherDerivedDiscount =
-        cov.discount + (voucher.applyToProducts ? computePendingProductsSubtotal(order) : 0);
+        cov.discount +
+        (voucher.applyToProducts
+          ? computeSlotParticipantProductsSubtotal(
+              (order.pendingProducts as any[]) ?? [],
+              order.pendingParticipants ?? [],
+              cov.qualifyingSlot,
+            )
+          : 0);
     }
   }
 
@@ -533,7 +625,14 @@ export function orderShape(order: any, discountOverride?: number, extra?: Record
   } else if (resolvedEffectiveUsage !== undefined && effectiveUsage === undefined && (coupon?.couponType === 'AGE' || (coupon?.couponType === 'DISCOUNT' && coupon?.cpfListStatus === 'ENABLED'))) {
     // AGE ou cupom com lista de documento: recomputa o total a partir do nº de
     // participantes elegíveis re-derivado (auto-corrige order.discount defasado em PENDING).
-    const productsExtra = coupon.applyToProducts ? computePendingProductsSubtotal(order) : 0;
+    // applyToProducts: só os produtos dos participantes cujo ingresso o cupom cobre (appliesTo).
+    const productsExtra = coupon.applyToProducts
+      ? computeApplicableProductsSubtotal(
+          (order.pendingProducts as any[]) ?? [],
+          buildParticipantTicketMap(order.reservedTickets ?? [], order.pendingParticipants ?? []),
+          resolveApplicableTicketIds(coupon.appliesTo, order.reservedTickets ?? []),
+        )
+      : 0;
     discount = computePartialCouponDiscount(order.reservedTickets ?? [], coupon.type, coupon.value, resolvedEffectiveUsage, productsExtra);
   } else if (voucherDerivedDiscount !== undefined) {
     // Voucher sozinho: recomputa o total (1 ingresso) — auto-corrige order.discount
@@ -611,7 +710,14 @@ export function orderShape(order: any, discountOverride?: number, extra?: Record
     } else {
       const cov = resolveVoucherCoverage(order.reservedTickets ?? [], voucher.appliesTo);
       const voucherPortion = cov.hasApplicable
-        ? cov.discount + (voucher.applyToProducts ? productsSubtotalCents : 0)
+        ? cov.discount +
+          (voucher.applyToProducts
+            ? computeSlotParticipantProductsSubtotal(
+                (order.pendingProducts as any[]) ?? [],
+                order.pendingParticipants ?? [],
+                cov.qualifyingSlot,
+              )
+            : 0)
         : 0;
       voucherDiscountCents = Math.min(discount, Math.max(0, voucherPortion));
     }
@@ -1716,7 +1822,7 @@ export class OrdersService {
     reservedTickets: any[],
     ticketsSubtotal: number,
     productsSubtotal: number,
-    opts: { autoApplyCouponTypes?: ('QUANTITY' | 'AGE')[] } = {},
+    opts: { autoApplyCouponTypes?: ('QUANTITY' | 'AGE')[]; pendingProducts?: any[] } = {},
   ): Promise<{
     autoCouponId?: string;
     autoEffectiveUsage?: number;
@@ -1728,6 +1834,19 @@ export class OrdersService {
     const r: any = this.prisma.getReadClient();
     const w: any = this.prisma.getWriteClient();
     const totalAmount = ticketsSubtotal + productsSubtotal;
+
+    // Lista AUTORITATIVA de produtos (com participantEmail) p/ escopar applyToProducts por
+    // ingresso. Em patchProducts é a lista NOVA (enrichedProducts), não o order.pendingProducts
+    // ainda-stale; por isso vem via opts. Mapa email→ingresso = mesma convenção posicional.
+    const pendingProductsList = opts.pendingProducts ?? [];
+    const participantTicketMap = buildParticipantTicketMap(reservedTickets, participants);
+    // Produtos cobertos por um cupom que aplica aos ingressos `appliesTo` (escopo por ingresso).
+    const scopedCouponProducts = (appliesTo: string | null | undefined): number =>
+      computeApplicableProductsSubtotal(
+        pendingProductsList,
+        participantTicketMap,
+        resolveApplicableTicketIds(appliesTo, reservedTickets),
+      );
 
     let autoCouponId: string | undefined;
     let autoDiscount = 0;
@@ -1768,7 +1887,7 @@ export class OrdersService {
           const effectiveUsage = Math.min(remaining, ageMatchCount, ageApplicableQty);
           ageQualifyingSlots = ageSlots;
           autoCouponId = existingCoupon.id;
-          const productsExtra = existingCoupon.applyToProducts ? productsSubtotal : 0;
+          const productsExtra = existingCoupon.applyToProducts ? scopedCouponProducts(existingCoupon.appliesTo) : 0;
           autoDiscount = computePartialCouponDiscount(ageApplicableTickets, existingCoupon.type, existingCoupon.value, effectiveUsage, productsExtra);
           autoEffectiveUsage = effectiveUsage;
         }
@@ -1851,7 +1970,7 @@ export class OrdersService {
               : ageMatchCount;
             const effectiveUsage = Math.min(remaining, ageMatchCount, autoApplicableQty);
             if (effectiveUsage <= 0) continue;
-            const productsExtra = coupon.applyToProducts ? productsSubtotal : 0;
+            const productsExtra = coupon.applyToProducts ? scopedCouponProducts(coupon.appliesTo) : 0;
             autoDiscount = computePartialCouponDiscount(autoApplicableTickets, coupon.type, coupon.value, effectiveUsage, productsExtra);
             autoEffectiveUsage = effectiveUsage;
             ageQualifyingSlots = ageSlots;
@@ -1902,7 +2021,8 @@ export class OrdersService {
           (s: number, rt: any) => s + rt.unitPrice * rt.quantity,
           0,
         );
-        const productsContribution = activeCoupon.applyToProducts ? productsSubtotal : 0;
+        // applyToProducts escopado: só os produtos dos participantes com ingresso no appliesTo.
+        const productsContribution = activeCoupon.applyToProducts ? scopedCouponProducts(activeCoupon.appliesTo) : 0;
         const applicableRatio = ticketsSubtotal > 0 ? applicableSubtotal / ticketsSubtotal : 1;
         const applicableBase = applicableSubtotal + Math.round(productsContribution * applicableRatio);
         newDiscount = Math.floor(applicableBase * (activeCoupon.value / 100));
@@ -1910,7 +2030,10 @@ export class OrdersService {
       } else if ((order as any).voucherId && !(order as any).couponId && (order as any).voucher) {
         const v = (order as any).voucher;
         const cov = resolveVoucherCoverage(reservedTickets, v.appliesTo);
-        const vProductsExtra = v.applyToProducts ? productsSubtotal : 0;
+        // Voucher cobre os produtos SÓ do participante do ingresso coberto (slot).
+        const vProductsExtra = v.applyToProducts
+          ? computeSlotParticipantProductsSubtotal(pendingProductsList, participants, cov.qualifyingSlot)
+          : 0;
         newDiscount = Math.min(cov.discount + vProductsExtra, totalAmount);
       }
     }
@@ -2008,6 +2131,7 @@ export class OrdersService {
       reservedTickets,
       ticketsSubtotalNew,
       productsSubtotal,
+      { pendingProducts: (order.pendingProducts as any[]) ?? [] },
     );
     const newFinalAmount = Math.max(0, newTotalAmount - newDiscount);
 
@@ -2118,7 +2242,7 @@ export class OrdersService {
       shouldRemoveQuantityCoupon,
       ageQualifyingSlots,
       newDiscount,
-    } = await this.evaluateAutoCoupons(order, filledParticipants, newReservedTickets, ticketsSubtotal, productsSubtotal);
+    } = await this.evaluateAutoCoupons(order, filledParticipants, newReservedTickets, ticketsSubtotal, productsSubtotal, { pendingProducts: (order.pendingProducts as any[]) ?? [] });
     const newFinalAmount = Math.max(0, newTotalAmount - newDiscount);
 
     const updated = await w.$transaction(async (tx: any) => {
@@ -2244,10 +2368,21 @@ export class OrdersService {
               'Voucher não aplicável aos ingressos do pedido',
             );
           }
-          // applyToProducts: o ingresso grátis cobre também os produtos adicionais
-          // (espelha o cupom). Voucher isolado aqui → sem risco de double-count.
-          discount = cov.discount + (voucherByCode.applyToProducts ? productsSubtotal : 0);
+          // applyToProducts: o ingresso grátis cobre também os produtos adicionais — mas SÓ os
+          // do participante do ingresso coberto (slot `qualifyingSlot`), não os dos outros.
+          const voucherProductsExtra = voucherByCode.applyToProducts
+            ? computeSlotParticipantProductsSubtotal(order.pendingProducts as any[], participants, cov.qualifyingSlot)
+            : 0;
+          discount = cov.discount + voucherProductsExtra;
           voucherId = voucherByCode.id;
+          // Reserva de uso único: claim atômico antes de persistir. Indisponível (já reservado
+          // por outro pedido ativo) → rejeição SUAVE (cai no catch → couponRejected).
+          if (!(await this.reserveVoucherForOrder(w, order, voucherId))) {
+            throw new AppUnprocessableException(
+              'VOUCHER_UNAVAILABLE',
+              'Este voucher já está sendo usado em outro pedido.',
+            );
+          }
           const finalAmountV = Math.max(0, order.totalAmount - discount);
           const updatedV = await w.order.update({
             where: { id: orderId },
@@ -2314,7 +2449,14 @@ export class OrdersService {
         ? Math.min(remaining, applicableQuantity, docEligibleSlots.length)
         : Math.min(remaining, applicableQuantity);
       couponQualifyingSlots = docEligibleSlots;
-      const couponProductsExtra = coupon.applyToProducts ? productsSubtotal : 0;
+      // applyToProducts incide SÓ nos produtos dos participantes cujo ingresso é coberto pelo
+      // cupom (appliesTo), não em todos os produtos do pedido. Ex.: cupom no meu ingresso não
+      // desconta os produtos do amigo (ingresso fora do appliesTo). Mapa email→ingresso posicional.
+      const couponApplicableTicketIdSet = new Set<string>(applicableTickets.map((rt: any) => rt.ticketId));
+      const participantTicketMap = buildParticipantTicketMap(reservedTickets, participants);
+      const couponProductsExtra = coupon.applyToProducts
+        ? computeApplicableProductsSubtotal(order.pendingProducts as any[], participantTicketMap, couponApplicableTicketIdSet)
+        : 0;
       discount = computePartialCouponDiscount(applicableTickets, coupon.type, coupon.value, couponEffectiveUsage, couponProductsExtra);
       couponId = coupon.id;
       if (coupon.type === 'FIXED') couponFixedPerUnit = coupon.value;
@@ -2339,9 +2481,12 @@ export class OrdersService {
           const cov = resolveVoucherCoverage(reservedTickets, existingVoucher.appliesTo, applicableTicketIds);
           if (cov.hasApplicable) {
             // Produtos entram no desconto NO MÁXIMO uma vez: se o cupom já os incluiu
-            // (applyToProducts), o voucher cobre só o ingresso — evita double-count.
+            // (applyToProducts), o voucher cobre só o ingresso — evita double-count. Quando o
+            // voucher cobre produtos, são SÓ os do participante do ingresso coberto (qualifyingSlot).
             const voucherProductsExtra =
-              existingVoucher.applyToProducts && !coupon.applyToProducts ? productsSubtotal : 0;
+              existingVoucher.applyToProducts && !coupon.applyToProducts
+                ? computeSlotParticipantProductsSubtotal(order.pendingProducts as any[], participants, cov.qualifyingSlot)
+                : 0;
             discount += cov.discount + voucherProductsExtra;
             voucherId = order.voucherId;
           }
@@ -2355,11 +2500,24 @@ export class OrdersService {
         where: { code: dto.voucherCode.toUpperCase().trim() },
       });
 
-      if (!voucher || voucher.eventId !== order.eventId || voucher.status !== 'ACTIVE') {
+      if (!voucher || voucher.eventId !== order.eventId) {
         throw new AppUnprocessableException('VOUCHER_NOT_FOUND', 'Voucher não encontrado ou inválido');
       }
-      if (voucher.expiryDate && new Date(voucher.expiryDate) < new Date()) {
+      // USED tem mensagem própria — "não encontrado" confunde quem recebeu o link
+      // e já usou (ou teve o voucher usado por outro pedido). Espelha o
+      // `assertVoucherUsable` do products.service.
+      if (voucher.status === 'USED') {
+        throw new AppUnprocessableException('VOUCHER_ALREADY_USED', 'Este voucher já foi utilizado');
+      }
+      if (
+        voucher.status === 'EXPIRED' ||
+        (voucher.expiryDate && new Date(voucher.expiryDate) < new Date())
+      ) {
         throw new AppUnprocessableException('VOUCHER_EXPIRED', 'Voucher expirado');
+      }
+      if (voucher.status !== 'ACTIVE') {
+        // INACTIVE (ou estados futuros) — inválido sem vazar detalhe interno.
+        throw new AppUnprocessableException('VOUCHER_NOT_FOUND', 'Voucher não encontrado ou inválido');
       }
 
       // Lista de documento por-participante. SEM participantes (voucher do link no início do
@@ -2383,8 +2541,12 @@ export class OrdersService {
           'Voucher não aplicável aos ingressos do pedido',
         );
       }
-      // applyToProducts: o ingresso grátis cobre também os produtos (espelha o cupom).
-      discount = cov.discount + (voucher.applyToProducts ? productsSubtotal : 0);
+      // applyToProducts: o ingresso grátis cobre também os produtos — SÓ os do participante do
+      // ingresso coberto (slot `qualifyingSlot`), nunca os dos demais participantes.
+      const voucherProductsExtra = voucher.applyToProducts
+        ? computeSlotParticipantProductsSubtotal(order.pendingProducts as any[], participants, cov.qualifyingSlot)
+        : 0;
+      discount = cov.discount + voucherProductsExtra;
       voucherId = voucher.id;
 
     } else {
@@ -2392,6 +2554,16 @@ export class OrdersService {
       couponId = null;
       voucherId = null;
       discount = 0;
+    }
+
+    // Reserva de uso único do voucher: claim do novo (se houver) + liberação do anterior em
+    // troca/remoção/aplicação de cupom. `voucherId` null aqui já libera a reserva deste pedido.
+    // Indisponível → rejeição SUAVE (cai no catch → couponRejected).
+    if (!(await this.reserveVoucherForOrder(w, order, voucherId))) {
+      throw new AppUnprocessableException(
+        'VOUCHER_UNAVAILABLE',
+        'Este voucher já está sendo usado em outro pedido.',
+      );
     }
 
     const finalAmount = Math.max(0, order.totalAmount - discount);
@@ -2504,7 +2676,7 @@ export class OrdersService {
       shouldRemoveQuantityCoupon,
       ageQualifyingSlots,
       newDiscount,
-    } = await this.evaluateAutoCoupons(order, participants, reservedTickets, ticketsSubtotal, productsSubtotal);
+    } = await this.evaluateAutoCoupons(order, participants, reservedTickets, ticketsSubtotal, productsSubtotal, { pendingProducts: enrichedProducts });
 
     const finalAmount = Math.max(0, totalAmount - newDiscount);
 
@@ -2647,6 +2819,17 @@ export class OrdersService {
       );
     }
 
+    // 6.3b Whitelist de métodos por evento (tela financeira). Array vazio/ausente
+    // (registro pré-migration ou include sem event) = aceita todos — mesmo
+    // comportamento dos eventos legados, que são backfillados com os 3 métodos.
+    const acceptedMethods: string[] = (order as any).event?.acceptedPaymentMethods ?? [];
+    if (acceptedMethods.length > 0 && !acceptedMethods.includes(dto.method)) {
+      throw new AppUnprocessableException(
+        'PAYMENT_METHOD_NOT_ACCEPTED',
+        'Este evento não aceita esta forma de pagamento',
+      );
+    }
+
     // 6.4 Billing address required
     if (!order.billingPostalCode || !order.billingStreet || !order.billingCity) {
       throw new AppUnprocessableException(
@@ -2687,6 +2870,9 @@ export class OrdersService {
     );
     let productsSubtotal = 0;
     const pendingProducts = order.pendingProducts as any[] | null;
+    // Itens com preço LIVE recalculado + participantEmail preservado — base do escopo de
+    // produtos por ingresso (applyToProducts). Usa o MESMO preço que entra no preDiscountTotal.
+    const pricedPendingProducts: any[] = [];
     if (pendingProducts?.length) {
       for (const item of pendingProducts) {
         const product = await r.product.findUnique({
@@ -2699,9 +2885,12 @@ export class OrdersService {
             : null;
           const unitPrice = resolveProductUnitPrice(product, variation);
           productsSubtotal += unitPrice * item.quantity;
+          pricedPendingProducts.push({ ...item, unitPrice });
         }
       }
     }
+    // Mapa email→ingresso (posicional) reutilizado pelos escopos de produto do cupom/voucher.
+    const participantTicketMap = buildParticipantTicketMap(reservedTickets, participants);
 
     const preDiscountTotal = ticketsSubtotal + productsSubtotal;
 
@@ -2785,7 +2974,11 @@ export class OrdersService {
           const effectiveUsage = docEligibleCount != null
             ? Math.min(remaining, applicableQty, docEligibleCount)
             : Math.min(remaining, applicableQty);
-          const productsExtraPay = coupon.applyToProducts ? productsSubtotal : 0;
+          // applyToProducts SÓ nos produtos dos participantes cujo ingresso o cupom cobre
+          // (couponApplicableTicketIds), via mapa email→ingresso — não em todos os produtos.
+          const productsExtraPay = coupon.applyToProducts
+            ? computeApplicableProductsSubtotal(pricedPendingProducts, participantTicketMap, couponApplicableTicketIds)
+            : 0;
           couponDiscount = computePartialCouponDiscount(applicableTicketsPay, coupon.type, coupon.value, effectiveUsage, productsExtraPay);
           couponId = coupon.id;
           couponAppliedToProducts = coupon.applyToProducts;
@@ -2854,7 +3047,11 @@ export class OrdersService {
             : ageMatchCount;
           const effectiveUsage = Math.min(remaining, ageMatchCount, ageApplicableQty);
           if (effectiveUsage <= 0) continue;
-          const ageProductsExtra = coupon.applyToProducts ? productsSubtotal : 0;
+          // applyToProducts SÓ nos produtos dos participantes cujo ingresso o cupom AGE cobre.
+          const ageApplicableTicketIdSet = new Set<string>(ageApplicableTickets.map((rt: any) => rt.ticketId));
+          const ageProductsExtra = coupon.applyToProducts
+            ? computeApplicableProductsSubtotal(pricedPendingProducts, participantTicketMap, ageApplicableTicketIdSet)
+            : 0;
           couponDiscount = computePartialCouponDiscount(ageApplicableTickets, coupon.type, coupon.value, effectiveUsage, ageProductsExtra);
           couponId = coupon.id;
           couponAppliedToProducts = coupon.applyToProducts;
@@ -2885,29 +3082,40 @@ export class OrdersService {
           else voucherEligibleSlots = new Set(slots);
         }
         if (!cpfBlocked) {
-          // applyToProducts: o ingresso grátis cobre também os produtos adicionais.
-          // Produtos entram NO MÁXIMO uma vez — se o cupom já os incluiu (combinado),
-          // o voucher não soma de novo (evita double-count). Espelha o cupom.
-          const voucherProductsExtra =
-            voucher.applyToProducts && !couponAppliedToProducts ? productsSubtotal : 0;
           // Voucher = 1 ingresso grátis (a unidade aplicável mais cara), nunca todos.
-          if (couponApplicableTicketIds && couponApplicableTicketIds.size > 0) {
+          // Resolve a cobertura PRIMEIRO — o slot coberto (`qualifyingSlot`) define de qual
+          // participante vêm os produtos no escopo de applyToProducts.
+          const cov = couponApplicableTicketIds && couponApplicableTicketIds.size > 0
             // Combinado: voucher cobre 1 ingresso entre os NÃO cobertos pelo cupom
             // (0 se nenhum sobrar — o cupom já cobre tudo; não erra no pay).
-            const cov = resolveVoucherCoverage(reservedTickets, voucher.appliesTo, couponApplicableTicketIds, voucherEligibleSlots);
-            voucherDiscount = cov.discount + voucherProductsExtra;
-          } else {
-            const cov = resolveVoucherCoverage(reservedTickets, voucher.appliesTo, undefined, voucherEligibleSlots);
-            if (!cov.hasApplicable) {
-              throw new AppUnprocessableException(
-                'VOUCHER_NOT_APPLICABLE',
-                'Voucher não aplicável aos ingressos do pedido',
-              );
-            }
-            voucherDiscount = cov.discount + voucherProductsExtra;
+            ? resolveVoucherCoverage(reservedTickets, voucher.appliesTo, couponApplicableTicketIds, voucherEligibleSlots)
+            : resolveVoucherCoverage(reservedTickets, voucher.appliesTo, undefined, voucherEligibleSlots);
+          if (!(couponApplicableTicketIds && couponApplicableTicketIds.size > 0) && !cov.hasApplicable) {
+            throw new AppUnprocessableException(
+              'VOUCHER_NOT_APPLICABLE',
+              'Voucher não aplicável aos ingressos do pedido',
+            );
           }
-          voucherId = voucher.id;
-          voucherAppliedToProducts = voucher.applyToProducts;
+          // applyToProducts: cobre também os produtos — SÓ os do participante do ingresso coberto
+          // (slot `qualifyingSlot`). Entra NO MÁXIMO uma vez: se o cupom já incluiu os produtos
+          // (combinado), o voucher não soma de novo (evita double-count). Espelha o cupom.
+          const voucherProductsExtra =
+            voucher.applyToProducts && !couponAppliedToProducts
+              ? computeSlotParticipantProductsSubtotal(pricedPendingProducts, participants, cov.qualifyingSlot)
+              : 0;
+          voucherDiscount = cov.discount + voucherProductsExtra;
+          // Reserva de uso único: claim ATÔMICO ANTES de cobrar (o bloco do voucher roda antes
+          // da chamada à Cielo). Se o voucher já está reservado por outro pedido ativo, NÃO
+          // aplicamos o desconto — espelha o recheck de status logo acima e evita cobrar/finalizar
+          // com um voucher indisponível (o consumo no finalize abortaria a tx pós-captura).
+          const voucherReservedUntil =
+            (order.expiresAt as Date | null) ?? new Date(Date.now() + VOUCHER_RESERVATION_FALLBACK_MS);
+          if (await claimVoucher(w, voucher.id, orderId, voucherReservedUntil)) {
+            voucherId = voucher.id;
+            voucherAppliedToProducts = voucher.applyToProducts;
+          } else {
+            voucherDiscount = 0;
+          }
         }
       }
     }
@@ -3640,6 +3848,8 @@ export class OrdersService {
               where: { orderId: order.id, status: 'PENDING' },
               data: { status: 'CANCELLED' },
             });
+            // Libera a reserva de voucher (carrinho abandonado): volta o voucher pra disponível.
+            await releaseVoucherByOrder(tx, order.id);
           });
           cancelled++;
           this.logger.debug(`Cancelled expired order ${order.id}`);
@@ -3655,6 +3865,9 @@ export class OrdersService {
               WHERE id = ${rt.batchId}::uuid
             `;
           }
+          // `reservedByOrderId` não é FK (sem cascade) → libera ANTES de deletar o pedido,
+          // senão o voucher ficaria preso à reserva de um pedido inexistente até `reservedUntil`.
+          await releaseVoucherByOrder(tx, order.id);
           await tx.order.delete({ where: { id: order.id } });
         });
         cancelled++;
@@ -3713,6 +3926,31 @@ export class OrdersService {
     }
   }
 
+  /**
+   * Reserva (claim ATÔMICO) o voucher `newVoucherId` para o pedido, liberando antes qualquer
+   * reserva anterior que ESTE pedido mantivesse num voucher DIFERENTE (troca/remoção). Garante
+   * uso único: enquanto um pedido ativo detém a reserva, o mesmo voucher não pode ser aplicado a
+   * outro pedido. Retorna `false` quando o voucher já está reservado por outro pedido ativo —
+   * o caller decide a rejeição (suave no patchCoupon; "não aplica" no pay).
+   *
+   * `newVoucherId` null = sem voucher (só assegura a liberação da reserva anterior → retorna true).
+   * `reservedUntil` = `order.expiresAt` (rede de segurança: reserva vencida é tratada como livre).
+   */
+  private async reserveVoucherForOrder(
+    client: any,
+    order: any,
+    newVoucherId: string | null,
+  ): Promise<boolean> {
+    const oldVoucherId = (order.voucherId as string | null) ?? null;
+    if (oldVoucherId && oldVoucherId !== newVoucherId) {
+      await releaseVoucherByOrder(client, order.id);
+    }
+    if (!newVoucherId) return true;
+    const reservedUntil =
+      (order.expiresAt as Date | null) ?? new Date(Date.now() + VOUCHER_RESERVATION_FALLBACK_MS);
+    return claimVoucher(client, newVoucherId, order.id, reservedUntil);
+  }
+
   private async cancelOrderAndRestoreStock(
     orderId: string,
     reason: string,
@@ -3750,6 +3988,8 @@ export class OrdersService {
           where: { orderId, status: 'PENDING' },
           data: { status: 'CANCELLED' },
         });
+        // Libera a reserva de voucher do pedido cancelado → volta disponível pra outro pedido.
+        await releaseVoucherByOrder(tx, orderId);
       });
     }
   }

@@ -180,12 +180,15 @@ export class CouponsService {
    * então a rota resolve os dois tipos e devolve um `kind` discriminador
    * (`'coupon'` | `'voucher'`).
    *
-   * Só retorna os campos necessários pro front exibir a sinalização
-   * ("R$ 50 OFF", "10% OFF", "ingresso grátis"). Não vaza:
+   * Retorna o que o front precisa pra exibir a sinalização ("R$ 50 OFF",
+   * "10% OFF", "ingresso grátis") + as CONDIÇÕES/escopo de aplicação:
+   *   - appliesTo: ingressos cobertos ('all' ou lista de ticketIds — públicos)
+   *   - minCartValue: valor mínimo do carrinho (centavos)
+   *   - minQuantity: qtd mínima de ingressos (cupons QUANTITY)
+   * Continua SEM vazar:
    *   - cpfList/documentList (PII de elegíveis)
    *   - usageCount/maxUsage (timing pra esgotar cupom)
-   *   - minCartValue, ageRule, minAge/maxAge (config interna)
-   *   - note (texto interno do organizador)
+   *   - ageRule/minAge/maxAge (AGE não entra aqui), note (texto interno do organizador)
    *
    * Precedência voucher > cupom: espelha `OrdersService.patchCoupon`, onde um
    * voucher ACTIVE e não-expirado tem prioridade sobre um cupom de mesmo
@@ -227,6 +230,9 @@ export class CouponsService {
           type: true,
           couponType: true,
           applyToProducts: true,
+          appliesTo: true, // ingressos cobertos ('all' ou lista de ticketIds)
+          minCartValue: true, // condição: valor mínimo do carrinho (centavos)
+          minQuantity: true, // condição: qtd mínima de ingressos (cupons QUANTITY)
           status: true,
           expiryDate: true,
           deletedAt: true,
@@ -289,6 +295,14 @@ export class CouponsService {
           type: coupon!.type,
           value: coupon!.value, // PERCENTAGE: 1–100 | FIXED: centavos
           applyToProducts: coupon!.applyToProducts,
+          // Ingressos cobertos: normaliza pro shape ideal (array de ticketIds) ou 'all' quando
+          // irrestrito — espelha o ramo do voucher acima. O front mapeia os ids pros nomes (lista
+          // de ingressos já é pública). NÃO expõe PII (cpf/document), uso (usageCount) nem `note`.
+          appliesTo: this.parseAppliesTo(coupon!.appliesTo) ?? 'all',
+          // Condições de aplicação (exibição na UX). null/ausente = sem condição — o
+          // ResponseCompressionInterceptor remove chaves null do response.
+          minCartValue: coupon!.minCartValue, // centavos
+          minQuantity: coupon!.minQuantity, // cupons QUANTITY
         },
       };
     }

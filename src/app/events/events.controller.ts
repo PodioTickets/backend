@@ -470,7 +470,8 @@ export class EventsController {
   @ApiOperation({
     summary: 'Atualizar configurações financeiras do evento',
     description:
-      'Atualiza a divisão da taxa da plataforma (`organizerFeePercent`) e o parcelamento máximo (`maxInstallments`). ' +
+      'Atualiza a divisão da taxa da plataforma (`organizerFeePercent`), o parcelamento máximo (`maxInstallments`) ' +
+      'e as formas de pagamento aceitas (`acceptedPaymentMethods`, mínimo 1 — omitir mantém o valor atual). ' +
       'A taxa total da plataforma é sempre 6%; `participantFeePercent = 6 - organizerFeePercent`. ' +
       'Retorna 409 se o evento já foi publicado (configurações bloqueadas).',
   })

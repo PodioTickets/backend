@@ -1,5 +1,9 @@
-import { IsNumber, IsInt, Min, IsIn, IsOptional } from 'class-validator';
+import { IsNumber, IsInt, Min, IsIn, IsOptional, IsArray, ArrayMinSize, ArrayUnique } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+
+/** Métodos configuráveis na tela financeira (CRYPTO/BOLETO existem no enum mas não são processados no checkout). */
+export const CONFIGURABLE_PAYMENT_METHODS = ['PIX', 'DEBIT_CARD', 'CREDIT_CARD'] as const;
+export type ConfigurablePaymentMethod = (typeof CONFIGURABLE_PAYMENT_METHODS)[number];
 
 // ──────────────── Request ────────────────
 
@@ -23,6 +27,20 @@ export class UpdateFinancialSettingsDto {
   @IsNumber()
   @Min(0)
   totalFee?: number;
+
+  @ApiProperty({
+    description: 'Formas de pagamento aceitas no checkout (mínimo 1). Omitir mantém o valor atual.',
+    example: ['PIX', 'CREDIT_CARD'],
+    isArray: true,
+    enum: CONFIGURABLE_PAYMENT_METHODS,
+    required: false,
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayUnique()
+  @IsIn(CONFIGURABLE_PAYMENT_METHODS, { each: true })
+  acceptedPaymentMethods?: ConfigurablePaymentMethod[];
 }
 
 // ──────────────── Response ────────────────
@@ -41,11 +59,11 @@ export class FinancialSettingsResponseDto {
   maxInstallments: number;
 
   @ApiProperty({
-    description: 'Métodos de pagamento aceitos. Atualmente fixos — todos os eventos aceitam PIX, débito e crédito.',
+    description: 'Métodos de pagamento aceitos no checkout, configurados por evento (default: todos).',
     example: ['PIX', 'DEBIT_CARD', 'CREDIT_CARD'],
     isArray: true,
     type: String,
-    enum: ['PIX', 'DEBIT_CARD', 'CREDIT_CARD'],
+    enum: CONFIGURABLE_PAYMENT_METHODS,
   })
   acceptedPaymentMethods: string[];
 

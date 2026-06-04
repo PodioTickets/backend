@@ -36,6 +36,15 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bodyParser: false,
   });
+
+  // Confia em 1 hop de proxy (nginx/Caddy no mesmo host à frente do Node). Com isso o Express
+  // resolve `req.ip` (e `req.protocol`/`secure`) a partir do PRIMEIRO IP do X-Forwarded-For —
+  // ou seja, o IP REAL do cliente, não o do proxy. Sem isso, todo rate-limit/log/antifraude
+  // baseado em IP colapsava todos os clientes no IP do proxy (um balde global). `1` (e NÃO
+  // `true`) é deliberado: confiar cegamente no XFF de qualquer origem deixaria o cliente forjar
+  // o header e furar os limites por IP. Se a topologia mudar (ex.: CDN + LB), ajustar os hops.
+  app.set('trust proxy', 1);
+
   app.use(
     express.json({
       limit: '200mb',
@@ -259,11 +268,8 @@ async function bootstrap() {
   }
 
   app.use('/api/v1/upload', bodyParser.raw({ limit: '200mb' }));
-  app.use(
-    new ConcurrencyLimiterMiddleware().use.bind(
-      new ConcurrencyLimiterMiddleware(),
-    ),
-  );
+  const concurrencyLimiter = new ConcurrencyLimiterMiddleware();
+  app.use(concurrencyLimiter.use.bind(concurrencyLimiter));
 
   app.use(
     new SSRFProtectionMiddleware().use.bind(new SSRFProtectionMiddleware()),

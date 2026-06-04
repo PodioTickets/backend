@@ -1,10 +1,15 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  UnprocessableEntityException,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateProductDto, UpdateProductDto, FilterProductsDto, ProductVariationDto } from './dto/create-product.dto';
 import { OrganizationsService } from '../organizations/organizations.service';
 import { UploadService } from '../upload/upload.service';
 import { stripDeletedProductFromKitSelectionDisplay } from '../events/kit-selection-display.prune';
-import { Prisma } from '@prisma/client';
+import { Prisma, VoucherStatus } from '@prisma/client';
 import {
   summarizeProductUpdateForAudit,
   type ProductBeforeAudit,
@@ -300,8 +305,62 @@ export class ProductsService {
     };
   }
 
+  /**
+   * Valida o voucher informado no link de checkout (?voucher=CODE) antes de listar produtos.
+   * Erros tipados (422, mesmo padrão de código+mensagem do patchCoupon em orders) para o front
+   * exibir o motivo real — em especial "já foi utilizado" — em vez do 400 genérico de whitelist.
+   * Vouchers reservados por outro pedido NÃO são barrados aqui: a exclusividade da reserva é
+   * decidida na aplicação (patchCoupon/pay), onde o pedido dono é conhecido.
+   */
+  private async assertVoucherUsable(
+    prismaRead: ReturnType<PrismaService['getReadClient']>,
+    eventId: string,
+    code: string,
+  ): Promise<void> {
+    // `code` é único global (@unique no schema) — lookup por índice + checagem de evento.
+    const voucher = await prismaRead.voucher.findUnique({
+      where: { code: code.toUpperCase().trim() },
+      select: { eventId: true, status: true, expiryDate: true, deletedAt: true },
+    });
+
+    if (!voucher || voucher.eventId !== eventId || voucher.deletedAt) {
+      throw new UnprocessableEntityException({
+        code: 'VOUCHER_NOT_FOUND',
+        message: 'Voucher não encontrado ou inválido',
+      });
+    }
+    if (voucher.status === VoucherStatus.USED) {
+      throw new UnprocessableEntityException({
+        code: 'VOUCHER_ALREADY_USED',
+        message: 'Este voucher já foi utilizado',
+      });
+    }
+    if (
+      voucher.status === VoucherStatus.EXPIRED ||
+      (voucher.expiryDate && new Date(voucher.expiryDate) < new Date())
+    ) {
+      throw new UnprocessableEntityException({
+        code: 'VOUCHER_EXPIRED',
+        message: 'Voucher expirado',
+      });
+    }
+    if (voucher.status !== VoucherStatus.ACTIVE) {
+      // INACTIVE (ou estados futuros) — trata como inválido sem vazar detalhe interno.
+      throw new UnprocessableEntityException({
+        code: 'VOUCHER_NOT_FOUND',
+        message: 'Voucher não encontrado ou inválido',
+      });
+    }
+  }
+
   async findAll(eventId: string, filterDto: FilterProductsDto = {}, baseUrl?: string) {
     const prismaRead = this.prisma.getReadClient();
+
+    // Voucher do link de checkout: valida ANTES de listar para devolver o motivo real
+    // (ex.: já utilizado) em vez de seguir num fluxo de compra que vai falhar depois.
+    if (filterDto.voucher) {
+      await this.assertVoucherUsable(prismaRead, eventId, filterDto.voucher);
+    }
 
     const page = filterDto.page || 1;
     const limit = filterDto.limit || 20;
