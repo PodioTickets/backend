@@ -1,7 +1,32 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { DocumentType, RegistrationStatus } from '@prisma/client';
+import {
+  DocumentType,
+  RegistrationStatus,
+  UserActivityCategory,
+  UserActivitySource,
+} from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { UserActivityService } from '../../common/services/user-activity.service';
+
+/**
+ * Aborto TIPADO do finalize pós-captura: o pagamento já foi capturado no gateway, mas o
+ * pedido NÃO pode ser entregue (voucher consumido por outro pedido, participantes vazios).
+ * O throw força o rollback da tx do caller (correto — nada é meio-entregue) e o tipo permite
+ * ao caller distinguir de erros genéricos e disparar a COMPENSAÇÃO (estorno automático via
+ * `PaymentCompensationService`) em vez de propagar 500 — antes, o webhook devolvia 500 pra
+ * Cielo, que reentregava para sempre, deixando o cliente pago sem ingresso e sem estorno.
+ */
+export class OrderFinalizationAbortError extends Error {
+  constructor(
+    public readonly code: 'VOUCHER_CONSUMED' | 'EMPTY_PARTICIPANTS',
+    public readonly orderId: string,
+    public readonly friendlyMessage: string,
+  ) {
+    super(`${code}: ${friendlyMessage} (order ${orderId})`);
+    this.name = 'OrderFinalizationAbortError';
+  }
+}
 import { resolveDocument } from '../../common/utils/document.util';
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
 import { computeCouponCoveredUnits } from '../../common/utils/coupon-eligibility.util';
@@ -32,7 +57,10 @@ import { tryConsumeVoucher } from '../../common/utils/voucher-reservation.util';
 export class OrderFinalizationService {
   private readonly logger = new Logger(OrderFinalizationService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly activity: UserActivityService,
+  ) {}
 
   /**
    * Promove o Order PENDING→PAID de forma ATÔMICA e, se foi este caller quem venceu a
@@ -46,7 +74,7 @@ export class OrderFinalizationService {
   async confirmAndFinalizeOrder(
     tx: any,
     orderId: string,
-  ): Promise<{ finalized: boolean; registrations: any[] }> {
+  ): Promise<{ finalized: boolean; registrations: any[]; orderStatus?: string }> {
     const rows: any[] = await tx.$queryRaw`
       UPDATE "Order"
       SET "status" = 'PAID'::"OrderStatus", "updatedAt" = NOW()
@@ -54,8 +82,14 @@ export class OrderFinalizationService {
       RETURNING id
     `;
     if (!rows?.length) {
-      this.logger.warn(`confirmAndFinalizeOrder: order ${orderId} não estava PENDING — finalize ignorado (idempotência)`);
-      return { finalized: false, registrations: [] };
+      // Expõe o status atual pro caller distinguir entrega dupla benigna (já PAID) de
+      // pagamento confirmado TARDE DEMAIS (CANCELLED pelo cron de expiração) — este último
+      // exige compensação (estorno automático), senão o cliente fica pago sem ingresso.
+      const current = await tx.order.findUnique({ where: { id: orderId }, select: { status: true } });
+      this.logger.warn(
+        `confirmAndFinalizeOrder: order ${orderId} não estava PENDING (status=${current?.status ?? 'inexistente'}) — finalize ignorado (idempotência)`,
+      );
+      return { finalized: false, registrations: [], orderStatus: current?.status };
     }
     const registrations = await this.finalizePaidOrder(tx, orderId);
     return { finalized: true, registrations };
@@ -170,11 +204,19 @@ export class OrderFinalizationService {
 
     if (participants.length === 0) {
       // Sem participantes preenchidos não há como criar inscrições reais. Não deveria
-      // ocorrer pós-checkout (o front preenche em /participants antes de pagar).
+      // ocorrer pós-checkout (o pay exige participantes), mas é alcançável por corrida:
+      // patch esvazia participantes enquanto um PIX está pendente e o webhook confirma
+      // depois. ABORTA (rollback) em vez de deixar Order/Payment PAID sem inscrição —
+      // o caller compensa com estorno automático. (O script reconcile-orphan-orders
+      // pula pedidos sem participantes ANTES de chamar este finalize — não é afetado.)
       this.logger.error(
-        `finalizePaidOrder: order ${orderId} sem pendingParticipants — inscrições não criadas`,
+        `finalizePaidOrder: order ${orderId} sem pendingParticipants — finalize abortado (requer estorno)`,
       );
-      return [];
+      throw new OrderFinalizationAbortError(
+        'EMPTY_PARTICIPANTS',
+        orderId,
+        'Pedido sem participantes preenchidos no momento da confirmação do pagamento.',
+      );
     }
 
     // Valores financeiros do snapshot vêm do pedido já persistido (congelados no pay).
@@ -264,11 +306,16 @@ export class OrderFinalizationService {
     if (order.voucherId) {
       const consumed = await tryConsumeVoucher(tx, order.voucherId, orderId, userId);
       if (!consumed) {
-        // Pagamento já capturado mas voucher indisponível → o caller deve estornar.
+        // Pagamento já capturado mas voucher indisponível → erro TIPADO pro caller
+        // compensar (estorno automático). Antes era BadRequestException genérica: o
+        // webhook propagava 500 pra Cielo → reentrega infinita, cliente pago sem
+        // ingresso e sem estorno.
         this.logger.error(
           `[VOUCHER-DOUBLE-USE] finalize abortado: voucher ${order.voucherId} já consumido por outro pedido (order ${orderId}) — pagamento requer estorno`,
         );
-        throw new BadRequestException(
+        throw new OrderFinalizationAbortError(
+          'VOUCHER_CONSUMED',
+          orderId,
           'Este voucher já foi utilizado em outro pedido e não pode ser aplicado novamente.',
         );
       }
@@ -287,6 +334,12 @@ export class OrderFinalizationService {
     });
 
     const frontendUrl = (process.env.FRONTEND_URL ?? '').replace(/\/$/, '');
+
+    // Cada item de pendingProducts materializa NO MÁXIMO um RegistrationProduct. Sem este
+    // controle, comprador com o MESMO e-mail em 2 slots (2 ingressos pra si) fazia o filtro
+    // por participantEmail casar o mesmo item em AMBAS as inscrições → produto cobrado 1x e
+    // entregue 2x. First-wins na ordem dos slots (consistente com buildParticipantTicketMap).
+    const consumedProductIdx = new Set<number>();
 
     let pIdx = 0;
     for (const rt of reservedTickets) {
@@ -395,9 +448,15 @@ export class OrderFinalizationService {
           },
         });
 
-        // RegistrationProduct deste participante
+        // RegistrationProduct deste participante — consome cada item UMA única vez
+        // (e-mail duplicado em 2 slots não duplica a entrega do produto).
         const participantProducts = (pendingProducts ?? []).filter(
-          (item: any) => item.participantEmail?.toLowerCase() === pData.email?.toLowerCase(),
+          (item: any, itemIdx: number) => {
+            if (consumedProductIdx.has(itemIdx)) return false;
+            if (item.participantEmail?.toLowerCase() !== pData.email?.toLowerCase()) return false;
+            consumedProductIdx.add(itemIdx);
+            return true;
+          },
         );
         const participantProductMap = new Map<string, any>();
         if (participantProducts.length > 0) {
@@ -496,13 +555,15 @@ export class OrderFinalizationService {
             registrationEndDate: snapshotEvent.registrationEndDate ?? null,
             bannerUrl: snapshotEvent.bannerUrl ?? null,
             logoUrl: snapshotEvent.logoUrl ?? null,
+            // Contato (email/phone) NÃO entra mais no snapshot (2026-06-04): o recibo é
+            // devolvido em rotas de USUÁRIO e o contato do organizador está fora desse
+            // contrato. Snapshots antigos que já têm os campos são limpos no READ
+            // (stripOrganizationContact em orders/registrations).
             organization: snapshotEvent.organization
               ? {
                   id: snapshotEvent.organization.id,
                   name: snapshotEvent.organization.name,
                   logoUrl: snapshotEvent.organization.logoUrl ?? null,
-                  email: snapshotEvent.organization.email ?? null,
-                  phone: snapshotEvent.organization.phone ?? null,
                 }
               : null,
             location: {
@@ -578,6 +639,35 @@ export class OrderFinalizationService {
     }
 
     this.logger.log(`finalizePaidOrder: ${createdRegs.length} inscrição(ões) criada(s) para order ${orderId}`);
+
+    // ── Telemetria de funil: CONVERSÃO efetiva (`order.paid`) ──────────────────────────
+    // Fonte ÚNICA — cobre todos os caminhos de confirmação: cartão à vista (pay inline),
+    // PIX (webhook), 3DS, polling e pedido R$0. Push em buffer (sem I/O no hot path).
+    // Se a tx do caller sofrer rollback DEPOIS daqui, fica 1 evento fantasma — aceitável:
+    // o log é evidência de jornada, não fonte fiscal (a verdade é Order/Payment).
+    try {
+      const payment = await tx.payment.findUnique({
+        where: { orderId },
+        select: { method: true },
+      });
+      this.activity.record({
+        userId,
+        source: UserActivitySource.BACKEND,
+        category: UserActivityCategory.CHECKOUT,
+        action: 'order.paid',
+        metadata: {
+          orderId,
+          eventId: order.eventId,
+          method: payment?.method ?? null,
+          finalAmount: order.finalAmount ?? 0,
+          discount,
+          registrations: createdRegs.length,
+        },
+      });
+    } catch {
+      // Telemetria nunca quebra o finalize.
+    }
+
     return createdRegs;
   }
 }

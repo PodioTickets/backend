@@ -49,11 +49,12 @@ export const PAYMENT_DETAILS_STANDARD_INCLUDE = {
                   userId: true,
                   role: true,
                   user: {
+                    // email do owner não é consumido pelo shape (contato do organizador
+                    // fora do contrato de rota de usuário) — não buscar do banco.
                     select: {
                       id: true,
                       firstName: true,
                       lastName: true,
-                      email: true,
                       avatarUrl: true,
                     },
                   },

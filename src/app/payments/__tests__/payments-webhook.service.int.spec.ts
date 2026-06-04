@@ -63,12 +63,14 @@ import { PaymentMethod, PaymentStatus, OrderStatus, RegistrationStatus } from '@
 import { ConfigService } from '@nestjs/config';
 import { PaymentsWebhookService } from '../payments-webhook.service';
 import { OrderFinalizationService } from '../order-finalization.service';
+import { PaymentCompensationService } from '../payment-compensation.service';
 import { CieloService } from '../cielo.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import {
   createTestPrisma,
   resetDb,
   seedOrgUserEvent,
+  seedUser,
 } from '../../../common/testing/integration-db';
 
 // Aguarda a fila de microtasks/macrotasks esvaziar — deixa o fire-and-forget
@@ -104,6 +106,8 @@ describe('PaymentsWebhookService.handleWebhook (integração, banco real)', () =
         MerchantOrderId: 'mo-test',
         Payment: { PaymentId: 'PAY-XYZ', Status: cieloStatus },
       }),
+      // Estorno automático da compensação — sucesso por default nos cenários.
+      cancelPayment: jest.fn().mockResolvedValue({ success: true, cieloStatus: 'Voided' }),
       // Delegamos aos mapeadores REAIS (puros) — preserva a semântica de produção.
       mapCieloStatusToPaymentStatus: (s: number) => cieloMappers.mapCieloStatusToPaymentStatus(s),
       mapCieloStatusToString: (s: number) => cieloMappers.mapCieloStatusToString(s),
@@ -117,7 +121,15 @@ describe('PaymentsWebhookService.handleWebhook (integração, banco real)', () =
   const makeService = (cieloStatus: number) => {
     const gateway = gatewayMock();
     const cielo = makeCieloMock(cieloStatus);
-    const finalization = new OrderFinalizationService(prisma); // REAL
+    // Telemetria no-op (o alvo são os efeitos no banco, não o log de atividade).
+    const finalization = new OrderFinalizationService(prisma, { record: () => {} } as any); // REAL
+    // Compensação REAL (estorno automático) com a MESMA Cielo mockada do cenário —
+    // `cancelPayment` resolve sucesso por default; cenários de compensação inspecionam o banco.
+    const compensation = new PaymentCompensationService(
+      prisma,
+      cielo as any,
+      { record: () => {} } as any,
+    );
     const service = new PaymentsWebhookService(
       prisma,
       cielo,
@@ -125,6 +137,7 @@ describe('PaymentsWebhookService.handleWebhook (integração, banco real)', () =
       pdfMock,
       gateway,
       finalization,
+      compensation,
     );
     return { service, gateway, cielo };
   };
@@ -442,6 +455,105 @@ describe('PaymentsWebhookService.handleWebhook (integração, banco real)', () =
     expect(coupon?.usageCount).toBe(0);
 
     // Sem confirmação → WebSocket não é notificado.
+    expect(gateway.emitPaymentConfirmed).not.toHaveBeenCalled();
+  });
+
+  // ── COMPENSAÇÃO AUTOMÁTICA (regressões 2026-06-04) ─────────────────────────
+  // Antes: (1) voucher consumido por outro pedido → finalize lançava 500 pro webhook →
+  // Cielo reentregava pra sempre, cliente pago sem ingresso e sem estorno; (2) webhook
+  // confirmando pedido JÁ CANCELADO pelo cron → Payment ficava PAID órfão eternamente.
+
+  it('COMPENSAÇÃO: voucher consumido por OUTRO pedido → estorno automático + pedido cancelado (sem 500/loop)', async () => {
+    const { service, gateway, cielo } = makeService(2);
+    const { orderId, voucherId } = await seedPendingOrder({ withVoucher: true });
+
+    // Outro usuário "rouba" e consome o voucher entre o QR e a confirmação (reserva vencida).
+    const otherUserId = await seedUser(prisma, 'USER');
+    await prisma.getWriteClient().voucher.update({
+      where: { id: voucherId! },
+      data: { status: 'USED', usedAt: new Date(), usedBy: otherUserId, reservedByOrderId: null, reservedUntil: null },
+    });
+
+    // O webhook NÃO pode lançar (lançar = 500 = reentrega infinita da Cielo).
+    await expect(service.handleWebhook(paidPayload())).resolves.not.toThrow();
+    await tick();
+
+    const r = prisma.getReadClient();
+
+    // Estorno automático disparado na Cielo.
+    expect(cielo.cancelPayment).toHaveBeenCalledWith(PAYMENT_ID);
+
+    // Payment → REFUNDED com a classificação de compensação.
+    const payment = await r.payment.findFirst({
+      where: { transactionId: PAYMENT_ID },
+      select: { status: true, metadata: true },
+    });
+    expect(payment?.status).toBe(PaymentStatus.REFUNDED);
+    expect((payment?.metadata as any)?.refundType).toBe('AUTO_COMPENSATION');
+    expect((payment?.metadata as any)?.compensationReason).toBe('VOUCHER_CONSUMED');
+
+    // Pedido cancelado com devolução de estoque (98 → 100) e placeholders cancelados.
+    const order = await r.order.findUnique({
+      where: { id: orderId },
+      select: { status: true, cancelledReason: true, reservedTickets: { select: { batchId: true } } },
+    });
+    expect(order?.status).toBe(OrderStatus.CANCELLED);
+    expect(order?.cancelledReason).toContain('VOUCHER_CONSUMED');
+    const batch = await r.ticketBatch.findUnique({
+      where: { id: order!.reservedTickets[0].batchId },
+      select: { availableQuantity: true },
+    });
+    expect(batch?.availableQuantity).toBe(100);
+
+    // Nada entregue: zero inscrições CONFIRMED.
+    const confirmed = await r.registration.count({ where: { orderId, status: RegistrationStatus.CONFIRMED } });
+    expect(confirmed).toBe(0);
+
+    // O voucher do outro usuário fica intacto (não foi "roubado de volta").
+    const voucher = await r.voucher.findUnique({ where: { id: voucherId! }, select: { status: true, usedBy: true } });
+    expect(voucher?.status).toBe('USED');
+    expect(voucher?.usedBy).toBe(otherUserId);
+
+    // Sem confirmação → front não recebe paymentConfirmed.
+    expect(gateway.emitPaymentConfirmed).not.toHaveBeenCalled();
+  });
+
+  it('COMPENSAÇÃO: webhook confirma pedido JÁ CANCELADO pelo cron → Payment estornado (não fica PAID órfão)', async () => {
+    const { service, gateway, cielo } = makeService(2);
+    const { orderId } = await seedPendingOrder();
+
+    // Simula o cron de expiração: pedido cancelado + estoque já devolvido (98 → 100).
+    const w = prisma.getWriteClient();
+    await w.order.update({
+      where: { id: orderId },
+      data: { status: OrderStatus.CANCELLED, cancelledAt: new Date(), cancelledReason: 'EXPIRED' },
+    });
+    const rt = await w.orderReservedTicket.findFirst({ where: { orderId }, select: { batchId: true } });
+    await w.ticketBatch.update({ where: { id: rt!.batchId }, data: { availableQuantity: 100 } });
+
+    await expect(service.handleWebhook(paidPayload())).resolves.not.toThrow();
+    await tick();
+
+    const r = prisma.getReadClient();
+
+    // Estorno automático na Cielo + Payment REFUNDED (antes: ficava PAID pra sempre).
+    expect(cielo.cancelPayment).toHaveBeenCalledWith(PAYMENT_ID);
+    const payment = await r.payment.findFirst({
+      where: { transactionId: PAYMENT_ID },
+      select: { status: true, metadata: true },
+    });
+    expect(payment?.status).toBe(PaymentStatus.REFUNDED);
+    expect((payment?.metadata as any)?.compensationReason).toBe('PAID_AFTER_CANCELLATION');
+
+    // Pedido permanece CANCELLED e o estoque NÃO é devolvido em dobro (continua 100).
+    const order = await r.order.findUnique({ where: { id: orderId }, select: { status: true } });
+    expect(order?.status).toBe(OrderStatus.CANCELLED);
+    const batch = await r.ticketBatch.findUnique({ where: { id: rt!.batchId }, select: { availableQuantity: true } });
+    expect(batch?.availableQuantity).toBe(100);
+
+    // Nada entregue, nada confirmado pro front.
+    const confirmed = await r.registration.count({ where: { orderId, status: RegistrationStatus.CONFIRMED } });
+    expect(confirmed).toBe(0);
     expect(gateway.emitPaymentConfirmed).not.toHaveBeenCalled();
   });
 });

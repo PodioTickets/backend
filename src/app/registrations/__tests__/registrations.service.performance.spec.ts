@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { RegistrationsService } from '../registrations.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { KitsService } from '../../kits/kits.service';
+import { EmailService } from '../../../common/services/email.service';
 
 describe('RegistrationsService - Performance Tests', () => {
   let service: RegistrationsService;
@@ -19,6 +20,24 @@ describe('RegistrationsService - Performance Tests', () => {
     user: {
       create: jest.fn(),
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
+    },
+    // O `create` cria o Order primeiro; o read paginado usa order.findMany/count.
+    order: {
+      create: jest.fn(),
+      findMany: jest.fn(),
+      count: jest.fn(),
+    },
+    coupon: {
+      findUnique: jest.fn(),
+      update: jest.fn(),
+    },
+    voucher: {
+      findUnique: jest.fn(),
+      updateMany: jest.fn(),
+    },
+    organizationMember: {
+      findFirst: jest.fn(),
     },
     registration: {
       create: jest.fn(),
@@ -59,6 +78,10 @@ describe('RegistrationsService - Performance Tests', () => {
         {
           provide: KitsService,
           useValue: mockKitsService,
+        },
+        {
+          provide: EmailService,
+          useValue: {},
         },
       ],
     }).compile();
@@ -115,16 +138,31 @@ describe('RegistrationsService - Performance Tests', () => {
       mockPrismaService.$transaction.mockImplementation(async (callback) => {
         return callback(mockPrismaService);
       });
+      // Order é criado primeiro dentro da transação (o service usa order.id).
+      mockPrismaService.order.create.mockResolvedValue({ id: 'order-123' });
       mockPrismaService.registration.create.mockResolvedValue({
         id: 'reg-123',
         eventId: 'event-123',
         userId: 'user-123',
         status: 'PENDING',
-        totalAmount: 100.0,
-        serviceFee: 5.0,
-        finalAmount: 105.0,
         qrCode: 'qr-code-data',
       });
+      mockPrismaService.registration.update.mockResolvedValue({
+        id: 'reg-123',
+        qrCode: 'qr-code-data',
+      });
+      // Retorno final do create (inscrição com relações).
+      mockPrismaService.registration.findUnique.mockResolvedValue({
+        id: 'reg-123',
+        eventId: 'event-123',
+        userId: 'user-123',
+        status: 'PENDING',
+        qrCode: 'qr-code-data',
+        modalities: [],
+        kitItems: [],
+        questionAnswers: [],
+      });
+      mockPrismaService.registrationModality.create.mockResolvedValue({});
       mockPrismaService.modality.update.mockResolvedValue(mockModality);
     });
 
@@ -242,30 +280,28 @@ describe('RegistrationsService - Performance Tests', () => {
 
   describe('High Concurrency - Registration Queries', () => {
     beforeEach(() => {
-      mockPrismaService.registration.findMany.mockResolvedValue([
+      // findUserRegistrations é baseado em Order (order.findMany/count) + lookup do user.
+      mockPrismaService.user.findUnique.mockResolvedValue({ documentNumberClean: null });
+      mockPrismaService.order.count.mockResolvedValue(1);
+      mockPrismaService.order.findMany.mockResolvedValue([
         {
-          id: 'reg-1',
-          eventId: 'event-123',
-          userId: 'user-123',
+          id: 'order-1',
           status: 'PENDING',
-          event: {
-            organizer: {
-              id: 'org-1',
-              name: 'Organizer',
-              email: 'org@example.com',
-              phone: '1234567890',
-            },
-          },
-          user: {
-            id: 'user-123',
-            firstName: 'John',
-            lastName: 'Doe',
-            documentNumber: '12345678901',
-            dateOfBirth: new Date('2000-01-01'),
-          },
-          modalities: [],
-          kitItems: [],
+          createdAt: new Date(),
           payment: null,
+          event: {
+            id: 'event-123',
+            name: 'Event',
+            slug: 'event',
+            eventDate: new Date(),
+            logoUrl: null,
+            location: null,
+            city: null,
+            state: null,
+          },
+          registrations: [
+            { userId: 'user-123', invitedById: null, receiptSnapshot: null, invitedBy: null, tickets: [] },
+          ],
         },
       ]);
     });

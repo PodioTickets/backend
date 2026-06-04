@@ -5,7 +5,8 @@ import { CieloService } from './cielo.service';
 import { PaymentGateway } from './payment.gateway';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
-import { OrderFinalizationService } from './order-finalization.service';
+import { OrderFinalizationService, OrderFinalizationAbortError } from './order-finalization.service';
+import { PaymentCompensationService } from './payment-compensation.service';
 import {
   PAYMENT_DETAILS_STANDARD_INCLUDE,
   TICKET_CATEGORY_DETAIL_INCLUDE,
@@ -44,6 +45,7 @@ export class PaymentsService {
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
     private readonly orderFinalization: OrderFinalizationService,
+    private readonly compensation: PaymentCompensationService,
   ) { }
 
   private async isAdminUser(userId: string): Promise<boolean> {
@@ -581,7 +583,8 @@ export class PaymentsService {
           organizer: organizer ? {
             id: organizer.id,
             name: `${organizer.firstName} ${organizer.lastName}`,
-            email: organizer.email,
+            // email do owner NÃO sai em rota de usuário (contato do organizador
+            // fora do contrato — mesma regra dos events/orders/registrations).
             avatar: organizer.avatarUrl,
           } : null,
         } : null,
@@ -728,28 +731,47 @@ export class PaymentsService {
     // como CONFIRMED (placeholders VAZIOS) e nunca promovia o Order nem finalizava —
     // deixando o pedido PIX pago porém quebrado quando o polling vencia a corrida.
     // timeout estendido: o finalize de pedidos grandes faz muitas escritas seriais.
-    await prismaWrite.$transaction(async (tx) => {
-      const updated = await tx.payment.updateMany({
-        where: { id: payment.id, status: { not: PaymentStatus.PAID } },
-        data: { status: PaymentStatus.PAID, paymentDate: new Date() },
-      });
+    let orphanCancelledOrder = false;
+    try {
+      await prismaWrite.$transaction(async (tx) => {
+        const updated = await tx.payment.updateMany({
+          where: { id: payment.id, status: { not: PaymentStatus.PAID } },
+          data: { status: PaymentStatus.PAID, paymentDate: new Date() },
+        });
 
-      if (updated.count === 0) return; // already confirmed by concurrent request or webhook
+        if (updated.count === 0) return; // already confirmed by concurrent request or webhook
 
-      await tx.payment.update({
-        where: { id: payment.id },
-        data: {
-          metadata: {
-            ...(payment.metadata as object),
-            cieloStatus: this.cieloService.mapCieloStatusToString(braspagPayment.Payment.Status),
-            confirmedViaPolling: true,
-            confirmedAt: new Date().toISOString(),
-          } as any,
-        },
-      });
+        await tx.payment.update({
+          where: { id: payment.id },
+          data: {
+            metadata: {
+              ...(payment.metadata as object),
+              cieloStatus: this.cieloService.mapCieloStatusToString(braspagPayment.Payment.Status),
+              confirmedViaPolling: true,
+              confirmedAt: new Date().toISOString(),
+            } as any,
+          },
+        });
 
-      await this.orderFinalization.confirmAndFinalizeOrder(tx, orderId);
-    }, { timeout: 30000, maxWait: 10000 });
+        const { finalized, orderStatus } = await this.orderFinalization.confirmAndFinalizeOrder(tx, orderId);
+        // Pago TARDE DEMAIS (cron já cancelou o pedido) → compensação fora da tx.
+        if (!finalized && orderStatus === 'CANCELLED') orphanCancelledOrder = true;
+      }, { timeout: 30000, maxWait: 10000 });
+    } catch (err: unknown) {
+      // Finalize abortado pós-captura (voucher consumido / participantes vazios): rollback
+      // limpo + estorno automático. O polling devolve "não pago" pro front.
+      if (err instanceof OrderFinalizationAbortError) {
+        this.logger.error(`Polling PIX: finalize abortado (${err.code}) para order ${err.orderId} — compensando com estorno automático`);
+        await this.compensation.compensateOrphanPayment(err.orderId, err.code);
+        return { status: PaymentStatus.REFUNDED, paid: false };
+      }
+      throw err;
+    }
+
+    if (orphanCancelledOrder) {
+      await this.compensation.compensateOrphanPayment(orderId, 'PAID_AFTER_CANCELLATION');
+      return { status: PaymentStatus.REFUNDED, paid: false };
+    }
 
     // Emit WebSocket event so the frontend updates immediately
     this.gateway.emitPaymentConfirmed(orderId);

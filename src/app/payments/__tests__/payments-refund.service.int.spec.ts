@@ -79,12 +79,15 @@ describe('PaymentsRefundService (integração, banco real)', () => {
     };
 
     // OrderFinalizationService REAL com o MESMO prisma de teste (reverseSaleSideEffects roda de verdade).
-    const finalization = new OrderFinalizationService(prisma);
+    // Telemetria no-op: o alvo do teste são os efeitos no banco, não o log de atividade.
+    const activityStub = { record: () => {} } as any;
+    const finalization = new OrderFinalizationService(prisma, activityStub);
 
     service = new PaymentsRefundService(
       prisma,
       cieloMock as unknown as CieloService,
       finalization,
+      activityStub,
     );
   });
 

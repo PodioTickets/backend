@@ -8,10 +8,17 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { DocumentType, PaymentMethod, PaymentStatus, RegistrationStatus } from '@prisma/client';
+import {
+  DocumentType,
+  PaymentMethod,
+  PaymentStatus,
+  RegistrationStatus,
+  UserActivityCategory,
+  UserActivitySource,
+} from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from '../payments/cielo.service';
-import { OrderFinalizationService } from '../payments/order-finalization.service';
+import { OrderFinalizationService, OrderFinalizationAbortError } from '../payments/order-finalization.service';
 import { OrdersRedisService } from './orders-redis.service';
 import { ReserveOrderDto } from './dto/reserve-order.dto';
 import { PatchParticipantsDto } from './dto/patch-participants.dto';
@@ -21,6 +28,7 @@ import { PayOrderDto } from './dto/pay-order.dto';
 import { PatchCouponDto } from './dto/patch-coupon.dto';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
+import { UserActivityService } from '../../common/services/user-activity.service';
 import { parseAppliesToArray } from '../../helpers/AppliesToHelper';
 import {
   cleanDocumentNumber,
@@ -34,6 +42,7 @@ import {
   computeCouponCoveredUnits,
 } from '../../common/utils/coupon-eligibility.util';
 import { claimVoucher, releaseVoucherByOrder } from '../../common/utils/voucher-reservation.util';
+import { stripOrganizationContact } from '../../common/utils/organization-sanitizer.util';
 
 // Fallback de expiração da reserva de voucher quando o pedido (excepcionalmente) não tem
 // `expiresAt` — mantém a rede de segurança da reserva sem prendê-la para sempre.
@@ -334,7 +343,11 @@ export function buildParticipantTicketMap(reservedTickets: any[], participants: 
     const qty = rt?.quantity ?? 0;
     for (let i = 0; i < qty; i++) {
       const email = (participants?.[slot]?.email ?? '').toString().trim().toLowerCase();
-      if (email) map.set(email, rt.ticketId);
+      // FIRST-WINS para e-mail duplicado em 2+ slots (comprador com 2 ingressos pra si):
+      // sobrescrever fazia o ÚLTIMO slot vencer e o escopo de applyToProducts ser avaliado
+      // contra o ingresso errado. Primeira ocorrência alinha com o consumo first-wins de
+      // produtos no finalize (consumedProductIdx) — escopo e entrega nunca divergem.
+      if (email && !map.has(email)) map.set(email, rt.ticketId);
       slot++;
     }
   }
@@ -614,6 +627,14 @@ export function orderShape(order: any, discountOverride?: number, extra?: Record
               cov.qualifyingSlot,
             )
           : 0);
+    } else {
+      // NENHUMA unidade coberta (lista de documento sem participante elegível, ou
+      // appliesTo sem ingresso correspondente no pedido): o voucher NÃO cobre nada —
+      // espelha o pay (cpfBlocked → desconto 0). Sem este else, o order.discount
+      // defasado caía no fallback do inferEffectiveUsage (undefined → cobre TODAS as
+      // unidades) e o front exibia o desconto RATEADO entre todos os ingressos.
+      resolvedEffectiveUsage = 0;
+      voucherDerivedDiscount = 0;
     }
   }
 
@@ -787,6 +808,7 @@ export class OrdersService {
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
     private readonly orderFinalization: OrderFinalizationService,
+    private readonly activity: UserActivityService,
   ) {}
 
   private async isAdminUser(userId: string): Promise<boolean> {
@@ -1226,7 +1248,8 @@ export class OrdersService {
               state: true,
               participantFeePercent: true,
               organization: {
-                select: { id: true, name: true, logoUrl: true, email: true, phone: true },
+                // Contato (email/phone) fora do contrato de rota de usuário.
+                select: { id: true, name: true, logoUrl: true },
               },
             },
           },
@@ -1514,7 +1537,8 @@ export class OrdersService {
               zipCode: primaryReceipt.event.location?.zipCode ?? null,
               neighborhood: primaryReceipt.event.location?.neighborhood ?? null,
               googleMapsLink: primaryReceipt.event.location?.googleMapsLink ?? null,
-              organization: primaryReceipt.event.organization ?? null,
+              // Snapshots antigos congelaram email/phone da org — strip no read.
+              organization: stripOrganizationContact(primaryReceipt.event.organization),
             }
           : order.event
             ? (({ participantFeePercent: _fee, ...rest }) => rest)(order.event as any)
@@ -1997,7 +2021,11 @@ export class OrdersService {
       }
     }
 
-    // Discount final — prioridade: auto-aplicado > remoção > recálculo PERCENTAGE não-AGE > existente.
+    // Discount final — prioridade: auto-aplicado > remoção > recálculo do cupom/voucher
+    // existente > valor persistido. Os recálculos abaixo precisam respeitar a LISTA DE
+    // DOCUMENTO por-participante (cpfListStatus) — sem isso, editar participantes para CPFs
+    // fora da lista mantinha/recriava o desconto no banco e no display, divergindo do pay
+    // (que bloqueia). Mesma família do bug do voucher rateado de 2026-06-04.
     let newDiscount: number;
     if (autoCouponId) {
       newDiscount = autoDiscount;
@@ -2007,6 +2035,32 @@ export class OrdersService {
       newDiscount = (order as any).discount ?? 0;
       const activeCoupon = (order as any).coupon;
       if (
+        activeCoupon &&
+        activeCoupon.couponType === 'DISCOUNT' &&
+        activeCoupon.cpfListStatus === 'ENABLED' &&
+        !(order as any).voucherId
+      ) {
+        // Cupom DISCOUNT com lista de documento: re-deriva os participantes ELEGÍVEIS
+        // (lenient: slot vazio mantém provisório) e recalcula POR SLOT — PERCENTAGE e
+        // FIXED. Espelha patchCoupon/pay; nenhum elegível → desconto 0 (pay bloquearia).
+        const totalUnits = reservedTickets.reduce((s: number, rt: any) => s + (rt.quantity ?? 0), 0);
+        const eligibleSlots = computeDocEligibleSlots(
+          participants, activeCoupon.documentList, activeCoupon.cpfList, totalUnits, true,
+        );
+        let applicableTickets = reservedTickets;
+        if (activeCoupon.appliesTo && activeCoupon.appliesTo !== 'all') {
+          const allowed = parseAppliesToArray(activeCoupon.appliesTo);
+          applicableTickets = reservedTickets.filter((rt: any) => allowed.includes(rt.ticketId));
+        }
+        const applicableQty = applicableTickets.reduce((s: number, rt: any) => s + (rt.quantity ?? 0), 0);
+        const usage = Math.min(capUsageByMax(eligibleSlots.length, activeCoupon), applicableQty);
+        if (usage <= 0) {
+          newDiscount = 0;
+        } else {
+          const productsExtra = activeCoupon.applyToProducts ? scopedCouponProducts(activeCoupon.appliesTo) : 0;
+          newDiscount = computePartialCouponDiscount(applicableTickets, activeCoupon.type, activeCoupon.value, usage, productsExtra);
+        }
+      } else if (
         activeCoupon &&
         activeCoupon.type === 'PERCENTAGE' &&
         activeCoupon.couponType !== 'AGE' &&
@@ -2029,12 +2083,26 @@ export class OrdersService {
         newDiscount = Math.min(newDiscount, applicableBase);
       } else if ((order as any).voucherId && !(order as any).couponId && (order as any).voucher) {
         const v = (order as any).voucher;
-        const cov = resolveVoucherCoverage(reservedTickets, v.appliesTo);
-        // Voucher cobre os produtos SÓ do participante do ingresso coberto (slot).
-        const vProductsExtra = v.applyToProducts
-          ? computeSlotParticipantProductsSubtotal(pendingProductsList, participants, cov.qualifyingSlot)
-          : 0;
-        newDiscount = Math.min(cov.discount + vProductsExtra, totalAmount);
+        // Voucher com lista de documento: a cobertura fica restrita aos slots dos
+        // participantes elegíveis — antes ignorava a lista e mantinha o ingresso mais
+        // caro grátis no banco/display mesmo sem nenhum elegível (pay bloquearia).
+        let voucherEligibleSlots: Set<number> | undefined;
+        if (v.cpfListStatus === 'ENABLED') {
+          const totalUnits = reservedTickets.reduce((s: number, rt: any) => s + (rt.quantity ?? 0), 0);
+          voucherEligibleSlots = new Set(
+            computeVoucherEligibleSlots(participants, v.documentList, v.cpfList, totalUnits),
+          );
+        }
+        const cov = resolveVoucherCoverage(reservedTickets, v.appliesTo, undefined, voucherEligibleSlots);
+        if (!cov.hasApplicable) {
+          newDiscount = 0; // nenhum slot coberto — espelha o pay (cpfBlocked) e o orderShape
+        } else {
+          // Voucher cobre os produtos SÓ do participante do ingresso coberto (slot).
+          const vProductsExtra = v.applyToProducts
+            ? computeSlotParticipantProductsSubtotal(pendingProductsList, participants, cov.qualifyingSlot)
+            : 0;
+          newDiscount = Math.min(cov.discount + vProductsExtra, totalAmount);
+        }
       }
     }
 
@@ -2210,6 +2278,10 @@ export class OrdersService {
             WHERE id = ${rt.batchId}::uuid
           `;
         }
+        // `reservedByOrderId` não é FK (sem cascade) → libera a reserva de voucher ANTES de
+        // deletar o pedido, senão o voucher ficaria preso a um pedido inexistente até
+        // `reservedUntil` (até 30 min). Espelha o caminho gêmeo do cron de expiração.
+        await releaseVoucherByOrder(tx, orderId);
         await tx.order.delete({ where: { id: orderId } });
       });
       return { id: orderId, status: 'DELETED', orderDeleted: true };
@@ -2776,7 +2848,48 @@ export class OrdersService {
 
   // ── 6. pay ────────────────────────────────────────────────────────────────
 
+  /**
+   * Wrapper de idempotência do pagamento. O check de cache + gravação do resultado não são
+   * atômicos — sem o LOCK (SET NX), dois `pay` simultâneos com a MESMA Idempotency-Key
+   * passavam ambos pelo check vazio e chamavam a Cielo DUAS vezes (dupla autorização no
+   * cartão; QR PIX órfão). O lock garante exatamente UMA execução por chave por vez; o
+   * concorrente recebe 409 e o front re-tenta/aguarda (o resultado cacheado atende o retry).
+   */
   async pay(
+    userId: string,
+    orderId: string,
+    idempotencyKey: string | undefined,
+    dto: PayOrderDto,
+  ): Promise<Record<string, any>> {
+    // 6.1 Idempotency check (resposta cacheada de uma execução anterior)
+    if (idempotencyKey) {
+      const cached = await this.redisService.getIdempotencyResult(idempotencyKey);
+      if (cached) {
+        this.logger.log(`Idempotent pay: returning cached response for key ${idempotencyKey}`);
+        return cached.body;
+      }
+      // 6.1b Lock atômico por chave — fail-open se Redis indisponível.
+      const locked = await this.redisService.acquireIdempotencyLock(idempotencyKey);
+      if (!locked) {
+        throw new AppConflictException(
+          'PAYMENT_IN_PROGRESS',
+          'Já existe um pagamento em processamento para esta chave — aguarde a resposta.',
+        );
+      }
+    }
+
+    try {
+      return await this.executePay(userId, orderId, idempotencyKey, dto);
+    } finally {
+      // Libera SEMPRE (sucesso ou falha). No sucesso o resultado já está cacheado, então
+      // um retry posterior nem chega ao lock; na falha o usuário pode tentar de novo.
+      if (idempotencyKey) {
+        await this.redisService.releaseIdempotencyLock(idempotencyKey);
+      }
+    }
+  }
+
+  private async executePay(
     userId: string,
     orderId: string,
     idempotencyKey: string | undefined,
@@ -2784,15 +2897,6 @@ export class OrdersService {
   ): Promise<Record<string, any>> {
     const r: any = this.prisma.getReadClient();
     const w: any = this.prisma.getWriteClient();
-
-    // 6.1 Idempotency check
-    if (idempotencyKey) {
-      const cached = await this.redisService.getIdempotencyResult(idempotencyKey);
-      if (cached) {
-        this.logger.log(`Idempotent pay: returning cached response for key ${idempotencyKey}`);
-        return cached.body;
-      }
-    }
 
     // 6.2 Ownership check
     // PRIMARY (write client): o pay COBRA com base no que lê aqui (ticketsSubtotal/finalTotal
@@ -3470,12 +3574,15 @@ export class OrdersService {
         eventDate: true, registrationStartDate: true, registrationEndDate: true,
         location: true, city: true, state: true, country: true, zipCode: true, neighborhood: true,
         googleMapsLink: true, bannerUrl: true, logoUrl: true,
-        organization: { select: { id: true, name: true, logoUrl: true, email: true, phone: true } },
+        // Só o necessário pro e-mail de confirmação (nome/logo) — sem contato.
+        organization: { select: { id: true, name: true, logoUrl: true } },
       },
     });
 
     // 6.14 Finalize: mark PAID, create Payment, create Registrations
-    const registrations: any[] = await w.$transaction(async (tx: any) => {
+    let registrations: any[];
+    try {
+      registrations = await w.$transaction(async (tx: any) => {
       // Atomic guard — only proceed if order is still PENDING
       const guardRows: any[] = await tx.$queryRaw`
         UPDATE "Order"
@@ -3551,7 +3658,24 @@ export class OrdersService {
       });
 
       return await this.orderFinalization.finalizePaidOrder(tx, orderId);
-    }, { timeout: 30000, maxWait: 10000 });
+      }, { timeout: 30000, maxWait: 10000 });
+    } catch (e: unknown) {
+      // Finalize abortado PÓS-CAPTURA (ex.: voucher consumido por outro pedido na janela
+      // entre a autorização e o finalize): a tx deu rollback (pedido volta a PENDING, sem
+      // Payment), mas o dinheiro JÁ foi capturado na Cielo → VOID imediato + 422 amigável.
+      // Sem o void, o cliente ficava cobrado sem ingresso e sem estorno.
+      if (e instanceof OrderFinalizationAbortError) {
+        if (cieloResult.paymentId) {
+          await this.cieloService.cancelPayment(cieloResult.paymentId).catch((voidErr: any) => {
+            this.logger.error(
+              `[PAY-ABORT] VOID falhou para payment ${cieloResult.paymentId} (order ${orderId}, ${e.code}): ${voidErr?.message ?? voidErr} — estornar manualmente`,
+            );
+          });
+        }
+        throw new AppUnprocessableException(e.code, e.friendlyMessage);
+      }
+      throw e;
+    }
 
     const body: Record<string, any> = {
       orderId,
@@ -3807,16 +3931,61 @@ export class OrdersService {
   async cancelExpiredOrders(): Promise<number> {
     const w: any = this.prisma.getWriteClient();
 
+    // Janela de GRAÇA pra pedido com PAGAMENTO EM ANDAMENTO (Payment PENDING = PIX/3DS
+    // aguardando confirmação assíncrona): cancelar cedo demais abria a corrida "webhook
+    // tardio em pedido CANCELLED" — estoque devolvido (e revendível) com o cliente cobrado.
+    // Pedido com Payment PAID NUNCA é cancelado pelo cron (finalize em voo na mesma tx).
+    // Confirmações que chegarem DEPOIS da graça caem na compensação automática
+    // (PaymentCompensationService → estorno) — a graça só reduz a frequência disso.
+    const now = new Date();
+    const PAYMENT_IN_FLIGHT_GRACE_MS = 2 * 60 * 60 * 1000; // 2h
+    const paymentGraceCutoff = new Date(now.getTime() - PAYMENT_IN_FLIGHT_GRACE_MS);
+
     const expired = await w.order.findMany({
-      where: { status: 'PENDING', expiresAt: { lte: new Date() } },
+      where: {
+        status: 'PENDING',
+        OR: [
+          // Nunca tentou pagar → expira no prazo normal.
+          { expiresAt: { lte: now }, payment: null },
+          // Tentativa falhou/estornada → expira no prazo normal.
+          { expiresAt: { lte: now }, payment: { is: { status: { in: ['FAILED', 'REFUNDED'] } } } },
+          // Pagamento EM VOO (PIX/3DS pendente) → só expira após a janela de graça.
+          { expiresAt: { lte: paymentGraceCutoff }, payment: { is: { status: 'PENDING' } } },
+        ],
+      },
       select: {
         id: true,
+        userId: true,
+        eventId: true,
+        finalAmount: true,
         billingPostalCode: true,
         reservedTickets: { select: { batchId: true, quantity: true } },
       },
     });
 
     if (!expired.length) return 0;
+
+    // Telemetria de funil: pedido expirado = carrinho ABANDONADO (a métrica de drop-off
+    // mais valiosa). `reachedBilling` distingue quem parou antes vs depois do endereço.
+    // Push em buffer, fail-open — nunca quebra o cron.
+    const trackExpired = (order: { id: string; userId: string; eventId: string; finalAmount: number | null }, reachedBilling: boolean) => {
+      try {
+        this.activity.record({
+          userId: order.userId,
+          source: UserActivitySource.BACKEND,
+          category: UserActivityCategory.CHECKOUT,
+          action: 'order.expired',
+          metadata: {
+            orderId: order.id,
+            eventId: order.eventId,
+            finalAmount: order.finalAmount ?? 0,
+            reachedBilling,
+          },
+        });
+      } catch {
+        // Telemetria nunca quebra o cron de expiração.
+      }
+    };
 
     let cancelled = 0;
     for (const order of expired) {
@@ -3852,6 +4021,7 @@ export class OrdersService {
             await releaseVoucherByOrder(tx, order.id);
           });
           cancelled++;
+          trackExpired(order, reachedBilling);
           this.logger.debug(`Cancelled expired order ${order.id}`);
         }
       } else {
@@ -3871,6 +4041,7 @@ export class OrdersService {
           await tx.order.delete({ where: { id: order.id } });
         });
         cancelled++;
+        trackExpired(order, reachedBilling);
         this.logger.debug(`Deleted incomplete expired order ${order.id}`);
       }
     }

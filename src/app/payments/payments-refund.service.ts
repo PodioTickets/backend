@@ -11,10 +11,13 @@ import {
   PaymentMethod,
   PaymentStatus,
   RegistrationStatus,
+  UserActivityCategory,
+  UserActivitySource,
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from './cielo.service';
 import { OrderFinalizationService } from './order-finalization.service';
+import { UserActivityService } from '../../common/services/user-activity.service';
 import { REFUND_FEE_RATE, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 
 /**
@@ -45,6 +48,7 @@ export class PaymentsRefundService {
     private readonly prisma: PrismaService,
     private readonly cieloService: CieloService,
     private readonly orderFinalization: OrderFinalizationService,
+    private readonly activity: UserActivityService,
   ) {}
 
   /**
@@ -179,8 +183,10 @@ export class PaymentsRefundService {
     const isPending = cieloStatusStr === 'Pending';
 
     // ── 5. Aplica efeitos colaterais transacionalmente ───────────────────────
+    // Retorna `true` quando ESTA chamada aplicou os efeitos (false = corrida/no-op),
+    // pra só registrar a telemetria de estorno quando o estorno de fato aconteceu aqui.
     const refundedAt = new Date();
-    await this.prisma.getWriteClient().$transaction(async (tx: any) => {
+    const applied = await this.prisma.getWriteClient().$transaction(async (tx: any): Promise<boolean> => {
       // 5a. Marca o Payment como REFUNDED. updateMany com guard de status garante
       //     idempotência: se outro processo (ex: cron de chargeback) já tiver marcado,
       //     count=0 e o restante da transação vira no-op.
@@ -211,7 +217,7 @@ export class PaymentsRefundService {
         this.logger.warn(
           `[REFUND] payment ${payment.id} já não está PAID — provável corrida com cron de chargeback. No-op.`,
         );
-        return;
+        return false;
       }
 
       // 5b. Order → CANCELLED
@@ -266,7 +272,35 @@ export class PaymentsRefundService {
           },
         },
       });
+
+      return true;
     });
+
+    // ── 6. Telemetria: evento na jornada do COMPRADOR ─────────────────────────
+    // Complementa o `order.refund` (COMPLIANCE) gravado pelo controller admin, que fica
+    // na jornada do ADMIN. Este aqui aparece no histórico do usuário estornado.
+    if (applied) {
+      try {
+        this.activity.record({
+          userId: order.userId,
+          source: UserActivitySource.BACKEND,
+          category: UserActivityCategory.COMPLIANCE,
+          action: 'order.refunded',
+          metadata: {
+            orderId: order.id,
+            eventId: order.event.id,
+            paymentId: payment.id,
+            method: payment.method,
+            amount: order.finalAmount,
+            refundFee,
+            refundType: 'REFUND',
+            ...(isPending && { pendingConfirmation: true }),
+          },
+        });
+      } catch {
+        // Telemetria nunca quebra o estorno.
+      }
+    }
 
     this.logger.warn(
       `[REFUND] order=${order.id} payment=${payment.id} method=${payment.method} ` +

@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { RegistrationsService } from '../registrations.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { KitsService } from '../../kits/kits.service';
+import { EmailService } from '../../../common/services/email.service';
 import { NotFoundException, BadRequestException } from '@nestjs/common';
 import { RegistrationStatus } from '@prisma/client';
 
@@ -21,6 +22,24 @@ describe('RegistrationsService - Comprehensive Tests', () => {
     user: {
       create: jest.fn(),
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
+    },
+    // O `create` cria o Order primeiro (e os valores financeiros vivem nele).
+    order: {
+      create: jest.fn(),
+      findMany: jest.fn(),
+      count: jest.fn(),
+    },
+    coupon: {
+      findUnique: jest.fn(),
+      update: jest.fn(),
+    },
+    voucher: {
+      findUnique: jest.fn(),
+      updateMany: jest.fn(),
+    },
+    organizationMember: {
+      findFirst: jest.fn(),
     },
     registration: {
       create: jest.fn(),
@@ -42,7 +61,13 @@ describe('RegistrationsService - Comprehensive Tests', () => {
       findMany: jest.fn(),
     },
     $transaction: jest.fn(),
+    // Split read/write client: o service resolve o client via getReadClient/getWriteClient.
+    getReadClient: jest.fn(),
+    getWriteClient: jest.fn(),
   };
+  // Ambos apontam para o próprio mock (mesmas jest.fn() de cada model).
+  mockPrismaService.getReadClient.mockReturnValue(mockPrismaService);
+  mockPrismaService.getWriteClient.mockReturnValue(mockPrismaService);
 
   const mockKitsService = {
     checkStock: jest.fn(),
@@ -61,12 +86,22 @@ describe('RegistrationsService - Comprehensive Tests', () => {
           provide: KitsService,
           useValue: mockKitsService,
         },
+        {
+          provide: EmailService,
+          useValue: {},
+        },
       ],
     }).compile();
 
     service = module.get<RegistrationsService>(RegistrationsService);
     prisma = module.get<PrismaService>(PrismaService);
     kitsService = module.get<KitsService>(KitsService);
+
+    // getReadClient/getWriteClient devolvem o próprio mock (limpos a cada teste).
+    mockPrismaService.getReadClient.mockReturnValue(mockPrismaService);
+    mockPrismaService.getWriteClient.mockReturnValue(mockPrismaService);
+    // O Order é criado primeiro dentro da transação; o service usa `order.id`.
+    mockPrismaService.order.create.mockResolvedValue({ id: 'order-123' });
   });
 
   afterEach(() => {
@@ -160,10 +195,14 @@ describe('RegistrationsService - Comprehensive Tests', () => {
         const result = await service.create(userId, createDto);
 
         expect(result.message).toBe('Registration created successfully');
-        expect(result.data.registration.totalAmount).toBe(150.0);
-        expect(result.data.registration.serviceFee).toBe(7.5);
-        expect(result.data.registration.finalAmount).toBe(157.5);
-        expect(result.data.registration.qrCode).toBeDefined();
+        // Os valores financeiros (totalAmount/serviceFee/finalAmount) saíram do
+        // retorno da inscrição e agora vivem no Order. O `create` retorna a inscrição
+        // (com relações) e o qrCode formatado como link.
+        expect(result.data.registration.id).toBe('reg-123');
+        expect(result.data.registration.qrCode).toBe(
+          'https://www.podioticket.com.br/user/tickets/reg-123',
+        );
+        expect(result.data.registration.modalities).toHaveLength(1);
       });
     });
 
@@ -229,13 +268,16 @@ describe('RegistrationsService - Comprehensive Tests', () => {
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
         mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
         mockKitsService.checkStock.mockResolvedValue(true);
-        mockPrismaService.user.create.mockResolvedValue(mockInvitedUser);
+        // Convidado novo (e-mail inexistente): o service NÃO cria User — congela um
+        // guestSnapshot na inscrição (participantName/Email/Document) e userId fica null.
+        mockPrismaService.user.findFirst.mockResolvedValue(null);
+        const createSpy = jest.fn().mockResolvedValue(mockRegistration);
         mockPrismaService.$transaction.mockImplementation(async (callback) => {
           return callback({
             ...mockPrismaService,
             registration: {
               ...mockPrismaService.registration,
-              create: jest.fn().mockResolvedValue(mockRegistration),
+              create: createSpy,
               update: jest.fn().mockResolvedValue({ ...mockRegistration, qrCode: 'qr-code' }),
               findUnique: jest.fn().mockResolvedValue({
                 ...mockRegistration,
@@ -255,13 +297,18 @@ describe('RegistrationsService - Comprehensive Tests', () => {
 
         const result = await service.create(userId, createDto);
 
-        expect(result.data.registration.userId).toBe(mockInvitedUser.id);
+        // Comprador (userId) vira invitedById; o convidado entra como snapshot (userId null).
         expect(result.data.registration.invitedById).toBe(userId);
-        expect(mockPrismaService.user.create).toHaveBeenCalledWith(
+        expect(mockPrismaService.user.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { email: createDto.invitedUser.email } }),
+        );
+        expect(createSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             data: expect.objectContaining({
-              email: createDto.invitedUser.email,
-              isActive: false,
+              userId: null,
+              invitedById: userId,
+              participantEmail: createDto.invitedUser.email,
+              participantName: 'Jane Doe',
             }),
           }),
         );
@@ -269,43 +316,41 @@ describe('RegistrationsService - Comprehensive Tests', () => {
     });
 
     describe('UC3: User views their registrations', () => {
-      it('should return all registrations including invited ones', async () => {
+      it('should return an order-based, paginated payload', async () => {
         const userId = 'user-123';
-        const mockRegistrations = [
+        // O retorno agora é baseado em Order (não Registration): `{ orders, pagination }`.
+        const mockOrders = [
           {
-            id: 'reg-1',
-            userId,
-            event: { id: 'event-1', name: 'Event 1', eventDate: new Date('2025-06-15') },
-            modalities: [{ modality: { name: '5K', price: 100 } }],
-            kitItems: [],
+            id: 'order-1',
+            status: 'PENDING',
+            createdAt: new Date('2025-06-15'),
             payment: null,
+            event: { id: 'event-1', name: 'Event 1', eventDate: new Date('2025-06-15') },
+            registrations: [
+              { userId, invitedById: null, receiptSnapshot: null, invitedBy: null, tickets: [] },
+            ],
           },
           {
-            id: 'reg-2',
-            userId: 'invited-user',
-            invitedById: userId,
-            event: { id: 'event-2', name: 'Event 2', eventDate: new Date('2025-07-20') },
-            modalities: [],
-            kitItems: [],
+            id: 'order-2',
+            status: 'PENDING',
+            createdAt: new Date('2025-07-20'),
             payment: null,
+            event: { id: 'event-2', name: 'Event 2', eventDate: new Date('2025-07-20') },
+            registrations: [
+              { userId: 'invited-user', invitedById: userId, receiptSnapshot: null, invitedBy: null, tickets: [] },
+            ],
           },
         ];
 
-        mockPrismaService.registration.findMany.mockResolvedValue(mockRegistrations);
+        mockPrismaService.user.findUnique.mockResolvedValue({ documentNumberClean: null });
+        mockPrismaService.order.findMany.mockResolvedValue(mockOrders);
+        mockPrismaService.order.count.mockResolvedValue(2);
 
-        const result = await service.findUserRegistrations(userId);
+        const result: any = await service.findUserRegistrations(userId);
 
-        expect(result.data.registrations).toHaveLength(2);
-        expect(mockPrismaService.registration.findMany).toHaveBeenCalledWith(
-          expect.objectContaining({
-            where: {
-              OR: [
-                { userId },
-                { invitedById: userId },
-              ],
-            },
-          }),
-        );
+        expect(result.data.orders).toHaveLength(2);
+        expect(result.data.pagination).toMatchObject({ page: 1, limit: 20, total: 2 });
+        expect(mockPrismaService.order.findMany).toHaveBeenCalled();
       });
     });
   });
@@ -330,11 +375,12 @@ describe('RegistrationsService - Comprehensive Tests', () => {
       it('should prevent user from cancelling paid registrations', async () => {
         const userId = 'user-123';
         const registrationId = 'reg-123';
+        // O pagamento agora vive no Order (registration.order.payment), não no nível raiz.
         const mockRegistration = {
           id: registrationId,
           userId,
           status: RegistrationStatus.PENDING,
-          payment: { status: 'PAID' },
+          order: { userId, payment: { status: 'PAID' } },
           modalities: [],
         };
 
@@ -799,8 +845,10 @@ describe('RegistrationsService - Comprehensive Tests', () => {
 
       const result = await service.create(userId, createDto);
 
-      expect(result.data.registration.totalAmount).toBe(0);
-      expect(result.data.registration.finalAmount).toBe(0);
+      // Modalidade gratuita: a inscrição é criada normalmente. Valores financeiros
+      // migraram para o Order; aqui validamos que a inscrição (R$0) foi retornada.
+      expect(result.message).toBe('Registration created successfully');
+      expect(result.data.registration.id).toBe('reg-123');
     });
 
     it('should handle modality reaching max participants', async () => {
@@ -978,6 +1026,8 @@ describe('RegistrationsService - Comprehensive Tests', () => {
         status: 'PUBLISHED',
         eventDate: futureDate,
         registrationEndDate: new Date(futureDate.getTime() - 86400000),
+        // Taxa de serviço de 5% (o cálculo financeiro acontece no service e vai pro Order).
+        participantFeePercent: 5,
         questions: [],
       };
 
@@ -1000,18 +1050,10 @@ describe('RegistrationsService - Comprehensive Tests', () => {
           return callback({
             ...mockPrismaService,
             registration: {
-              create: jest.fn().mockResolvedValue({
-                id: 'reg-123',
-                totalAmount: 300,
-                serviceFee: 15,
-                finalAmount: 315,
-              }),
+              create: jest.fn().mockResolvedValue({ id: 'reg-123' }),
               update: jest.fn().mockResolvedValue({ id: 'reg-123', qrCode: 'qr' }),
               findUnique: jest.fn().mockResolvedValue({
                 id: 'reg-123',
-                totalAmount: 300,
-                serviceFee: 15,
-                finalAmount: 315,
                 modalities: [],
                 kitItems: [],
                 questionAnswers: [],
@@ -1022,11 +1064,18 @@ describe('RegistrationsService - Comprehensive Tests', () => {
           });
         });
 
-      const result = await service.create(userId, createDto);
+      await service.create(userId, createDto);
 
-      expect(result.data.registration.totalAmount).toBe(300);
-      expect(result.data.registration.serviceFee).toBe(15);
-      expect(result.data.registration.finalAmount).toBe(315);
+      // O cálculo financeiro vive no Order: total 300, taxa 5% = 15, final 315.
+      expect(mockPrismaService.order.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            totalAmount: 300,
+            serviceFee: 15,
+            finalAmount: 315,
+          }),
+        }),
+      );
     });
 
     it('should generate unique QR codes for each registration', async () => {

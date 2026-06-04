@@ -95,7 +95,7 @@ describe('AuthService - Performance Tests', () => {
       const endTime = Date.now();
       const duration = endTime - startTime;
 
-      const successful = results.filter((r) => !r.error).length;
+      const successful = results.filter((r) => !('error' in r)).length;
       const throughput = (concurrentRequests / duration) * 1000;
 
       expect(successful).toBeGreaterThan(0);
@@ -175,7 +175,7 @@ describe('AuthService - Performance Tests', () => {
       const endTime = Date.now();
       const duration = endTime - startTime;
 
-      const successful = results.filter((r) => !r.error).length;
+      const successful = results.filter((r) => !('error' in r)).length;
       const throughput = (concurrentRequests / duration) * 1000;
 
       expect(successful).toBeGreaterThan(0);

@@ -721,7 +721,7 @@ export class EventsService {
               id: true,
               name: true,
               tradeName: true, // Nome fantasia — mesmo formato de /organizations/me
-              email: true,
+              // Contato (email/phone) NÃO entra em rota pública — fora do contrato.
               logoUrl: true,
             },
           },
@@ -947,7 +947,7 @@ export class EventsService {
               id: true,
               name: true,
               tradeName: true, // Nome fantasia — mesmo formato de /organizations/me
-              email: true,
+              // Contato (email/phone) NÃO entra em rota pública — fora do contrato.
               logoUrl: true,
             },
           },
@@ -1201,14 +1201,14 @@ export class EventsService {
       ...EventsService.PUBLIC_EVENT_SCALAR_SELECT,
       // Organização: só o que a página pública/checkout lê (getEventOrganizer).
       // Fecha o vazamento de dados bancários/documentos/endereço da org.
+      // Contato (email/phone) também NÃO entra (2026-06-04): organizador não tem
+      // e-mail/telefone expostos em NENHUMA rota de usuário/pública.
       organization: {
         select: {
           id: true,
           name: true,
           tradeName: true,
           logoUrl: true,
-          email: true,
-          phone: true,
           description: true,
         },
       },

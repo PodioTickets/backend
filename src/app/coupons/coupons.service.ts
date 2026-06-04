@@ -510,10 +510,13 @@ export class CouponsService {
     // Update da lista de documentos: aceita documentList (novo) e/ou
     // cpfList (legacy). Quando qualquer um dos dois é informado, recalcula
     // o documentList canônico mantendo cpfList em paralelo.
+    // IMPORTANTE: a canônica é derivada APENAS do que veio no update — nunca do
+    // documentList VELHO do banco (update só-de-cpfList mantinha a canônica
+    // antiga e a elegibilidade validava contra a lista errada — ver Voucher.update).
     if (updateCouponDto.cpfList !== undefined || updateCouponDto.documentList !== undefined) {
       const merged = buildDocumentList({
-        documentList: updateCouponDto.documentList ?? (coupon.documentList as any),
-        cpfList: updateCouponDto.cpfList ?? (coupon.cpfList as any),
+        documentList: updateCouponDto.documentList ?? null,
+        cpfList: updateCouponDto.cpfList ?? null,
       });
       updateData.documentList = (merged as any) ?? null;
       if (updateCouponDto.cpfList !== undefined) {

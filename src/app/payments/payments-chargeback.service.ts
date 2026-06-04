@@ -1,9 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
-import { PaymentStatus } from '@prisma/client';
+import {
+  PaymentStatus,
+  UserActivityCategory,
+  UserActivitySource,
+} from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from './cielo.service';
 import { OrderFinalizationService } from './order-finalization.service';
+import { UserActivityService } from '../../common/services/user-activity.service';
 import { CronTimeout } from '../../common/decorators/cron-timeout.decorator';
 
 // Statuses Braspag que indicam reversão de pagamento
@@ -26,6 +31,7 @@ export class PaymentsChargebackService {
     private readonly prisma: PrismaService,
     private readonly cieloService: CieloService,
     private readonly orderFinalization: OrderFinalizationService,
+    private readonly activity: UserActivityService,
   ) {}
 
   // Diariamente às 03:00 no horário de Brasília (America/Sao_Paulo, UTC-3 sem DST).
@@ -56,6 +62,7 @@ export class PaymentsChargebackService {
       select: {
         id: true,
         orderId: true,
+        userId: true, // comprador — vai pro evento de telemetria do chargeback
         transactionId: true,
         metadata: true,
         method: true,
@@ -104,7 +111,7 @@ export class PaymentsChargebackService {
   }
 
   private async processReversal(
-    payment: { id: string; orderId: string; metadata: unknown },
+    payment: { id: string; orderId: string; userId?: string; metadata: unknown; method?: string },
     cieloStatus: number,
     existingMeta: any,
   ): Promise<void> {
@@ -116,7 +123,9 @@ export class PaymentsChargebackService {
         ? 'Pagamento cancelado/estornado pelo emissor'
         : 'Pagamento reembolsado (chargeback ou estorno)';
 
-    await this.prisma.getWriteClient().$transaction(async (tx: any) => {
+    // Retorna `true` quando ESTA execução processou a reversão (false = já tratada),
+    // pra só registrar a telemetria quando o chargeback foi de fato aplicado aqui.
+    const applied = await this.prisma.getWriteClient().$transaction(async (tx: any): Promise<boolean> => {
       // Idempotência: só processa se ainda estiver PAID
       const updated = await tx.payment.updateMany({
         where: { id: payment.id, status: PaymentStatus.PAID },
@@ -137,7 +146,7 @@ export class PaymentsChargebackService {
         },
       });
 
-      if (updated.count === 0) return; // já processado por execução anterior
+      if (updated.count === 0) return false; // já processado por execução anterior
 
       await tx.order.updateMany({
         where: { id: payment.orderId, status: 'PAID' },
@@ -157,7 +166,31 @@ export class PaymentsChargebackService {
       // Reverte cupom/voucher — MESMA fonte do estorno proativo. Antes o chargeback NÃO
       // revertia, deixando o cupom com usageCount inflado e o voucher preso em USED.
       await this.orderFinalization.reverseSaleSideEffects(tx, payment.orderId);
+
+      return true;
     });
+
+    // Telemetria na jornada do comprador: reversão involuntária detectada via Cielo.
+    // Sinal forte pra anti-fraude (usuário com chargebacks recorrentes).
+    if (applied) {
+      try {
+        this.activity.record({
+          userId: payment.userId ?? null,
+          source: UserActivitySource.BACKEND,
+          category: UserActivityCategory.COMPLIANCE,
+          action: 'order.chargeback',
+          metadata: {
+            orderId: payment.orderId,
+            paymentId: payment.id,
+            method: payment.method ?? null,
+            reversalType,
+            cieloStatus: cieloStatusStr,
+          },
+        });
+      } catch {
+        // Telemetria nunca quebra o cron.
+      }
+    }
 
     this.logger.warn(
       `[REVERSAL] payment=${payment.id} order=${payment.orderId} tipo=${reversalType} cieloStatus=${cieloStatusStr}`,

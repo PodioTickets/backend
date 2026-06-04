@@ -8,7 +8,10 @@ describe('ModalitiesService - Comprehensive Tests', () => {
   let prisma: PrismaService;
 
   const mockPrismaService = {
-    organizer: {
+    user: {
+      findUnique: jest.fn(),
+    },
+    organizationMember: {
       findUnique: jest.fn(),
     },
     event: {
@@ -17,6 +20,7 @@ describe('ModalitiesService - Comprehensive Tests', () => {
     modalityGroup: {
       create: jest.fn(),
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
       findMany: jest.fn(),
       update: jest.fn(),
       delete: jest.fn(),
@@ -49,6 +53,15 @@ describe('ModalitiesService - Comprehensive Tests', () => {
     // Mock getReadClient and getWriteClient to return the same mock
     mockPrismaService.getReadClient.mockReturnValue(mockPrismaService);
     mockPrismaService.getWriteClient.mockReturnValue(mockPrismaService);
+
+    // Default: usuário comum membro da organização do evento (acesso liberado).
+    // Testes de autorização negativa sobrescrevem organizationMember p/ null.
+    mockPrismaService.user.findUnique.mockResolvedValue({ role: 'USER' });
+    mockPrismaService.organizationMember.findUnique.mockResolvedValue({
+      organizationId: 'org-123',
+      userId: 'org-user-123',
+    });
+    mockPrismaService.modalityGroup.findFirst.mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -62,12 +75,9 @@ describe('ModalitiesService - Comprehensive Tests', () => {
         const eventId = 'event-123';
         const createGroupDto = {
           name: 'Corridas',
-          description: 'Modalidades de corrida',
-          isActive: true,
         };
 
-        const mockEvent = { id: eventId, organizerId: 'org-123' };
-        const mockOrganizer = { id: 'org-123', userId };
+        const mockEvent = { id: eventId, organizationId: 'org-123' };
         const mockGroup = {
           id: 'group-123',
           eventId,
@@ -75,7 +85,6 @@ describe('ModalitiesService - Comprehensive Tests', () => {
         };
 
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
         mockPrismaService.modalityGroup.create.mockResolvedValue(mockGroup);
 
         const result = await service.createGroup(userId, eventId, createGroupDto);
@@ -143,11 +152,11 @@ describe('ModalitiesService - Comprehensive Tests', () => {
         const userId = 'user-123';
         const eventId = 'event-123';
 
-        const mockEvent = { id: eventId, organizerId: 'org-999' };
-        const mockOrganizer = null;
+        const mockEvent = { id: eventId, organizationId: 'org-999' };
 
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+        // Usuário não é membro da organização do evento
+        mockPrismaService.organizationMember.findUnique.mockResolvedValue(null);
 
         await expect(
           service.create(userId, eventId, {
@@ -164,12 +173,12 @@ describe('ModalitiesService - Comprehensive Tests', () => {
         const eventId = 'event-123';
         const modalityId = 'mod-123';
 
-        const mockEvent = { id: eventId, organizerId: 'org-999' };
-        const mockOrganizer = { id: 'org-123', userId };
+        const mockEvent = { id: eventId, organizationId: 'org-999' };
         const mockModality = { id: modalityId, eventId, groupId: 'group-123' };
 
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+        // Usuário não é membro da organização do evento → acesso negado
+        mockPrismaService.organizationMember.findUnique.mockResolvedValue(null);
         mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
 
         await expect(
@@ -183,12 +192,10 @@ describe('ModalitiesService - Comprehensive Tests', () => {
         const userId = 'org-user-123';
         const eventId = 'event-123';
 
-        const mockEvent = { id: eventId, organizerId: 'org-123' };
-        const mockOrganizer = { id: 'org-123', userId };
+        const mockEvent = { id: eventId, organizationId: 'org-123' };
         const mockGroup = { id: 'group-123', eventId };
 
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
         mockPrismaService.modalityGroup.findUnique.mockResolvedValue(mockGroup);
         mockPrismaService.modality.create.mockRejectedValue(new Error('Invalid price'));
 
@@ -206,12 +213,10 @@ describe('ModalitiesService - Comprehensive Tests', () => {
         const userId = 'org-user-123';
         const eventId = 'event-123';
 
-        const mockEvent = { id: eventId, organizerId: 'org-123' };
-        const mockOrganizer = { id: 'org-123', userId };
+        const mockEvent = { id: eventId, organizationId: 'org-123' };
         const mockGroup = { id: 'group-123', eventId };
 
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
         mockPrismaService.modalityGroup.findUnique.mockResolvedValue(mockGroup);
         mockPrismaService.modality.create.mockRejectedValue(new Error('Invalid maxParticipants'));
 
@@ -232,12 +237,10 @@ describe('ModalitiesService - Comprehensive Tests', () => {
         const userId = 'org-user-123';
         const eventId = 'event-123';
 
-        const mockEvent = { id: eventId, organizerId: 'org-123' };
-        const mockOrganizer = { id: 'org-123', userId };
+        const mockEvent = { id: eventId, organizationId: 'org-123' };
         const mockGroup = { id: 'group-999', eventId: 'other-event' }; // Grupo de outro evento
 
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
         mockPrismaService.modalityGroup.findUnique.mockResolvedValue(mockGroup);
 
         await expect(
@@ -301,8 +304,7 @@ describe('ModalitiesService - Comprehensive Tests', () => {
       const userId = 'org-user-123';
       const eventId = 'event-123';
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
+      const mockEvent = { id: eventId, organizationId: 'org-123' };
       const mockGroup = { id: 'group-123', eventId };
       const mockModality = {
         id: 'mod-123',
@@ -315,7 +317,6 @@ describe('ModalitiesService - Comprehensive Tests', () => {
       };
 
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
       mockPrismaService.modalityGroup.findUnique.mockResolvedValue(mockGroup);
       mockPrismaService.modality.create.mockResolvedValue(mockModality);
 
@@ -334,8 +335,7 @@ describe('ModalitiesService - Comprehensive Tests', () => {
       const userId = 'org-user-123';
       const eventId = 'event-123';
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
+      const mockEvent = { id: eventId, organizationId: 'org-123' };
       const mockGroup = { id: 'group-123', eventId };
       const mockModality = {
         id: 'mod-123',
@@ -347,7 +347,6 @@ describe('ModalitiesService - Comprehensive Tests', () => {
       };
 
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
       mockPrismaService.modalityGroup.findUnique.mockResolvedValue(mockGroup);
       mockPrismaService.modality.create.mockResolvedValue(mockModality);
 
@@ -366,8 +365,7 @@ describe('ModalitiesService - Comprehensive Tests', () => {
       const eventId = 'event-123';
       const highPrice = 999999.99;
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
+      const mockEvent = { id: eventId, organizationId: 'org-123' };
       const mockGroup = { id: 'group-123', eventId };
       const mockModality = {
         id: 'mod-123',
@@ -379,7 +377,6 @@ describe('ModalitiesService - Comprehensive Tests', () => {
       };
 
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
       mockPrismaService.modalityGroup.findUnique.mockResolvedValue(mockGroup);
       mockPrismaService.modality.create.mockResolvedValue(mockModality);
 
@@ -400,8 +397,7 @@ describe('ModalitiesService - Comprehensive Tests', () => {
       const eventId = 'event-123';
       const groupId = 'group-123';
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
+      const mockEvent = { id: eventId, organizationId: 'org-123' };
       const mockGroup = {
         id: groupId,
         eventId,
@@ -409,10 +405,9 @@ describe('ModalitiesService - Comprehensive Tests', () => {
       };
 
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
       mockPrismaService.modalityGroup.findUnique.mockResolvedValue(mockGroup);
 
-      await expect(service.deleteGroup(userId, eventId, groupId)).rejects.toThrow(
+      await expect(service.removeGroup(userId, eventId, groupId)).rejects.toThrow(
         BadRequestException,
       );
     });
@@ -422,8 +417,7 @@ describe('ModalitiesService - Comprehensive Tests', () => {
       const eventId = 'event-123';
       const modalityId = 'mod-123';
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
+      const mockEvent = { id: eventId, organizationId: 'org-123' };
       const mockModality = {
         id: modalityId,
         eventId,
@@ -431,7 +425,6 @@ describe('ModalitiesService - Comprehensive Tests', () => {
       };
 
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
       mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
       mockPrismaService.modality.delete.mockResolvedValue(mockModality);
 
@@ -443,8 +436,7 @@ describe('ModalitiesService - Comprehensive Tests', () => {
       const eventId = 'event-123';
       const modalityId = 'mod-123';
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
+      const mockEvent = { id: eventId, organizationId: 'org-123' };
       const mockModality = {
         id: modalityId,
         eventId,
@@ -452,7 +444,6 @@ describe('ModalitiesService - Comprehensive Tests', () => {
       };
 
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
       mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
 
       await expect(service.remove(userId, eventId, modalityId)).rejects.toThrow(
@@ -466,11 +457,9 @@ describe('ModalitiesService - Comprehensive Tests', () => {
       const userId = 'org-user-123';
       const eventId = 'event-123';
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
+      const mockEvent = { id: eventId, organizationId: 'org-123' };
 
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
 
       const groups = ['Corridas', 'Caminhadas', 'Ciclismo'];
       for (const groupName of groups) {
@@ -482,7 +471,6 @@ describe('ModalitiesService - Comprehensive Tests', () => {
 
         await service.createGroup(userId, eventId, {
           name: groupName,
-          description: `Group ${groupName}`,
         });
       }
 
@@ -494,12 +482,10 @@ describe('ModalitiesService - Comprehensive Tests', () => {
       const eventId = 'event-123';
       const modalityId = 'mod-123';
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
+      const mockEvent = { id: eventId, organizationId: 'org-123' };
       const mockModality = { id: modalityId, eventId, order: 1 };
 
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
       mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
       mockPrismaService.modality.update.mockResolvedValue({
         ...mockModality,

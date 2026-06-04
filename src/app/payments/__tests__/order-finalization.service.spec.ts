@@ -11,7 +11,7 @@ describe('OrderFinalizationService — métodos compartilhados', () => {
   let service: OrderFinalizationService;
 
   beforeEach(() => {
-    service = new OrderFinalizationService(prismaStub);
+    service = new OrderFinalizationService(prismaStub, { record: jest.fn() } as any);
   });
 
   describe('confirmAndFinalizeOrder', () => {
@@ -28,14 +28,33 @@ describe('OrderFinalizationService — métodos compartilhados', () => {
       expect(spy).toHaveBeenCalledWith(tx, 'o1');
     });
 
-    it('é idempotente: se o Order já não estava PENDING, NÃO finaliza', async () => {
-      const tx: any = { $queryRaw: jest.fn().mockResolvedValue([]) };
+    it('é idempotente: se o Order já não estava PENDING, NÃO finaliza (e expõe o status atual)', async () => {
+      const tx: any = {
+        $queryRaw: jest.fn().mockResolvedValue([]),
+        // O caminho não-finalizado relê o status pro caller distinguir entrega dupla (PAID)
+        // de pagamento tardio em pedido CANCELLED (→ compensação/estorno automático).
+        order: { findUnique: jest.fn().mockResolvedValue({ status: 'PAID' }) },
+      };
       const spy = jest.spyOn(service, 'finalizePaidOrder').mockResolvedValue([]);
 
       const res = await service.confirmAndFinalizeOrder(tx, 'o1');
 
       expect(res.finalized).toBe(false);
+      expect(res.orderStatus).toBe('PAID');
       expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('pedido CANCELLED (pago tarde demais) → finalized=false com orderStatus=CANCELLED', async () => {
+      const tx: any = {
+        $queryRaw: jest.fn().mockResolvedValue([]),
+        order: { findUnique: jest.fn().mockResolvedValue({ status: 'CANCELLED' }) },
+      };
+      jest.spyOn(service, 'finalizePaidOrder').mockResolvedValue([]);
+
+      const res = await service.confirmAndFinalizeOrder(tx, 'o1');
+
+      expect(res.finalized).toBe(false);
+      expect(res.orderStatus).toBe('CANCELLED'); // gatilho da compensação no caller
     });
   });
 

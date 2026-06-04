@@ -11,28 +11,52 @@ describe('OrganizersService - Comprehensive Tests', () => {
   let emailService: EmailService;
   let whatsappService: WhatsAppService;
 
+  // Modelo organização + membro (OWNER), acessado via getReadClient()/getWriteClient().
+  // $transaction roda o callback com o próprio mock como cliente tx.
   const mockPrismaService = {
-    organizer: {
-      findUnique: jest.fn(),
+    organizationMember: {
+      findFirst: jest.fn(),
+      create: jest.fn(),
+    },
+    organization: {
       create: jest.fn(),
       update: jest.fn(),
+      findUnique: jest.fn(),
+      findMany: jest.fn(),
     },
     user: {
       update: jest.fn(),
+      findUnique: jest.fn(),
     },
     contactMessage: {
       create: jest.fn(),
       findMany: jest.fn(),
     },
+    $transaction: jest.fn(),
+    getReadClient: jest.fn(),
+    getWriteClient: jest.fn(),
   };
 
   const mockEmailService = {
-    sendContactMessageToOrganizer: jest.fn(),
+    sendWelcomeOrganizer: jest.fn().mockResolvedValue(undefined),
+    sendContactMessageToOrganizer: jest.fn().mockResolvedValue(undefined),
+    sendContactMessageConfirmation: jest.fn().mockResolvedValue(undefined),
   };
 
   const mockWhatsAppService = {
-    sendContactMessageToOrganizer: jest.fn(),
+    sendContactMessageToOrganizer: jest.fn().mockResolvedValue(undefined),
   };
+
+  // Helper: monta uma organização com um membro OWNER (com telefone) para o
+  // fluxo de mensagem de contato (e-mail + WhatsApp do dono).
+  const buildOrganizationWithOwner = (organizationId = 'org-123') => ({
+    id: organizationId,
+    name: 'Test Organizer',
+    email: 'org@example.com',
+    logoUrl: null,
+    members: [{ user: { email: 'org@example.com', phone: '11999999999' } }],
+    events: [],
+  });
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -57,6 +81,12 @@ describe('OrganizersService - Comprehensive Tests', () => {
     prisma = module.get<PrismaService>(PrismaService);
     emailService = module.get<EmailService>(EmailService);
     whatsappService = module.get<WhatsAppService>(WhatsAppService);
+
+    mockPrismaService.getReadClient.mockReturnValue(mockPrismaService);
+    mockPrismaService.getWriteClient.mockReturnValue(mockPrismaService);
+    mockPrismaService.$transaction.mockImplementation((cb: any) => cb(mockPrismaService));
+    // userId no contato dispara busca do user; default não encontra nada.
+    mockPrismaService.user.findUnique.mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -71,28 +101,27 @@ describe('OrganizersService - Comprehensive Tests', () => {
           name: 'Maratona SP',
           email: 'org@example.com',
           phone: '11999999999',
-          documentNumber: '12345678900',
         };
 
-        const mockOrganizer = {
-          id: 'org-123',
+        const mockOrganization = { id: 'org-123', ...createDto };
+        const mockMember = {
+          id: 'member-123',
+          organizationId: 'org-123',
           userId,
-          ...createDto,
-          user: {
-            id: userId,
-            firstName: 'John',
-            lastName: 'Doe',
-            email: 'user@example.com',
-          },
+          role: 'OWNER',
+          user: { id: userId, firstName: 'John', lastName: 'Doe', email: 'user@example.com' },
+          organization: mockOrganization,
         };
 
-        mockPrismaService.organizer.findUnique.mockResolvedValue(null);
-        mockPrismaService.organizer.create.mockResolvedValue(mockOrganizer);
+        mockPrismaService.organizationMember.findFirst.mockResolvedValue(null);
+        mockPrismaService.organization.create.mockResolvedValue(mockOrganization);
+        mockPrismaService.organizationMember.create.mockResolvedValue(mockMember);
         mockPrismaService.user.update.mockResolvedValue({ id: userId, role: 'ORGANIZER', accountType: 'ORGANIZER' });
 
         const result = await service.create(userId, createDto);
 
-        expect(result.data.organizer).toBeDefined();
+        expect(result.data.organization).toBeDefined();
+        expect(result.data.member).toBeDefined();
         expect(mockPrismaService.user.update).toHaveBeenCalledWith({
           where: { id: userId },
           data: { role: 'ORGANIZER', accountType: 'ORGANIZER' },
@@ -101,9 +130,8 @@ describe('OrganizersService - Comprehensive Tests', () => {
 
       it('should prevent duplicate organizer creation', async () => {
         const userId = 'user-123';
-        const existingOrganizer = { id: 'org-123', userId };
 
-        mockPrismaService.organizer.findUnique.mockResolvedValue(existingOrganizer);
+        mockPrismaService.organizationMember.findFirst.mockResolvedValue({ id: 'member-123', role: 'OWNER' });
 
         await expect(
           service.create(userId, {
@@ -118,7 +146,7 @@ describe('OrganizersService - Comprehensive Tests', () => {
     describe('UC2: User contacts organizer', () => {
       it('should send email and WhatsApp message', async () => {
         const userId = 'user-123';
-        const organizerId = 'org-123';
+        const organizationId = 'org-123';
         const contactData = {
           name: 'John Doe',
           email: 'user@example.com',
@@ -127,26 +155,10 @@ describe('OrganizersService - Comprehensive Tests', () => {
           userId,
         };
 
-        const mockOrganizer = {
-          id: organizerId,
-          name: 'Test Organizer',
-          email: 'org@example.com',
-          user: {
-            email: 'org@example.com',
-            phone: '11999999999',
-          },
-          events: [],
-        };
+        mockPrismaService.organization.findUnique.mockResolvedValue(buildOrganizationWithOwner(organizationId));
+        mockPrismaService.contactMessage.create.mockResolvedValue({ id: 'msg-123', organizationId, ...contactData });
 
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-        mockPrismaService.contactMessage.create.mockResolvedValue({
-          id: 'msg-123',
-          organizerId,
-          ...contactData,
-        });
-        mockEmailService.sendContactMessageToOrganizer.mockResolvedValue(undefined);
-
-        const result = await service.sendContactMessage(organizerId, contactData);
+        const result = await service.sendContactMessage(organizationId, contactData);
 
         expect(mockEmailService.sendContactMessageToOrganizer).toHaveBeenCalled();
         expect(result.message).toContain('Message sent successfully');
@@ -154,7 +166,7 @@ describe('OrganizersService - Comprehensive Tests', () => {
 
       it('should handle WhatsApp contact method', async () => {
         const userId = 'user-123';
-        const organizerId = 'org-123';
+        const organizationId = 'org-123';
         const contactData = {
           name: 'John Doe',
           email: 'user@example.com',
@@ -163,27 +175,12 @@ describe('OrganizersService - Comprehensive Tests', () => {
           userId,
         };
 
-        const mockOrganizer = {
-          id: organizerId,
-          name: 'Test Organizer',
-          email: 'org@example.com',
-          user: {
-            email: 'org@example.com',
-            phone: '11999999999',
-          },
-          events: [],
-        };
+        mockPrismaService.organization.findUnique.mockResolvedValue(buildOrganizationWithOwner(organizationId));
+        mockPrismaService.contactMessage.create.mockResolvedValue({ id: 'msg-123', organizationId, ...contactData });
 
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-        mockPrismaService.contactMessage.create.mockResolvedValue({
-          id: 'msg-123',
-          organizerId,
-          ...contactData,
-        });
-        mockWhatsAppService.sendContactMessageToOrganizer.mockResolvedValue(undefined);
+        await service.sendContactMessage(organizationId, contactData);
 
-        await service.sendContactMessage(organizerId, contactData);
-
+        // WhatsApp dispara apenas porque o membro OWNER tem telefone cadastrado.
         expect(mockWhatsAppService.sendContactMessageToOrganizer).toHaveBeenCalled();
       });
     });
@@ -192,47 +189,48 @@ describe('OrganizersService - Comprehensive Tests', () => {
   describe('Security Tests', () => {
     describe('Authorization', () => {
       it('should prevent contacting non-existent organizer', async () => {
-        const organizerId = 'non-existent-org';
+        const organizationId = 'non-existent-org';
         const contactData = {
           name: 'Test User',
           email: 'test@example.com',
           message: 'Test',
         };
 
-        mockPrismaService.organizer.findUnique.mockResolvedValue(null);
+        mockPrismaService.organization.findUnique.mockResolvedValue(null);
 
         await expect(
-          service.sendContactMessage(organizerId, contactData),
+          service.sendContactMessage(organizationId, contactData),
         ).rejects.toThrow(NotFoundException);
       });
 
       it('should prevent unauthorized contact message access', async () => {
-        const organizerId = 'org-123';
+        const organizationId = 'org-123';
         const contactData = {
           name: 'Test User',
           email: 'test@example.com',
           message: 'Test',
         };
 
-        mockPrismaService.organizer.findUnique.mockResolvedValue(null);
+        mockPrismaService.organization.findUnique.mockResolvedValue(null);
 
         await expect(
-          service.sendContactMessage(organizerId, contactData),
+          service.sendContactMessage(organizationId, contactData),
         ).rejects.toThrow(NotFoundException);
       });
     });
 
     describe('Input Validation', () => {
-      it('should validate email format', async () => {
+      it('should propagate create errors (invalid email)', async () => {
         const userId = 'user-123';
         const invalidEmails = ['invalid', '@example.com', 'test@', 'test@.com'];
 
-        // O Prisma vai validar o formato, então simulamos o erro do Prisma
+        // O service não valida e-mail (responsabilidade do DTO/Prisma). Simulamos a
+        // rejeição do create para garantir que o erro propaga sem ser engolido.
         for (const email of invalidEmails) {
-          mockPrismaService.organizer.findUnique.mockResolvedValue(null);
+          mockPrismaService.organizationMember.findFirst.mockResolvedValue(null);
           const prismaError = new Error('Invalid email format');
           (prismaError as any).code = 'P2003';
-          mockPrismaService.organizer.create.mockRejectedValue(prismaError);
+          mockPrismaService.organization.create.mockRejectedValue(prismaError);
 
           await expect(
             service.create(userId, {
@@ -244,63 +242,40 @@ describe('OrganizersService - Comprehensive Tests', () => {
         }
       });
 
-      it('should sanitize XSS in contact message', async () => {
+      it('should sanitize links in contact message', async () => {
         const userId = 'user-123';
-        const organizerId = 'org-123';
-        const xssPayload = '<script>alert("XSS")</script>';
+        const organizationId = 'org-123';
+        // O service sanitiza links/domínios da mensagem antes de persistir.
+        const messageWithLink = 'Visite https://spam.com agora mesmo';
 
-        const mockOrganizer = {
-          id: organizerId,
-          name: 'Test Organizer',
-          email: 'org@example.com',
-          user: {
-            email: 'org@example.com',
-            phone: '11999999999',
-          },
-          events: [],
-        };
+        mockPrismaService.organization.findUnique.mockResolvedValue(buildOrganizationWithOwner(organizationId));
+        mockPrismaService.contactMessage.create.mockResolvedValue({ id: 'msg-123' });
 
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-        mockPrismaService.contactMessage.create.mockResolvedValue({
-          id: 'msg-123',
-          message: xssPayload,
-        });
-        mockEmailService.sendContactMessageToOrganizer.mockResolvedValue(undefined);
-
-        await service.sendContactMessage(organizerId, {
+        await service.sendContactMessage(organizationId, {
           name: 'Test User',
           email: 'test@example.com',
-          message: xssPayload,
+          message: messageWithLink,
           userId,
         });
 
-        // Verificar que a mensagem foi salva (sanitização deve ser feita no frontend ou middleware)
         expect(mockPrismaService.contactMessage.create).toHaveBeenCalled();
+        const savedMessage = mockPrismaService.contactMessage.create.mock.calls[0][0].data.message;
+        // O link foi removido pela sanitização.
+        expect(savedMessage).not.toContain('https://spam.com');
       });
     });
 
     describe('Rate Limiting', () => {
       it('should handle multiple contact messages efficiently', async () => {
         const userId = 'user-123';
-        const organizerId = 'org-123';
-        const mockOrganizer = {
-          id: organizerId,
-          name: 'Test Organizer',
-          email: 'org@example.com',
-          user: {
-            email: 'org@example.com',
-            phone: '11999999999',
-          },
-          events: [],
-        };
+        const organizationId = 'org-123';
 
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+        mockPrismaService.organization.findUnique.mockResolvedValue(buildOrganizationWithOwner(organizationId));
         mockPrismaService.contactMessage.create.mockResolvedValue({ id: 'msg-123' });
-        mockEmailService.sendContactMessageToOrganizer.mockResolvedValue(undefined);
 
         const startTime = Date.now();
         const promises = Array.from({ length: 10 }, (_, i) =>
-          service.sendContactMessage(organizerId, {
+          service.sendContactMessage(organizationId, {
             name: `Test User ${i}`,
             email: `test${i}@example.com`,
             message: `Message ${i}`,
@@ -320,18 +295,11 @@ describe('OrganizersService - Comprehensive Tests', () => {
   describe('Performance Tests', () => {
     it('should load organizer with events efficiently', async () => {
       const userId = 'org-user-123';
-      const mockOrganizer = {
+      const mockOrganization = {
         id: 'org-123',
-        userId,
         name: 'Test Organizer',
         email: 'org@example.com',
-        user: {
-          id: userId,
-          firstName: 'John',
-          lastName: 'Doe',
-          email: 'user@example.com',
-          phone: '11999999999',
-        },
+        members: [],
         events: Array.from({ length: 100 }, (_, i) => ({
           id: `event-${i}`,
           name: `Event ${i}`,
@@ -340,14 +308,20 @@ describe('OrganizersService - Comprehensive Tests', () => {
         })),
       };
 
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+      mockPrismaService.organizationMember.findFirst.mockResolvedValue({
+        id: 'member-123',
+        userId,
+        role: 'OWNER',
+        organization: mockOrganization,
+        user: { id: userId },
+      });
 
       const startTime = Date.now();
       const result = await service.findOne(userId);
       const endTime = Date.now();
 
       expect(endTime - startTime).toBeLessThan(1000);
-      expect(result.data.organizer.events).toHaveLength(100);
+      expect(result.data.organization.events).toHaveLength(100);
     });
   });
 
@@ -356,50 +330,35 @@ describe('OrganizersService - Comprehensive Tests', () => {
       const userId = 'org-user-123';
       const updateDto = { name: 'Updated Name' };
 
-      const mockOrganizer = {
+      mockPrismaService.organizationMember.findFirst.mockResolvedValue({
+        id: 'member-123',
+        organizationId: 'org-123',
+        role: 'OWNER',
+        organization: { id: 'org-123' },
+      });
+      mockPrismaService.organization.update.mockResolvedValue({
         id: 'org-123',
-        userId,
-        name: 'Old Name',
+        name: 'Updated Name',
         email: 'org@example.com',
-      };
-
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-      mockPrismaService.organizer.update.mockResolvedValue({
-        ...mockOrganizer,
-        ...updateDto,
+        members: [],
       });
 
       const result = await service.update(userId, updateDto);
 
-      expect(result.data.organizer.name).toBe(updateDto.name);
-      expect(result.data.organizer.email).toBe(mockOrganizer.email);
+      expect(result.data.organization.name).toBe(updateDto.name);
+      expect(result.data.organization.email).toBe('org@example.com');
     });
 
     it('should handle contact message with very long text', async () => {
       const userId = 'user-123';
-      const organizerId = 'org-123';
+      const organizationId = 'org-123';
       const longMessage = 'A'.repeat(10000);
 
-      const mockOrganizer = {
-        id: organizerId,
-        name: 'Test Organizer',
-        email: 'org@example.com',
-        user: {
-          email: 'org@example.com',
-          phone: '11999999999',
-        },
-        events: [],
-      };
-
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-      mockPrismaService.contactMessage.create.mockResolvedValue({
-        id: 'msg-123',
-        message: longMessage,
-      });
-      mockEmailService.sendContactMessageToOrganizer.mockResolvedValue(undefined);
+      mockPrismaService.organization.findUnique.mockResolvedValue(buildOrganizationWithOwner(organizationId));
+      mockPrismaService.contactMessage.create.mockResolvedValue({ id: 'msg-123', message: longMessage });
 
       await expect(
-        service.sendContactMessage(organizerId, {
+        service.sendContactMessage(organizationId, {
           name: 'Test User',
           email: 'test@example.com',
           message: longMessage,
@@ -416,22 +375,26 @@ describe('OrganizersService - Comprehensive Tests', () => {
         phone: '11999999999',
       };
 
-      mockPrismaService.organizer.findUnique.mockResolvedValue(null);
-      mockPrismaService.organizer.create.mockResolvedValue({
-        id: 'org-123',
+      const mockOrganization = { id: 'org-123', ...createDto };
+      mockPrismaService.organizationMember.findFirst.mockResolvedValue(null);
+      mockPrismaService.organization.create.mockResolvedValue(mockOrganization);
+      mockPrismaService.organizationMember.create.mockResolvedValue({
+        id: 'member-123',
         userId,
-        ...createDto,
+        role: 'OWNER',
+        organization: mockOrganization,
+        user: { id: userId, firstName: 'John', email: 'user@example.com' },
       });
       mockPrismaService.user.update.mockResolvedValue({ id: userId, role: 'ORGANIZER', accountType: 'ORGANIZER' });
 
       const result = await service.create(userId, createDto);
 
-      expect(result.data.organizer.name).toBe(createDto.name);
+      expect(result.data.organization.name).toBe(createDto.name);
     });
   });
 
   describe('Data Integrity', () => {
-    it('should maintain referential integrity on user role update', async () => {
+    it('should fail creation when transactional user update fails', async () => {
       const userId = 'user-123';
       const createDto = {
         name: 'Test Organizer',
@@ -439,21 +402,23 @@ describe('OrganizersService - Comprehensive Tests', () => {
         phone: '11999999999',
       };
 
-      mockPrismaService.organizer.findUnique.mockResolvedValue(null);
-      mockPrismaService.organizer.create.mockResolvedValue({
-        id: 'org-123',
+      mockPrismaService.organizationMember.findFirst.mockResolvedValue(null);
+      mockPrismaService.organization.create.mockResolvedValue({ id: 'org-123', ...createDto });
+      mockPrismaService.organizationMember.create.mockResolvedValue({
+        id: 'member-123',
         userId,
-        ...createDto,
+        role: 'OWNER',
+        organization: { id: 'org-123' },
+        user: { id: userId, email: 'user@example.com' },
       });
+      // Falha no update do user dentro da transação → toda a operação rejeita.
       mockPrismaService.user.update.mockRejectedValue(new Error('User not found'));
 
       await expect(service.create(userId, createDto)).rejects.toThrow();
-
-      // Verificar que o organizer não foi criado se o user update falhar
-      expect(mockPrismaService.organizer.create).toHaveBeenCalled();
+      expect(mockPrismaService.organization.create).toHaveBeenCalled();
     });
 
-    it('should prevent duplicate organizer emails', async () => {
+    it('should propagate unique constraint errors on creation', async () => {
       const userId = 'user-123';
       const createDto = {
         name: 'Test',
@@ -461,14 +426,13 @@ describe('OrganizersService - Comprehensive Tests', () => {
         phone: '11999999999',
       };
 
-      mockPrismaService.organizer.findUnique.mockResolvedValue(null);
+      mockPrismaService.organizationMember.findFirst.mockResolvedValue(null);
       const prismaError = new Error('Unique constraint failed');
       (prismaError as any).code = 'P2002';
       (prismaError as any).meta = { target: ['email'] };
-      mockPrismaService.organizer.create.mockRejectedValue(prismaError);
+      mockPrismaService.organization.create.mockRejectedValue(prismaError);
 
       await expect(service.create(userId, createDto)).rejects.toThrow();
     });
   });
 });
-

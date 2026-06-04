@@ -73,6 +73,7 @@ describe('OrdersExpirationService (integração, banco real)', () => {
       {} as any, // EmailService
       {} as any, // TicketPdfService
       {} as any, // OrderFinalizationService
+      { record: () => {} } as any, // UserActivityService (telemetria — no-op no teste)
     );
     service = new OrdersExpirationService(ordersService);
   });
@@ -384,5 +385,77 @@ describe('OrdersExpirationService (integração, banco real)', () => {
     // estoque devolvido só dos 2 vencidos: 4 + 2 + 1 = 7 (o do válido continua preso)
     const batch = await prisma.getWriteClient().ticketBatch.findUnique({ where: { id: batchId } });
     expect(batch?.availableQuantity).toBe(4 + 2 + 1);
+  });
+
+  // ── JANELA DE GRAÇA p/ pagamento EM ANDAMENTO (regressão 2026-06-04) ────────
+  // Antes, o cron cancelava pedido expirado mesmo com Payment PENDING (PIX aguardando
+  // webhook): estoque devolvido/revendido e o webhook tardio confirmava um pedido morto.
+  describe('janela de graça para pagamento em andamento', () => {
+    /** Payment com status e idade configuráveis, vinculado ao pedido. */
+    const seedPayment = async (orderId: string, userId: string, status: 'PENDING' | 'FAILED') => {
+      await prisma.getWriteClient().payment.create({
+        data: {
+          orderId,
+          userId,
+          method: 'PIX' as any,
+          status: status as any,
+          amount: 10000,
+          transactionId: `tx-${orderId.slice(0, 8)}`,
+          metadata: {},
+        },
+      });
+    };
+
+    it('expirado HÁ POUCO com Payment PENDING (PIX em voo) → NÃO cancela (graça de 2h)', async () => {
+      const { adminUserId, eventId } = await seedOrgUserEvent(prisma);
+      const { ticketId, batchId } = await seedTicketWithBatch(eventId, { quantity: 10, available: 8 });
+      const { orderId } = await seedPendingOrder({
+        eventId, userId: adminUserId, ticketId, batchId,
+        expiresAt: new Date(Date.now() - 5 * 60 * 1000), // venceu há 5 min
+        quantity: 2, withBilling: true,
+      });
+      await seedPayment(orderId, adminUserId, 'PENDING');
+
+      await service.handleExpiredOrders();
+
+      const order = await prisma.getWriteClient().order.findUnique({ where: { id: orderId } });
+      expect(order?.status).toBe('PENDING'); // protegido pela graça
+      const batch = await prisma.getWriteClient().ticketBatch.findUnique({ where: { id: batchId } });
+      expect(batch?.availableQuantity).toBe(8); // estoque NÃO devolvido (evita revenda da vaga)
+    });
+
+    it('expirado ALÉM da graça (3h) com Payment PENDING → cancela normalmente', async () => {
+      const { adminUserId, eventId } = await seedOrgUserEvent(prisma);
+      const { ticketId, batchId } = await seedTicketWithBatch(eventId, { quantity: 10, available: 8 });
+      const { orderId } = await seedPendingOrder({
+        eventId, userId: adminUserId, ticketId, batchId,
+        expiresAt: new Date(Date.now() - 3 * 60 * 60 * 1000), // venceu há 3h > graça de 2h
+        quantity: 2, withBilling: true,
+      });
+      await seedPayment(orderId, adminUserId, 'PENDING');
+
+      await service.handleExpiredOrders();
+
+      const order = await prisma.getWriteClient().order.findUnique({ where: { id: orderId } });
+      expect(order?.status).toBe('CANCELLED'); // graça vencida → expira
+      const batch = await prisma.getWriteClient().ticketBatch.findUnique({ where: { id: batchId } });
+      expect(batch?.availableQuantity).toBe(10); // estoque devolvido
+    });
+
+    it('Payment FAILED → SEM graça: expira no prazo normal', async () => {
+      const { adminUserId, eventId } = await seedOrgUserEvent(prisma);
+      const { ticketId, batchId } = await seedTicketWithBatch(eventId, { quantity: 10, available: 8 });
+      const { orderId } = await seedPendingOrder({
+        eventId, userId: adminUserId, ticketId, batchId,
+        expiresAt: new Date(Date.now() - 5 * 60 * 1000), // venceu há 5 min
+        quantity: 2, withBilling: true,
+      });
+      await seedPayment(orderId, adminUserId, 'FAILED');
+
+      await service.handleExpiredOrders();
+
+      const order = await prisma.getWriteClient().order.findUnique({ where: { id: orderId } });
+      expect(order?.status).toBe('CANCELLED'); // tentativa falha não segura o pedido
+    });
   });
 });

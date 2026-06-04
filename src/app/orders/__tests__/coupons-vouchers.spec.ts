@@ -361,6 +361,49 @@ describe('Cupons & Vouchers — motor de desconto', () => {
       expect(u.unitDiscount).toBe(10000); // clamp no unitPrice
       expect(u.finalUnitPrice).toBe(0);
     });
+
+    // ── G9–G11: voucher com lista de documento + 2 ingressos iguais ──────────
+    // REGRESSÃO (bug 2026-06-03): com nenhum participante elegível, o order.discount
+    // defasado caía no fallback proporcional e o front exibia o voucher RATEADO entre
+    // os dois ingressos (5000/5000) em vez de 1 ingresso grátis ou nada.
+    const cpfVoucher = (over: any = {}) => ({
+      id: 'v1', code: 'FVFJ0MAO', name: 'Lote X', status: 'ACTIVE', appliesTo: 'all',
+      applyToProducts: false, cpfListStatus: 'ENABLED',
+      documentList: [cpfDoc('11111111111')], cpfList: ['11111111111'], ...over,
+    });
+    const voucherOrder = (over: any = {}) => baseOrder({
+      voucher: cpfVoucher(), voucherId: 'v1', discount: 10000,
+      reservedTickets: [rt('A', 2, 10000)], totalAmount: 20000, ...over,
+    });
+
+    it('G9 voucher cpf: NENHUM participante elegível → desconto 0, sem rateio (espelha o pay)', () => {
+      const shaped = orderShape(voucherOrder({
+        pendingParticipants: [participantCpf('22222222222'), participantCpf('33333333333')],
+      }));
+      expect(shaped.discount).toBe(0); // pay não aplicaria (cpfBlocked) — display idem
+      expect(shaped.reservedTickets.every((u: any) => u.unitDiscount === 0)).toBe(true);
+      expect(shaped.reservedTickets.every((u: any) => u.finalUnitPrice === 10000)).toBe(true);
+    });
+
+    it('G10 voucher cpf: UM elegível → desconto INTEIRO no slot dele (nunca dividido)', () => {
+      const shaped = orderShape(voucherOrder({
+        pendingParticipants: [participantCpf('22222222222'), participantCpf('11111111111')],
+      }));
+      expect(shaped.discount).toBe(10000);
+      expect(shaped.reservedTickets[0].unitDiscount).toBe(0);
+      expect(shaped.reservedTickets[1].unitDiscount).toBe(10000); // slot do elegível, zerado
+      expect(shaped.reservedTickets[1].finalUnitPrice).toBe(0);
+    });
+
+    it('G11 voucher cpf: sem participantes (link no início do checkout) → provisório cobre UMA unidade', () => {
+      for (const pendingParticipants of [null, [], [{}, {}]]) {
+        const shaped = orderShape(voucherOrder({ pendingParticipants }));
+        expect(shaped.discount).toBe(10000);
+        const covered = shaped.reservedTickets.filter((u: any) => u.unitDiscount > 0);
+        expect(covered).toHaveLength(1); // 1 ingresso grátis — nunca rateado
+        expect(covered[0].unitDiscount).toBe(10000);
+      }
+    });
   });
 
   // ── H. ADVERSARIAL / edge cases (tentando quebrar) ──────────────────────────
