@@ -115,7 +115,9 @@
       "PowerShell(npx tsc --noEmit -p tsconfig.json)",
       "PowerShell(npx tsc --noEmit -p tsconfig.json 2>&1 | Select-Object -First 40)",
       "Bash(sed 's/\\\\x1b\\\\[[0-9;]*m//g')",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "PowerShell(npx jest src/app/products --silent 2>$null; echo \"EXIT=$LASTEXITCODE\")",
+      "PowerShell(npx tsc --noEmit; echo \"EXIT=$LASTEXITCODE\")"
     ]
   }
 }

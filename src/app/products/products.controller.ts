@@ -75,8 +75,16 @@ export class ProductsController {
   @ApiParam({ name: 'eventId', description: 'Event UUID' })
   @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20)' })
+  @ApiQuery({
+    name: 'voucher',
+    required: false,
+    type: String,
+    description:
+      'Voucher code from the checkout link. Validated before listing: returns 422 with code VOUCHER_ALREADY_USED / VOUCHER_EXPIRED / VOUCHER_NOT_FOUND when not usable.',
+  })
   @ApiResponse({ status: 200, description: 'Products retrieved successfully' })
   @ApiResponse({ status: 404, description: 'Event not found' })
+  @ApiResponse({ status: 422, description: 'Voucher already used, expired or not found' })
   findAll(
     @Request() req: ExpressRequest,
     @Param('eventId') eventId: string,

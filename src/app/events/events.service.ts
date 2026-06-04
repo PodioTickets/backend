@@ -1184,6 +1184,9 @@ export class EventsService {
     status: true,
     participantFeePercent: true,
     maxInstallments: true,
+    // Whitelist da tela financeira — o checkout só renderiza estes métodos
+    // (o /pay valida server-side de qualquer forma).
+    acceptedPaymentMethods: true,
     kitSelectionDisplay: true,
     // IDs de tracking: públicos por natureza (disparam no browser do visitante).
     // Reagrupados em `tracking` por `withTracking` — não vão crus no topo do evento.
@@ -2294,7 +2297,11 @@ export class EventsService {
       organizerFeePercent: event.organizerFeePercent ?? 0,
       participantFeePercent: event.participantFeePercent ?? 0,
       maxInstallments: event.maxInstallments ?? 1,
-      acceptedPaymentMethods: ['PIX', 'DEBIT_CARD', 'CREDIT_CARD'],
+      // Array vazio nunca é estado válido (mín. 1 no DTO) — fallback pra todos
+      // cobre registros anteriores à migration/replica defasada.
+      acceptedPaymentMethods: event.acceptedPaymentMethods?.length
+        ? event.acceptedPaymentMethods
+        : ['PIX', 'DEBIT_CARD', 'CREDIT_CARD'],
       lockedAt: event.financialSettingsLockedAt ?? null,
     };
   }
@@ -2305,6 +2312,7 @@ export class EventsService {
       organizerFeePercent: true,
       participantFeePercent: true,
       maxInstallments: true,
+      acceptedPaymentMethods: true,
       financialSettingsLockedAt: true,
     } as const;
   }
@@ -2325,18 +2333,28 @@ export class EventsService {
   async updateFinancialSettings(
     userId: string,
     eventId: string,
-    dto: { organizerFeePercent: number; participantFeePercent: number; maxInstallments: number },
+    dto: {
+      organizerFeePercent: number;
+      participantFeePercent: number;
+      maxInstallments: number;
+      acceptedPaymentMethods?: string[];
+    },
     opts: { bypassLock?: boolean } = {},
   ) {
     await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
     const prismaWrite = this.prisma.getWriteClient();
 
-    const data = {
+    const data: Record<string, any> = {
       organizerFeePercent: dto.organizerFeePercent,
       participantFeePercent: dto.participantFeePercent,
       maxInstallments: dto.maxInstallments,
     };
+    // Opcional no PATCH: omitido = mantém o valor atual (validação de conteúdo
+    // — mín. 1, valores do enum, sem duplicata — fica no UpdateFinancialSettingsDto).
+    if (dto.acceptedPaymentMethods?.length) {
+      data.acceptedPaymentMethods = dto.acceptedPaymentMethods;
+    }
 
     if (opts.bypassLock) {
       const event = await prismaWrite.event.findUnique({ where: { id: eventId }, select: { id: true } });
