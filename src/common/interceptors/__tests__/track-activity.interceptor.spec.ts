@@ -207,6 +207,78 @@ describe('TrackActivityInterceptor', () => {
     expect(activity.record).toHaveBeenCalledTimes(1);
   });
 
+  // ── Vínculo com o domínio (funil por evento) ─────────────────────────────
+
+  const EVENT_UUID = '11111111-2222-4333-8444-555555555555';
+  const ORDER_UUID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+
+  it('eventId do body e orderId do path param entram no metadata', async () => {
+    reflector.get.mockReturnValue({ category: 'CHECKOUT', action: 'order.reserve' });
+    const req = makeRequest({
+      body: { eventId: EVENT_UUID },
+      params: { orderId: ORDER_UUID },
+    });
+
+    await lastValueFrom(
+      interceptor.intercept(makeContext(req), {
+        handle: () => of({ ok: 1 }),
+      } as any),
+    );
+
+    const payload = activity.record.mock.calls[0][0];
+    expect(payload.metadata.eventId).toBe(EVENT_UUID);
+    expect(payload.metadata.orderId).toBe(ORDER_UUID);
+  });
+
+  it('sem eventId no body → cai pro eventId do payload de resposta ({ data })', async () => {
+    reflector.get.mockReturnValue({ category: 'CHECKOUT', action: 'order.billing-address' });
+    const req = makeRequest({ params: { orderId: ORDER_UUID } });
+
+    await lastValueFrom(
+      interceptor.intercept(makeContext(req), {
+        handle: () => of({ message: 'ok', data: { eventId: EVENT_UUID } }),
+      } as any),
+    );
+
+    const payload = activity.record.mock.calls[0][0];
+    expect(payload.metadata.eventId).toBe(EVENT_UUID);
+  });
+
+  it('em ERRO o orderId do path ainda é registrado (resolve o evento via join na leitura)', async () => {
+    reflector.get.mockReturnValue({ category: 'CHECKOUT', action: 'order.pay' });
+    const req = makeRequest({ params: { orderId: ORDER_UUID } });
+
+    await expect(
+      lastValueFrom(
+        interceptor.intercept(makeContext(req), {
+          handle: () => throwError(() => ({ status: 402 })),
+        } as any),
+      ),
+    ).rejects.toBeDefined();
+
+    const payload = activity.record.mock.calls[0][0];
+    expect(payload.metadata.orderId).toBe(ORDER_UUID);
+    expect(payload.metadata.eventId).toBeUndefined(); // sem resposta em erro
+  });
+
+  it('valores que não são UUID são DESCARTADOS (nunca loga input arbitrário)', async () => {
+    reflector.get.mockReturnValue({ category: 'CHECKOUT', action: 'order.reserve' });
+    const req = makeRequest({
+      body: { eventId: '<script>alert(1)</script>' },
+      params: { orderId: 'not-a-uuid' },
+    });
+
+    await lastValueFrom(
+      interceptor.intercept(makeContext(req), {
+        handle: () => of({ ok: 1 }),
+      } as any),
+    );
+
+    const payload = activity.record.mock.calls[0][0];
+    expect(payload.metadata.eventId).toBeUndefined();
+    expect(payload.metadata.orderId).toBeUndefined();
+  });
+
   it('sessionId vem do body quando não há header x-session-id', async () => {
     reflector.get.mockReturnValue({ category: 'CHECKOUT', action: 'reserve' });
     const req = makeRequest({

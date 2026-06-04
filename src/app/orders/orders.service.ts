@@ -3457,6 +3457,8 @@ export class OrdersService {
 
       const body: Record<string, any> = {
         orderId,
+        // Vínculo com o evento — consumido pela telemetria de funil (interceptor).
+        eventId: order.eventId,
         status: 'PENDING',
         payment: {
           method: dto.method,
@@ -3538,6 +3540,8 @@ export class OrdersService {
 
       const body = {
         orderId,
+        // Vínculo com o evento — consumido pela telemetria de funil (interceptor).
+        eventId: order.eventId,
         status: 'PENDING',
         payment: {
           method: PaymentMethod.DEBIT_CARD,
@@ -3679,6 +3683,9 @@ export class OrdersService {
 
     const body: Record<string, any> = {
       orderId,
+      // Vínculo com o evento — consumido pela telemetria de funil (interceptor)
+      // e disponível pro front sem lookup extra.
+      eventId: order.eventId,
       status: 'PAID',
       registrations: registrations.map((reg) => ({
         id: reg.id,

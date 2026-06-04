@@ -1204,6 +1204,8 @@ model UserActivityLog {
   @@index([userId, occurredAt])
   @@index([sessionId, occurredAt])
   @@index([category, occurredAt])
+  /// Funil de compra / séries por ação (dashboard admin).
+  @@index([action, occurredAt])
   /// Usado pelo cron de retenção (DELETE WHERE occurredAt < N).
   @@index([occurredAt])
 }
