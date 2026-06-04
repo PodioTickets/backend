@@ -76,6 +76,37 @@ export async function releaseVoucherByOrder(client: any, orderId: string): Promi
  * Aceita também `reservedByOrderId IS NULL` por robustez: cobre pedidos legados criados antes da
  * reserva (voucher ACTIVE sem reserva) — o primeiro a finalizar consome; o segundo recebe `false`.
  */
+/**
+ * Consome o voucher (ACTIVE→USED) em fluxos SEM pedido/reserva próprios (ex.: fluxo legado de
+ * inscrição direta `POST /registrations`). Só consome se o voucher está LIVRE: sem reserva
+ * ativa de nenhum checkout em andamento (ou com reserva vencida). Sem este guard, o fluxo
+ * legado era um BYPASS do uso único — consumia um voucher reservado por outro pedido PENDING,
+ * quebrando o checkout daquele pedido no finalize.
+ */
+export async function tryConsumeVoucherUnreserved(
+  client: any,
+  voucherId: string,
+  userId: string,
+): Promise<boolean> {
+  const rows: any[] = await client.$queryRaw`
+    UPDATE "Voucher"
+    SET "status" = 'USED',
+        "usedAt" = NOW(),
+        "usedBy" = ${userId}::uuid,
+        "reservedByOrderId" = NULL,
+        "reservedUntil" = NULL,
+        "updatedAt" = NOW()
+    WHERE id = ${voucherId}::uuid
+      AND "status" = 'ACTIVE'
+      AND (
+        "reservedByOrderId" IS NULL
+        OR ("reservedUntil" IS NOT NULL AND "reservedUntil" < NOW())
+      )
+    RETURNING id
+  `;
+  return rows.length > 0;
+}
+
 export async function tryConsumeVoucher(
   client: any,
   voucherId: string,

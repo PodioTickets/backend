@@ -1,7 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
-import { AdminUserActivityListQueryDto } from './dto/admin-list-activity.dto';
+import {
+  AdminUserActivityListQueryDto,
+  AdminUserActivityStatsQueryDto,
+} from './dto/admin-list-activity.dto';
 
 /**
  * Leitura admin de `UserActivityLog`. Separado do `UserActivityService`
@@ -133,6 +136,121 @@ export class UserActivityAdminService {
           total,
           totalPages: Math.ceil(total / limit),
         },
+      },
+    };
+  }
+
+  /**
+   * Métricas agregadas pro dashboard admin. Todas as agregações rodam no
+   * Postgres (GROUP BY/COUNT) sobre os índices `category+occurredAt` etc. —
+   * nada de paginar a tabela no cliente.
+   *
+   * Janela default de 30 dias quando from/to ausentes: dashboards são
+   * consultados com frequência e sem default a query varreria a tabela
+   * inteira a cada visita.
+   *
+   * `uniqueUsers`/`uniqueSessions` via groupBy (uma linha por grupo trafega
+   * do banco). Aceitável pra janelas de até alguns meses; se o volume
+   * crescer, trocar por `COUNT(DISTINCT ...)` em raw SQL.
+   */
+  async statsAsAdmin(query: AdminUserActivityStatsQueryDto) {
+    const prismaRead = this.prisma.getReadClient();
+
+    const to = query.to ? new Date(query.to) : new Date();
+    to.setUTCHours(23, 59, 59, 999);
+    const from = query.from
+      ? new Date(query.from)
+      : (() => {
+          const d = new Date(to);
+          d.setUTCDate(d.getUTCDate() - 29);
+          d.setUTCHours(0, 0, 0, 0);
+          return d;
+        })();
+
+    const where: Prisma.UserActivityLogWhereInput = {
+      occurredAt: { gte: from, lte: to },
+      ...(query.category ? { category: query.category } : {}),
+      ...(query.source ? { source: query.source } : {}),
+    };
+
+    const [
+      total,
+      anonymousEvents,
+      byCategory,
+      bySource,
+      topActions,
+      uniqueUserGroups,
+      uniqueSessionGroups,
+      perDayRaw,
+    ] = await Promise.all([
+      prismaRead.userActivityLog.count({ where }),
+      prismaRead.userActivityLog.count({ where: { ...where, userId: null } }),
+      prismaRead.userActivityLog.groupBy({
+        by: ['category'],
+        where,
+        _count: { _all: true },
+      }),
+      prismaRead.userActivityLog.groupBy({
+        by: ['source'],
+        where,
+        _count: { _all: true },
+      }),
+      prismaRead.userActivityLog.groupBy({
+        by: ['action'],
+        where,
+        _count: { _all: true },
+        orderBy: { _count: { action: 'desc' } },
+        take: 10,
+      }),
+      prismaRead.userActivityLog.groupBy({
+        by: ['userId'],
+        where: { ...where, userId: { not: null } },
+      }),
+      prismaRead.userActivityLog.groupBy({
+        by: ['sessionId'],
+        where: { ...where, sessionId: { not: null } },
+      }),
+      // Série diária: date_trunc não existe no groupBy do Prisma → raw SQL.
+      // Cast `::text` nos enums evita o cast explícito pro tipo do Postgres.
+      prismaRead.$queryRaw<Array<{ day: Date; count: bigint }>>(Prisma.sql`
+        SELECT date_trunc('day', "occurredAt") AS day, COUNT(*)::bigint AS count
+        FROM "UserActivityLog"
+        WHERE "occurredAt" >= ${from} AND "occurredAt" <= ${to}
+        ${query.category ? Prisma.sql`AND "category"::text = ${query.category}` : Prisma.empty}
+        ${query.source ? Prisma.sql`AND "source"::text = ${query.source}` : Prisma.empty}
+        GROUP BY 1
+        ORDER BY 1 ASC
+      `),
+    ]);
+
+    const sortDesc = (a: { count: number }, b: { count: number }) =>
+      b.count - a.count;
+
+    return {
+      message: 'User activity stats fetched successfully (admin)',
+      data: {
+        range: { from: from.toISOString(), to: to.toISOString() },
+        totals: {
+          events: total,
+          uniqueUsers: uniqueUserGroups.length,
+          uniqueSessions: uniqueSessionGroups.length,
+          anonymousEvents,
+        },
+        byCategory: byCategory
+          .map((g) => ({ category: g.category, count: g._count._all }))
+          .sort(sortDesc),
+        bySource: bySource
+          .map((g) => ({ source: g.source, count: g._count._all }))
+          .sort(sortDesc),
+        topActions: topActions.map((g) => ({
+          action: g.action,
+          count: g._count._all,
+        })),
+        // BigInt do COUNT raw não serializa em JSON — converte pra Number.
+        perDay: perDayRaw.map((row) => ({
+          day: row.day.toISOString().slice(0, 10),
+          count: Number(row.count),
+        })),
       },
     };
   }

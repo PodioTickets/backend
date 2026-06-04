@@ -8,7 +8,10 @@ describe('KitsService', () => {
   let prisma: PrismaService;
 
   const mockPrismaService = {
-    organizer: {
+    user: {
+      findUnique: jest.fn(),
+    },
+    organizationMember: {
       findUnique: jest.fn(),
     },
     event: {
@@ -65,8 +68,7 @@ describe('KitsService', () => {
         items: [],
       };
 
-      const mockOrganizer = { id: 'org-123', userId };
-      const mockEvent = { id: eventId, organizerId: mockOrganizer.id };
+      const mockEvent = { id: eventId, organizationId: 'org-123' };
       const mockKit = {
         id: 'kit-123',
         eventId,
@@ -74,8 +76,12 @@ describe('KitsService', () => {
         items: [],
       };
 
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+      mockPrismaService.user.findUnique.mockResolvedValue({ role: 'USER' });
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
+      mockPrismaService.organizationMember.findUnique.mockResolvedValue({
+        organizationId: 'org-123',
+        userId,
+      });
       mockPrismaService.kit.create.mockResolvedValue(mockKit);
 
       const result = await service.create(userId, eventId, createDto);
@@ -85,7 +91,12 @@ describe('KitsService', () => {
     });
 
     it('should throw BadRequestException if user is not organizer', async () => {
-      mockPrismaService.organizer.findUnique.mockResolvedValue(null);
+      mockPrismaService.user.findUnique.mockResolvedValue({ role: 'USER' });
+      mockPrismaService.event.findUnique.mockResolvedValue({
+        id: 'event-123',
+        organizationId: 'org-123',
+      });
+      mockPrismaService.organizationMember.findUnique.mockResolvedValue(null);
 
       await expect(
         service.create('user-123', 'event-123', {

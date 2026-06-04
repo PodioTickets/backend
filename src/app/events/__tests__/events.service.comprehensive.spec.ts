@@ -3,6 +3,11 @@ import { EventsService } from '../events.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { OrganizerMemberAccessService } from '../../organizations/organizer-member-access.service';
 import { OrganizationsService } from '../../organizations/organizations.service';
+import { TicketsService } from '../../tickets/tickets.service';
+import { TicketCategoriesService } from '../../ticket-categories/ticket-categories.service';
+import { EmailService } from '../../../common/services/email.service';
+import { RepasseService } from '../../repasse/repasse.service';
+import { CacheRedisService } from '../../../common/services/cache-redis.service';
 import { NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { EventStatus } from '@prisma/client';
 
@@ -13,13 +18,15 @@ function setupDefaultEventCreationMocks(
   eventId = 'event-123',
 ) {
   const m = mock as {
-    organizationMember: { findFirst: jest.Mock };
+    organizationMember: { findMany: jest.Mock };
     event: { findFirst: jest.Mock; create: jest.Mock; update: jest.Mock };
     eventTopic: { create: jest.Mock; findMany: jest.Mock };
   };
   const mockMember = {
+    id: 'member-123',
     organizationId: 'org-123',
     role: 'OWNER',
+    permissions: null,
     organization: { id: 'org-123' },
   };
   const mockEvent = {
@@ -45,7 +52,7 @@ function setupDefaultEventCreationMocks(
       order: 0,
     },
   ];
-  m.organizationMember.findFirst.mockResolvedValue(mockMember);
+  m.organizationMember.findMany.mockResolvedValue([mockMember]);
   m.event.findFirst.mockResolvedValue(null);
   m.event.create.mockResolvedValue(mockEvent);
   m.event.update.mockResolvedValue(mockUpdated);
@@ -57,15 +64,26 @@ describe('EventsService - Comprehensive Tests', () => {
   let service: EventsService;
   let prisma: PrismaService;
 
+  // Métodos como findOne/update/updateTopic validam o formato UUID do id;
+  // strings tipo 'event-123' são rejeitadas com BadRequestException.
+  const VALID_EVENT_ID = 'e1111111-1111-1111-1111-111111111111';
+  const VALID_TOPIC_ID = 'f1111111-1111-1111-1111-111111111111';
+
   const mockPrismaService = {
     organizer: {
       findUnique: jest.fn(),
     },
     organizationMember: {
       findFirst: jest.fn(),
+      findMany: jest.fn(),
+      findUnique: jest.fn(),
+    },
+    organizationMemberEventAccess: {
+      upsert: jest.fn(),
     },
     event: {
       create: jest.fn(),
+      findFirst: jest.fn(),
       findUnique: jest.fn(),
       findMany: jest.fn(),
       update: jest.fn(),
@@ -76,6 +94,7 @@ describe('EventsService - Comprehensive Tests', () => {
       create: jest.fn(),
       createMany: jest.fn(),
       findUnique: jest.fn(),
+      findMany: jest.fn(),
       update: jest.fn(),
       delete: jest.fn(),
     },
@@ -85,8 +104,35 @@ describe('EventsService - Comprehensive Tests', () => {
       update: jest.fn(),
       delete: jest.fn(),
     },
+    ticket: {
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+    registrationTicket: {
+      groupBy: jest.fn().mockResolvedValue([]),
+    },
+    registration: {
+      count: jest.fn().mockResolvedValue(0),
+    },
+    order: {
+      groupBy: jest.fn().mockResolvedValue([]),
+    },
+    user: {
+      findUnique: jest.fn(),
+    },
     getReadClient: jest.fn(),
     getWriteClient: jest.fn(),
+  };
+
+  const mockTicketsService = {};
+  const mockTicketCategoriesService = {};
+  const mockEmailService = {};
+  const mockRepasseService = {};
+  const mockCacheRedisService = {
+    get: jest.fn().mockResolvedValue(null),
+    set: jest.fn().mockResolvedValue(undefined),
+    del: jest.fn().mockResolvedValue(undefined),
+    getJson: jest.fn().mockResolvedValue(null),
+    setJson: jest.fn().mockResolvedValue(undefined),
   };
 
   const mockOrganizerMemberAccess = {
@@ -114,6 +160,26 @@ describe('EventsService - Comprehensive Tests', () => {
         {
           provide: OrganizationsService,
           useValue: mockOrganizationsService,
+        },
+        {
+          provide: TicketsService,
+          useValue: mockTicketsService,
+        },
+        {
+          provide: TicketCategoriesService,
+          useValue: mockTicketCategoriesService,
+        },
+        {
+          provide: EmailService,
+          useValue: mockEmailService,
+        },
+        {
+          provide: RepasseService,
+          useValue: mockRepasseService,
+        },
+        {
+          provide: CacheRedisService,
+          useValue: mockCacheRedisService,
         },
       ],
     }).compile();
@@ -149,8 +215,10 @@ describe('EventsService - Comprehensive Tests', () => {
         };
 
         const mockMember = {
+          id: 'member-123',
           organizationId: 'org-123',
           role: 'OWNER',
+          permissions: null,
           organization: { id: 'org-123' },
         };
         const mockEvent = {
@@ -174,7 +242,7 @@ describe('EventsService - Comprehensive Tests', () => {
           order: 0,
         };
 
-        mockPrismaService.organizationMember.findFirst.mockResolvedValue(mockMember);
+        mockPrismaService.organizationMember.findMany.mockResolvedValue([mockMember]);
         mockPrismaService.event.findFirst.mockResolvedValue(null);
         mockPrismaService.event.create.mockResolvedValue(mockEvent);
         mockPrismaService.event.update.mockResolvedValue(mockUpdated);
@@ -227,13 +295,19 @@ describe('EventsService - Comprehensive Tests', () => {
         const result = await service.findAll(filterDto);
 
         expect(result.data.events).toHaveLength(1);
+        // O where público é um AND de topo (status != SUSPENDED + cutoff de data)
+        // com o objeto de filtros aninhado no último elemento.
         expect(mockPrismaService.event.findMany).toHaveBeenCalledWith(
           expect.objectContaining({
             where: expect.objectContaining({
-              country: 'Brasil',
-              state: 'SP',
-              city: 'São Paulo',
-              name: expect.objectContaining({ contains: 'Maratona', mode: 'insensitive' }),
+              AND: expect.arrayContaining([
+                expect.objectContaining({
+                  country: 'Brasil',
+                  state: 'SP',
+                  city: 'São Paulo',
+                  name: expect.objectContaining({ contains: 'Maratona', mode: 'insensitive' }),
+                }),
+              ]),
             }),
           }),
         );
@@ -253,7 +327,7 @@ describe('EventsService - Comprehensive Tests', () => {
 
     describe('UC3: User views event details', () => {
       it('should return complete event information with all relations', async () => {
-        const eventId = 'event-123';
+        const eventId = VALID_EVENT_ID;
         const mockEvent = {
           id: eventId,
           name: 'Test Event',
@@ -293,7 +367,8 @@ describe('EventsService - Comprehensive Tests', () => {
 
         const result = await service.findOne(eventId);
 
-        expect(result.data.event).toEqual(mockEvent);
+        // Caminho público enriquece com `tracking`; o restante segue igual ao mock.
+        expect(result.data.event).toMatchObject(mockEvent);
         expect(
           (result.data.event as { organizer?: unknown }).organizer,
         ).toBeDefined();
@@ -306,7 +381,7 @@ describe('EventsService - Comprehensive Tests', () => {
   describe('Security Tests', () => {
     describe('Authorization', () => {
       it('should prevent non-organizer from creating events', async () => {
-        mockPrismaService.organizationMember.findFirst.mockResolvedValue(null);
+        mockPrismaService.organizationMember.findMany.mockResolvedValue([]);
 
         await expect(
           service.create('user-123', {
@@ -324,7 +399,7 @@ describe('EventsService - Comprehensive Tests', () => {
 
       it('should prevent organizer from updating other organizers events', async () => {
         const userId = 'user-123';
-        const eventId = 'event-123';
+        const eventId = VALID_EVENT_ID;
         const event = { id: eventId, organizationId: '00000000-0000-0000-0000-000000000099' };
 
         mockPrismaService.event.findUnique.mockResolvedValue(event);
@@ -344,13 +419,18 @@ describe('EventsService - Comprehensive Tests', () => {
 
         await service.findAll({ name: maliciousInput, page: 1, limit: 10 });
 
-        // Verificar que Prisma trata o input como string literal, não como SQL
+        // Verificar que Prisma trata o input como string literal, não como SQL.
+        // O filtro de nome vive no objeto aninhado dentro do AND de topo.
         expect(mockPrismaService.event.findMany).toHaveBeenCalledWith(
           expect.objectContaining({
             where: expect.objectContaining({
-              name: expect.objectContaining({
-                contains: maliciousInput,
-              }),
+              AND: expect.arrayContaining([
+                expect.objectContaining({
+                  name: expect.objectContaining({
+                    contains: maliciousInput,
+                  }),
+                }),
+              ]),
             }),
           }),
         );
@@ -449,7 +529,7 @@ describe('EventsService - Comprehensive Tests', () => {
     describe('Access Control', () => {
       it('should allow only event owner to update event', async () => {
         const attackerId = 'attacker-123';
-        const eventId = 'event-123';
+        const eventId = VALID_EVENT_ID;
 
         const event = { id: eventId, organizationId: '00000000-0000-0000-0000-000000000002' };
 
@@ -596,11 +676,13 @@ describe('EventsService - Comprehensive Tests', () => {
       };
 
       const mockMember = {
+        id: 'member-123',
         organizationId: 'org-123',
         role: 'OWNER',
+        permissions: null,
         organization: { id: 'org-123' },
       };
-      mockPrismaService.organizationMember.findFirst.mockResolvedValue(mockMember);
+      mockPrismaService.organizationMember.findMany.mockResolvedValue([mockMember]);
       mockPrismaService.event.findFirst.mockResolvedValue(null);
 
       // Simular erro de duplicação do Prisma
@@ -656,13 +738,13 @@ describe('EventsService - Comprehensive Tests', () => {
   describe('Topic Management', () => {
     it('should allow organizer to disable default topics', async () => {
       const userId = 'org-user-123';
-      const eventId = 'event-123';
+      const eventId = VALID_EVENT_ID;
       const updateDto = { isEnabled: false };
 
       const mockOrganizer = { id: 'org-123', userId };
       const mockEvent = { id: eventId, organizerId: mockOrganizer.id };
       const mockTopic = {
-        id: 'topic-123',
+        id: VALID_TOPIC_ID,
         eventId,
         title: 'REGULAMENTO',
         isDefault: true,
@@ -677,15 +759,15 @@ describe('EventsService - Comprehensive Tests', () => {
         ...updateDto,
       });
 
-      const result = await service.updateTopic(userId, eventId, 'topic-123', updateDto);
+      const result = await service.updateTopic(userId, eventId, VALID_TOPIC_ID, updateDto);
 
       expect(result.data.topic.isEnabled).toBe(false);
     });
 
     it('should prevent deletion of default topics', async () => {
       const userId = 'org-user-123';
-      const eventId = 'event-123';
-      const topicId = 'topic-123';
+      const eventId = VALID_EVENT_ID;
+      const topicId = VALID_TOPIC_ID;
 
       const mockOrganizer = { id: 'org-123', userId };
       const mockEvent = { id: eventId, organizerId: mockOrganizer.id };
@@ -709,7 +791,7 @@ describe('EventsService - Comprehensive Tests', () => {
   describe('Location Management', () => {
     it('should create event location with coordinates', async () => {
       const userId = 'org-user-123';
-      const eventId = 'event-123';
+      const eventId = VALID_EVENT_ID;
       const locationDto = {
         address: '123 Main St',
         city: 'São Paulo',

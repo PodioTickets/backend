@@ -37,6 +37,7 @@ import {
   claimVoucher,
   releaseVoucherByOrder,
   tryConsumeVoucher,
+  tryConsumeVoucherUnreserved,
 } from '../../utils/voucher-reservation.util';
 
 describe('Reserva de voucher (integração, banco real)', () => {
@@ -186,5 +187,57 @@ describe('Reserva de voucher (integração, banco real)', () => {
     expect(await tryConsumeVoucher(w, voucherId, orderA, userId)).toBe(true);
     // Segundo já não consegue.
     expect(await tryConsumeVoucher(w, voucherId, orderB, userId)).toBe(false);
+  });
+
+  // ── tryConsumeVoucherUnreserved (regressão 2026-06-04) ───────────────────────
+  // Fluxos SEM pedido próprio (ex.: POST /registrations legado) consumiam o voucher por
+  // status apenas — bypass do uso único: roubavam voucher RESERVADO por outro checkout.
+  describe('tryConsumeVoucherUnreserved (fluxos sem pedido próprio)', () => {
+    it('voucher LIVRE → consome (vira USED)', async () => {
+      const { eventId } = await seedOrgUserEvent(prisma);
+      const voucherId = await seedVoucher(eventId);
+      const userId = await seedUser(prisma, 'USER');
+
+      expect(await tryConsumeVoucherUnreserved(w, voucherId, userId)).toBe(true);
+      const v = await readVoucher(voucherId);
+      expect(v.status).toBe('USED');
+      expect(v.usedBy).toBe(userId);
+    });
+
+    it('voucher RESERVADO por checkout ativo → NÃO consome (fecha o bypass)', async () => {
+      const { eventId } = await seedOrgUserEvent(prisma);
+      const voucherId = await seedVoucher(eventId);
+      const userId = await seedUser(prisma, 'USER');
+      const checkoutOrder = randomUUID();
+      await claimVoucher(w, voucherId, checkoutOrder, future());
+
+      expect(await tryConsumeVoucherUnreserved(w, voucherId, userId)).toBe(false);
+      const v = await readVoucher(voucherId);
+      expect(v.status).toBe('ACTIVE'); // intacto — o checkout dono segue protegido
+      expect(v.reservedByOrderId).toBe(checkoutOrder);
+    });
+
+    it('reserva VENCIDA (carrinho abandonado) → consome normalmente', async () => {
+      const { eventId } = await seedOrgUserEvent(prisma);
+      const voucherId = await seedVoucher(eventId);
+      const userId = await seedUser(prisma, 'USER');
+      await w.voucher.update({
+        where: { id: voucherId },
+        data: { reservedByOrderId: randomUUID(), reservedUntil: past() },
+      });
+
+      expect(await tryConsumeVoucherUnreserved(w, voucherId, userId)).toBe(true);
+      const v = await readVoucher(voucherId);
+      expect(v.status).toBe('USED');
+      expect(v.reservedByOrderId).toBeNull();
+    });
+
+    it('voucher já USED → não consome de novo', async () => {
+      const { eventId } = await seedOrgUserEvent(prisma);
+      const voucherId = await seedVoucher(eventId, { status: 'USED', usedAt: new Date() });
+      const userId = await seedUser(prisma, 'USER');
+
+      expect(await tryConsumeVoucherUnreserved(w, voucherId, userId)).toBe(false);
+    });
   });
 });

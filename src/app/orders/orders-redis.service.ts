@@ -90,6 +90,37 @@ export class OrdersRedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Idempotency: lock ATÔMICO (SET NX) por chave, adquirido ANTES de chamar o gateway.
+   * Fecha a corrida de 2 `pay` simultâneos com a MESMA Idempotency-Key: o check de cache +
+   * set do resultado não são atômicos, então ambos passavam e a Cielo era chamada DUAS vezes
+   * (dupla autorização no cartão / QR PIX órfão). Fail-open: Redis fora → permite (mesma
+   * postura do cache de idempotência; o guard atômico do Order segue protegendo o finalize).
+   * TTL = rede de segurança contra crash sem release (o `pay` libera no finally).
+   */
+  async acquireIdempotencyLock(key: string, ttlSeconds = 90): Promise<boolean> {
+    if (!this.client?.isOpen) return true;
+    try {
+      const res = await this.client.set(`orders:idemlock:${key}`, '1', {
+        NX: true,
+        EX: ttlSeconds,
+      });
+      return res === 'OK';
+    } catch {
+      return true; // fail-open
+    }
+  }
+
+  /** Libera o lock de idempotência (chamado no finally do pay — sucesso OU falha). */
+  async releaseIdempotencyLock(key: string): Promise<void> {
+    if (!this.client?.isOpen) return;
+    try {
+      await this.client.del(`orders:idemlock:${key}`);
+    } catch {
+      // non-fatal: o TTL expira o lock sozinho
+    }
+  }
+
+  /**
    * Idempotency: store a response for 24 h.
    */
   async setIdempotencyResult(

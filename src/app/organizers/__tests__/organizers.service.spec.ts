@@ -11,27 +11,40 @@ describe('OrganizersService', () => {
   let emailService: EmailService;
   let whatsappService: WhatsAppService;
 
+  // O service trabalha com o modelo organização + membro (role OWNER), via
+  // getReadClient()/getWriteClient(). O mock expõe os models usados e um
+  // $transaction que executa o callback passando o próprio mock como tx.
   const mockPrismaService = {
-    organizer: {
-      findUnique: jest.fn(),
+    organizationMember: {
+      findFirst: jest.fn(),
+      create: jest.fn(),
+    },
+    organization: {
       create: jest.fn(),
       update: jest.fn(),
+      findUnique: jest.fn(),
       findMany: jest.fn(),
     },
     user: {
       update: jest.fn(),
+      findUnique: jest.fn(),
     },
     contactMessage: {
       create: jest.fn(),
     },
+    $transaction: jest.fn(),
+    getReadClient: jest.fn(),
+    getWriteClient: jest.fn(),
   };
 
   const mockEmailService = {
-    sendContactMessageToOrganizer: jest.fn(),
+    sendWelcomeOrganizer: jest.fn().mockResolvedValue(undefined),
+    sendContactMessageToOrganizer: jest.fn().mockResolvedValue(undefined),
+    sendContactMessageConfirmation: jest.fn().mockResolvedValue(undefined),
   };
 
   const mockWhatsAppService = {
-    sendContactMessageToOrganizer: jest.fn(),
+    sendContactMessageToOrganizer: jest.fn().mockResolvedValue(undefined),
   };
 
   beforeEach(async () => {
@@ -57,6 +70,11 @@ describe('OrganizersService', () => {
     prisma = module.get<PrismaService>(PrismaService);
     emailService = module.get<EmailService>(EmailService);
     whatsappService = module.get<WhatsAppService>(WhatsAppService);
+
+    mockPrismaService.getReadClient.mockReturnValue(mockPrismaService);
+    mockPrismaService.getWriteClient.mockReturnValue(mockPrismaService);
+    // $transaction executa o callback com o próprio mock como cliente tx.
+    mockPrismaService.$transaction.mockImplementation((cb: any) => cb(mockPrismaService));
   });
 
   afterEach(() => {
@@ -72,21 +90,26 @@ describe('OrganizersService', () => {
         phone: '1234567890',
       };
 
-      const mockOrganizer = {
-        id: 'org-123',
+      const mockOrganization = { id: 'org-123', ...createDto };
+      const mockMember = {
+        id: 'member-123',
+        organizationId: 'org-123',
         userId,
-        ...createDto,
-        user: { id: userId },
+        role: 'OWNER',
+        user: { id: userId, firstName: 'John', lastName: 'Doe', email: 'user@example.com' },
+        organization: mockOrganization,
       };
 
-      mockPrismaService.organizer.findUnique.mockResolvedValue(null);
-      mockPrismaService.organizer.create.mockResolvedValue(mockOrganizer);
+      mockPrismaService.organizationMember.findFirst.mockResolvedValue(null);
+      mockPrismaService.organization.create.mockResolvedValue(mockOrganization);
+      mockPrismaService.organizationMember.create.mockResolvedValue(mockMember);
       mockPrismaService.user.update.mockResolvedValue({ id: userId, role: 'ORGANIZER', accountType: 'ORGANIZER' });
 
       const result = await service.create(userId, createDto);
 
       expect(result.message).toBe('Organizer created successfully');
-      expect(result.data.organizer).toEqual(mockOrganizer);
+      expect(result.data.organization).toEqual(mockOrganization);
+      expect(result.data.member).toEqual(mockMember);
       expect(mockPrismaService.user.update).toHaveBeenCalledWith({
         where: { id: userId },
         data: { role: 'ORGANIZER', accountType: 'ORGANIZER' },
@@ -95,7 +118,7 @@ describe('OrganizersService', () => {
 
     it('should throw BadRequestException if user is already an organizer', async () => {
       const userId = 'user-123';
-      mockPrismaService.organizer.findUnique.mockResolvedValue({ id: 'org-123' });
+      mockPrismaService.organizationMember.findFirst.mockResolvedValue({ id: 'member-123', role: 'OWNER' });
 
       await expect(
         service.create(userId, {
@@ -109,24 +132,26 @@ describe('OrganizersService', () => {
   describe('findOne', () => {
     it('should return organizer by userId', async () => {
       const userId = 'user-123';
-      const mockOrganizer = {
-        id: 'org-123',
+      const mockOrganization = { id: 'org-123', name: 'Test Organizer', members: [], events: [] };
+      const mockMember = {
+        id: 'member-123',
         userId,
-        name: 'Test Organizer',
-        events: [],
+        role: 'OWNER',
+        organization: mockOrganization,
         user: { id: userId },
       };
 
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+      mockPrismaService.organizationMember.findFirst.mockResolvedValue(mockMember);
 
       const result = await service.findOne(userId);
 
       expect(result.message).toBe('Organizer fetched successfully');
-      expect(result.data.organizer).toEqual(mockOrganizer);
+      expect(result.data.organization).toEqual(mockOrganization);
+      expect(result.data.member).toEqual(mockMember);
     });
 
     it('should throw NotFoundException if organizer not found', async () => {
-      mockPrismaService.organizer.findUnique.mockResolvedValue(null);
+      mockPrismaService.organizationMember.findFirst.mockResolvedValue(null);
 
       await expect(service.findOne('invalid-id')).rejects.toThrow(NotFoundException);
     });
@@ -136,52 +161,47 @@ describe('OrganizersService', () => {
     it('should update organizer successfully', async () => {
       const userId = 'user-123';
       const updateDto = { name: 'Updated Name' };
-      const mockOrganizer = {
-        id: 'org-123',
-        userId,
-        ...updateDto,
-        user: { id: userId },
-      };
+      const mockOrganization = { id: 'org-123', name: 'Updated Name', members: [] };
 
-      mockPrismaService.organizer.findUnique.mockResolvedValue({ id: 'org-123' });
-      mockPrismaService.organizer.update.mockResolvedValue(mockOrganizer);
+      mockPrismaService.organizationMember.findFirst.mockResolvedValue({
+        id: 'member-123',
+        organizationId: 'org-123',
+        role: 'OWNER',
+        organization: { id: 'org-123' },
+      });
+      mockPrismaService.organization.update.mockResolvedValue(mockOrganization);
 
       const result = await service.update(userId, updateDto);
 
       expect(result.message).toBe('Organizer updated successfully');
-      expect(result.data.organizer).toEqual(mockOrganizer);
+      expect(result.data.organization).toEqual(mockOrganization);
     });
   });
 
   describe('sendContactMessage', () => {
     it('should send contact message successfully', async () => {
-      const organizerId = 'org-123';
+      const organizationId = 'org-123';
       const contactData = {
         name: 'John Doe',
         email: 'john@example.com',
         message: 'Test message',
       };
 
-      const mockOrganizer = {
-        id: organizerId,
+      const mockOrganization = {
+        id: organizationId,
         email: 'organizer@example.com',
         name: 'Organizer',
-        user: { phone: '1234567890' },
+        logoUrl: null,
+        members: [{ user: { email: 'organizer@example.com', phone: '1234567890' } }],
         events: [],
       };
 
-      const mockContactMessage = {
-        id: 'msg-123',
-        organizerId,
-        ...contactData,
-      };
+      const mockContactMessage = { id: 'msg-123', organizationId, ...contactData };
 
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+      mockPrismaService.organization.findUnique.mockResolvedValue(mockOrganization);
       mockPrismaService.contactMessage.create.mockResolvedValue(mockContactMessage);
-      mockEmailService.sendContactMessageToOrganizer.mockResolvedValue(undefined);
-      mockWhatsAppService.sendContactMessageToOrganizer.mockResolvedValue(undefined);
 
-      const result = await service.sendContactMessage(organizerId, contactData);
+      const result = await service.sendContactMessage(organizationId, contactData);
 
       expect(result.message).toBe('Message sent successfully');
       expect(result.data.contactMessage).toEqual(mockContactMessage);
@@ -189,7 +209,7 @@ describe('OrganizersService', () => {
     });
 
     it('should throw NotFoundException if organizer not found', async () => {
-      mockPrismaService.organizer.findUnique.mockResolvedValue(null);
+      mockPrismaService.organization.findUnique.mockResolvedValue(null);
 
       await expect(
         service.sendContactMessage('invalid-id', {
@@ -201,4 +221,3 @@ describe('OrganizersService', () => {
     });
   });
 });
-

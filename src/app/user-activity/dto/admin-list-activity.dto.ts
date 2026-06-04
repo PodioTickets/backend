@@ -113,3 +113,44 @@ export class AdminUserActivityListQueryDto {
   @Max(100)
   limit?: number;
 }
+
+/**
+ * Filtros do dashboard de métricas (`GET /admin/user-activity/stats`).
+ * Conjunto INTENCIONALMENTE menor que o da listagem: o dashboard agrega por
+ * período/categoria/origem; investigação fina (userId/sessionId/ip/q) fica
+ * na listagem. Sem from/to o service aplica janela default de 30 dias —
+ * protege as agregações de um full-scan da tabela inteira.
+ */
+export class AdminUserActivityStatsQueryDto {
+  @ApiPropertyOptional({
+    enum: UserActivityCategory,
+    description: 'Filtra por categoria do evento.',
+  })
+  @IsOptional()
+  @IsEnum(UserActivityCategory)
+  category?: UserActivityCategory;
+
+  @ApiPropertyOptional({
+    enum: UserActivitySource,
+    description: 'Filtra pela origem do registro (FRONTEND/BACKEND/WEBHOOK).',
+  })
+  @IsOptional()
+  @IsEnum(UserActivitySource)
+  source?: UserActivitySource;
+
+  @ApiPropertyOptional({
+    description:
+      'Data/hora inicial (ISO 8601). Inclusivo. Default: to − 30 dias.',
+  })
+  @IsOptional()
+  @IsString()
+  from?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Data/hora final (ISO 8601). Inclusivo até 23:59:59.999 UTC. Default: agora.',
+  })
+  @IsOptional()
+  @IsString()
+  to?: string;
+}
