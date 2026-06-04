@@ -314,6 +314,99 @@ describe('VouchersService (integração, banco real)', () => {
   });
 
   // =========================================================================
+  // Config do grupo APÓS o 1º voucher ser usado (bug "edição não reflete")
+  // =========================================================================
+  // Cenário real: lote de 5, o organizador usa o 1º voucher (o mais antigo) e
+  // DEPOIS edita o lote. O usado fica congelado (correto), mas o grupo NÃO pode
+  // exibir a config a partir dele — senão a edição "não reflete" quando alguém
+  // vai usar o 2º voucher. A config do grupo deve vir do mais antigo NÃO-usado.
+  describe('config do grupo após uso do 1º voucher', () => {
+    const NOVO_TICKET = '33333333-3333-3333-3333-333333333333';
+
+    /** Lote de 5, usa o 1º (mais antigo) e edita o grupo PELO voucher usado. */
+    async function seedLoteUsadoEEditado(nome: string) {
+      const { adminUserId, eventId } = await seedOrgUserEvent(prisma);
+      await service.create(adminUserId, eventId, { name: nome, quantity: 5 } as any);
+
+      const lote = await lerLote(eventId, nome);
+      await marcarComoUsado(lote[0].id); // congela o mais antigo
+
+      await service.update(adminUserId, eventId, lote[0].id, {
+        expiryDate: '2027-12-31',
+        appliesTo: [NOVO_TICKET],
+        cpfListStatus: CpfListStatus.ENABLED,
+        cpfList: ['11122233344'],
+        applyToProducts: true,
+      } as any);
+
+      return { adminUserId, eventId, usadoId: lote[0].id };
+    }
+
+    it('findAll: o grupo reflete a config NOVA e o representante é um voucher editável', async () => {
+      const { eventId, usadoId } = await seedLoteUsadoEEditado('Lote Reflete');
+
+      const res = await service.findAll(eventId);
+      const grupo = res.data.groups.find((g) => g.name === 'Lote Reflete')!;
+
+      // config exibida é a NOVA (do voucher não-usado), não a congelada do usado
+      expect(grupo.appliesTo).toEqual([NOVO_TICKET]);
+      expect(grupo.expiryDate).not.toBeNull();
+      expect(grupo.cpfListStatus).toBe('ENABLED');
+      expect(grupo.cpfList).toEqual(['11122233344']);
+      expect(grupo.applyToProducts).toBe(true);
+      // o representante (id usado pelo front pra editar) NÃO é o voucher congelado
+      expect(grupo.id).not.toBe(usadoId);
+      expect(grupo.usedCount).toBe(1);
+      expect(grupo.activeCount).toBe(4);
+    });
+
+    it('findGroupVouchers: o resumo do grupo reflete a config NOVA', async () => {
+      const { eventId } = await seedLoteUsadoEEditado('Lote Resumo');
+
+      const res = await service.findGroupVouchers(eventId, 'Lote Resumo');
+
+      // expiryDate do resumo vem do voucher não-usado (config atual do lote)
+      expect(res.data.group.expiryDate).not.toBeNull();
+      expect(res.data.group.usedCount).toBe(1);
+      expect(res.data.group.availableCount).toBe(4);
+      expect(res.data.group.status).toBe('ACTIVE');
+    });
+
+    it('inverso: desligar applyToProducts reflete mesmo com o usado congelado em true', async () => {
+      const { adminUserId, eventId } = await seedOrgUserEvent(prisma);
+      await service.create(adminUserId, eventId, {
+        name: 'Lote Desliga', quantity: 3, applyToProducts: true,
+      } as any);
+
+      const lote = await lerLote(eventId, 'Lote Desliga');
+      await marcarComoUsado(lote[0].id); // congelado com applyToProducts=true
+
+      await service.update(adminUserId, eventId, lote[1].id, { applyToProducts: false } as any);
+
+      const res = await service.findAll(eventId);
+      const grupo = res.data.groups.find((g) => g.name === 'Lote Desliga')!;
+      // antes (bool_or) o usado congelado em true forçava o grupo a exibir true pra sempre
+      expect(grupo.applyToProducts).toBe(false);
+    });
+
+    it('fallback: com TODOS os vouchers usados, o grupo ainda aparece (config do mais antigo)', async () => {
+      const { adminUserId, eventId } = await seedOrgUserEvent(prisma);
+      await service.create(adminUserId, eventId, { name: 'Lote Esgotado', quantity: 2 } as any);
+
+      const lote = await lerLote(eventId, 'Lote Esgotado');
+      await Promise.all(lote.map((v) => marcarComoUsado(v.id)));
+
+      const res = await service.findAll(eventId);
+      const grupo = res.data.groups.find((g) => g.name === 'Lote Esgotado')!;
+      expect(grupo.id).toBe(lote[0].id); // fallback: o mais antigo
+      expect(grupo.usedCount).toBe(2);
+
+      const resumo = await service.findGroupVouchers(eventId, 'Lote Esgotado');
+      expect(resumo.data.group.status).toBe('USED');
+    });
+  });
+
+  // =========================================================================
   // controle de acesso
   // =========================================================================
   describe('controle de acesso', () => {

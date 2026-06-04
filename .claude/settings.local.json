@@ -117,7 +117,8 @@
       "Bash(sed 's/\\\\x1b\\\\[[0-9;]*m//g')",
       "Read(//tmp/**)",
       "PowerShell(npx jest src/app/products --silent 2>$null; echo \"EXIT=$LASTEXITCODE\")",
-      "PowerShell(npx tsc --noEmit; echo \"EXIT=$LASTEXITCODE\")"
+      "PowerShell(npx tsc --noEmit; echo \"EXIT=$LASTEXITCODE\")",
+      "PowerShell(docker ps --format '{{.Names}} {{.Ports}}' | Select-String '5434'; \\(Get-Content package.json | ConvertFrom-Json\\).scripts.'test:int')"
     ]
   }
 }
