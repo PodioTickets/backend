@@ -36,6 +36,10 @@ export class AllExceptionsFilter implements ExceptionFilter {
     let httpStatus = HttpStatus.INTERNAL_SERVER_ERROR;
     let message = 'Internal server error';
     let errors: any = undefined;
+    // Código de erro TIPADO (ex.: VOUCHER_ALREADY_USED) — exceções de domínio
+    // lançam `{ code, message }`; sem o passthrough o front só recebe a message
+    // e não consegue ramificar por tipo de erro.
+    let code: string | undefined;
 
     if (exception instanceof HttpException) {
       httpStatus = exception.getStatus();
@@ -56,6 +60,11 @@ export class AllExceptionsFilter implements ExceptionFilter {
           }
         } else {
           message = exception.message || 'Bad Request';
+        }
+
+        // Capturar código tipado se existir (`{ code, message }` das exceções de domínio)
+        if (typeof responseObj.code === 'string' && responseObj.code) {
+          code = responseObj.code;
         }
 
         // Capturar erros adicionais se existirem (details do ValidationPipe customizado)
@@ -109,6 +118,11 @@ export class AllExceptionsFilter implements ExceptionFilter {
       path: httpAdapter.getRequestUrl(request),
       message,
     };
+
+    // Campo aditivo — clientes que só leem `message` não são afetados
+    if (code) {
+      responseBody.code = code;
+    }
 
     // Adicionar erros de validação se existirem
     if (errors) {

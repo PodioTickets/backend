@@ -137,7 +137,9 @@ const ORDER_INCLUDE = {
   // pagamento (Order.organizerFeePercent). eventDate é usado como referência para validar
   // cupons AGE — a idade do participante é calculada na data do evento, não na atual.
   // Nada disso é exposto no payload — orderShape retorna apenas eventId.
-  event: { select: { participantFeePercent: true, organizerFeePercent: true, eventDate: true } },
+  // acceptedPaymentMethods é a whitelist configurada na tela financeira do evento,
+  // validada no pay() antes de chamar o gateway.
+  event: { select: { participantFeePercent: true, organizerFeePercent: true, eventDate: true, acceptedPaymentMethods: true } },
 } as const;
 
 /**
@@ -2498,11 +2500,24 @@ export class OrdersService {
         where: { code: dto.voucherCode.toUpperCase().trim() },
       });
 
-      if (!voucher || voucher.eventId !== order.eventId || voucher.status !== 'ACTIVE') {
+      if (!voucher || voucher.eventId !== order.eventId) {
         throw new AppUnprocessableException('VOUCHER_NOT_FOUND', 'Voucher não encontrado ou inválido');
       }
-      if (voucher.expiryDate && new Date(voucher.expiryDate) < new Date()) {
+      // USED tem mensagem própria — "não encontrado" confunde quem recebeu o link
+      // e já usou (ou teve o voucher usado por outro pedido). Espelha o
+      // `assertVoucherUsable` do products.service.
+      if (voucher.status === 'USED') {
+        throw new AppUnprocessableException('VOUCHER_ALREADY_USED', 'Este voucher já foi utilizado');
+      }
+      if (
+        voucher.status === 'EXPIRED' ||
+        (voucher.expiryDate && new Date(voucher.expiryDate) < new Date())
+      ) {
         throw new AppUnprocessableException('VOUCHER_EXPIRED', 'Voucher expirado');
+      }
+      if (voucher.status !== 'ACTIVE') {
+        // INACTIVE (ou estados futuros) — inválido sem vazar detalhe interno.
+        throw new AppUnprocessableException('VOUCHER_NOT_FOUND', 'Voucher não encontrado ou inválido');
       }
 
       // Lista de documento por-participante. SEM participantes (voucher do link no início do
@@ -2801,6 +2816,17 @@ export class OrdersService {
       throw new AppConflictException(
         'ORDER_NOT_PENDING',
         'Pedido não está mais pendente ou expirou',
+      );
+    }
+
+    // 6.3b Whitelist de métodos por evento (tela financeira). Array vazio/ausente
+    // (registro pré-migration ou include sem event) = aceita todos — mesmo
+    // comportamento dos eventos legados, que são backfillados com os 3 métodos.
+    const acceptedMethods: string[] = (order as any).event?.acceptedPaymentMethods ?? [];
+    if (acceptedMethods.length > 0 && !acceptedMethods.includes(dto.method)) {
+      throw new AppUnprocessableException(
+        'PAYMENT_METHOD_NOT_ACCEPTED',
+        'Este evento não aceita esta forma de pagamento',
       );
     }
 

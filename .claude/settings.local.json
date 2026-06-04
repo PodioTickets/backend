@@ -110,7 +110,15 @@
       "Bash(tasklist)",
       "Bash(awk 'NR>=2620 && NR<=2760 && \\(/const w\\\\b/ || /const w:/ || /const r\\\\b/ || /const r:/ || /getWriteClient/ || /getReadClient/ || /order.expiresAt/ || /order = await/\\)' src/app/orders/orders.service.ts)",
       "Bash(awk 'NR>=2610 && NR<=2640 && \\(/async pay/ || /orderId/\\)' src/app/orders/orders.service.ts)",
-      "Bash(grep -n 'lista de documento por participante\\\\|aplica PROVISORIAMENTE\\\\|cai no participante elegível\\\\|$queryRaw\\\\|function build\\\\|const build\\\\|buildClient\\\\|=> {' src/app/orders/__tests__/orders.service.spec.ts)"
+      "Bash(grep -n 'lista de documento por participante\\\\|aplica PROVISORIAMENTE\\\\|cai no participante elegível\\\\|$queryRaw\\\\|function build\\\\|const build\\\\|buildClient\\\\|=> {' src/app/orders/__tests__/orders.service.spec.ts)",
+      "PowerShell(npx jest ip-throttler)",
+      "PowerShell(npx tsc --noEmit -p tsconfig.json)",
+      "PowerShell(npx tsc --noEmit -p tsconfig.json 2>&1 | Select-Object -First 40)",
+      "Bash(sed 's/\\\\x1b\\\\[[0-9;]*m//g')",
+      "Read(//tmp/**)",
+      "PowerShell(npx jest src/app/products --silent 2>$null; echo \"EXIT=$LASTEXITCODE\")",
+      "PowerShell(npx tsc --noEmit; echo \"EXIT=$LASTEXITCODE\")",
+      "PowerShell(docker ps --format '{{.Names}} {{.Ports}}' | Select-String '5434'; \\(Get-Content package.json | ConvertFrom-Json\\).scripts.'test:int')"
     ]
   }
 }

@@ -403,6 +403,9 @@ model Event {
   participantFeePercent       Float     @default(0.0)
   /// Número máximo de parcelas sem juros no cartão de crédito (1, 2 ou 3).
   maxInstallments             Int       @default(1)
+  /// Formas de pagamento aceitas no checkout, configuradas na tela financeira
+  /// (mín. 1). Default = todas — eventos existentes mantêm o comportamento atual.
+  acceptedPaymentMethods      PaymentMethod[] @default([PIX, DEBIT_CARD, CREDIT_CARD])
   /// Preenchido ao publicar o evento. Após essa data as configurações financeiras ficam bloqueadas.
   financialSettingsLockedAt   DateTime?
 
