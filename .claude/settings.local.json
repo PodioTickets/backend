@@ -119,7 +119,9 @@
       "PowerShell(npx jest src/app/products --silent 2>$null; echo \"EXIT=$LASTEXITCODE\")",
       "PowerShell(npx tsc --noEmit; echo \"EXIT=$LASTEXITCODE\")",
       "PowerShell(docker ps --format '{{.Names}} {{.Ports}}' | Select-String '5434'; \\(Get-Content package.json | ConvertFrom-Json\\).scripts.'test:int')",
-      "PowerShell(Out-Null *)"
+      "PowerShell(Out-Null *)",
+      "PowerShell(npx jest src/app/tickets --silent 2>$null)",
+      "PowerShell(npx jest src/app/tickets 2>&1 | Select-Object -Last 20)"
     ]
   }
 }

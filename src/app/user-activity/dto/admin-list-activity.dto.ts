@@ -140,6 +140,46 @@ export class AdminUserActivityStatsQueryDto {
 
   @ApiPropertyOptional({
     description:
+      'Restringe as métricas a um evento esportivo (match em metadata.eventId). ' +
+      'Registros antigos sem o vínculo ficam de fora.',
+  })
+  @IsOptional()
+  @IsUUID('4')
+  eventId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Data/hora inicial (ISO 8601). Inclusivo. Default: to − 30 dias.',
+  })
+  @IsOptional()
+  @IsString()
+  from?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Data/hora final (ISO 8601). Inclusivo até 23:59:59.999 UTC. Default: agora.',
+  })
+  @IsOptional()
+  @IsString()
+  to?: string;
+}
+
+/**
+ * Filtros do funil de compra (`GET /admin/user-activity/funnel`).
+ * Janela default de 30 dias (mesma semântica do stats). `eventId` restringe
+ * o funil a um evento esportivo — etapas de checkout sem `metadata.eventId`
+ * (falhas, registros do interceptor) são resolvidas via join com Order.
+ */
+export class AdminUserActivityFunnelQueryDto {
+  @ApiPropertyOptional({
+    description: 'Restringe o funil a um evento esportivo.',
+  })
+  @IsOptional()
+  @IsUUID('4')
+  eventId?: string;
+
+  @ApiPropertyOptional({
+    description:
       'Data/hora inicial (ISO 8601). Inclusivo. Default: to − 30 dias.',
   })
   @IsOptional()

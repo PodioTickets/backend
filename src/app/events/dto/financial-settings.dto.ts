@@ -8,20 +8,23 @@ export type ConfigurablePaymentMethod = (typeof CONFIGURABLE_PAYMENT_METHODS)[nu
 // ──────────────── Request ────────────────
 
 export class UpdateFinancialSettingsDto {
-  @ApiProperty({ description: 'Percentual da taxa absorvido pelo organizador (0.0–100.0).', example: 3.0, minimum: 0 })
+  @ApiProperty({ description: 'Percentual da taxa absorvido pelo organizador (0.0–100.0). Omitir mantém o valor atual. Travado após a publicação (409).', example: 3.0, minimum: 0, required: false })
+  @IsOptional()
   @IsNumber()
   @Min(0)
-  organizerFeePercent: number;
+  organizerFeePercent?: number;
 
-  @ApiProperty({ description: 'Percentual da taxa repassado ao participante (0.0–100.0).', example: 3.0, minimum: 0 })
+  @ApiProperty({ description: 'Percentual da taxa repassado ao participante (0.0–100.0). Omitir mantém o valor atual. Travado após a publicação (409).', example: 3.0, minimum: 0, required: false })
+  @IsOptional()
   @IsNumber()
   @Min(0)
-  participantFeePercent: number;
+  participantFeePercent?: number;
 
-  @ApiProperty({ description: 'Número máximo de parcelas sem juros aceitas no cartão de crédito.', example: 2, enum: [1, 2, 3] })
+  @ApiProperty({ description: 'Número máximo de parcelas sem juros aceitas no cartão de crédito. Omitir mantém o valor atual.', example: 2, enum: [1, 2, 3], required: false })
+  @IsOptional()
   @IsInt()
   @IsIn([1, 2, 3])
-  maxInstallments: number;
+  maxInstallments?: number;
 
   @IsOptional()
   @IsNumber()

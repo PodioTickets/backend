@@ -87,7 +87,7 @@ async function bootstrap() {
       );
       res.header(
         'Access-Control-Allow-Headers',
-        'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With,Idempotency-Key',
+        'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With,Idempotency-Key,x-session-id',
       );
       res.header('Access-Control-Allow-Credentials', 'true');
       res.header('Access-Control-Max-Age', '86400');
@@ -108,7 +108,7 @@ async function bootstrap() {
     );
     res.header(
       'Access-Control-Allow-Headers',
-      'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With',
+      'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With,x-session-id',
     );
     res.header('Access-Control-Allow-Credentials', 'true');
     next();
@@ -171,6 +171,9 @@ async function bootstrap() {
       'Accept',
       'X-Requested-With',
       'Idempotency-Key',
+      // Telemetria de atividade (UserActivityLog) — sem ele o preflight do
+      // browser bloqueia TODA request do front (que envia o header sempre)
+      'x-session-id',
     ],
     credentials: true,
     preflightContinue: false,
@@ -205,7 +208,7 @@ async function bootstrap() {
       );
       res.header(
         'Access-Control-Allow-Headers',
-        'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With,Idempotency-Key',
+        'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With,Idempotency-Key,x-session-id',
       );
       res.header('Access-Control-Allow-Credentials', 'true');
       res.header('Access-Control-Max-Age', '86400');

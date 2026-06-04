@@ -993,6 +993,7 @@ export class TicketsService {
       const created = await tx.ticket.create({
         data: {
           name: `${originalTicket.name} (Cópia)`,
+          description: originalTicket.description,
           categoryId: originalTicket.categoryId,
           sortOrder: duplicateSortOrder,
           modality: originalTicket.modality,
@@ -1006,12 +1007,17 @@ export class TicketsService {
           eventId: originalTicket.eventId,
           isActive: originalTicket.isActive,
           batches: {
+            // Preservar sortOrder/triggerType do lote original — sem eles, todos
+            // os lotes da cópia caíam no default (0 / BY_TIME) e o 2º lote em
+            // diante perdia a configuração de ativação e a ordem.
             create: originalTicket.batches.map((batch) => ({
               quantity: batch.quantity,
               availableQuantity: batch.quantity,
               price: batch.price,
               startDate: batch.startDate,
               endDate: batch.endDate,
+              sortOrder: batch.sortOrder,
+              triggerType: batch.triggerType,
             })),
           },
           products: originalTicket.products.length > 0

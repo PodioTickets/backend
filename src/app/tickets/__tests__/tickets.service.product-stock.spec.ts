@@ -203,6 +203,87 @@ describe('TicketsService — sincronização de estoque das variações por vaga
     expect(sync).toHaveBeenCalledWith(tx, ['p1', 'p2']);
   });
 
+  it('DUPLICATE preserva sortOrder/triggerType dos lotes e description (regressão: 2º lote vinha desconfigurado)', async () => {
+    // Bug 2026-06-04: a cópia não levava sortOrder/triggerType dos lotes —
+    // todos caíam no default (0 / BY_TIME) e o 2º lote perdia a configuração
+    // "ativa quando o anterior esgotar". A description do ingresso também sumia.
+    client.ticket.findUnique.mockResolvedValue({
+      id: 't1',
+      eventId: 'evt-1',
+      categoryId: null,
+      isActive: true,
+      name: 'Ingresso',
+      description: 'Descrição original',
+      modality: null,
+      distance: null,
+      distanceUnit: 'KM',
+      gender: 'all',
+      ageLimitMin: null,
+      ageLimitMax: null,
+      hasKit: false,
+      kitId: null,
+      batches: [
+        {
+          quantity: 50,
+          availableQuantity: 10, // cópia deve resetar p/ quantity, não herdar vendas
+          price: 1000,
+          startDate: new Date('2026-07-01'),
+          endDate: new Date('2026-07-31'),
+          sortOrder: 0,
+          triggerType: 'BY_TIME',
+        },
+        {
+          quantity: 30,
+          availableQuantity: 30,
+          price: 1500,
+          startDate: null,
+          endDate: null,
+          sortOrder: 1,
+          triggerType: 'AFTER_PREVIOUS_SOLD_OUT',
+        },
+      ],
+      products: [],
+    });
+    tx.ticket.create.mockResolvedValue({
+      id: 't2',
+      isActive: true,
+      products: [],
+      batches: [],
+      ageLimitMin: null,
+      ageLimitMax: null,
+      categoryId: null,
+    });
+
+    await service.duplicate('admin-1', 'evt-1', 't1');
+
+    expect(tx.ticket.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          name: 'Ingresso (Cópia)',
+          description: 'Descrição original',
+          batches: {
+            create: [
+              expect.objectContaining({
+                quantity: 50,
+                availableQuantity: 50,
+                price: 1000,
+                sortOrder: 0,
+                triggerType: 'BY_TIME',
+              }),
+              expect.objectContaining({
+                quantity: 30,
+                availableQuantity: 30,
+                price: 1500,
+                sortOrder: 1,
+                triggerType: 'AFTER_PREVIOUS_SOLD_OUT',
+              }),
+            ],
+          },
+        }),
+      }),
+    );
+  });
+
   // ──────────────────────────────────────────────────────────── REMOVE
   it('REMOVE soft delete (com vendas) → marca inativo e sincroniza vinculados', async () => {
     client.ticket.findUnique.mockResolvedValue({
