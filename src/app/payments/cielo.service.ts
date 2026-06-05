@@ -355,9 +355,19 @@ export class CieloService {
               Brand: debitBrand,
             };
 
+            // Débito SEMPRE exige autenticação (Authenticate=true). A Cielo pede o
+            // ReturnUrl em TODO débito — inclusive no fluxo 3DS via MPI, onde também
+            // mandamos ExternalAuthentication. O suporte Cielo apontou "ReturnUrl não
+            // está sendo enviado" exatamente aí: antes o ReturnUrl só ia no fluxo redirect
+            // (else). Agora vai sempre que disponível, nos dois caminhos.
+            paymentData.Authenticate = true;
+            if (returnUrl) {
+              paymentData.ReturnUrl = returnUrl;
+            }
             if (threedsData) {
-              // Post-3DS flow: frontend already authenticated externally
-              paymentData.Authenticate = true;
+              // 3DS via MPI: o frontend já autenticou e envia o resultado. Com
+              // ExternalAuthentication válido a Cielo liquida frictionless (sem usar o
+              // redirect do ReturnUrl).
               paymentData.ExternalAuthentication = {
                 Cavv: threedsData.cavv,
                 Eci: threedsData.eci,
@@ -365,11 +375,6 @@ export class CieloService {
                 Version: threedsData.version ?? '2',
                 ...(threedsData.referenceId && { ReferenceId: threedsData.referenceId }),
               };
-            } else {
-              // Pre-3DS flow: Cielo handles 3DS redirect via ReturnUrl
-              // Authenticate: true é obrigatório para o Braspag iniciar o fluxo 3DS
-              paymentData.Authenticate = true;
-              paymentData.ReturnUrl = returnUrl;
             }
           }
           break;
