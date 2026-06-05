@@ -82,6 +82,19 @@ export class PaymentsWebhookService {
       return;
     }
 
+    /* Anti-regressão: status intermediários da Cielo (0=NotFinished, 1=Authorized,
+     * 12=Pending) mapeiam pra PENDING e NUNCA rebaixam um Payment já decidido —
+     * ex.: crédito finalizado como PAID sendo notificado enquanto a captura
+     * liquida voltava a PENDING. Transições válidas chegam só via status finais
+     * (2=PAID, 3/13=FAILED, 10/11=REFUNDED); um Payment que ainda está PENDING
+     * não precisa de update (já nasce PENDING no pay). */
+    if (paymentStatus === PaymentStatus.PENDING) {
+      this.logger.log(
+        `Webhook ignorado (status intermediário ${event.Status}) para payment ${event.PaymentId}`,
+      );
+      return;
+    }
+
     // orderId capturado durante a transação para uso posterior (fora da transação)
     let confirmedOrderId: string | null = null;
     // Pagamento confirmado TARDE DEMAIS: Order já CANCELLED (cron de expiração). O Payment
@@ -98,7 +111,15 @@ export class PaymentsWebhookService {
         const updated = await prisma.payment.updateMany({
           where: {
             transactionId: event.PaymentId,
-            status: { not: paymentStatus },
+            // Idempotência (não reaplica o mesmo status) + anti-regressão: um
+            // Payment já REFUNDED (compensação/estorno) nunca volta a PAID por
+            // webhook atrasado ou replay.
+            status: {
+              notIn:
+                paymentStatus === PaymentStatus.PAID
+                  ? [paymentStatus, PaymentStatus.REFUNDED]
+                  : [paymentStatus],
+            },
           },
           data: {
             status: paymentStatus,

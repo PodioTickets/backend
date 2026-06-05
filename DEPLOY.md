@@ -123,6 +123,25 @@ Para processar pagamentos, você precisa configurar as credenciais da Cielo:
 
 **⚠️ IMPORTANTE**: Sem essas variáveis configuradas, você receberá o erro "Cielo is not configured" ao tentar processar pagamentos.
 
+#### Captura de crédito (auto-captura) — checklist antes do deploy de 2026-06-05
+
+Desde 2026-06-05 o backend envia crédito com **`Capture=true`** (autoriza + captura na mesma chamada). Antes disso, as vendas de crédito eram enviadas com `Capture=false` e **nada chamava a captura** — a transação ficava só AUTORIZADA na Cielo (Status 1), e autorização não capturada **expira em ~5 dias sem liquidar o dinheiro**.
+
+Antes de subir essa versão (e periodicamente até confirmar que está tudo limpo):
+
+1. **Verificar transações autorizadas e NÃO capturadas** no painel Cielo
+   (https://cieloecommerce.cielo.com.br/ → Vendas → filtrar por status "Autorizada"):
+   - Cada uma é uma venda real em risco de expirar sem receber.
+   - **Capturar manualmente** as que têm pedido `PAID` no nosso banco.
+   - Cruzar pelo `MerchantOrderId` / `PaymentId` (coluna `transactionId` da tabela `Payment`).
+
+2. **Conferir se a loja tem "captura automática" habilitada** nas configurações da conta Cielo.
+   Se estiver habilitada, é o que vinha mascarando o problema — com `Capture=true` no request ela se torna redundante (e inofensiva).
+
+3. **Pós-deploy**: pagamentos de crédito devem retornar Status **2 (PaymentConfirmed)** direto.
+   Se aparecer Status **1 (Authorized)** nos logs, o fallback defensivo do `pay` chama
+   `capturePayment()`; se a captura falhar, o pedido é recusado e a autorização desfeita (void).
+
 ### 4. Executar migrações do banco de dados
 
 **IMPORTANTE:** Como o PostgreSQL está rodando dentro do Docker, você precisa executar as migrações de uma forma que consiga acessar o container.

@@ -200,7 +200,12 @@ export class CieloService {
           }
 
           paymentData.Type = 'CreditCard';
-          paymentData.Capture = false;
+          // Auto-captura (autoriza + captura na MESMA chamada → Status 2 direto).
+          // Capture=false deixava vendas só AUTORIZADAS (Status 1) e nada chamava
+          // capturePayment() — a autorização expira em ~5 dias sem liquidar e o
+          // webhook (que reconsulta a Cielo) rebaixava o Payment PAID→PENDING.
+          // capturePayment() segue disponível como fallback defensivo no pay.
+          paymentData.Capture = true;
           // Provider sempre enviado: sandbox -> simulador; produção -> 'Cielo30'.
           // Antes ficava vazio em produção e a Cielo não recebia o Provider.
           paymentData.Provider = this.isSandbox ? 'Simulado' : 'Cielo30';
@@ -350,9 +355,19 @@ export class CieloService {
               Brand: debitBrand,
             };
 
+            // Débito SEMPRE exige autenticação (Authenticate=true). A Cielo pede o
+            // ReturnUrl em TODO débito — inclusive no fluxo 3DS via MPI, onde também
+            // mandamos ExternalAuthentication. O suporte Cielo apontou "ReturnUrl não
+            // está sendo enviado" exatamente aí: antes o ReturnUrl só ia no fluxo redirect
+            // (else). Agora vai sempre que disponível, nos dois caminhos.
+            paymentData.Authenticate = true;
+            if (returnUrl) {
+              paymentData.ReturnUrl = returnUrl;
+            }
             if (threedsData) {
-              // Post-3DS flow: frontend already authenticated externally
-              paymentData.Authenticate = true;
+              // 3DS via MPI: o frontend já autenticou e envia o resultado. Com
+              // ExternalAuthentication válido a Cielo liquida frictionless (sem usar o
+              // redirect do ReturnUrl).
               paymentData.ExternalAuthentication = {
                 Cavv: threedsData.cavv,
                 Eci: threedsData.eci,
@@ -360,11 +375,6 @@ export class CieloService {
                 Version: threedsData.version ?? '2',
                 ...(threedsData.referenceId && { ReferenceId: threedsData.referenceId }),
               };
-            } else {
-              // Pre-3DS flow: Cielo handles 3DS redirect via ReturnUrl
-              // Authenticate: true é obrigatório para o Braspag iniciar o fluxo 3DS
-              paymentData.Authenticate = true;
-              paymentData.ReturnUrl = returnUrl;
             }
           }
           break;
