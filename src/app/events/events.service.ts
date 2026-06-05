@@ -2464,7 +2464,8 @@ export class EventsService {
       const submittedHH = String(submittedAt.getHours()).padStart(2, '0');
       const submittedMM = String(submittedAt.getMinutes()).padStart(2, '0');
       const submittedAtFormatted = `${submittedAt.toLocaleDateString('pt-BR')} · ${submittedHH}h${submittedMM}`;
-      const eventLocation = [event.location, event.city].filter(Boolean).join(', ');
+      // Card do e-mail exibe apenas Estado, Cidade (sem endereço completo)
+      const eventLocation = [event.state, event.city].filter(Boolean).join(', ');
 
       this.emailService
         .sendEventUnderReview({

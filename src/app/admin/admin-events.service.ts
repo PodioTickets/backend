@@ -330,7 +330,8 @@ export class AdminEventsService {
       const weekdays = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
       const eventDt = new Date(event.eventDate);
       const eventDateFormatted = `${eventDt.toLocaleDateString('pt-BR')} · ${weekdays[eventDt.getDay()]}`;
-      const eventLocation = [event.location, event.city].filter(Boolean).join(', ');
+      // Card do e-mail exibe apenas Estado, Cidade (sem endereço completo)
+      const eventLocation = [event.state, event.city].filter(Boolean).join(', ');
 
       const submittedHH = String(now.getHours()).padStart(2, '0');
       const submittedMM = String(now.getMinutes()).padStart(2, '0');

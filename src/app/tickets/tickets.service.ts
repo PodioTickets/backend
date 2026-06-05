@@ -15,7 +15,6 @@ import {
 } from './ticket-audit.helpers';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { stripDeletedTicketFromKitSelectionDisplay } from '../events/kit-selection-display.prune';
-import { DEFAULT_NO_INTEREST_VARIATION_NAME } from '../products/product.constants';
 
 function resolveImageUrl(url: string | null | undefined, baseUrl: string): string | null | undefined {
   if (!url) return url;
@@ -118,48 +117,6 @@ export class TicketsService {
     baseUrl: string | undefined,
   ): string {
     return `tickets:list:${eventId}:org:${isOrganizer ? 1 : 0}:cat:${categoryId ?? 'all'}:p:${page}:l:${limit}:inact:${includeInactive ? 1 : 0}:base:${baseUrl ?? ''}`;
-  }
-
-  /**
-   * Sincroniza o estoque das variações dos produtos informados.
-   *
-   * Regra de produto: o estoque de cada variação deve ser igual à soma das vagas
-   * (Σ `quantity` de TODOS os lotes) de TODOS os ingressos ATIVOS aos quais o
-   * produto está vinculado. Um único UPDATE recalcula todas as variações dos
-   * produtos afetados — evita N+1 e mantém o valor sempre DERIVADO (idempotente
-   * e auto-corretivo, mesmo que haja drift histórico).
-   *
-   * A variação opt-out "Sem interesse" é preservada ilimitada (`stock = 0`):
-   * quem recusa o item adicional nunca "esgota".
-   *
-   * Deve rodar dentro da MESMA transação da operação de ingresso que a disparou,
-   * para refletir atomicamente o estado final dos vínculos/lotes.
-   */
-  private async syncProductVariationStock(
-    tx: Prisma.TransactionClient,
-    productIds: readonly string[],
-  ): Promise<void> {
-    const unique = Array.from(new Set(productIds.filter(Boolean)));
-    if (unique.length === 0) return;
-
-    await tx.$executeRaw(Prisma.sql`
-      UPDATE "ProductVariation" pv
-      SET "stock" = sub.total
-      FROM (
-        SELECT p.id AS "productId",
-               COALESCE((
-                 SELECT SUM(tb."quantity")::int
-                 FROM "TicketProduct" tp
-                 JOIN "Ticket" t ON t.id = tp."ticketId" AND t."isActive" = true
-                 JOIN "TicketBatch" tb ON tb."ticketId" = t.id
-                 WHERE tp."productId" = p.id
-               ), 0) AS total
-        FROM "Product" p
-        WHERE p.id IN (${Prisma.join(unique.map((id) => Prisma.sql`${id}::uuid`))})
-      ) sub
-      WHERE pv."productId" = sub."productId"
-        AND pv."name" <> ${DEFAULT_NO_INTEREST_VARIATION_NAME}
-    `);
   }
 
   async create(userId: string, eventId: string, createTicketDto: CreateTicketDto) {
@@ -272,10 +229,6 @@ export class TicketsService {
           kit: true,
         },
       });
-
-      if (createTicketDto.productIds && createTicketDto.productIds.length > 0) {
-        await this.syncProductVariationStock(tx, createTicketDto.productIds);
-      }
 
       return created;
     });
@@ -819,15 +772,6 @@ export class TicketsService {
         },
       });
 
-      // Re-sincroniza o estoque dos produtos afetados quando vínculos e/ou vagas
-      // mudaram. União: produtos ANTES (cobre vínculo removido e mudança de lote
-      // de quem continua vinculado) ∪ produtos DEPOIS (cobre vínculo adicionado).
-      if (updateTicketDto.productIds !== undefined || updateTicketDto.batches) {
-        const before = ticket.products.map((tp) => tp.productId);
-        const after = updateTicketDto.productIds ?? [];
-        await this.syncProductVariationStock(tx, [...before, ...after]);
-      }
-
       return updated;
     });
 
@@ -899,9 +843,6 @@ export class TicketsService {
           where: { order: { status: { not: OrderStatus.CANCELLED } } },
           take: 1,
         },
-        // Produtos vinculados: ao remover o ingresso, suas vagas saem do total
-        // que define o estoque das variações desses produtos.
-        products: { select: { productId: true } },
       },
     });
 
@@ -909,20 +850,14 @@ export class TicketsService {
       throw new NotFoundException('Ingresso não encontrado');
     }
 
-    const linkedProductIds = ticket.products.map((tp) => tp.productId);
     const hasSales = ticket.registrations.length > 0 || ticket.reservedTickets.length > 0;
 
     if (hasSales) {
       // Soft delete: ticket continua no evento (isActive=false), então não há
-      // ID órfão em kitSelectionDisplay — não precisa de prune. O estoque dos
-      // produtos é re-sincronizado na MESMA tx: como o ingresso fica inativo, suas
-      // vagas deixam de contar (o helper só soma ingressos ativos).
-      await prismaWrite.$transaction(async (tx) => {
-        await tx.ticket.update({
-          where: { id: ticketId },
-          data: { isActive: false },
-        });
-        await this.syncProductVariationStock(tx, linkedProductIds);
+      // ID órfão em kitSelectionDisplay — não precisa de prune.
+      await prismaWrite.ticket.update({
+        where: { id: ticketId },
+        data: { isActive: false },
       });
     } else {
       // Hard delete: ticket some do banco; o ticketId pode estar como chave em
@@ -946,9 +881,6 @@ export class TicketsService {
           }
         }
         await tx.ticket.delete({ where: { id: ticketId } });
-        // Após o delete os vínculos TicketProduct somem (onDelete: Cascade);
-        // o recálculo exclui automaticamente as vagas deste ingresso.
-        await this.syncProductVariationStock(tx, linkedProductIds);
       });
     }
 
@@ -1043,14 +975,6 @@ export class TicketsService {
           kit: true,
         },
       });
-
-      // Só sincroniza se a cópia for ATIVA (inativa não contribui com vagas).
-      if (originalTicket.products.length > 0 && created.isActive) {
-        await this.syncProductVariationStock(
-          tx,
-          originalTicket.products.map((tp) => tp.productId),
-        );
-      }
 
       return created;
     });
