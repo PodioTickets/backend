@@ -200,7 +200,12 @@ export class CieloService {
           }
 
           paymentData.Type = 'CreditCard';
-          paymentData.Capture = false;
+          // Auto-captura (autoriza + captura na MESMA chamada → Status 2 direto).
+          // Capture=false deixava vendas só AUTORIZADAS (Status 1) e nada chamava
+          // capturePayment() — a autorização expira em ~5 dias sem liquidar e o
+          // webhook (que reconsulta a Cielo) rebaixava o Payment PAID→PENDING.
+          // capturePayment() segue disponível como fallback defensivo no pay.
+          paymentData.Capture = true;
           // Provider sempre enviado: sandbox -> simulador; produção -> 'Cielo30'.
           // Antes ficava vazio em produção e a Cielo não recebia o Provider.
           paymentData.Provider = this.isSandbox ? 'Simulado' : 'Cielo30';

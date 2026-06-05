@@ -18,7 +18,7 @@
  * O QUE conferimos (tudo lido do código real, não inventado):
  *   1. Bandeira do cartão deduzida pelo NÚMERO (Visa, Master, Amex...).
  *   2. Validade convertida de MM/YY para MM/YYYY (com barra).
- *   3. Body de CRÉDITO: Type=CreditCard, Capture=false, Provider certo por
+ *   3. Body de CRÉDITO: Type=CreditCard, Capture=true (auto-captura), Provider certo por
  *      ambiente (sandbox='Simulado' / produção='Cielo30'), e o objeto
  *      CreditCard preenchido (CardNumber só dígitos, Holder, ExpirationDate,
  *      SecurityCode, Brand). Também o caminho via CardToken.
@@ -237,7 +237,7 @@ describe('CieloService — montagem do payload enviado à Cielo (lógica pura)',
   });
 
   describe('Body de CRÉDITO (cartão com dados completos)', () => {
-    it('monta Type=CreditCard, Capture=false e CreditCard preenchido', async () => {
+    it('monta Type=CreditCard, Capture=true e CreditCard preenchido', async () => {
       const { service, postMock } = makeService('sandbox');
 
       await service.createPayment(
@@ -252,8 +252,9 @@ describe('CieloService — montagem do payload enviado à Cielo (lógica pura)',
       const body = capturedBody(postMock);
       expect(body.MerchantOrderId).toBe('order-credit');
       expect(body.Payment.Type).toBe('CreditCard');
-      // Capture=false: a captura é feita em etapa separada (capturePayment).
-      expect(body.Payment.Capture).toBe(false);
+      // Capture=true: auto-captura — autoriza e captura na mesma chamada
+      // (capturePayment() vira só fallback defensivo p/ Status 1).
+      expect(body.Payment.Capture).toBe(true);
       expect(body.Payment.Currency).toBe('BRL');
       expect(body.Payment.Installments).toBe(3);
       expect(body.Payment.CreditCard).toEqual({
@@ -351,7 +352,7 @@ describe('CieloService — montagem do payload enviado à Cielo (lógica pura)',
 
       const body = capturedBody(postMock);
       expect(body.Payment.Type).toBe('CreditCard');
-      expect(body.Payment.Capture).toBe(false);
+      expect(body.Payment.Capture).toBe(true);
       expect(body.Payment.Provider).toBe('Cielo30');
       expect(body.Payment.Installments).toBe(2);
       expect(body.Payment.CreditCard).toEqual({

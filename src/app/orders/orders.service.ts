@@ -3558,10 +3558,138 @@ export class OrdersService {
       return body;
     }
 
+    // 6.11.6 CARTÃO com análise assíncrona (Cielo Status 12 = Pending, ex.: antifraude).
+    // NÃO é recusa: a Cielo confirma/nega depois via webhook. Persistimos o Payment
+    // PENDING com transactionId — sem isso o webhook não casa com nenhuma linha
+    // (updateMany count=0) e o pedido vira "fantasma": o cliente vê recusa, mas o
+    // dinheiro pode ser capturado depois sem nunca finalizar.
+    if (
+      !isFreeOrder &&
+      (dto.method === PaymentMethod.CREDIT_CARD || dto.method === PaymentMethod.DEBIT_CARD) &&
+      cieloResult.cieloStatus === 'Pending'
+    ) {
+      const newExpiresAt = new Date(Date.now() + RESERVATION_TTL_MINUTES * 60 * 1000);
+
+      // Metadata espelha o shape do finalize (recibo/painel leem brand/last4 daqui).
+      const pendingMeta = {
+        cieloPaymentId: cieloResult.paymentId,
+        cieloStatus: cieloResult.cieloStatus,
+        ...discountMeta,
+        ...(dto.card && dto.method === PaymentMethod.CREDIT_CARD && {
+          creditCard: {
+            brand: cieloResult.cardBrand ?? null,
+            last4Digits: dto.card.number.replace(/\s/g, '').slice(-4),
+            holder: dto.card.name,
+            installments: dto.card.installments ?? 1,
+          },
+        }),
+        ...(dto.card && dto.method === PaymentMethod.DEBIT_CARD && {
+          debitCard: {
+            brand: cieloResult.cardBrand ?? null,
+            last4Digits: dto.card.number.replace(/\s/g, '').slice(-4),
+            holder: dto.card.name,
+          },
+        }),
+      };
+
+      await w.$transaction(async (tx: any) => {
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            expiresAt: newExpiresAt,
+            discount: couponDiscount + voucherDiscount,
+            serviceFee,
+            participantFeePercent,
+            organizerFeePercent,
+            finalAmount: finalTotal,
+            totalAmount: preDiscountTotal,
+            ...(couponId && { couponId }),
+            ...(voucherId && { voucherId }),
+            updatedAt: new Date(),
+          },
+        });
+        await tx.payment.upsert({
+          where: { orderId },
+          create: {
+            orderId,
+            userId,
+            method: dto.method,
+            status: PaymentStatus.PENDING,
+            amount: finalTotal,
+            transactionId: cieloResult.paymentId ?? null,
+            metadata: pendingMeta,
+          },
+          update: {
+            method: dto.method,
+            status: PaymentStatus.PENDING,
+            amount: finalTotal,
+            transactionId: cieloResult.paymentId ?? null,
+            metadata: pendingMeta,
+          },
+        });
+      });
+
+      const body = {
+        orderId,
+        // Vínculo com o evento — consumido pela telemetria de funil (interceptor).
+        eventId: order.eventId,
+        status: 'PENDING',
+        payment: {
+          method: dto.method,
+          status: 'PENDING',
+          transactionId: cieloResult.paymentId ?? null,
+          // Sinaliza ao front: não é recusa — aguardar confirmação (webhook).
+          processing: true,
+        },
+        expiresAt: newExpiresAt,
+        serverTime: new Date(),
+      };
+
+      if (idempotencyKey) {
+        await this.redisService.setIdempotencyResult(idempotencyKey, 202, body);
+      }
+      return body;
+    }
+
     // 6.12 CREDIT_CARD / DEBIT_CARD: verify approval
+    // Com Capture=true o esperado para crédito é Status 2 (PaymentConfirmed).
+    // 'Authorized' (Status 1 = autorizado SEM captura) só é aceito após captura
+    // defensiva — nunca finalizar pedido com dinheiro apenas autorizado (a
+    // autorização expira sem liquidar e o webhook rebaixaria o estado).
+    let effectiveCieloStatus = cieloResult.cieloStatus;
+    if (
+      !isFreeOrder &&
+      dto.method === PaymentMethod.CREDIT_CARD &&
+      effectiveCieloStatus === 'Authorized' &&
+      cieloResult.paymentId
+    ) {
+      const capture = await this.cieloService.capturePayment(cieloResult.paymentId);
+      if (capture.success) {
+        effectiveCieloStatus = 'PaymentConfirmed';
+        cieloResult.cieloStatus = 'PaymentConfirmed';
+      } else {
+        // Captura falhou: desfaz a autorização (void) pra não deixar transação
+        // órfã na Cielo nem risco de dupla cobrança no retry do usuário.
+        this.logger.error(
+          `Captura falhou para order ${orderId} (payment ${cieloResult.paymentId}): ${capture.error}`,
+        );
+        try {
+          await this.cieloService.cancelPayment(cieloResult.paymentId);
+        } catch (voidErr: any) {
+          this.logger.error(
+            `Void pós-falha de captura também falhou para ${cieloResult.paymentId}: ${voidErr?.message ?? voidErr}`,
+          );
+        }
+        const errBody = { error: true, code: 'PAYMENT_REFUSED', message: 'Não foi possível confirmar o pagamento. Nenhum valor foi cobrado — tente novamente.' };
+        throw new HttpException(errBody, 402);
+      }
+    }
+
+    // Débito: 'Authorized' continua aceito (3DS pré-autenticado liquida na Cielo
+    // sem etapa de captura manual) — comportamento inalterado.
     const isApproved =
-      cieloResult.cieloStatus === 'Authorized' ||
-      cieloResult.cieloStatus === 'PaymentConfirmed';
+      effectiveCieloStatus === 'PaymentConfirmed' ||
+      (dto.method === PaymentMethod.DEBIT_CARD && effectiveCieloStatus === 'Authorized');
 
     if (!isApproved) {
       const errBody = { error: true, code: 'PAYMENT_REFUSED', message: 'Pagamento não autorizado. Verifique os dados do cartão e tente novamente.' };
