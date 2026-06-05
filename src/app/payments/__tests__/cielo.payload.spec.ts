@@ -498,6 +498,142 @@ describe('CieloService — montagem do payload enviado à Cielo (lógica pura)',
     });
   });
 
+  /*
+   * Débito tem DOIS fluxos de 3DS (autenticação obrigatória no débito):
+   *   • MPI: o frontend autentica via SDK e nos manda o resultado (cavv/eci/...)
+   *     no `threedsData`. Mandamos isso pra Cielo em `ExternalAuthentication`.
+   *   • Redirect: sem pré-autenticação — a Cielo cuida do 3DS e devolve uma URL
+   *     pra onde redirecionamos o comprador.
+   * Em AMBOS a Cielo exige `ReturnUrl` (URL de volta após o banco). O suporte
+   * Cielo avisou que no fluxo MPI o ReturnUrl NÃO estava indo (antes ele só era
+   * setado no fluxo redirect). Os testes abaixo travam o comportamento correto.
+   */
+  describe('Body de DÉBITO (3DS) — ReturnUrl + ExternalAuthentication', () => {
+    // URL de retorno que o orders.service monta a partir do SERVER_URL e passa
+    // como último argumento do createPayment.
+    const returnUrl =
+      'https://api.podioticket.com.br/api/v1/payments/3ds-callback?orderId=o1';
+
+    it('com 3DS via MPI: envia ExternalAuthentication E ReturnUrl (regressão do bug do suporte Cielo)', async () => {
+      // ARRANGE: service em produção (pra também conferir Provider='Cielo30').
+      const { service, postMock } = makeService('production');
+
+      // ACT: cobra um débito JÁ autenticado via MPI. Os args posicionais do
+      // createPayment são (lendo a assinatura real do service):
+      //   1000               -> amount em centavos
+      //   'BRL'              -> currency
+      //   DEBIT_CARD         -> método
+      //   'order-debit'      -> merchantOrderId
+      //   { name: 'Cliente' }-> customerData (Name é obrigatório na Cielo)
+      //   cardVisa           -> cardData (número/validade/cvv)
+      //   undefined          -> cardToken (não usado no débito)
+      //   { cavv, eci, ... } -> threedsData (resultado do 3DS feito no front)
+      //   returnUrl          -> URL de retorno pós-banco
+      await service.createPayment(
+        1000,
+        'BRL',
+        PaymentMethod.DEBIT_CARD,
+        'order-debit',
+        { name: 'Cliente' },
+        cardVisa,
+        undefined,
+        { cavv: 'AAABBkhkAAAA==', eci: '05', xid: 'XID123', version: '2', referenceId: 'ref-1' },
+        returnUrl,
+      );
+
+      // ASSERT: inspeciona o body que teria ido pra Cielo (2º arg do .post).
+      const body = capturedBody(postMock);
+      // Tipo correto e débito é sempre à vista (1 parcela).
+      expect(body.Payment.Type).toBe('DebitCard');
+      expect(body.Payment.Installments).toBe(1);
+      // Provider de produção (não lê do .env).
+      expect(body.Payment.Provider).toBe('Cielo30');
+      // Débito exige autenticação → Authenticate sempre true.
+      expect(body.Payment.Authenticate).toBe(true);
+      // O FIX: o ReturnUrl vai JUNTO com o ExternalAuthentication (antes era
+      // omitido nesse fluxo — exatamente o que o suporte Cielo reclamou).
+      expect(body.Payment.ReturnUrl).toBe(returnUrl);
+      // O resultado do 3DS do MPI é repassado fielmente.
+      expect(body.Payment.ExternalAuthentication).toEqual({
+        Cavv: 'AAABBkhkAAAA==',
+        Eci: '05',
+        Xid: 'XID123',
+        Version: '2',
+        ReferenceId: 'ref-1',
+      });
+      // Cartão montado: número só dígitos, validade expandida p/ MM/YYYY, bandeira detectada.
+      expect(body.Payment.DebitCard).toEqual({
+        CardNumber: '4111111111111111',
+        Holder: 'JOAO DA SILVA',
+        ExpirationDate: '12/2030',
+        SecurityCode: '123',
+        Brand: 'Visa',
+      });
+    });
+
+    it('sem 3DS (redirect): envia ReturnUrl e NÃO envia ExternalAuthentication', async () => {
+      // ARRANGE: sandbox basta (não checamos Provider aqui).
+      const { service, postMock } = makeService('sandbox');
+
+      // ACT: débito SEM threedsData (8º arg = undefined) → fluxo redirect, onde a
+      // própria Cielo faz o 3DS e usa o ReturnUrl pra trazer o comprador de volta.
+      await service.createPayment(
+        1000,
+        'BRL',
+        PaymentMethod.DEBIT_CARD,
+        'order-debit-2',
+        { name: 'Cliente' },
+        cardVisa,
+        undefined,
+        undefined,
+        returnUrl,
+      );
+
+      // ASSERT:
+      const body = capturedBody(postMock);
+      expect(body.Payment.Type).toBe('DebitCard');
+      // Authenticate=true continua obrigatório pra Cielo iniciar o 3DS dela.
+      expect(body.Payment.Authenticate).toBe(true);
+      // ReturnUrl presente (é o destino do redirect).
+      expect(body.Payment.ReturnUrl).toBe(returnUrl);
+      // Sem pré-autenticação → NÃO mandamos ExternalAuthentication.
+      expect(body.Payment.ExternalAuthentication).toBeUndefined();
+    });
+
+    it('omite Xid/ReferenceId e usa Version default "2" quando não informados', async () => {
+      // ARRANGE.
+      const { service, postMock } = makeService('sandbox');
+
+      // ACT: threedsData mínimo — só cavv/eci (sem xid, version, referenceId).
+      // Valida que os campos opcionais não vão como undefined e que o Version
+      // cai no default '2'.
+      await service.createPayment(
+        1000,
+        'BRL',
+        PaymentMethod.DEBIT_CARD,
+        'order-debit-3',
+        { name: 'Cliente' },
+        cardVisa,
+        undefined,
+        { cavv: 'CAVVONLY==', eci: '02' },
+        returnUrl,
+      );
+
+      // ASSERT: ExternalAuthentication só com os campos presentes + Version default.
+      const body = capturedBody(postMock);
+      expect(body.Payment.ExternalAuthentication).toEqual({
+        Cavv: 'CAVVONLY==',
+        Eci: '02',
+        Version: '2', // default aplicado quando o caller não manda
+      });
+      // Xid e ReferenceId NÃO devem aparecer (spread condicional os omite).
+      expect(body.Payment.ExternalAuthentication.Xid).toBeUndefined();
+      expect(body.Payment.ExternalAuthentication.ReferenceId).toBeUndefined();
+      // ReturnUrl continua presente mesmo no caminho MPI mínimo.
+      expect(body.Payment.ReturnUrl).toBe(returnUrl);
+    });
+  });
+
   describe('Valores em centavos preservados', () => {
     it('repassa o amount recebido sem conversão (12345 -> 12345)', async () => {
       const { service, postMock } = makeService('sandbox');
