@@ -721,7 +721,7 @@ export class EventsService {
               id: true,
               name: true,
               tradeName: true, // Nome fantasia — mesmo formato de /organizations/me
-              email: true,
+              // Contato (email/phone) NÃO entra em rota pública — fora do contrato.
               logoUrl: true,
             },
           },
@@ -947,7 +947,7 @@ export class EventsService {
               id: true,
               name: true,
               tradeName: true, // Nome fantasia — mesmo formato de /organizations/me
-              email: true,
+              // Contato (email/phone) NÃO entra em rota pública — fora do contrato.
               logoUrl: true,
             },
           },
@@ -1201,14 +1201,14 @@ export class EventsService {
       ...EventsService.PUBLIC_EVENT_SCALAR_SELECT,
       // Organização: só o que a página pública/checkout lê (getEventOrganizer).
       // Fecha o vazamento de dados bancários/documentos/endereço da org.
+      // Contato (email/phone) também NÃO entra (2026-06-04): organizador não tem
+      // e-mail/telefone expostos em NENHUMA rota de usuário/pública.
       organization: {
         select: {
           id: true,
           name: true,
           tradeName: true,
           logoUrl: true,
-          email: true,
-          phone: true,
           description: true,
         },
       },
@@ -2334,9 +2334,9 @@ export class EventsService {
     userId: string,
     eventId: string,
     dto: {
-      organizerFeePercent: number;
-      participantFeePercent: number;
-      maxInstallments: number;
+      organizerFeePercent?: number;
+      participantFeePercent?: number;
+      maxInstallments?: number;
       acceptedPaymentMethods?: string[];
     },
     opts: { bypassLock?: boolean } = {},
@@ -2345,18 +2345,33 @@ export class EventsService {
 
     const prismaWrite = this.prisma.getWriteClient();
 
-    const data: Record<string, any> = {
-      organizerFeePercent: dto.organizerFeePercent,
-      participantFeePercent: dto.participantFeePercent,
-      maxInstallments: dto.maxInstallments,
-    };
-    // Opcional no PATCH: omitido = mantém o valor atual (validação de conteúdo
-    // — mín. 1, valores do enum, sem duplicata — fica no UpdateFinancialSettingsDto).
+    // Semântica PATCH: campo omitido = mantém o valor atual (validação de
+    // conteúdo fica no UpdateFinancialSettingsDto).
+    const data: Record<string, any> = {};
+    if (dto.organizerFeePercent !== undefined) data.organizerFeePercent = dto.organizerFeePercent;
+    if (dto.participantFeePercent !== undefined) data.participantFeePercent = dto.participantFeePercent;
+    if (dto.maxInstallments !== undefined) data.maxInstallments = dto.maxInstallments;
     if (dto.acceptedPaymentMethods?.length) {
       data.acceptedPaymentMethods = dto.acceptedPaymentMethods;
     }
 
-    if (opts.bypassLock) {
+    // O lock pós-publicação protege apenas a DIVISÃO DA TAXA (impacta preço já
+    // acordado). Formas de pagamento e parcelamento seguem editáveis pelo
+    // organizador — afetam só pagamentos futuros e o /pay valida a whitelist.
+    const touchesLockedFields =
+      data.organizerFeePercent !== undefined || data.participantFeePercent !== undefined;
+
+    if (Object.keys(data).length === 0) {
+      // PATCH vazio: no-op — devolve o estado atual sem tocar o banco.
+      const event = await prismaWrite.event.findUnique({
+        where: { id: eventId },
+        select: this.financialSettingsSelect(),
+      });
+      if (!event) throw new NotFoundException('Evento não encontrado');
+      return { data: this.buildFinancialSettingsPayload(event) };
+    }
+
+    if (opts.bypassLock || !touchesLockedFields) {
       const event = await prismaWrite.event.findUnique({ where: { id: eventId }, select: { id: true } });
       if (!event) throw new NotFoundException('Evento não encontrado');
       await prismaWrite.event.update({ where: { id: eventId }, data });
@@ -2377,10 +2392,14 @@ export class EventsService {
         if (!exists) throw new NotFoundException('Evento não encontrado');
         throw new ConflictException({
           error: 'FINANCIAL_SETTINGS_LOCKED',
-          message: 'As configurações financeiras não podem ser alteradas após a publicação do evento.',
+          message: 'A divisão da taxa não pode ser alterada após a publicação do evento.',
         });
       }
     }
+
+    // Evento publicado pode ter cache público ativo — o checkout lê
+    // acceptedPaymentMethods do payload público (TTL 30s degrada o resto).
+    this.invalidateEventCacheById(eventId);
 
     const updated = await prismaWrite.event.findUnique({
       where: { id: eventId },
@@ -2445,7 +2464,8 @@ export class EventsService {
       const submittedHH = String(submittedAt.getHours()).padStart(2, '0');
       const submittedMM = String(submittedAt.getMinutes()).padStart(2, '0');
       const submittedAtFormatted = `${submittedAt.toLocaleDateString('pt-BR')} · ${submittedHH}h${submittedMM}`;
-      const eventLocation = [event.location, event.city].filter(Boolean).join(', ');
+      // Card do e-mail exibe apenas Estado, Cidade (sem endereço completo)
+      const eventLocation = [event.state, event.city].filter(Boolean).join(', ');
 
       this.emailService
         .sendEventUnderReview({

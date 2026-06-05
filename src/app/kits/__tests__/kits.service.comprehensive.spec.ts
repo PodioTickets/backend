@@ -8,7 +8,10 @@ describe('KitsService - Comprehensive Tests', () => {
   let prisma: PrismaService;
 
   const mockPrismaService = {
-    organizer: {
+    user: {
+      findUnique: jest.fn(),
+    },
+    organizationMember: {
       findUnique: jest.fn(),
     },
     event: {
@@ -83,8 +86,7 @@ describe('KitsService - Comprehensive Tests', () => {
           ],
         };
 
-        const mockEvent = { id: eventId, organizerId: 'org-123' };
-        const mockOrganizer = { id: 'org-123', userId };
+        const mockEvent = { id: eventId, organizationId: 'org-123' };
         const mockKit = {
           id: 'kit-123',
           eventId,
@@ -95,8 +97,12 @@ describe('KitsService - Comprehensive Tests', () => {
           })),
         };
 
+        mockPrismaService.user.findUnique.mockResolvedValue({ role: 'USER' });
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+        mockPrismaService.organizationMember.findUnique.mockResolvedValue({
+          organizationId: 'org-123',
+          userId,
+        });
         mockPrismaService.kit.create.mockResolvedValue(mockKit);
 
         const result = await service.create(userId, eventId, createDto);
@@ -199,11 +205,11 @@ describe('KitsService - Comprehensive Tests', () => {
         const userId = 'user-123';
         const eventId = 'event-123';
 
-        const mockEvent = { id: eventId, organizerId: 'org-999' };
-        const mockOrganizer = null;
+        const mockEvent = { id: eventId, organizationId: 'org-999' };
 
+        mockPrismaService.user.findUnique.mockResolvedValue({ role: 'USER' });
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+        mockPrismaService.organizationMember.findUnique.mockResolvedValue(null);
 
         await expect(
           service.create(userId, eventId, {
@@ -219,12 +225,13 @@ describe('KitsService - Comprehensive Tests', () => {
         const eventId = 'event-123';
         const kitId = 'kit-123';
 
-        const mockEvent = { id: eventId, organizerId: 'org-999' };
-        const mockOrganizer = { id: 'org-123', userId };
+        const mockEvent = { id: eventId, organizationId: 'org-999' };
         const mockKit = { id: kitId, eventId, name: 'Other Kit' };
 
+        // Usuário não é membro da organização do evento → bloqueio de acesso
+        mockPrismaService.user.findUnique.mockResolvedValue({ role: 'USER' });
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+        mockPrismaService.organizationMember.findUnique.mockResolvedValue(null);
         mockPrismaService.kit.findUnique.mockResolvedValue(mockKit);
 
         await expect(
@@ -247,11 +254,14 @@ describe('KitsService - Comprehensive Tests', () => {
           ],
         };
 
-        const mockEvent = { id: eventId, organizerId: 'org-123' };
-        const mockOrganizer = { id: 'org-123', userId };
+        const mockEvent = { id: eventId, organizationId: 'org-123' };
 
+        mockPrismaService.user.findUnique.mockResolvedValue({ role: 'USER' });
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+        mockPrismaService.organizationMember.findUnique.mockResolvedValue({
+          organizationId: 'org-123',
+          userId,
+        });
         mockPrismaService.kit.create.mockRejectedValue(new Error('Invalid stock'));
 
         await expect(service.create(userId, eventId, createDto)).rejects.toThrow();
@@ -309,11 +319,7 @@ describe('KitsService - Comprehensive Tests', () => {
         quantity: -1,
       }));
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
-
-      mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+      // updateStock não passa por verifyOrganizerAccess; apenas estoque importa
       mockPrismaService.kitItem.findUnique.mockResolvedValue({
         id: 'item-123',
         sizes: [{ size: 'M', stock: 100 }],
@@ -468,8 +474,7 @@ describe('KitsService - Comprehensive Tests', () => {
         isActive: true,
       };
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
+      const mockEvent = { id: eventId, organizationId: 'org-123' };
       const mockKit = { id: kitId, eventId };
       const mockItem = {
         id: 'item-123',
@@ -477,8 +482,12 @@ describe('KitsService - Comprehensive Tests', () => {
         ...createItemDto,
       };
 
+      mockPrismaService.user.findUnique.mockResolvedValue({ role: 'USER' });
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+      mockPrismaService.organizationMember.findUnique.mockResolvedValue({
+        organizationId: 'org-123',
+        userId,
+      });
       mockPrismaService.kit.findUnique.mockResolvedValue(mockKit);
       mockPrismaService.kitItem.create.mockResolvedValue(mockItem);
 
@@ -492,16 +501,19 @@ describe('KitsService - Comprehensive Tests', () => {
         const eventId = 'event-123';
         const kitId = 'kit-123';
 
-        const mockEvent = { id: eventId, organizerId: 'org-123' };
-        const mockOrganizer = { id: 'org-123', userId };
+        const mockEvent = { id: eventId, organizationId: 'org-123' };
         const mockKit = {
           id: kitId,
           eventId,
           items: [{ id: 'item-123', registrations: [{ id: 'reg-123' }] }], // Com registrações
         };
 
+        mockPrismaService.user.findUnique.mockResolvedValue({ role: 'USER' });
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+        mockPrismaService.organizationMember.findUnique.mockResolvedValue({
+          organizationId: 'org-123',
+          userId,
+        });
         mockPrismaService.kit.findUnique.mockResolvedValue(mockKit);
 
         await expect(service.remove(userId, eventId, kitId)).rejects.toThrow(BadRequestException);

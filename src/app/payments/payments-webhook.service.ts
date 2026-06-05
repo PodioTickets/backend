@@ -4,7 +4,8 @@ import { CieloService } from './cielo.service';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
 import { PaymentGateway } from './payment.gateway';
-import { OrderFinalizationService } from './order-finalization.service';
+import { OrderFinalizationService, OrderFinalizationAbortError } from './order-finalization.service';
+import { PaymentCompensationService } from './payment-compensation.service';
 import { PaymentMethod, PaymentStatus } from '@prisma/client';
 
 function formatEventDate(date: Date | string | null | undefined): string {
@@ -48,6 +49,7 @@ export class PaymentsWebhookService {
     private readonly ticketPdfService: TicketPdfService,
     private readonly gateway: PaymentGateway,
     private readonly orderFinalization: OrderFinalizationService,
+    private readonly compensation: PaymentCompensationService,
   ) {}
 
   async handleWebhook(event: CieloWebhookEvent) {
@@ -82,63 +84,86 @@ export class PaymentsWebhookService {
 
     // orderId capturado durante a transação para uso posterior (fora da transação)
     let confirmedOrderId: string | null = null;
+    // Pagamento confirmado TARDE DEMAIS: Order já CANCELLED (cron de expiração). O Payment
+    // ficou PAID mas não há entrega possível → compensação (estorno automático) FORA da tx.
+    let orphanCancelledOrderId: string | null = null;
 
     // Atualização atômica dentro de uma única transação.
     // updateMany com condição "status diferente do novo" garante que:
     //   • count=1 → este worker processou; prossegue com efeitos colaterais.
     //   • count=0 → outro worker já aplicou este status; ignora (idempotência).
     // Elimina a race condition entre webhooks duplicados ou entrega dupla.
-    await this.prisma.$transaction(async (prisma) => {
-      const updated = await prisma.payment.updateMany({
-        where: {
-          transactionId: event.PaymentId,
-          status: { not: paymentStatus },
-        },
-        data: {
-          status: paymentStatus,
-          paymentDate: paymentStatus === PaymentStatus.PAID ? new Date() : undefined,
-        },
-      });
+    try {
+      await this.prisma.$transaction(async (prisma) => {
+        const updated = await prisma.payment.updateMany({
+          where: {
+            transactionId: event.PaymentId,
+            status: { not: paymentStatus },
+          },
+          data: {
+            status: paymentStatus,
+            paymentDate: paymentStatus === PaymentStatus.PAID ? new Date() : undefined,
+          },
+        });
 
-      if (updated.count === 0) {
-        this.logger.log(`Webhook idempotent: payment ${event.PaymentId} already at status ${paymentStatus}`);
-        return;
-      }
-
-      // Recarregar para obter metadata e orderId atualizados
-      const fresh = await prisma.payment.findFirst({
-        where: { transactionId: event.PaymentId },
-      });
-      if (!fresh) return;
-
-      await prisma.payment.update({
-        where: { id: fresh.id },
-        data: {
-          metadata: {
-            ...(fresh.metadata as object),
-            cieloStatus: this.cieloService.mapCieloStatusToString(event.Status),
-            webhookProcessedAt: new Date().toISOString(),
-            returnCode: event.ReturnCode,
-            returnMessage: event.ReturnMessage,
-          } as any,
-        },
-      });
-
-      if (paymentStatus === PaymentStatus.PAID) {
-        // Fonte ÚNICA: promove Order PENDING→PAID (atômico/idempotente) + finalize
-        // compartilhado (deleta placeholders + cria inscrições completas + aplica
-        // cupom/voucher). Se já não estava PENDING (entrega dupla), finalized=false.
-        const { finalized } = await this.orderFinalization.confirmAndFinalizeOrder(prisma, fresh.orderId);
-        if (!finalized) {
-          this.logger.warn(`Webhook: Order ${fresh.orderId} não estava PENDING ao confirmar PAID — efeitos ignorados`);
+        if (updated.count === 0) {
+          this.logger.log(`Webhook idempotent: payment ${event.PaymentId} already at status ${paymentStatus}`);
           return;
         }
-        // Captura orderId para envio de email fora da transação
-        confirmedOrderId = fresh.orderId;
-      }
 
-      this.logger.log(`Payment ${fresh.id} updated via webhook to status ${paymentStatus}`);
-    }, { timeout: 30000, maxWait: 10000 });
+        // Recarregar para obter metadata e orderId atualizados
+        const fresh = await prisma.payment.findFirst({
+          where: { transactionId: event.PaymentId },
+        });
+        if (!fresh) return;
+
+        await prisma.payment.update({
+          where: { id: fresh.id },
+          data: {
+            metadata: {
+              ...(fresh.metadata as object),
+              cieloStatus: this.cieloService.mapCieloStatusToString(event.Status),
+              webhookProcessedAt: new Date().toISOString(),
+              returnCode: event.ReturnCode,
+              returnMessage: event.ReturnMessage,
+            } as any,
+          },
+        });
+
+        if (paymentStatus === PaymentStatus.PAID) {
+          // Fonte ÚNICA: promove Order PENDING→PAID (atômico/idempotente) + finalize
+          // compartilhado (deleta placeholders + cria inscrições completas + aplica
+          // cupom/voucher). Se já não estava PENDING (entrega dupla), finalized=false.
+          const { finalized, orderStatus } = await this.orderFinalization.confirmAndFinalizeOrder(prisma, fresh.orderId);
+          if (!finalized) {
+            this.logger.warn(`Webhook: Order ${fresh.orderId} não estava PENDING ao confirmar PAID — efeitos ignorados`);
+            // Já PAID = entrega dupla benigna. CANCELLED = pago tarde demais → compensa.
+            if (orderStatus === 'CANCELLED') orphanCancelledOrderId = fresh.orderId;
+            return;
+          }
+          // Captura orderId para envio de email fora da transação
+          confirmedOrderId = fresh.orderId;
+        }
+
+        this.logger.log(`Payment ${fresh.id} updated via webhook to status ${paymentStatus}`);
+      }, { timeout: 30000, maxWait: 10000 });
+    } catch (err: unknown) {
+      // Finalize abortado pós-captura (voucher consumido por outro pedido / participantes
+      // vazios): a tx deu rollback (nada meio-entregue) e o pagamento capturado é compensado
+      // com estorno automático. Retornamos NORMALMENTE (200) — antes o erro propagava 500 e
+      // a Cielo reentregava o webhook para sempre, sem nunca estornar.
+      if (err instanceof OrderFinalizationAbortError) {
+        this.logger.error(`Webhook: finalize abortado (${err.code}) para order ${err.orderId} — compensando com estorno automático`);
+        await this.compensation.compensateOrphanPayment(err.orderId, err.code);
+        return;
+      }
+      throw err;
+    }
+
+    if (orphanCancelledOrderId) {
+      await this.compensation.compensateOrphanPayment(orphanCancelledOrderId, 'PAID_AFTER_CANCELLATION');
+      return;
+    }
 
     // Notify connected frontend clients immediately
     if (confirmedOrderId) {
@@ -383,39 +408,58 @@ export class PaymentsWebhookService {
     }
 
     let confirmedOrderId: string | null = null;
+    let orphanCancelledOrder = false;
 
-    await this.prisma.$transaction(async (prisma) => {
-      const updated = await prisma.payment.updateMany({
-        where: { id: payment.id, status: { not: PaymentStatus.PAID } },
-        data: {
-          status: PaymentStatus.PAID,
-          paymentDate: new Date(),
-          metadata: {
-            ...(meta as object),
-            cieloStatus: cieloStatusStr,
-            authorizationCode: cieloAuthCode,
-            proofOfSale: cieloProofOfSale,
-            threeDsCallbackAt: new Date().toISOString(),
-          } as any,
-        },
-      });
+    try {
+      await this.prisma.$transaction(async (prisma) => {
+        const updated = await prisma.payment.updateMany({
+          where: { id: payment.id, status: { not: PaymentStatus.PAID } },
+          data: {
+            status: PaymentStatus.PAID,
+            paymentDate: new Date(),
+            metadata: {
+              ...(meta as object),
+              cieloStatus: cieloStatusStr,
+              authorizationCode: cieloAuthCode,
+              proofOfSale: cieloProofOfSale,
+              threeDsCallbackAt: new Date().toISOString(),
+            } as any,
+          },
+        });
 
-      if (updated.count === 0) {
-        // Already processed (duplicate callback)
+        if (updated.count === 0) {
+          // Already processed (duplicate callback)
+          confirmedOrderId = orderId;
+          return;
+        }
+
+        // Fonte ÚNICA: promove Order PENDING→PAID + finalize compartilhado.
+        const { finalized, orderStatus } = await this.orderFinalization.confirmAndFinalizeOrder(prisma, orderId);
+        if (!finalized) {
+          this.logger.warn(`3DS callback: order ${orderId} não estava PENDING ao confirmar`);
+          // CANCELLED = confirmado tarde demais (cron já cancelou) → compensa fora da tx.
+          if (orderStatus === 'CANCELLED') orphanCancelledOrder = true;
+          return;
+        }
+
         confirmedOrderId = orderId;
-        return;
+        this.logger.log(`3DS callback confirmed order ${orderId}`);
+      }, { timeout: 30000, maxWait: 10000 });
+    } catch (err: unknown) {
+      // Finalize abortado pós-captura (voucher consumido / participantes vazios): rollback
+      // já desfez tudo; compensa com estorno automático e devolve "failed" pro front.
+      if (err instanceof OrderFinalizationAbortError) {
+        this.logger.error(`3DS callback: finalize abortado (${err.code}) para order ${err.orderId} — compensando com estorno automático`);
+        await this.compensation.compensateOrphanPayment(err.orderId, err.code);
+        return `${frontendUrl}/checkout/${orderId}?3ds=failed`;
       }
+      throw err;
+    }
 
-      // Fonte ÚNICA: promove Order PENDING→PAID + finalize compartilhado.
-      const { finalized } = await this.orderFinalization.confirmAndFinalizeOrder(prisma, orderId);
-      if (!finalized) {
-        this.logger.warn(`3DS callback: order ${orderId} não estava PENDING ao confirmar`);
-        return;
-      }
-
-      confirmedOrderId = orderId;
-      this.logger.log(`3DS callback confirmed order ${orderId}`);
-    }, { timeout: 30000, maxWait: 10000 });
+    if (orphanCancelledOrder) {
+      await this.compensation.compensateOrphanPayment(orderId, 'PAID_AFTER_CANCELLATION');
+      return `${frontendUrl}/checkout/${orderId}?3ds=failed`;
+    }
 
     if (confirmedOrderId) {
       this.gateway.emitPaymentConfirmed(confirmedOrderId);

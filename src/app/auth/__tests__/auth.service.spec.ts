@@ -3,6 +3,9 @@ import { AuthService } from '../auth.service';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { EmailService } from '../../../common/services/email.service';
+import { HttpService } from '@nestjs/axios';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import {
   UnauthorizedException,
   BadRequestException,
@@ -26,11 +29,36 @@ describe('AuthService', () => {
     get: jest.fn(),
   };
 
+  // PrismaService passou a expor getReadClient()/getWriteClient() (read/write
+  // splitting). Os mocks retornam o próprio objeto para que `user.findUnique`
+  // etc. continuem sendo interceptados pelos jest.fn() já existentes.
   const mockPrismaService = {
     user: {
       findUnique: jest.fn(),
       create: jest.fn(),
+      update: jest.fn(),
     },
+    getReadClient: jest.fn(),
+    getWriteClient: jest.fn(),
+  };
+
+  // Dependências adicionadas ao AuthService (cache, e-mail, http). Mockadas
+  // para isolar a unidade e evitar I/O real.
+  const mockCacheManager = {
+    get: jest.fn().mockResolvedValue(null),
+    set: jest.fn().mockResolvedValue(undefined),
+    del: jest.fn().mockResolvedValue(undefined),
+  };
+
+  const mockEmailService = {
+    sendWelcomeUser: jest.fn().mockResolvedValue(undefined),
+    sendPasswordResetCode: jest.fn().mockResolvedValue(undefined),
+    sendPasswordChangedNotification: jest.fn().mockResolvedValue(undefined),
+  };
+
+  const mockHttpService = {
+    get: jest.fn(),
+    post: jest.fn(),
   };
 
   beforeEach(async () => {
@@ -49,6 +77,18 @@ describe('AuthService', () => {
           provide: PrismaService,
           useValue: mockPrismaService,
         },
+        {
+          provide: CACHE_MANAGER,
+          useValue: mockCacheManager,
+        },
+        {
+          provide: HttpService,
+          useValue: mockHttpService,
+        },
+        {
+          provide: EmailService,
+          useValue: mockEmailService,
+        },
       ],
     }).compile();
 
@@ -56,6 +96,11 @@ describe('AuthService', () => {
     jwtService = module.get<JwtService>(JwtService);
     configService = module.get<ConfigService>(ConfigService);
     prisma = module.get<PrismaService>(PrismaService);
+
+    // getReadClient/getWriteClient devolvem o mesmo mock para que os jest.fn()
+    // de user.* sejam compartilhados entre leituras e escritas.
+    mockPrismaService.getReadClient.mockReturnValue(mockPrismaService);
+    mockPrismaService.getWriteClient.mockReturnValue(mockPrismaService);
   });
 
   afterEach(() => {
@@ -220,8 +265,7 @@ describe('AuthService', () => {
     const registerDto = {
       email: 'newuser@example.com',
       password: 'StrongPass123!',
-      firstName: 'John',
-      lastName: 'Doe',
+      complete_name: 'John Doe',
       gender: Gender.MALE,
       phone: '1234567890',
       dateOfBirth: '2000-01-01',
@@ -241,8 +285,8 @@ describe('AuthService', () => {
     const mockCreatedUser = {
       id: 'user-id',
       email: registerDto.email,
-      firstName: registerDto.firstName,
-      lastName: registerDto.lastName,
+      firstName: 'John',
+      lastName: 'Doe',
       phone: registerDto.phone,
       documentNumber: registerDto.documentNumber,
       role: 'USER',

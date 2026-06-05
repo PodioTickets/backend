@@ -56,7 +56,11 @@ const prismaShim = {
   getWriteClient: () => prisma,
 } as unknown as PrismaService;
 
-const finalizer = new OrderFinalizationService(prismaShim);
+// Telemetria no-op: script offline de reconciliação não deve gerar eventos de jornada
+// (os order.paid daqui seriam retroativos/duplicados — a venda real já aconteceu).
+const activityShim = { record: () => {} } as any;
+
+const finalizer = new OrderFinalizationService(prismaShim, activityShim);
 
 async function main() {
   console.log(`\nreconcile-orphan-orders  ${DRY_RUN ? '[DRY RUN]' : '[APPLY]'}${EVENT_ID ? `  event=${EVENT_ID}` : ''}\n`);

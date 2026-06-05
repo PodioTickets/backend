@@ -118,7 +118,13 @@
       "Read(//tmp/**)",
       "PowerShell(npx jest src/app/products --silent 2>$null; echo \"EXIT=$LASTEXITCODE\")",
       "PowerShell(npx tsc --noEmit; echo \"EXIT=$LASTEXITCODE\")",
-      "PowerShell(docker ps --format '{{.Names}} {{.Ports}}' | Select-String '5434'; \\(Get-Content package.json | ConvertFrom-Json\\).scripts.'test:int')"
+      "PowerShell(docker ps --format '{{.Names}} {{.Ports}}' | Select-String '5434'; \\(Get-Content package.json | ConvertFrom-Json\\).scripts.'test:int')",
+      "PowerShell(Out-Null *)",
+      "PowerShell(npx jest src/app/tickets --silent 2>$null)",
+      "PowerShell(npx jest src/app/tickets 2>&1 | Select-Object -Last 20)",
+      "PowerShell(Remove-Item *)",
+      "PowerShell(npx tsc -p tsconfig.build.json --noEmit)",
+      "PowerShell(npx jest src/app/tickets src/app/products --silent 2>&1 | Select-Object -Last 15)"
     ]
   }
 }

@@ -471,9 +471,10 @@ export class EventsController {
     summary: 'Atualizar configurações financeiras do evento',
     description:
       'Atualiza a divisão da taxa da plataforma (`organizerFeePercent`), o parcelamento máximo (`maxInstallments`) ' +
-      'e as formas de pagamento aceitas (`acceptedPaymentMethods`, mínimo 1 — omitir mantém o valor atual). ' +
+      'e as formas de pagamento aceitas (`acceptedPaymentMethods`, mínimo 1). Todos os campos são opcionais — omitir mantém o valor atual. ' +
       'A taxa total da plataforma é sempre 6%; `participantFeePercent = 6 - organizerFeePercent`. ' +
-      'Retorna 409 se o evento já foi publicado (configurações bloqueadas).',
+      'Após a publicação, apenas a divisão da taxa fica bloqueada (409 ao enviá-la); ' +
+      'parcelamento e formas de pagamento seguem editáveis pelo organizador.',
   })
   @ApiParam({ name: 'eventId', type: 'string', format: 'uuid', description: 'UUID do evento' })
   @ApiBody({ type: UpdateFinancialSettingsDto })

@@ -39,6 +39,11 @@ import { TrackActivityInterceptor } from '../../common/interceptors/track-activi
 @Controller('api/v1/orders')
 @UseGuards(JwtAuthGuard)
 @ApiBearerAuth()
+// Telemetria de funil: o interceptor é registrado no controller inteiro, mas só grava nas
+// rotas marcadas com @TrackActivity (pass-through custo-zero nas demais). Cada ETAPA do
+// checkout é contabilizada — inclusive falhas (trackErrors default), pra medir drop-off.
+// Fora do funil de propósito: GET :orderId/details (leitura) e payment-status (polling PIX).
+@UseInterceptors(TrackActivityInterceptor)
 export class OrdersController {
   constructor(private readonly ordersService: OrdersService) { }
 
@@ -46,7 +51,6 @@ export class OrdersController {
 
   @Post('reserve')
   @Throttle({ short: { limit: 5, ttl: 60000 } })
-  @UseInterceptors(TrackActivityInterceptor)
   @TrackActivity({ category: 'CHECKOUT', action: 'order.reserve' })
   @ApiOperation({
     summary: 'Reserve tickets',
@@ -98,6 +102,7 @@ export class OrdersController {
   // ── PATCH /orders/:orderId/participants ────────────────────────────────
 
   @Patch(':orderId/participants')
+  @TrackActivity({ category: 'CHECKOUT', action: 'order.participants' })
   @ApiOperation({ summary: 'Set participant data for the order' })
   @ApiParam({ name: 'orderId', type: String, format: 'uuid' })
   @ApiResponse({ status: 200, description: 'Participants updated' })
@@ -115,6 +120,7 @@ export class OrdersController {
   // cancela 1 placeholder, apara o participante daquele slot e recalcula cupom — SEM recriar
   // o pedido. `slot` = índice (0-based) do participante/unidade reservada.
   @Delete(':orderId/participants/:slot')
+  @TrackActivity({ category: 'CHECKOUT', action: 'order.participants.remove' })
   @ApiOperation({ summary: 'Remove a reserved ticket/participant slot (reduz a quantidade em 1)' })
   @ApiParam({ name: 'orderId', type: String, format: 'uuid' })
   @ApiParam({ name: 'slot', type: Number, description: 'Índice (0-based) do slot a remover' })
@@ -132,6 +138,7 @@ export class OrdersController {
   // ── PATCH /orders/:orderId/products ────────────────────────────────────
 
   @Patch(':orderId/products')
+  @TrackActivity({ category: 'CHECKOUT', action: 'order.products' })
   @ApiOperation({ summary: 'Set additional products for the order' })
   @ApiParam({ name: 'orderId', type: String, format: 'uuid' })
   @ApiResponse({ status: 200, description: 'Products updated' })
@@ -147,6 +154,7 @@ export class OrdersController {
   // ── PATCH /orders/:orderId/billing-address ─────────────────────────────
 
   @Patch(':orderId/billing-address')
+  @TrackActivity({ category: 'CHECKOUT', action: 'order.billing-address' })
   @ApiOperation({ summary: 'Set billing address for the order' })
   @ApiParam({ name: 'orderId', type: String, format: 'uuid' })
   @ApiResponse({ status: 200, description: 'Billing address updated' })
@@ -162,6 +170,7 @@ export class OrdersController {
   // ── PATCH /orders/:orderId/coupon ─────────────────────────────────────
 
   @Patch(':orderId/coupon')
+  @TrackActivity({ category: 'CHECKOUT', action: 'order.coupon' })
   @ApiOperation({
     summary: 'Apply or remove coupon/voucher',
     description: 'Apply a DISCOUNT coupon or voucher to the order. Send empty body to remove. Automatic coupons (QUANTITY/AGE) are applied automatically on PATCH /products.',
@@ -182,7 +191,6 @@ export class OrdersController {
 
   @Post(':orderId/pay')
   @Throttle({ short: { limit: 3, ttl: 60000 } })
-  @UseInterceptors(TrackActivityInterceptor)
   @TrackActivity({ category: 'CHECKOUT', action: 'order.pay' })
   @ApiOperation({
     summary: 'Pay for an order',
@@ -245,6 +253,9 @@ export class OrdersController {
 
   @Get(':orderId/3ds-token')
   @NoCache()
+  // Conta como etapa do funil: sinaliza que o usuário entrou no fluxo de débito 3DS
+  // (1 chamada por tentativa de pagamento — baixo volume, alto valor de análise).
+  @TrackActivity({ category: 'CHECKOUT', action: 'order.3ds-token' })
   @ApiOperation({
     summary: 'Obter access token 3DS para autenticação do cartão de débito',
     description:

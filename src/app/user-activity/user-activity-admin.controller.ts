@@ -10,7 +10,11 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AdminGuard } from '../auth/guards/admin.guard';
 import { NoCache } from '../../common/decorators/cache.decorator';
 import { UserActivityAdminService } from './user-activity-admin.service';
-import { AdminUserActivityListQueryDto } from './dto/admin-list-activity.dto';
+import {
+  AdminUserActivityFunnelQueryDto,
+  AdminUserActivityListQueryDto,
+  AdminUserActivityStatsQueryDto,
+} from './dto/admin-list-activity.dto';
 
 /**
  * Listagem admin de atividade de usuário final. Endpoint paralelo (não
@@ -50,5 +54,44 @@ export class UserActivityAdminController {
   @ApiResponse({ status: 403, description: 'Admin access required' })
   async list(@Query() query: AdminUserActivityListQueryDto) {
     return this.service.listAsAdmin(query);
+  }
+
+  @Get('stats')
+  @NoCache()
+  @ApiOperation({
+    summary: '[ADMIN] User activity metrics (dashboard)',
+    description:
+      'Métricas agregadas do UserActivityLog: totais (eventos, usuários únicos, sessões únicas, anônimos), distribuição por categoria/origem, top 10 ações e série diária. Janela default: últimos 30 dias. Agregações 100% no banco (GROUP BY indexado).',
+  })
+  @ApiQuery({ name: 'category', required: false, enum: ['PAGE_VIEW', 'CLICK', 'API', 'AUTH', 'CHECKOUT', 'PROFILE', 'COMPLIANCE', 'OTHER'] })
+  @ApiQuery({ name: 'source', required: false, enum: ['FRONTEND', 'BACKEND', 'WEBHOOK'] })
+  @ApiQuery({ name: 'eventId', required: false, description: 'Restringe a um evento esportivo (metadata.eventId).' })
+  @ApiQuery({ name: 'from', required: false })
+  @ApiQuery({ name: 'to', required: false })
+  @ApiResponse({ status: 200, description: 'Stats retrieved successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Admin access required' })
+  async stats(@Query() query: AdminUserActivityStatsQueryDto) {
+    return this.service.statsAsAdmin(query);
+  }
+
+  @Get('funnel')
+  @NoCache()
+  @ApiOperation({
+    summary: '[ADMIN] Purchase funnel (sessões únicas por etapa)',
+    description:
+      'Funil de compra: page:event → order.reserve → order.billing-address → order.pay → order.paid. ' +
+      'Cada etapa conta sessões/usuários ÚNICOS (COALESCE(sessionId, userId)) — recarregar página ou ' +
+      'tentar pagar 2x não infla. `eventId` restringe a um evento (resolvido por metadata.eventId com ' +
+      'fallback via Order do metadata.orderId). Janela default: últimos 30 dias.',
+  })
+  @ApiQuery({ name: 'eventId', required: false })
+  @ApiQuery({ name: 'from', required: false })
+  @ApiQuery({ name: 'to', required: false })
+  @ApiResponse({ status: 200, description: 'Funnel retrieved successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Admin access required' })
+  async funnel(@Query() query: AdminUserActivityFunnelQueryDto) {
+    return this.service.funnelAsAdmin(query);
   }
 }

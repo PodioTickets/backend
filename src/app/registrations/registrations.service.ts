@@ -7,6 +7,8 @@ import { DocumentType, Prisma, RegistrationStatus, PaymentStatus } from '@prisma
 import { KitsService } from '../kits/kits.service';
 import { EmailService } from '../../common/services/email.service';
 import { isDocumentInList, resolveDocument } from '../../common/utils/document.util';
+import { tryConsumeVoucherUnreserved } from '../../common/utils/voucher-reservation.util';
+import { stripOrganizationContact } from '../../common/utils/organization-sanitizer.util';
 
 @Injectable()
 export class RegistrationsService {
@@ -207,17 +209,16 @@ export class RegistrationsService {
           },
         });
       } else if (appliedVoucherId) {
-        // Atomic ACTIVE → USED para evitar dupla utilização do voucher
-        const r = await prisma.voucher.updateMany({
-          where: { id: appliedVoucherId, status: 'ACTIVE' },
-          data: {
-            status: 'USED',
-            usedAt: new Date(),
-            usedBy: registrationUserId,
-          },
-        });
-        if (r.count === 0) {
-          throw new Error(`Voucher ${appliedVoucherId} já foi utilizado`);
+        // Atomic ACTIVE → USED respeitando a RESERVA do checkout (reservedByOrderId):
+        // este fluxo legado não tem pedido/claim próprio, então só pode consumir um
+        // voucher LIVRE (sem reserva ativa de outro checkout, ou com reserva vencida).
+        // Antes (updateMany por status apenas) era um bypass do uso único — consumia
+        // voucher reservado por um pedido PENDING e quebrava aquele checkout no finalize.
+        const consumed = await tryConsumeVoucherUnreserved(prisma, appliedVoucherId, registrationUserId);
+        if (!consumed) {
+          throw new BadRequestException(
+            'Este voucher já foi utilizado ou está sendo usado em outro pedido.',
+          );
         }
       }
 
@@ -732,6 +733,12 @@ export class RegistrationsService {
         };
       });
 
+      // Snapshots antigos congelaram organization.{email,phone} — strip no read
+      // (contato do organizador fora do contrato de rota de usuário).
+      const snapshotEvent = snapshot.event
+        ? { ...snapshot.event, organization: stripOrganizationContact(snapshot.event.organization) }
+        : snapshot.event;
+
       return {
         message: 'Registration fetched successfully',
         data: {
@@ -740,6 +747,7 @@ export class RegistrationsService {
             status: registration.status,
             qrCode: registration.qrCode ?? `https://www.podioticket.com.br/user/tickets/${registration.id}`,
             ...snapshot,
+            event: snapshotEvent,
             products,
           },
         },
@@ -764,11 +772,10 @@ export class RegistrationsService {
         event: {
           include: {
             organization: {
+              // Contato (email/phone) fora do contrato de rota de usuário.
               select: {
                 id: true,
                 name: true,
-                email: true,
-                phone: true,
               },
             },
             topics: {
@@ -1001,11 +1008,10 @@ export class RegistrationsService {
         event: {
           include: {
             organization: {
+              // Contato (email/phone) fora do contrato de rota de usuário.
               select: {
                 id: true,
                 name: true,
-                email: true,
-                phone: true,
                 logoUrl: true,
               },
             },

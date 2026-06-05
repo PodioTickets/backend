@@ -432,10 +432,15 @@ export class VouchersService {
     }
     // Sincroniza documentList canônico quando cpfList OU documentList mudam
     // (ver Coupon.update — mesma estratégia de dual-write).
+    // IMPORTANTE: a canônica é derivada APENAS do que veio no update — nunca do
+    // documentList VELHO do banco. Antes, um update só-de-cpfList (front atual é
+    // cliente legado) mantinha a canônica antiga (`buildDocumentList` prefere
+    // documentList) → listas divergentes, e o checkout (que valida pela canônica)
+    // considerava o CPF NOVO inelegível — o voucher "cobria" o slot errado.
     if (updateVoucherDto.cpfList !== undefined || updateVoucherDto.documentList !== undefined) {
       const merged = buildDocumentList({
-        documentList: updateVoucherDto.documentList ?? (voucher.documentList as any),
-        cpfList: updateVoucherDto.cpfList ?? (voucher.cpfList as any),
+        documentList: updateVoucherDto.documentList ?? null,
+        cpfList: updateVoucherDto.cpfList ?? null,
       });
       updateData.documentList = (merged as any) ?? null;
       if (updateVoucherDto.cpfList !== undefined) {

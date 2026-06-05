@@ -2,6 +2,11 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { PaymentsService } from '../payments.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { CieloService } from '../cielo.service';
+import { PaymentGateway } from '../payment.gateway';
+import { EmailService } from '../../../common/services/email.service';
+import { TicketPdfService } from '../../../common/services/ticket-pdf.service';
+import { OrderFinalizationService } from '../order-finalization.service';
+import { PaymentCompensationService } from '../payment-compensation.service';
 import { NotFoundException, BadRequestException } from '@nestjs/common';
 import { PaymentStatus, PaymentMethod } from '@prisma/client';
 
@@ -10,10 +15,14 @@ describe('PaymentsService', () => {
   let prisma: PrismaService;
   let cieloService: CieloService;
 
-  const mockPrismaService = {
+  const mockPrismaService: any = {
     registration: {
       findUnique: jest.fn(),
       update: jest.fn(),
+    },
+    // isAdminUser() consulta user.findUnique — default: não-admin.
+    user: {
+      findUnique: jest.fn().mockResolvedValue(null),
     },
     payment: {
       create: jest.fn(),
@@ -23,6 +32,9 @@ describe('PaymentsService', () => {
     },
     $transaction: jest.fn(),
   };
+  // O service acessa o banco via getReadClient()/getWriteClient() — devolvem o próprio mock.
+  mockPrismaService.getReadClient = jest.fn(() => mockPrismaService);
+  mockPrismaService.getWriteClient = jest.fn(() => mockPrismaService);
 
   const mockCieloService = {
     createPayment: jest.fn(),
@@ -44,6 +56,12 @@ describe('PaymentsService', () => {
           provide: CieloService,
           useValue: mockCieloService,
         },
+        // Deps restantes do construtor — não exercitadas pelos testes atuais.
+        { provide: PaymentGateway, useValue: { emitPaymentConfirmed: jest.fn() } },
+        { provide: EmailService, useValue: {} },
+        { provide: TicketPdfService, useValue: {} },
+        { provide: OrderFinalizationService, useValue: { confirmAndFinalizeOrder: jest.fn().mockResolvedValue({ finalized: true, registrations: [] }) } },
+        { provide: PaymentCompensationService, useValue: { compensateOrphanPayment: jest.fn() } },
       ],
     }).compile();
 
@@ -106,17 +124,16 @@ describe('PaymentsService', () => {
       );
     });
 
-    it('should throw BadRequestException if payment does not belong to user', async () => {
+    it('pagamento de OUTRO usuário → 404 (não vaza existência; antes o teste esperava 400)', async () => {
       mockPrismaService.payment.findUnique.mockResolvedValue({
         ...mockPayment,
         userId: 'other-user-id',
       });
 
+      // Comportamento atual e correto (least privilege): responder 404 em vez de 400/403
+      // não revela que o pagamento existe para quem não é dono.
       await expect(service.findOne(paymentId, userId)).rejects.toThrow(
-        BadRequestException,
-      );
-      await expect(service.findOne(paymentId, userId)).rejects.toThrow(
-        'Access denied',
+        NotFoundException,
       );
     });
   });

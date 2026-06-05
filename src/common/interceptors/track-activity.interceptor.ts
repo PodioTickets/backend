@@ -46,12 +46,23 @@ export class TrackActivityInterceptor implements NestInterceptor {
       .getRequest<ExpressRequest & { user?: { id?: string } }>();
     const startedAt = Date.now();
 
-    const enqueue = (status: number, errored: boolean) => {
+    const enqueue = (status: number, errored: boolean, responseBody?: unknown) => {
       // Mesmo se trackErrors=false, ainda assim ignoramos erro — mas só
       // quando errored=true. Sucesso (errored=false) sempre passa.
       if (errored && options.trackErrors === false) return;
 
       try {
+        // Vínculo com o domínio pra agregações por evento (funil de compra):
+        //  - `eventId` direto do body (reserve) ou do payload de resposta;
+        //  - `orderId` do path param — presente mesmo em FALHA (4xx/5xx),
+        //    permite resolver o evento via join Order na leitura.
+        const eventId =
+          this.extractUuid((req.body as Record<string, unknown>)?.eventId) ??
+          this.extractEventIdFromResponse(responseBody);
+        const orderId = this.extractUuid(
+          (req.params as Record<string, unknown>)?.orderId,
+        );
+
         this.activity.record({
           userId: req.user?.id ?? null,
           sessionId: this.extractSessionId(req),
@@ -69,6 +80,8 @@ export class TrackActivityInterceptor implements NestInterceptor {
             method: req.method,
             statusCode: status,
             durationMs: Date.now() - startedAt,
+            ...(eventId ? { eventId } : {}),
+            ...(orderId ? { orderId } : {}),
             ...(errored ? { errored: true } : {}),
           },
         });
@@ -78,9 +91,9 @@ export class TrackActivityInterceptor implements NestInterceptor {
     };
 
     return next.handle().pipe(
-      tap(() => {
+      tap((body) => {
         const res = context.switchToHttp().getResponse<{ statusCode?: number }>();
-        enqueue(res.statusCode ?? 200, false);
+        enqueue(res.statusCode ?? 200, false, body);
       }),
       catchError((err: unknown) => {
         const status =
@@ -90,6 +103,37 @@ export class TrackActivityInterceptor implements NestInterceptor {
         enqueue(status, true);
         return throwError(() => err);
       }),
+    );
+  }
+
+  /** Aceita apenas UUID v1–v5 — nunca loga valor arbitrário vindo do cliente. */
+  private extractUuid(value: unknown): string | null {
+    if (typeof value !== 'string') return null;
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
+    )
+      ? value
+      : null;
+  }
+
+  /**
+   * Procura `eventId` nos shapes usuais de resposta dos controllers
+   * (`{ data: order }`, order plano, `{ data: { event: { id } } }`).
+   * Best-effort — ausência não é erro.
+   */
+  private extractEventIdFromResponse(body: unknown): string | null {
+    if (!body || typeof body !== 'object') return null;
+    const root = body as Record<string, unknown>;
+    const data =
+      root.data && typeof root.data === 'object'
+        ? (root.data as Record<string, unknown>)
+        : root;
+    const event =
+      data.event && typeof data.event === 'object'
+        ? (data.event as Record<string, unknown>)
+        : null;
+    return (
+      this.extractUuid(data.eventId) ?? this.extractUuid(event?.id ?? null)
     );
   }
 

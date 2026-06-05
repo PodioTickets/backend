@@ -61,8 +61,48 @@ describe('OrdersService.getOrderDetails — contrato de pricing/ticket.unitPrice
       productVariation: { findMany: jest.fn().mockResolvedValue([]) },
     };
     const prisma: any = { getReadClient: () => client, getWriteClient: () => client };
-    return new OrdersService(prisma, {} as any, {} as any, {} as any, {} as any, {} as any);
+    return new OrdersService(prisma, {} as any, {} as any, {} as any, {} as any, {} as any, { record: () => {} } as any);
   };
+
+  it('REGRESSÃO LGPD: snapshot ANTIGO com organization.{email,phone} → contato NÃO sai na resposta', async () => {
+    // Snapshots congelados antes de 2026-06-04 carregam o contato do organizador.
+    // O read do details deve strip-ar (contato fora do contrato de rota de usuário).
+    const legacySnapshot = {
+      event: {
+        id: 'evt_1', name: 'Corrida XYZ', slug: 'corrida-xyz',
+        eventDate: '2026-07-20', bannerUrl: null, logoUrl: null,
+        location: { name: 'SP', city: 'São Paulo', state: 'SP' },
+        organization: { id: 'o1', name: 'Org', logoUrl: null, email: 'org@vazou.com', phone: '11999990000' },
+      },
+      billing: null,
+      pricing: { ticketsSubtotal: 20000, productsSubtotal: 1000, discount: 0, pixDiscount: 0, finalTotal: 21000, coupon: null, voucher: null },
+      products: [],
+      participant: {},
+      questionAnswers: [],
+    };
+    const orderWithSnapshot = {
+      ...order,
+      registrations: [
+        { ...mkReg('reg_1', [paidProduct]), receiptSnapshot: legacySnapshot },
+        mkReg('reg_2', []),
+      ],
+    };
+    const client: any = {
+      order: { findUnique: jest.fn().mockResolvedValue(orderWithSnapshot) },
+      user: { findUnique: jest.fn().mockResolvedValue({ documentNumberClean: null }) },
+      productVariation: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const prisma: any = { getReadClient: () => client, getWriteClient: () => client };
+    const svc = new OrdersService(prisma, {} as any, {} as any, {} as any, {} as any, {} as any, { record: () => {} } as any);
+
+    const res = await svc.getOrderDetails(USER, 'order-1');
+    // `event` é irmão de `order` dentro de `data` (não filho de `order`).
+    const org = res.data.event?.organization;
+
+    expect(org?.name).toBe('Org'); // dados públicos preservados
+    expect(org?.email).toBeUndefined(); // contato NUNCA sai
+    expect(org?.phone).toBeUndefined();
+  });
 
   it('pricing: ticketsSubtotal/productsSubtotal separados + split de desconto', async () => {
     const res = await build().getOrderDetails(USER, 'order-1');

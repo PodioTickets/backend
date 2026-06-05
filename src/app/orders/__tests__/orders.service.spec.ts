@@ -7,6 +7,7 @@ import { CieloService } from '../../payments/cielo.service';
 import { EmailService } from '../../../common/services/email.service';
 import { TicketPdfService } from '../../../common/services/ticket-pdf.service';
 import { OrderFinalizationService } from '../../payments/order-finalization.service';
+import { UserActivityService } from '../../../common/services/user-activity.service';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -68,6 +69,8 @@ describe('OrdersService', () => {
     confirmAndFinalizeOrder: jest.fn().mockResolvedValue({ finalized: true, registrations: [] }),
     reverseSaleSideEffects: jest.fn().mockResolvedValue(undefined),
   };
+  // Telemetria de funil (order.expired etc.) — só interessa que não exploda.
+  const mockActivity = { record: jest.fn() };
 
   beforeEach(async () => {
     writeClient = makeWriteClient();
@@ -83,6 +86,7 @@ describe('OrdersService', () => {
         { provide: EmailService, useValue: mockEmailService },
         { provide: TicketPdfService, useValue: mockTicketPdfService },
         { provide: OrderFinalizationService, useValue: mockOrderFinalization },
+        { provide: UserActivityService, useValue: mockActivity },
       ],
     }).compile();
 
@@ -476,7 +480,11 @@ describe('OrdersService', () => {
 
       expect(res.orderDeleted).toBe(true);
       expect(tx.order.delete).toHaveBeenCalledWith(expect.objectContaining({ where: { id: orderId } }));
-      expect(tx.$executeRaw).toHaveBeenCalledTimes(1); // restaurou estoque
+      // 2 writes raw: restaura estoque + libera reserva de voucher ANTES do delete
+      // (regressão 2026-06-04: deletar sem release prendia o voucher até reservedUntil).
+      expect(tx.$executeRaw).toHaveBeenCalledTimes(2);
+      const rawCalls = tx.$executeRaw.mock.calls.map((c: any[]) => c[0].join(''));
+      expect(rawCalls.some((sql: string) => sql.includes('reservedByOrderId'))).toBe(true);
     });
 
     it('último ingresso COM endereço (chegou ao billing) → CANCELA (mantém histórico)', async () => {

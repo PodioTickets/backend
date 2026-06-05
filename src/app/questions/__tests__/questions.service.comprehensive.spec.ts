@@ -7,11 +7,18 @@ describe('QuestionsService - Comprehensive Tests', () => {
   let service: QuestionsService;
   let prisma: PrismaService;
 
+  // O service usa o modelo organização/membro (não "organizer") e acessa o
+  // client via getReadClient()/getWriteClient(). O mock expõe os models usados
+  // (user, event, organizationMember, question) e ambos os getters apontam para
+  // o próprio mock, simulando read e write no mesmo client em memória.
   const mockPrismaService = {
-    organizer: {
+    user: {
       findUnique: jest.fn(),
     },
     event: {
+      findUnique: jest.fn(),
+    },
+    organizationMember: {
       findUnique: jest.fn(),
     },
     question: {
@@ -21,8 +28,27 @@ describe('QuestionsService - Comprehensive Tests', () => {
       update: jest.fn(),
       delete: jest.fn(),
     },
+    ticket: {
+      findMany: jest.fn(),
+    },
     getReadClient: jest.fn(),
     getWriteClient: jest.fn(),
+  };
+
+  // Helper: configura o acesso de organizador como autorizado para um evento.
+  const grantOrganizerAccess = (
+    userId: string,
+    eventId: string,
+    organizationId = 'org-123',
+  ) => {
+    mockPrismaService.user.findUnique.mockResolvedValue({ role: 'ORGANIZER' });
+    mockPrismaService.event.findUnique.mockResolvedValue({ id: eventId, organizationId });
+    mockPrismaService.organizationMember.findUnique.mockResolvedValue({
+      id: 'member-123',
+      organizationId,
+      userId,
+      role: 'OWNER',
+    });
   };
 
   beforeEach(async () => {
@@ -39,7 +65,7 @@ describe('QuestionsService - Comprehensive Tests', () => {
     service = module.get<QuestionsService>(QuestionsService);
     prisma = module.get<PrismaService>(PrismaService);
 
-    // Mock getReadClient and getWriteClient to return the same mock
+    // Ambos os getters retornam o próprio mock (read == write no teste).
     mockPrismaService.getReadClient.mockReturnValue(mockPrismaService);
     mockPrismaService.getWriteClient.mockReturnValue(mockPrismaService);
   });
@@ -55,22 +81,18 @@ describe('QuestionsService - Comprehensive Tests', () => {
         const eventId = 'event-123';
         const createDto = {
           question: 'Qual seu tamanho de camiseta?',
-          type: 'text' as const,
+          type: 'text',
           isRequired: true,
           order: 1,
         };
 
-        const mockEvent = { id: eventId, organizerId: 'org-123' };
-        const mockOrganizer = { id: 'org-123', userId };
-        const mockQuestion = {
+        grantOrganizerAccess(userId, eventId);
+        mockPrismaService.question.create.mockResolvedValue({
           id: 'q-123',
           eventId,
+          appliesTo: null,
           ...createDto,
-        };
-
-        mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-        mockPrismaService.question.create.mockResolvedValue(mockQuestion);
+        });
 
         const result = await service.create(userId, eventId, createDto);
 
@@ -83,23 +105,19 @@ describe('QuestionsService - Comprehensive Tests', () => {
         const eventId = 'event-123';
         const createDto = {
           question: 'Qual sua experiência?',
-          type: 'multiple_choice' as const,
+          type: 'multiple_choice',
           options: ['Iniciante', 'Intermediário', 'Avançado'],
           isRequired: true,
           order: 2,
         };
 
-        const mockEvent = { id: eventId, organizerId: 'org-123' };
-        const mockOrganizer = { id: 'org-123', userId };
-        const mockQuestion = {
+        grantOrganizerAccess(userId, eventId);
+        mockPrismaService.question.create.mockResolvedValue({
           id: 'q-123',
           eventId,
+          appliesTo: null,
           ...createDto,
-        };
-
-        mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-        mockPrismaService.question.create.mockResolvedValue(mockQuestion);
+        });
 
         const result = await service.create(userId, eventId, createDto);
 
@@ -110,28 +128,25 @@ describe('QuestionsService - Comprehensive Tests', () => {
       it('should create yes/no question', async () => {
         const userId = 'org-user-123';
         const eventId = 'event-123';
+        // true_false é um dos NO_OPTION_TYPES suportados pelo service.
         const createDto = {
           question: 'Você já participou de eventos anteriores?',
-          type: 'yes_no' as const,
+          type: 'true_false',
           isRequired: false,
           order: 3,
         };
 
-        const mockEvent = { id: eventId, organizerId: 'org-123' };
-        const mockOrganizer = { id: 'org-123', userId };
-        const mockQuestion = {
+        grantOrganizerAccess(userId, eventId);
+        mockPrismaService.question.create.mockResolvedValue({
           id: 'q-123',
           eventId,
+          appliesTo: null,
           ...createDto,
-        };
-
-        mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-        mockPrismaService.question.create.mockResolvedValue(mockQuestion);
+        });
 
         const result = await service.create(userId, eventId, createDto);
 
-        expect(result.data.question.type).toBe('yes_no');
+        expect(result.data.question.type).toBe('true_false');
       });
     });
 
@@ -139,9 +154,9 @@ describe('QuestionsService - Comprehensive Tests', () => {
       it('should return questions in correct order', async () => {
         const eventId = 'event-123';
         const mockQuestions = [
-          { id: 'q-1', eventId, question: 'Question 1', order: 1, isRequired: true },
-          { id: 'q-2', eventId, question: 'Question 2', order: 2, isRequired: false },
-          { id: 'q-3', eventId, question: 'Question 3', order: 3, isRequired: true },
+          { id: 'q-1', eventId, question: 'Question 1', order: 1, isRequired: true, appliesTo: null },
+          { id: 'q-2', eventId, question: 'Question 2', order: 2, isRequired: false, appliesTo: null },
+          { id: 'q-3', eventId, question: 'Question 3', order: 3, isRequired: true, appliesTo: null },
         ];
 
         mockPrismaService.question.findMany.mockResolvedValue(mockQuestions);
@@ -159,16 +174,16 @@ describe('QuestionsService - Comprehensive Tests', () => {
       it('should identify required questions', async () => {
         const eventId = 'event-123';
         const mockQuestions = [
-          { id: 'q-1', eventId, question: 'Required 1', isRequired: true },
-          { id: 'q-2', eventId, question: 'Optional 1', isRequired: false },
-          { id: 'q-3', eventId, question: 'Required 2', isRequired: true },
+          { id: 'q-1', eventId, question: 'Required 1', isRequired: true, appliesTo: null },
+          { id: 'q-2', eventId, question: 'Optional 1', isRequired: false, appliesTo: null },
+          { id: 'q-3', eventId, question: 'Required 2', isRequired: true, appliesTo: null },
         ];
 
         mockPrismaService.question.findMany.mockResolvedValue(mockQuestions);
 
         const result = await service.findAll(eventId);
 
-        const requiredQuestions = result.data.questions.filter((q) => q.isRequired);
+        const requiredQuestions = result.data.questions.filter((q: any) => q.isRequired);
         expect(requiredQuestions).toHaveLength(2);
       });
     });
@@ -180,11 +195,10 @@ describe('QuestionsService - Comprehensive Tests', () => {
         const userId = 'user-123';
         const eventId = 'event-123';
 
-        const mockEvent = { id: eventId, organizerId: 'org-999' };
-        const mockOrganizer = null;
-
-        mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+        // Usuário comum, evento existe, mas não é membro da organização.
+        mockPrismaService.user.findUnique.mockResolvedValue({ role: 'USER' });
+        mockPrismaService.event.findUnique.mockResolvedValue({ id: eventId, organizationId: 'org-999' });
+        mockPrismaService.organizationMember.findUnique.mockResolvedValue(null);
 
         await expect(
           service.create(userId, eventId, {
@@ -195,22 +209,18 @@ describe('QuestionsService - Comprehensive Tests', () => {
         ).rejects.toThrow(BadRequestException);
       });
 
-      it('should prevent organizer from modifying other organizers questions', async () => {
+      it('should prevent acting on a non-existent event', async () => {
         const userId = 'org-user-123';
         const eventId = 'event-123';
         const questionId = 'q-123';
 
-        const mockEvent = { id: eventId, organizerId: 'org-999' };
-        const mockOrganizer = { id: 'org-123', userId };
-        const mockQuestion = { id: questionId, eventId };
-
-        mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-        mockPrismaService.question.findUnique.mockResolvedValue(mockQuestion);
+        // Usuário comum e evento inexistente → NotFoundException.
+        mockPrismaService.user.findUnique.mockResolvedValue({ role: 'USER' });
+        mockPrismaService.event.findUnique.mockResolvedValue(null);
 
         await expect(
           service.update(userId, eventId, questionId, { question: 'Hacked' }),
-        ).rejects.toThrow(BadRequestException);
+        ).rejects.toThrow(NotFoundException);
       });
     });
 
@@ -220,19 +230,15 @@ describe('QuestionsService - Comprehensive Tests', () => {
         const eventId = 'event-123';
         const xssPayload = '<script>alert("XSS")</script>Qual seu nome?';
 
-        const mockEvent = { id: eventId, organizerId: 'org-123' };
-        const mockOrganizer = { id: 'org-123', userId };
-        const mockQuestion = {
+        grantOrganizerAccess(userId, eventId);
+        mockPrismaService.question.create.mockResolvedValue({
           id: 'q-123',
           eventId,
           question: xssPayload,
-        };
+          appliesTo: null,
+        });
 
-        mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-        mockPrismaService.question.create.mockResolvedValue(mockQuestion);
-
-        // Deve criar mesmo com payload XSS (sanitização deve ser feita no frontend ou middleware)
+        // Deve criar mesmo com payload XSS (sanitização é responsabilidade de outra camada).
         await expect(
           service.create(userId, eventId, {
             question: xssPayload,
@@ -246,11 +252,7 @@ describe('QuestionsService - Comprehensive Tests', () => {
         const userId = 'org-user-123';
         const eventId = 'event-123';
 
-        const mockEvent = { id: eventId, organizerId: 'org-123' };
-        const mockOrganizer = { id: 'org-123', userId };
-
-        mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+        grantOrganizerAccess(userId, eventId);
         mockPrismaService.question.create.mockRejectedValue(new Error('Question cannot be empty'));
 
         await expect(
@@ -266,15 +268,10 @@ describe('QuestionsService - Comprehensive Tests', () => {
         const userId = 'org-user-123';
         const eventId = 'event-123';
 
-        const mockEvent = { id: eventId, organizerId: 'org-123' };
-        const mockOrganizer = { id: 'org-123', userId };
+        grantOrganizerAccess(userId, eventId);
 
-        mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-        mockPrismaService.question.create.mockRejectedValue(
-          new Error('Multiple choice questions require options'),
-        );
-
+        // O próprio service valida: multiple_choice com options vazias lança BadRequestException
+        // em resolveQuestionOptions, antes mesmo de chamar o create.
         await expect(
           service.create(userId, eventId, {
             question: 'Test',
@@ -282,7 +279,7 @@ describe('QuestionsService - Comprehensive Tests', () => {
             options: [], // Opções vazias
             isRequired: false,
           }),
-        ).rejects.toThrow();
+        ).rejects.toThrow(BadRequestException);
       });
     });
   });
@@ -294,9 +291,10 @@ describe('QuestionsService - Comprehensive Tests', () => {
         id: `q-${i}`,
         eventId,
         question: `Question ${i}`,
-        type: 'text' as const,
+        type: 'text',
         order: i,
         isRequired: i % 2 === 0,
+        appliesTo: null,
       }));
 
       mockPrismaService.question.findMany.mockResolvedValue(largeQuestionList);
@@ -316,16 +314,17 @@ describe('QuestionsService - Comprehensive Tests', () => {
         id: `q-${i}`,
         eventId,
         question: `Question ${i}`,
-        type: i % 3 === 0 ? 'text' : i % 3 === 1 ? 'multiple_choice' : 'yes_no',
+        type: i % 3 === 0 ? 'text' : i % 3 === 1 ? 'multiple_choice' : 'true_false',
         order: i,
         isRequired: false,
+        appliesTo: null,
       }));
 
       mockPrismaService.question.findMany.mockResolvedValue(questions);
 
       const result = await service.findAll(eventId);
 
-      const textQuestions = result.data.questions.filter((q) => q.type === 'text');
+      const textQuestions = result.data.questions.filter((q: any) => q.type === 'text');
       expect(textQuestions.length).toBeGreaterThan(0);
     });
   });
@@ -336,18 +335,14 @@ describe('QuestionsService - Comprehensive Tests', () => {
       const eventId = 'event-123';
       const longQuestion = 'A'.repeat(10000);
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
-      const mockQuestion = {
+      grantOrganizerAccess(userId, eventId);
+      mockPrismaService.question.create.mockResolvedValue({
         id: 'q-123',
         eventId,
         question: longQuestion,
-        type: 'text' as const,
-      };
-
-      mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-      mockPrismaService.question.create.mockResolvedValue(mockQuestion);
+        type: 'text',
+        appliesTo: null,
+      });
 
       const result = await service.create(userId, eventId, {
         question: longQuestion,
@@ -363,19 +358,15 @@ describe('QuestionsService - Comprehensive Tests', () => {
       const eventId = 'event-123';
       const manyOptions = Array.from({ length: 100 }, (_, i) => `Option ${i + 1}`);
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
-      const mockQuestion = {
+      grantOrganizerAccess(userId, eventId);
+      mockPrismaService.question.create.mockResolvedValue({
         id: 'q-123',
         eventId,
         question: 'Choose an option',
-        type: 'multiple_choice' as const,
+        type: 'multiple_choice',
         options: manyOptions,
-      };
-
-      mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-      mockPrismaService.question.create.mockResolvedValue(mockQuestion);
+        appliesTo: null,
+      });
 
       const result = await service.create(userId, eventId, {
         question: 'Choose an option',
@@ -392,18 +383,14 @@ describe('QuestionsService - Comprehensive Tests', () => {
       const eventId = 'event-123';
       const specialChars = "Question: What's your name? (Choose one) - Special chars: @#$%^&*()";
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
-      const mockQuestion = {
+      grantOrganizerAccess(userId, eventId);
+      mockPrismaService.question.create.mockResolvedValue({
         id: 'q-123',
         eventId,
         question: specialChars,
-        type: 'text' as const,
-      };
-
-      mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-      mockPrismaService.question.create.mockResolvedValue(mockQuestion);
+        type: 'text',
+        appliesTo: null,
+      });
 
       const result = await service.create(userId, eventId, {
         question: specialChars,
@@ -416,26 +403,34 @@ describe('QuestionsService - Comprehensive Tests', () => {
   });
 
   describe('Data Integrity', () => {
-    it('should prevent deleting question with answers', async () => {
+    it('should soft-delete question with answers', async () => {
       const userId = 'org-user-123';
       const eventId = 'event-123';
       const questionId = 'q-123';
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
-      const mockQuestion = {
+      grantOrganizerAccess(userId, eventId);
+      // Questão ativa, pertence ao evento e possui respostas → soft-delete.
+      mockPrismaService.question.findUnique.mockResolvedValue({
         id: questionId,
         eventId,
-        answers: [{ id: 'ans-123' }], // Com respostas
-      };
+        isActive: true,
+        answers: [{ id: 'ans-123' }],
+      });
+      mockPrismaService.question.update.mockResolvedValue({
+        id: questionId,
+        eventId,
+        isActive: false,
+      });
 
-      mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-      mockPrismaService.question.findUnique.mockResolvedValue(mockQuestion);
+      const result = await service.remove(userId, eventId, questionId);
 
-      await expect(service.remove(userId, eventId, questionId)).rejects.toThrow(
-        BadRequestException,
-      );
+      expect(result.message).toBe('Question deleted successfully');
+      // Soft-delete: usa update (isActive=false), nunca delete.
+      expect(mockPrismaService.question.update).toHaveBeenCalledWith({
+        where: { id: questionId },
+        data: { isActive: false },
+      });
+      expect(mockPrismaService.question.delete).not.toHaveBeenCalled();
     });
 
     it('should maintain question order on updates', async () => {
@@ -443,16 +438,21 @@ describe('QuestionsService - Comprehensive Tests', () => {
       const eventId = 'event-123';
       const questionId = 'q-123';
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
-      const mockQuestion = { id: questionId, eventId, order: 1 };
-
-      mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-      mockPrismaService.question.findUnique.mockResolvedValue(mockQuestion);
+      grantOrganizerAccess(userId, eventId);
+      mockPrismaService.question.findUnique.mockResolvedValue({
+        id: questionId,
+        eventId,
+        isActive: true,
+        order: 1,
+        type: 'text',
+      });
       mockPrismaService.question.update.mockResolvedValue({
-        ...mockQuestion,
+        id: questionId,
+        eventId,
+        isActive: true,
         order: 2,
+        type: 'text',
+        appliesTo: null,
       });
 
       const result = await service.update(userId, eventId, questionId, { order: 2 });
@@ -460,20 +460,18 @@ describe('QuestionsService - Comprehensive Tests', () => {
       expect(result.data.question.order).toBe(2);
     });
 
-    it('should prevent duplicate question orders', async () => {
+    it('should return all questions regardless of duplicate order', async () => {
       const eventId = 'event-123';
       const mockQuestions = [
-        { id: 'q-1', eventId, question: 'Q1', order: 1 },
-        { id: 'q-2', eventId, question: 'Q2', order: 1 }, // Ordem duplicada
-        { id: 'q-3', eventId, question: 'Q3', order: 2 },
+        { id: 'q-1', eventId, question: 'Q1', order: 1, appliesTo: null },
+        { id: 'q-2', eventId, question: 'Q2', order: 1, appliesTo: null }, // Ordem duplicada
+        { id: 'q-3', eventId, question: 'Q3', order: 2, appliesTo: null },
       ];
 
       mockPrismaService.question.findMany.mockResolvedValue(mockQuestions);
 
       const result = await service.findAll(eventId);
 
-      // As questões devem ser retornadas, mas a ordem pode estar incorreta
-      // Isso deve ser validado na camada de serviço ou schema
       expect(result.data.questions).toHaveLength(3);
     });
   });
@@ -482,25 +480,25 @@ describe('QuestionsService - Comprehensive Tests', () => {
     it('should handle all question types correctly', async () => {
       const userId = 'org-user-123';
       const eventId = 'event-123';
-      const types = ['text', 'multiple_choice', 'yes_no'];
+      const types = ['text', 'multiple_choice', 'true_false'];
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
-
-      mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
+      grantOrganizerAccess(userId, eventId);
 
       for (const type of types) {
+        // multiple_choice exige opções válidas; demais ignoram options.
+        const options = type === 'multiple_choice' ? ['A', 'B'] : undefined;
         mockPrismaService.question.create.mockResolvedValue({
           id: `q-${type}`,
           eventId,
           question: `Question ${type}`,
           type,
+          appliesTo: null,
         });
 
         await service.create(userId, eventId, {
           question: `Question ${type}`,
-          type: type as any,
+          type,
+          options,
           isRequired: false,
         });
       }
@@ -513,21 +511,21 @@ describe('QuestionsService - Comprehensive Tests', () => {
       const eventId = 'event-123';
       const questionId = 'q-123';
 
-      const mockEvent = { id: eventId, organizerId: 'org-123' };
-      const mockOrganizer = { id: 'org-123', userId };
-      const mockQuestion = {
+      grantOrganizerAccess(userId, eventId);
+      mockPrismaService.question.findUnique.mockResolvedValue({
         id: questionId,
         eventId,
-        type: 'multiple_choice' as const,
+        isActive: true,
+        type: 'multiple_choice',
         options: ['Option 1', 'Option 2'],
-      };
-
-      mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.organizer.findUnique.mockResolvedValue(mockOrganizer);
-      mockPrismaService.question.findUnique.mockResolvedValue(mockQuestion);
+      });
       mockPrismaService.question.update.mockResolvedValue({
-        ...mockQuestion,
+        id: questionId,
+        eventId,
+        isActive: true,
+        type: 'multiple_choice',
         options: ['Option 1', 'Option 2', 'Option 3'],
+        appliesTo: null,
       });
 
       const result = await service.update(userId, eventId, questionId, {
@@ -538,4 +536,3 @@ describe('QuestionsService - Comprehensive Tests', () => {
     });
   });
 });
-

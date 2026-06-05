@@ -277,8 +277,13 @@ describe('RegistrationsService', () => {
       const result: any = await service.findOne(registrationId, userId);
 
       expect(result.message).toBe('Registration fetched successfully');
-      // event/ticket/pricing/participant vêm 100% do snapshot (sem joins ao vivo)
-      expect(result.data.registration.event).toEqual(receiptSnapshot.event);
+      // event/ticket/pricing/participant vêm 100% do snapshot (sem joins ao vivo).
+      // O read aplica stripOrganizationContact no event.organization: como o snapshot
+      // não tem organization, o resultado adiciona `organization: null` (comportamento atual).
+      expect(result.data.registration.event).toEqual({
+        ...receiptSnapshot.event,
+        organization: null,
+      });
       expect(result.data.registration.pricing).toEqual(receiptSnapshot.pricing);
       expect(result.data.registration.id).toBe(registrationId);
       // produto enriquecido com variationEdited (default false, sem edição)

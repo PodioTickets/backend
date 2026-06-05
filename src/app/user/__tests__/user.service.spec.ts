@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { UserService } from '../user.service';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { EmailService } from '../../../common/services/email.service';
 import {
   BadRequestException,
   NotFoundException,
@@ -23,6 +24,13 @@ describe('UserService', () => {
     getWriteClient: jest.fn(),
   };
 
+  // UserService passou a injetar EmailService (envio de boas-vindas na
+  // conclusão de perfil de usuários Google). Mockado pois os fluxos testados
+  // não devem disparar e-mails reais.
+  const mockEmailService = {
+    sendWelcomeUser: jest.fn().mockResolvedValue(undefined),
+  };
+
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -30,6 +38,10 @@ describe('UserService', () => {
         {
           provide: PrismaService,
           useValue: mockPrismaService,
+        },
+        {
+          provide: EmailService,
+          useValue: mockEmailService,
         },
       ],
     }).compile();
@@ -440,42 +452,42 @@ describe('UserService', () => {
   describe('validatePasswordStrength', () => {
     it('should accept valid strong password', () => {
       expect(() => {
-        const service = new UserService(mockPrismaService as any);
+        const service = new UserService(mockPrismaService as any, mockEmailService as any);
         (service as any).validatePasswordStrength('StrongPass123!');
       }).not.toThrow();
     });
 
     it('should reject password without uppercase', () => {
       expect(() => {
-        const service = new UserService(mockPrismaService as any);
+        const service = new UserService(mockPrismaService as any, mockEmailService as any);
         (service as any).validatePasswordStrength('lowercase123!');
       }).toThrow(BadRequestException);
     });
 
     it('should reject password without lowercase', () => {
       expect(() => {
-        const service = new UserService(mockPrismaService as any);
+        const service = new UserService(mockPrismaService as any, mockEmailService as any);
         (service as any).validatePasswordStrength('UPPERCASE123!');
       }).toThrow(BadRequestException);
     });
 
     it('should reject password without digit', () => {
       expect(() => {
-        const service = new UserService(mockPrismaService as any);
+        const service = new UserService(mockPrismaService as any, mockEmailService as any);
         (service as any).validatePasswordStrength('NoDigitsPass!');
       }).toThrow(BadRequestException);
     });
 
     it('should reject password without special character', () => {
       expect(() => {
-        const service = new UserService(mockPrismaService as any);
+        const service = new UserService(mockPrismaService as any, mockEmailService as any);
         (service as any).validatePasswordStrength('NoSpecial123');
       }).toThrow(BadRequestException);
     });
 
     it('should reject password shorter than 8 characters', () => {
       expect(() => {
-        const service = new UserService(mockPrismaService as any);
+        const service = new UserService(mockPrismaService as any, mockEmailService as any);
         (service as any).validatePasswordStrength('Short1!');
       }).toThrow(BadRequestException);
     });
