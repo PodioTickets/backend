@@ -458,6 +458,79 @@ describe('PaymentsWebhookService.handleWebhook (integração, banco real)', () =
     expect(gateway.emitPaymentConfirmed).not.toHaveBeenCalled();
   });
 
+  // ── ANTI-REGRESSÃO de status (2026-06-05) ───────────────────────────────────
+  // Antes: o webhook reconsulta a Cielo e aplicava o status real SEM guard de
+  // direção — um crédito já finalizado como PAID era REBAIXADO pra PENDING quando
+  // a Cielo notificava Status 1 (Authorized, ainda não liquidado) ou 12 (Pending).
+
+  it('ANTI-REGRESSÃO: webhook com status intermediário (Authorized=1) NÃO rebaixa Payment já PAID', async () => {
+    // 1º webhook: Cielo confirma (Status 2) → finaliza tudo (Order PAID, Payment PAID).
+    const confirmed = makeService(2);
+    const { orderId } = await seedPendingOrder();
+    await confirmed.service.handleWebhook(paidPayload());
+    await tick();
+
+    const r = prisma.getReadClient();
+    const paidBefore = await r.payment.findFirst({
+      where: { transactionId: PAYMENT_ID },
+      select: { status: true },
+    });
+    expect(paidBefore?.status).toBe(PaymentStatus.PAID);
+
+    // 2º webhook (replay/notificação atrasada): status REAL na Cielo é 1 (Authorized).
+    const intermediate = makeService(1);
+    await expect(intermediate.service.handleWebhook(paidPayload())).resolves.not.toThrow();
+    await tick();
+
+    // Payment continua PAID — o status intermediário foi ignorado.
+    const paidAfter = await r.payment.findFirst({
+      where: { transactionId: PAYMENT_ID },
+      select: { status: true },
+    });
+    expect(paidAfter?.status).toBe(PaymentStatus.PAID);
+
+    // Order e inscrições intactos.
+    const order = await r.order.findUnique({ where: { id: orderId }, select: { status: true } });
+    expect(order?.status).toBe(OrderStatus.PAID);
+    const confirmedRegs = await r.registration.count({
+      where: { orderId, status: RegistrationStatus.CONFIRMED },
+    });
+    expect(confirmedRegs).toBe(2);
+
+    // Nenhuma nova notificação de confirmação disparada pelo replay.
+    expect(intermediate.gateway.emitPaymentConfirmed).not.toHaveBeenCalled();
+  });
+
+  it('ANTI-REGRESSÃO: webhook PAID atrasado NÃO sobrescreve Payment já REFUNDED (compensação/estorno)', async () => {
+    const { orderId } = await seedPendingOrder();
+
+    // Pagamento já estornado (ex.: compensação automática concluiu antes do replay).
+    const w = prisma.getWriteClient();
+    await w.payment.updateMany({
+      where: { transactionId: PAYMENT_ID },
+      data: { status: PaymentStatus.REFUNDED },
+    });
+    await w.order.update({ where: { id: orderId }, data: { status: OrderStatus.CANCELLED } });
+
+    // Webhook atrasado: Cielo (real) diz Status 2 = PaymentConfirmed.
+    const { service, gateway } = makeService(2);
+    await expect(service.handleWebhook(paidPayload())).resolves.not.toThrow();
+    await tick();
+
+    // REFUNDED é terminal — não volta a PAID por replay.
+    const r = prisma.getReadClient();
+    const payment = await r.payment.findFirst({
+      where: { transactionId: PAYMENT_ID },
+      select: { status: true },
+    });
+    expect(payment?.status).toBe(PaymentStatus.REFUNDED);
+
+    // Pedido cancelado segue cancelado; nada foi finalizado/notificado.
+    const order = await r.order.findUnique({ where: { id: orderId }, select: { status: true } });
+    expect(order?.status).toBe(OrderStatus.CANCELLED);
+    expect(gateway.emitPaymentConfirmed).not.toHaveBeenCalled();
+  });
+
   // ── COMPENSAÇÃO AUTOMÁTICA (regressões 2026-06-04) ─────────────────────────
   // Antes: (1) voucher consumido por outro pedido → finalize lançava 500 pro webhook →
   // Cielo reentregava pra sempre, cliente pago sem ingresso e sem estorno; (2) webhook
