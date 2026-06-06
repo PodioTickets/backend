@@ -246,9 +246,6 @@ export class EventsController {
   @UseGuards(JwtAuthGuard)
   @NoCache()
   @ApiBearerAuth()
-  // Sem Cache-Control explícito → o SecurityHeadersInterceptor aplica `no-store` por default.
-  // (Antes era `private, max-age=10`, que deixava o NAVEGADOR servir dado velho por 10s ao
-  // reabrir a página de edição de ingressos logo após salvar.)
   @ApiOperation({
     summary: 'Tickets management bundle',
     description:
