@@ -15,11 +15,11 @@
       },
       {
         "include": "common/templates/**/*",
-        "outDir": "dist"
+        "outDir": "dist/src"
       },
       {
         "include": "common/assets/**/*",
-        "outDir": "dist"
+        "outDir": "dist/src"
       }
     ]
   }

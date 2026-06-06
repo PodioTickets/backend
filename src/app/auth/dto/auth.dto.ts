@@ -1,4 +1,4 @@
-import { IsEmail, IsString, IsOptional, MinLength, IsNotEmpty, IsBoolean, IsDateString, IsEnum, Matches, Length, registerDecorator, ValidationOptions, ValidationArguments } from 'class-validator';
+import { IsEmail, IsString, IsOptional, MinLength, IsNotEmpty, IsBoolean, IsDateString, IsEnum, Matches, Length, ValidateIf, registerDecorator, ValidationOptions, ValidationArguments } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Gender, DocumentType, Language, AccountType } from '@prisma/client';
 
@@ -229,11 +229,20 @@ export class RefreshTokenDto {
 }
 
 export class ForgotPasswordDto {
-  @ApiProperty({ description: 'User email' })
+  @ApiPropertyOptional({ description: 'User email (informe email OU cpf)' })
+  @ValidateIf((o) => !o.cpf)
   @IsEmail()
-  email: string;
+  email?: string;
 
-  @ApiPropertyOptional({ 
+  @ApiPropertyOptional({
+    description: 'CPF da conta, com ou sem máscara (alternativa ao email)',
+  })
+  @ValidateIf((o) => !o.email)
+  @IsString()
+  @IsValidCpf()
+  cpf?: string;
+
+  @ApiPropertyOptional({
     description: 'Account type: USER (participant) or ORGANIZER',
     enum: AccountType,
     default: AccountType.USER
@@ -286,9 +295,18 @@ export class ChangeEmailDto {
 }
 
 export class VerifyResetCodeDto {
-  @ApiProperty({ description: 'User email' })
+  @ApiPropertyOptional({ description: 'User email (informe email OU cpf)' })
+  @ValidateIf((o) => !o.cpf)
   @IsEmail()
-  email: string;
+  email?: string;
+
+  @ApiPropertyOptional({
+    description: 'CPF da conta, com ou sem máscara (alternativa ao email)',
+  })
+  @ValidateIf((o) => !o.email)
+  @IsString()
+  @IsValidCpf()
+  cpf?: string;
 
   @ApiProperty({ description: 'Reset code (6 digits)' })
   @IsString()
@@ -306,9 +324,18 @@ export class VerifyResetCodeDto {
 }
 
 export class ResendResetCodeDto {
-  @ApiProperty({ description: 'User email' })
+  @ApiPropertyOptional({ description: 'User email (informe email OU cpf)' })
+  @ValidateIf((o) => !o.cpf)
   @IsEmail()
-  email: string;
+  email?: string;
+
+  @ApiPropertyOptional({
+    description: 'CPF da conta, com ou sem máscara (alternativa ao email)',
+  })
+  @ValidateIf((o) => !o.email)
+  @IsString()
+  @IsValidCpf()
+  cpf?: string;
 
   @ApiPropertyOptional({ 
     description: 'Account type: USER (participant) or ORGANIZER',
