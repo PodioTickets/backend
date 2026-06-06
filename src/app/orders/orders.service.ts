@@ -3344,13 +3344,17 @@ export class OrdersService {
       };
     } else {
     try {
+      // ReturnUrl é montado para TODO débito (com 3DS via MPI ou sem). A Cielo exige
+      // ReturnUrl nas transações de débito mesmo quando enviamos ExternalAuthentication
+      // (o suporte Cielo apontou "ReturnUrl não enviado" no fluxo MPI). Por isso
+      // SERVER_URL passa a ser obrigatório para qualquer débito.
       let debitReturnUrl: string | undefined;
-      if (dto.method === PaymentMethod.DEBIT_CARD && !threedsData) {
+      if (dto.method === PaymentMethod.DEBIT_CARD) {
         const serverUrl = (process.env.SERVER_URL ?? '').replace(/\/$/, '');
         if (!serverUrl || !serverUrl.startsWith('http')) {
           throw new AppUnprocessableException(
             'SERVER_URL_REQUIRED',
-            'SERVER_URL environment variable must be set to a valid HTTP(S) URL to use debit card without pre-authenticated 3DS',
+            'SERVER_URL environment variable must be set to a valid HTTP(S) URL for debit card (Cielo requires ReturnUrl)',
           );
         }
         debitReturnUrl = `${serverUrl}/api/v1/payments/3ds-callback?orderId=${orderId}`;
