@@ -15,7 +15,15 @@
       },
       {
         "include": "common/templates/**/*",
+        "outDir": "dist"
+      },
+      {
+        "include": "common/templates/**/*",
         "outDir": "dist/src"
+      },
+      {
+        "include": "common/assets/**/*",
+        "outDir": "dist"
       },
       {
         "include": "common/assets/**/*",
