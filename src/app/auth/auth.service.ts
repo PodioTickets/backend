@@ -597,32 +597,62 @@ export class AuthService {
     return { message: 'Logged out successfully' };
   }
 
-  async forgotPassword(forgotPasswordDto: ForgotPasswordDto, accountType: 'USER' | 'ORGANIZER' = 'USER') {
-    const emailNorm = forgotPasswordDto.email.trim();
+  /**
+   * Resolve a conta do fluxo de redefinição de senha a partir de e-mail OU
+   * CPF. O CPF é normalizado para dígitos e buscado por
+   * `documentNumberClean_accountType` (mesma regra do login por documento).
+   * Retorna null se nenhum identificador válido for informado — o chamador
+   * responde de forma genérica (anti-enumeração).
+   */
+  private async findUserForPasswordReset(
+    identifier: { email?: string; cpf?: string },
+    accountType: 'USER' | 'ORGANIZER',
+  ) {
     const prismaRead = this.prisma.getReadClient();
+    const select = { id: true, email: true, firstName: true, isActive: true };
 
-    const generic = {
+    const email = identifier.email?.trim();
+    if (email) {
+      return prismaRead.user.findUnique({
+        where: { email_accountType: { email, accountType } },
+        select,
+      });
+    }
+
+    const documentNumberClean = (identifier.cpf ?? '').replace(/\D/g, '');
+    if (documentNumberClean.length !== 11) return null;
+    return prismaRead.user.findUnique({
+      where: {
+        documentNumberClean_accountType: { documentNumberClean, accountType },
+      },
+      select,
+    });
+  }
+
+  /** Resposta genérica do forgot/resend conforme o identificador usado. */
+  private passwordResetGenericResponse(identifier: { email?: string; cpf?: string }) {
+    return {
       success: true,
       message:
-        'Se uma conta existir com este e-mail, enviaremos instruções para redefinir a senha.',
+        identifier.cpf && !identifier.email
+          ? 'Se uma conta existir com este CPF, enviaremos instruções para o e-mail cadastrado.'
+          : 'Se uma conta existir com este e-mail, enviaremos instruções para redefinir a senha.',
     };
+  }
 
-    const user = await prismaRead.user.findUnique({
-      where: {
-        email_accountType: {
-          email: emailNorm,
-          accountType,
-        },
-      },
-      select: { id: true, email: true, firstName: true, isActive: true },
-    });
+  async forgotPassword(forgotPasswordDto: ForgotPasswordDto, accountType: 'USER' | 'ORGANIZER' = 'USER') {
+    const generic = this.passwordResetGenericResponse(forgotPasswordDto);
+
+    const user = await this.findUserForPasswordReset(forgotPasswordDto, accountType);
 
     if (!user) {
       return generic;
     }
 
+    // Rate limit pelo e-mail canônico da conta: o limite vale para a conta,
+    // independente de o pedido ter vindo por e-mail ou CPF.
     const hour = Math.floor(Date.now() / (60 * 60 * 1000));
-    const rateKey = `forgot_pw:${emailNorm.toLowerCase()}:${accountType}:${hour}`;
+    const rateKey = `forgot_pw:${user.email.toLowerCase()}:${accountType}:${hour}`;
     const count = (await this.cacheManager.get<number>(rateKey)) || 0;
     if (count >= 5) {
       return generic;
@@ -641,7 +671,22 @@ export class AuthService {
     return generic;
   }
 
-  async verifyResetCode(email: string, code: string, accountType: 'USER' | 'ORGANIZER' = 'USER') {
+  async verifyResetCode(
+    identifier: { email?: string; cpf?: string },
+    code: string,
+    accountType: 'USER' | 'ORGANIZER' = 'USER',
+  ) {
+    let email = identifier.email?.trim();
+    if (!email) {
+      // Fluxo por CPF: resolve o e-mail da conta (o código é cacheado por
+      // e-mail). Erro genérico se não existir — não revela se o CPF tem conta.
+      const user = await this.findUserForPasswordReset(identifier, accountType);
+      if (!user) {
+        throw new BadRequestException('Código inválido ou expirado');
+      }
+      email = user.email;
+    }
+
     const cacheKey = `reset_code:${email}:${accountType}`;
     const cached = await this.cacheManager.get<any>(cacheKey);
 
@@ -690,31 +735,21 @@ export class AuthService {
     };
   }
 
-  async resendResetCode(email: string, accountType: 'USER' | 'ORGANIZER' = 'USER') {
-    const emailNorm = email.trim();
-    const prismaRead = this.prisma.getReadClient();
+  async resendResetCode(
+    identifier: { email?: string; cpf?: string },
+    accountType: 'USER' | 'ORGANIZER' = 'USER',
+  ) {
+    const generic = this.passwordResetGenericResponse(identifier);
 
-    const generic = {
-      success: true,
-      message:
-        'Se uma conta existir com este e-mail, enviaremos instruções para redefinir a senha.',
-    };
-
-    const user = await prismaRead.user.findUnique({
-      where: {
-        email_accountType: {
-          email: emailNorm,
-          accountType,
-        },
-      },
-      select: { id: true, email: true, firstName: true, isActive: true },
-    });
+    const user = await this.findUserForPasswordReset(identifier, accountType);
 
     if (!user || !user.isActive) {
       return generic;
     }
 
-    const rateLimitKey = `reset_link_resend:${emailNorm.toLowerCase()}:${accountType}`;
+    // Cooldown pelo e-mail canônico: 1 reenvio efetivo/min por conta,
+    // independente do identificador usado no pedido.
+    const rateLimitKey = `reset_link_resend:${user.email.toLowerCase()}:${accountType}`;
     if (await this.cacheManager.get(rateLimitKey)) {
       return generic;
     }

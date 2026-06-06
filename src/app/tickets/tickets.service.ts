@@ -1179,7 +1179,16 @@ export class TicketsService {
   }
 
   private async isOrganizerOfEvent(userId: string, eventId: string, prisma: any): Promise<boolean> {
-    const event = await prisma.event.findUnique({ where: { id: eventId }, select: { organizationId: true } });
+    // Admin/staff contam como organizador — espelha o bypass do verifyOrganizerAccess.
+    // Sem isso, um ADMIN que não é membro da organização caía no cache público de
+    // 15s do findAll e via lista DESATUALIZADA logo após criar/editar/deletar
+    // ingresso (ex.: DELETE seguido de GET /tickets-management ainda trazia o
+    // ingresso deletado).
+    const [user, event] = await Promise.all([
+      prisma.user.findUnique({ where: { id: userId }, select: { role: true } }),
+      prisma.event.findUnique({ where: { id: eventId }, select: { organizationId: true } }),
+    ]);
+    if (user?.role === 'ADMIN' || user?.role === 'PODIOGO_STAFF') return true;
     if (!event) return false;
     const member = await prisma.organizationMember.findUnique({
       where: { organizationId_userId: { organizationId: event.organizationId, userId } },

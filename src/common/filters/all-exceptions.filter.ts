@@ -7,12 +7,66 @@ import {
   Logger,
 } from '@nestjs/common';
 import { HttpAdapterHost } from '@nestjs/core';
+import { Prisma } from '@prisma/client';
+
+/**
+ * Rótulos PT-BR para campos com unique constraint — usados na mensagem do P2002.
+ * Campos fora do mapa caem no nome cru (ainda amigável: "Valor já cadastrado para X").
+ */
+const UNIQUE_FIELD_LABELS: Record<string, string> = {
+  document: 'documento (CPF/CNPJ)',
+  documentNumberClean: 'documento (CPF/CNPJ)',
+  email: 'e-mail',
+  slug: 'slug',
+  code: 'código',
+  phone: 'telefone',
+  name: 'nome',
+};
 
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
   private readonly logger = new Logger(AllExceptionsFilter.name);
 
   constructor(private readonly httpAdapterHost: HttpAdapterHost) {}
+
+  /**
+   * Mapeia erros CONHECIDOS do Prisma para respostas HTTP amigáveis.
+   * Sem isso, um P2002 (unique) que escapou das validações dos services virava
+   * 500 com a mensagem CRUA do Prisma (paths de arquivo, trecho de código) no
+   * body — vazamento de detalhe interno + UX horrível pro front.
+   */
+  private mapPrismaError(
+    e: Prisma.PrismaClientKnownRequestError,
+  ): { status: HttpStatus; message: string; code: string } | null {
+    switch (e.code) {
+      case 'P2002': {
+        // meta.target: string[] (campos) ou string (nome do índice), conforme o caso.
+        const target = e.meta?.target;
+        const fields = Array.isArray(target) ? target.map(String) : target ? [String(target)] : [];
+        const labels = fields.map((f) => UNIQUE_FIELD_LABELS[f] ?? f);
+        const fieldsTxt = labels.length ? ` para: ${labels.join(', ')}` : '';
+        return {
+          status: HttpStatus.CONFLICT,
+          message: `Valor já cadastrado${fieldsTxt}. Verifique os dados e tente novamente.`,
+          code: 'DUPLICATE_VALUE',
+        };
+      }
+      case 'P2025': // registro exigido pela operação não existe (update/delete)
+        return {
+          status: HttpStatus.NOT_FOUND,
+          message: 'Registro não encontrado.',
+          code: 'RECORD_NOT_FOUND',
+        };
+      case 'P2003': // violação de chave estrangeira
+        return {
+          status: HttpStatus.CONFLICT,
+          message: 'Operação não permitida: existem registros vinculados a este item.',
+          code: 'RELATED_RECORDS_EXIST',
+        };
+      default:
+        return null; // demais códigos: 500 genérico (sem vazar detalhe)
+    }
+  }
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const { httpAdapter } = this.httpAdapterHost;
@@ -81,8 +135,34 @@ export class AllExceptionsFilter implements ExceptionFilter {
       } else {
         message = exception.message || 'Bad Request';
       }
+    } else if (exception instanceof Prisma.PrismaClientKnownRequestError) {
+      // Erro CONHECIDO do Prisma (P2002 unique, P2025 not found, P2003 FK...).
+      const mapped = this.mapPrismaError(exception);
+      if (mapped) {
+        httpStatus = mapped.status;
+        message = mapped.message;
+        code = mapped.code;
+        // Warn (não error): é falha de negócio esperada, não bug — mas logamos o
+        // detalhe original pra rastrear de onde escapou (idealmente o service
+        // valida antes e este caminho é só a rede de segurança da race).
+        this.logger.warn(
+          `Prisma ${exception.code} mapeado para ${httpStatus}: ${exception.message.split('\n').pop()}`,
+        );
+      } else {
+        this.logger.error(`Prisma error ${exception.code}: ${exception.message}`, exception.stack);
+        message = 'Erro interno do servidor';
+      }
+    } else if (exception instanceof Prisma.PrismaClientValidationError) {
+      // Query malformada (geralmente bug nosso) — mensagem crua expõe schema/código.
+      this.logger.error(`Prisma validation error: ${exception.message}`, exception.stack);
+      message = 'Erro interno do servidor';
     } else if (exception instanceof Error) {
-      message = exception.message;
+      // NUNCA vazar a mensagem crua de erro não-HTTP em produção (pode conter
+      // paths, SQL, detalhes de infra). Em development mantemos pra DX.
+      message =
+        process.env.NODE_ENV === 'development'
+          ? exception.message
+          : 'Erro interno do servidor';
       this.logger.error(
         `Unhandled exception: ${exception.message}`,
         exception.stack,

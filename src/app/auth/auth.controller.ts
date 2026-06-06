@@ -350,7 +350,7 @@ export class AuthController {
   async verifyResetCode(@Body() verifyResetCodeDto: VerifyResetCodeDto) {
     const accountType = verifyResetCodeDto.accountType || 'USER';
     return this.authService.verifyResetCode(
-      verifyResetCodeDto.email,
+      { email: verifyResetCodeDto.email, cpf: verifyResetCodeDto.cpf },
       verifyResetCodeDto.code,
       accountType
     );
@@ -367,7 +367,10 @@ export class AuthController {
   @ApiResponse({ status: 200, description: 'Pedido aceito' })
   async resendResetCode(@Body() resendResetCodeDto: ResendResetCodeDto) {
     const accountType = resendResetCodeDto.accountType || 'USER';
-    return this.authService.resendResetCode(resendResetCodeDto.email, accountType);
+    return this.authService.resendResetCode(
+      { email: resendResetCodeDto.email, cpf: resendResetCodeDto.cpf },
+      accountType
+    );
   }
 
   @Post('reset-password')

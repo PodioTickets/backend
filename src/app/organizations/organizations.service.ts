@@ -376,6 +376,22 @@ export class OrganizationsService {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
+    // Documento (CPF/CNPJ) é @unique em Organization — valida ANTES da transação
+    // pra devolver 409 amigável em vez de estourar P2002 no create (que viraria
+    // 500 cru). Race residual entre o check e o create é coberta pelo mapeamento
+    // de P2002 no AllExceptionsFilter (também 409).
+    if (createDto.document) {
+      const existingOrg = await prismaRead.organization.findUnique({
+        where: { document: createDto.document },
+        select: { id: true, name: true },
+      });
+      if (existingOrg) {
+        throw new ConflictException(
+          `Já existe uma organização cadastrada com este documento (CPF/CNPJ): ${existingOrg.name}`,
+        );
+      }
+    }
+
     // Detecta se há intenção de criar/vincular owner nesta chamada.
     const hasOwnerEmailData = !!(createDto.ownerEmail || createDto.ownerPassword || createDto.ownerFirstName || createDto.ownerLastName);
     const provisionOwner = !!createDto.userId || hasOwnerEmailData;
