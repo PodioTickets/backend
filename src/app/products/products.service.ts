@@ -127,6 +127,21 @@ export class ProductsService {
     ];
   }
 
+  /**
+   * Recalcula o `availableStock` (restante) de uma variação quando o organizador altera o
+   * LIMITE (`stock`). Aplica o DELTA do limite sobre o restante atual e faz clamp em [0, novoStock],
+   * preservando vendas/holds em andamento — em vez de sobrescrever o restante com o novo limite.
+   * Ex.: limite 10→15 com 3 vendidos (restante 7) → restante 12. Limite 10→8 (restante 7) → 5.
+   */
+  private computeNextAvailableStock(
+    oldStock: number,
+    oldAvailable: number,
+    newStock: number,
+  ): number {
+    const delta = (newStock ?? 0) - (oldStock ?? 0);
+    return Math.max(0, Math.min((oldAvailable ?? 0) + delta, newStock ?? 0));
+  }
+
   private normalizeBuyerVariationEditForCreate(dto: CreateProductDto): {
     buyerVariationEditAllowed: boolean;
     variationEditDeadlineDays: number;
@@ -246,6 +261,7 @@ export class ProductsService {
             name: v.name,
             price: Math.round(v.price ?? 0), // entrada já em centavos (INT)
             stock: v.stock ?? 0,
+            availableStock: v.stock ?? 0, // restante parte igual ao limite (nada vendido ainda)
             sortOrder: i,
           })),
         },
@@ -451,7 +467,7 @@ export class ProductsService {
       include: {
         tickets: true,
         variations: {
-          select: { id: true, name: true, price: true, stock: true },
+          select: { id: true, name: true, price: true, stock: true, availableStock: true },
           orderBy: { sortOrder: 'asc' },
         },
       },
@@ -544,28 +560,32 @@ export class ProductsService {
           // Atualizar pelo ID explícito
           const exists = product.variations.find((pv) => pv.id === v.id);
           if (exists) {
+            // Ajusta o restante pelo DELTA do limite (preserva vendas/holds em andamento),
+            // nunca sobrescreve availableStock cegamente.
+            const availableStock = this.computeNextAvailableStock(exists.stock, exists.availableStock, stock);
             await prismaWrite.productVariation.update({
               where: { id: v.id },
-              data: { name: v.name, price, stock, sortOrder: i },
+              data: { name: v.name, price, stock, availableStock, sortOrder: i },
             });
           } else {
-            // ID enviado mas não existe — criar como nova
+            // ID enviado mas não existe — criar como nova (restante = limite)
             await prismaWrite.productVariation.create({
-              data: { productId, name: v.name, price, stock, sortOrder: i },
+              data: { productId, name: v.name, price, stock, availableStock: stock, sortOrder: i },
             });
           }
         } else {
           // Sem ID: tenta match por nome (backwards-compat) antes de criar
           const byName = product.variations.find((pv) => pv.name === v.name);
           if (byName) {
+            const availableStock = this.computeNextAvailableStock(byName.stock, byName.availableStock, stock);
             await prismaWrite.productVariation.update({
               where: { id: byName.id },
-              data: { price, stock, sortOrder: i },
+              data: { price, stock, availableStock, sortOrder: i },
             });
             incomingIds.add(byName.id);
           } else {
             await prismaWrite.productVariation.create({
-              data: { productId, name: v.name, price, stock, sortOrder: i },
+              data: { productId, name: v.name, price, stock, availableStock: stock, sortOrder: i },
             });
           }
         }

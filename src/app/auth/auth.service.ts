@@ -629,6 +629,26 @@ export class AuthService {
     });
   }
 
+  /**
+   * Mascara um e-mail expondo o mínimo: 2 primeiros chars do local e do domínio,
+   * preservando o TLD. Ex.: `joao@gmail.com` → `jo***@gm***.com`. Usado no fluxo
+   * de recuperação por CPF para indicar PARA ONDE o código foi enviado sem vazar
+   * o endereço completo. Tradeoff de segurança aprovado: revela que o CPF tem
+   * conta (enumeração parcial), mas limita a exposição do e-mail.
+   */
+  private maskEmail(email: string): string {
+    const at = email.lastIndexOf('@');
+    if (at <= 0) return email;
+    const local = email.slice(0, at);
+    const domain = email.slice(at + 1);
+    const head = (s: string, keep: number) =>
+      s.length <= keep ? (s[0] ?? '') : s.slice(0, keep);
+    const dot = domain.lastIndexOf('.');
+    const domainName = dot > 0 ? domain.slice(0, dot) : domain;
+    const tld = dot > 0 ? domain.slice(dot) : '';
+    return `${head(local, 2)}***@${head(domainName, 2)}***${tld}`;
+  }
+
   /** Resposta genérica do forgot/resend conforme o identificador usado. */
   private passwordResetGenericResponse(identifier: { email?: string; cpf?: string }) {
     return {
@@ -666,6 +686,15 @@ export class AuthService {
       );
     } catch (err) {
       this.logger.error('[AUTH] Falha ao enviar e-mail de recuperação de senha:', err);
+    }
+
+    // No fluxo por CPF, devolve o e-mail MASCARADO da conta — o usuário não
+    // digitou o e-mail e precisa saber para onde olhar. Só quando o CPF resolve
+    // numa conta (tradeoff de enumeração parcial aprovado). No fluxo por e-mail
+    // não é necessário (o próprio usuário informou o endereço).
+    const wasByCpf = !!forgotPasswordDto.cpf && !forgotPasswordDto.email;
+    if (wasByCpf) {
+      return { ...generic, maskedEmail: this.maskEmail(user.email) };
     }
 
     return generic;

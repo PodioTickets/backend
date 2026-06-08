@@ -36,6 +36,11 @@ import {
 } from '../../common/utils/document.util';
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
 import {
+  holdsStock,
+  acquireVariationHold,
+  releaseVariationHold,
+} from '../../common/utils/product-stock.util';
+import {
   computeDocEligibleSlots,
   computeVoucherEligibleSlots,
   computeAgeEligibleSlots,
@@ -1316,7 +1321,7 @@ export class OrdersService {
                       buyerVariationEditAllowed: true,
                       variationEditDeadlineDays: true,
                       // Opções vivas pra montar o seletor de variação no recibo (ordenadas).
-                      variations: { select: { id: true, name: true, price: true, stock: true, sortOrder: true }, orderBy: { sortOrder: 'asc' } },
+                      variations: { select: { id: true, name: true, price: true, stock: true, availableStock: true, soldCount: true, sortOrder: true }, orderBy: { sortOrder: 'asc' } },
                     },
                   },
                   variation: true,
@@ -1708,6 +1713,8 @@ export class OrdersService {
                       name: v.name,
                       price: v.price,
                       stock: v.stock,
+                      availableStock: v.availableStock,
+                      soldCount: v.soldCount,
                       sortOrder: v.sortOrder,
                     })),
                   };
@@ -2278,9 +2285,10 @@ export class OrdersService {
             WHERE id = ${rt.batchId}::uuid
           `;
         }
-        // `reservedByOrderId` não é FK (sem cascade) → libera a reserva de voucher ANTES de
-        // deletar o pedido, senão o voucher ficaria preso a um pedido inexistente até
-        // `reservedUntil` (até 30 min). Espelha o caminho gêmeo do cron de expiração.
+        // `reservedByOrderId` e holds de produto não têm cascade → liberar ANTES de deletar,
+        // senão availableStock/voucher ficariam presos a um pedido inexistente.
+        // Espelha o caminho gêmeo do cron de expiração.
+        await this.releaseProductHolds(tx, order.pendingProducts as any[] | null);
         await releaseVoucherByOrder(tx, orderId);
         await tx.order.delete({ where: { id: orderId } });
       });
@@ -2700,6 +2708,8 @@ export class OrdersService {
     // Sem isso, qualquer recálculo de totalAmount posterior zera os produtos.
     let productsSubtotal = 0;
     const enrichedProducts: any[] = [];
+    // Rótulo amigável por variação (p/ mensagem de "esgotado" no hold).
+    const variationLabels = new Map<string, string>();
     for (const item of dto.products) {
       if (!validEmails.has(item.participantEmail.toLowerCase())) {
         throw new UnprocessableEntityException(
@@ -2724,12 +2734,20 @@ export class OrdersService {
       }
       const unitPrice = resolveProductUnitPrice(product, variation);
       productsSubtotal += unitPrice * item.quantity;
+      // Segura estoque quando: produto NÃO é incluso-e-obrigatório, tem variação selecionada e
+      // o estoque é LIMITADO (stock > 0). Incluso+obrigatório é gated pela vaga do ingresso;
+      // ilimitado nunca segura. A marca persiste no JSON p/ release no cancel/expire.
+      const stockHeld = holdsStock(product) && !!variation && (variation.stock ?? 0) > 0;
+      if (stockHeld && item.variationId) {
+        variationLabels.set(item.variationId, `${product.name} — ${variation.name}`);
+      }
       enrichedProducts.push({
         productId: item.productId,
         variationId: item.variationId ?? null,
         quantity: item.quantity,
         participantEmail: item.participantEmail,
         unitPrice,
+        stockHeld,
       });
     }
 
@@ -2752,18 +2770,49 @@ export class OrdersService {
 
     const finalAmount = Math.max(0, totalAmount - newDiscount);
 
-    const updated = await w.order.update({
-      where: { id: orderId },
-      data: {
-        pendingProducts: enrichedProducts,
-        totalAmount,
-        discount: newDiscount,
-        finalAmount,
-        ...(autoCouponId && { couponId: autoCouponId }),
-        ...((shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon) && { couponId: null }),
-        updatedAt: new Date(),
-      },
-      include: ORDER_INCLUDE,
+    // Hold de estoque das variações (opcional/não-incluso, limitado). Atômico: libera os holds
+    // do estado ANTERIOR (pode ser re-chamada da rota) e readquire os novos; se alguma variação
+    // estiver esgotada, a transação inteira faz rollback e nada é cobrado/reservado.
+    const sumHeldByVariation = (items: any[]): Map<string, number> => {
+      const m = new Map<string, number>();
+      for (const it of items ?? []) {
+        if (!it?.stockHeld || !it.variationId) continue;
+        m.set(it.variationId, (m.get(it.variationId) ?? 0) + (it.quantity ?? 1));
+      }
+      return m;
+    };
+    const oldHeld = sumHeldByVariation((order.pendingProducts as any[] | null) ?? []);
+    const newHeld = sumHeldByVariation(enrichedProducts);
+
+    const updated = await w.$transaction(async (tx: any) => {
+      // 1. Libera holds anteriores (LEAST garante que não ultrapasse o limite).
+      for (const [variationId, qty] of oldHeld) {
+        await releaseVariationHold(tx, variationId, qty);
+      }
+      // 2. Adquire os novos holds; 0 linhas = esgotado → rollback.
+      for (const [variationId, qty] of newHeld) {
+        const affected = await acquireVariationHold(tx, variationId, qty);
+        if (affected === 0) {
+          const label = variationLabels.get(variationId) ?? 'produto selecionado';
+          throw new UnprocessableEntityException(
+            `Estoque insuficiente para "${label}". Reduza a quantidade ou escolha outra opção.`,
+          );
+        }
+      }
+      // 3. Persiste o pedido (stockHeld já vai no JSON pra release futuro no cancel/expire).
+      return tx.order.update({
+        where: { id: orderId },
+        data: {
+          pendingProducts: enrichedProducts,
+          totalAmount,
+          discount: newDiscount,
+          finalAmount,
+          ...(autoCouponId && { couponId: autoCouponId }),
+          ...((shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon) && { couponId: null }),
+          updatedAt: new Date(),
+        },
+        include: ORDER_INCLUDE,
+      });
     });
     return orderShape(
       updated,
@@ -4098,6 +4147,7 @@ export class OrdersService {
         eventId: true,
         finalAmount: true,
         billingPostalCode: true,
+        pendingProducts: true,
         reservedTickets: { select: { batchId: true, quantity: true } },
       },
     });
@@ -4152,6 +4202,7 @@ export class OrdersService {
                 WHERE id = ${rt.batchId}::uuid
               `;
             }
+            await this.releaseProductHolds(tx, order.pendingProducts as any[] | null);
             await tx.registration.updateMany({
               where: { orderId: order.id, status: 'PENDING' },
               data: { status: 'CANCELLED' },
@@ -4174,8 +4225,9 @@ export class OrdersService {
               WHERE id = ${rt.batchId}::uuid
             `;
           }
-          // `reservedByOrderId` não é FK (sem cascade) → libera ANTES de deletar o pedido,
-          // senão o voucher ficaria preso à reserva de um pedido inexistente até `reservedUntil`.
+          // Holds de produto e reserva de voucher não têm cascade → liberar ANTES do delete,
+          // senão availableStock/voucher ficariam presos a um pedido inexistente.
+          await this.releaseProductHolds(tx, order.pendingProducts as any[] | null);
           await releaseVoucherByOrder(tx, order.id);
           await tx.order.delete({ where: { id: order.id } });
         });
@@ -4261,6 +4313,23 @@ export class OrdersService {
     return claimVoucher(client, newVoucherId, order.id, reservedUntil);
   }
 
+  /**
+   * Libera o hold de estoque das variações de um pedido PENDING (itens `stockHeld` do
+   * `pendingProducts`), devolvendo `availableStock`. Usado em todo caminho que restaura estoque
+   * de ingresso (cancel manual, expiração com/sem histórico). Não mexe em `soldCount` — pedido
+   * PENDING nunca o incrementou.
+   */
+  private async releaseProductHolds(tx: any, pendingProducts: any[] | null): Promise<void> {
+    const heldByVariation = new Map<string, number>();
+    for (const it of pendingProducts ?? []) {
+      if (!it?.stockHeld || !it.variationId) continue;
+      heldByVariation.set(it.variationId, (heldByVariation.get(it.variationId) ?? 0) + (it.quantity ?? 1));
+    }
+    for (const [variationId, qty] of heldByVariation) {
+      await releaseVariationHold(tx, variationId, qty);
+    }
+  }
+
   private async cancelOrderAndRestoreStock(
     orderId: string,
     reason: string,
@@ -4294,6 +4363,8 @@ export class OrdersService {
             WHERE id = ${rt.batchId}::uuid
           `;
         }
+        // Libera o hold de estoque das variações (itens stockHeld do pendingProducts).
+        await this.releaseProductHolds(tx, order.pendingProducts as any[] | null);
         await tx.registration.updateMany({
           where: { orderId, status: 'PENDING' },
           data: { status: 'CANCELLED' },
