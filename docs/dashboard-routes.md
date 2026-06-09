@@ -174,7 +174,7 @@ esgotamento.
     "tickets": {
       "message": "Tickets fetched successfully",
       "data": {
-        "tickets": [ /* ... shape idêntico ao /financial */ ],
+        "tickets": [ /* ... shape idêntico ao /financial + "organizerNet": 525000 */ ],
         "pagination": { "page": 1, "limit": 20, "total": 12, "totalPages": 1 }
       }
     },
@@ -230,7 +230,8 @@ esgotamento.
 |---|---|
 | `ticketRanking[].quantity` | Quantidade total de items (tickets) vendidos. Itens de modalidade só contam quando a inscrição não tem ticket. |
 | `ticketRanking[].total` | Receita líquida rateada entre todos os items da order (em centavos). |
-| `tickets.data.tickets` | Lista de ingressos cadastrados — shape **idêntico** ao retornado por `GET /events/:eventId/financial`. Inclui inativos (`includeInactive=true`). |
+| `tickets.data.tickets` | Lista de ingressos cadastrados — shape **idêntico** ao retornado por `GET /events/:eventId/financial`, **acrescido** de `organizerNet` (ver abaixo). Inclui inativos (`includeInactive=true`). |
+| `tickets.data.tickets[].organizerNet` | **Exclusivo do dashboard.** Líquido do organizador (centavos) que aquele ingresso gerou no período/filtro — quanto ele de fato recebe, já descontadas taxa de plataforma (`serviceFee`) e taxa do organizador (`organizerFeePercent` do pedido), e já considerando cupons e produtos adicionais (parte do `finalAmount`). Rateado por item dentro da order, **mesma fonte de verdade** do `ticketRanking[].total` e do repasse. `0` para ingressos sem venda confirmada/paga no período. |
 | `topProductVariations[].totalSoldAmount` | Receita líquida do produto (rateada pela razão `orderNet/orderGross`), em centavos. |
 | `topProductVariations[].variations[].remainingStock` | `null` quando o produto tem estoque ilimitado. |
 | `topProductVariations[].variations[].variationName` | Pode ser `"Sem variação"` quando há vendas do produto base sem variação selecionada. |

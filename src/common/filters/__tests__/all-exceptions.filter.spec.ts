@@ -38,7 +38,7 @@ describe('AllExceptionsFilter — mapeamento de erros pra respostas seguras', ()
   });
 
   /** Monta filtro + dublês e devolve uma função que dispara o catch e retorna o body. */
-  function run(exception: unknown): { body: any; status: number } {
+  function run(exception: unknown, requestBody: any = {}): { body: any; status: number } {
     const reply = jest.fn();
     const adapterHost = {
       httpAdapter: {
@@ -49,7 +49,7 @@ describe('AllExceptionsFilter — mapeamento de erros pra respostas seguras', ()
 
     const host = {
       switchToHttp: () => ({
-        getRequest: () => ({ url: '/api/v1/teste', method: 'POST', body: {}, query: {}, params: {} }),
+        getRequest: () => ({ url: '/api/v1/teste', method: 'POST', body: requestBody, query: {}, params: {} }),
         getResponse: () => ({ headersSent: false, finished: false }),
       }),
     } as any;
@@ -80,6 +80,43 @@ describe('AllExceptionsFilter — mapeamento de erros pra respostas seguras', ()
       // O ponto central: NADA da mensagem crua do Prisma no body.
       expect(JSON.stringify(body)).not.toContain('/usr/src/app');
       expect(JSON.stringify(body)).not.toContain('Invalid tx.');
+    });
+
+    it('P2002 em document com CNPJ (14 dígitos) no body especifica "CNPJ" na mensagem', () => {
+      const { body, status } = run(
+        prismaError('P2002', { target: ['document'] }),
+        { document: '12.345.678/0001-95' },
+      );
+
+      expect(status).toBe(HttpStatus.CONFLICT);
+      expect(body.code).toBe('DUPLICATE_VALUE');
+      expect(body.message).toContain('CNPJ');
+      expect(body.message).not.toContain('CPF/CNPJ');
+    });
+
+    it('P2002 em document com CPF (11 dígitos) no body especifica "CPF"', () => {
+      const { body } = run(
+        prismaError('P2002', { target: ['document'] }),
+        { document: '123.456.789-00' },
+      );
+
+      expect(body.message).toContain('CPF');
+      expect(body.message).not.toContain('CPF/CNPJ');
+    });
+
+    it('P2002 em documentNumberClean infere pelo documentNumber do body', () => {
+      const { body } = run(
+        prismaError('P2002', { target: ['documentNumberClean'] }),
+        { documentNumber: '12345678000195' },
+      );
+
+      expect(body.message).toContain('CNPJ');
+    });
+
+    it('P2002 em document sem valor utilizável no body cai no rótulo genérico', () => {
+      const { body } = run(prismaError('P2002', { target: ['document'] }), {});
+
+      expect(body.message).toContain('documento (CPF/CNPJ)');
     });
 
     it('P2002 com campo fora do mapa usa o nome cru do campo (ainda sem vazar internals)', () => {
