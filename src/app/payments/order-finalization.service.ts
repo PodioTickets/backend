@@ -29,6 +29,12 @@ export class OrderFinalizationAbortError extends Error {
 }
 import { resolveDocument } from '../../common/utils/document.util';
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
+import {
+  holdsStock,
+  incrementVariationSold,
+  decrementVariationSold,
+  releaseVariationHold,
+} from '../../common/utils/product-stock.util';
 import { computeCouponCoveredUnits } from '../../common/utils/coupon-eligibility.util';
 import { tryConsumeVoucher } from '../../common/utils/voucher-reservation.util';
 
@@ -172,6 +178,28 @@ export class OrderFinalizationService {
           updatedAt: new Date(),
         },
       });
+    }
+
+    // Reverte estoque/venda das variações de produto (estorno + chargeback usam este ponto).
+    // soldCount-- SEMPRE; availableStock++ só para itens que seguraram estoque (verdade
+    // congelada em productSnapshot.stockHeld; fallback p/ holdsStock em pedidos antigos).
+    const regProducts = await tx.registrationProduct.findMany({
+      where: { registration: { orderId } },
+      select: { variationId: true, quantity: true, productSnapshot: true },
+    });
+    for (const rp of regProducts) {
+      if (!rp.variationId) continue;
+      const qty = rp.quantity ?? 1;
+      await decrementVariationSold(tx, rp.variationId, qty);
+      const snap = (rp.productSnapshot as any) ?? {};
+      const held =
+        typeof snap.stockHeld === 'boolean'
+          ? snap.stockHeld
+          : holdsStock({ isIncludedInTicket: snap.isIncludedInTicket, isRequired: snap.isRequired });
+      // releaseVariationHold tem guard `stock > 0` → no-op seguro p/ variação ilimitada.
+      if (held) {
+        await releaseVariationHold(tx, rp.variationId, qty);
+      }
     }
   }
 
@@ -480,6 +508,9 @@ export class OrderFinalizationService {
               isIncludedInTicket: (product as any).isIncludedInTicket,
               isRequired: (product as any).isRequired,
               variationType: (product as any).variationType ?? null,
+              // Congela se este item segurou estoque (decidido no patchProducts) — usado pelo
+              // estorno para saber se deve devolver availableStock.
+              stockHeld: item.stockHeld === true,
               selectedVariation: selectedVariation
                 ? { id: selectedVariation.id, name: selectedVariation.name, price: (selectedVariation as any).price }
                 : null,
@@ -495,6 +526,11 @@ export class OrderFinalizationService {
                 productSnapshot,
               },
             });
+            // Contabiliza a venda da variação (vale p/ incluso+obrigatório também). O availableStock
+            // NÃO é tocado aqui — o hold já foi feito no patchProducts para opcional/não-incluso.
+            if (item.variationId) {
+              await incrementVariationSold(tx, item.variationId, item.quantity ?? 1);
+            }
           }
         }
 
@@ -636,6 +672,15 @@ export class OrderFinalizationService {
         createdRegs.push(updatedReg);
         pIdx++;
       }
+    }
+
+    // Rede de segurança: holds de itens que NENHUM participante consumiu (ex.: slot removido sem
+    // re-patch dos produtos, e-mail órfão) nunca viram venda → devolve o availableStock pra não
+    // vazar estoque. Mantém a invariante availableStock + soldCount == stock.
+    for (let i = 0; i < pendingProducts.length; i++) {
+      const item = pendingProducts[i];
+      if (consumedProductIdx.has(i) || !item?.stockHeld || !item.variationId) continue;
+      await releaseVariationHold(tx, item.variationId, item.quantity ?? 1);
     }
 
     this.logger.log(`finalizePaidOrder: ${createdRegs.length} inscrição(ões) criada(s) para order ${orderId}`);
