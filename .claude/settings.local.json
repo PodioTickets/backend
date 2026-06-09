@@ -127,7 +127,11 @@
       "PowerShell(npx jest src/app/tickets src/app/products --silent 2>&1 | Select-Object -Last 15)",
       "PowerShell(npx jest src/app/payments/__tests__/cielo.payload.spec.ts 2>$null; if \\(-not $?\\) { exit 1 })",
       "Bash(echo \"exit: $?\")",
-      "Bash(DATABASE_URL=\"postgresql://test:test@localhost:5434/test?schema=public\" npx prisma db push --skip-generate)"
+      "Bash(DATABASE_URL=\"postgresql://test:test@localhost:5434/test?schema=public\" npx prisma db push --skip-generate)",
+      "Bash(cd \"C:/Users/muril/Projects/PodioTickets/server\")",
+      "Bash(echo \"ready\")",
+      "Bash(break)",
+      "Bash(sleep 1)"
     ]
   }
 }
