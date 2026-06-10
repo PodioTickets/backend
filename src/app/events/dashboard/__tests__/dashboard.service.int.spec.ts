@@ -462,6 +462,62 @@ describe('DashboardService (integração, banco real)', () => {
       expect(res.data.ticketRanking.pagination.total).toBe(2);
     });
 
+    it('injeta organizerNet em cada ingresso do bloco tickets (mesma fonte do ticketRanking; 0 sem venda)', async () => {
+      const { adminUserId, eventId } = await seedOrgUserEvent(prisma);
+      const a = await seedTicketWithBatch(eventId, { name: 'Ingresso A' });
+      const b = await seedTicketWithBatch(eventId, { name: 'Ingresso B' });
+      const c = await seedTicketWithBatch(eventId, { name: 'Ingresso C (sem venda)' });
+
+      await seedOrder({
+        eventId,
+        buyerUserId: adminUserId,
+        ticketId: a.ticketId,
+        batchId: a.batchId,
+        finalAmount: 10000,
+        serviceFee: 0,
+        organizerFeePercent: 0,
+      });
+      await seedOrder({
+        eventId,
+        buyerUserId: adminUserId,
+        ticketId: b.ticketId,
+        batchId: b.batchId,
+        finalAmount: 4000,
+        serviceFee: 0,
+        organizerFeePercent: 0,
+        participants: [{ userId: await seedUser(prisma, 'USER') }],
+      });
+
+      // Stub do bloco `tickets` espelha o catálogo (inclui o ingresso sem venda).
+      const originalFindAll = ticketsServiceStub.findAll;
+      ticketsServiceStub.findAll = async () => ({
+        message: 'Tickets fetched successfully',
+        data: {
+          tickets: [
+            { id: a.ticketId, name: 'Ingresso A' },
+            { id: b.ticketId, name: 'Ingresso B' },
+            { id: c.ticketId, name: 'Ingresso C (sem venda)' },
+          ],
+          pagination: { page: 1, limit: 20, total: 3, totalPages: 1 },
+        },
+      });
+
+      try {
+        const res: any = await service.getRankings(adminUserId, eventId, {
+          period: DashboardPeriod.GERAL,
+        } as any);
+
+        const list = res.data.tickets.data.tickets;
+        const byId = new Map(list.map((t: any) => [t.id, t.organizerNet]));
+        expect(byId.get(a.ticketId)).toBe(10000);
+        expect(byId.get(b.ticketId)).toBe(4000);
+        // Sem venda no período → 0 (e bate com o ticketRanking).
+        expect(byId.get(c.ticketId)).toBe(0);
+      } finally {
+        ticketsServiceStub.findAll = originalFindAll;
+      }
+    });
+
     it('vendas por método de pagamento somam o líquido por método (1 pedido = 1 venda)', async () => {
       const { adminUserId, eventId } = await seedOrgUserEvent(prisma);
       const { ticketId, batchId } = await seedTicketWithBatch(eventId);

@@ -16,12 +16,37 @@ import { Prisma } from '@prisma/client';
 const UNIQUE_FIELD_LABELS: Record<string, string> = {
   document: 'documento (CPF/CNPJ)',
   documentNumberClean: 'documento (CPF/CNPJ)',
+  documentNumber: 'documento (CPF/CNPJ)',
   email: 'e-mail',
   slug: 'slug',
   code: 'código',
   phone: 'telefone',
   name: 'nome',
 };
+
+/**
+ * Campos cujo valor é um documento (CPF ou CNPJ no mesmo campo). Mapeia o nome do
+ * campo do unique constraint para os possíveis nomes no body da request, pra inferir
+ * o rótulo PRECISO ("CNPJ"/"CPF") a partir do número enviado. Sem isso, todo conflito
+ * de documento vira o genérico "documento (CPF/CNPJ)".
+ */
+const DOCUMENT_FIELD_BODY_KEYS: Record<string, string[]> = {
+  document: ['document'],
+  documentNumberClean: ['documentNumberClean', 'documentNumber'],
+  documentNumber: ['documentNumber', 'documentNumberClean'],
+};
+
+/**
+ * Rótulo preciso de um documento a partir do valor cru: 14 dígitos → CNPJ,
+ * 11 → CPF. Qualquer outro tamanho (ou valor ausente) cai no genérico, evitando
+ * afirmar o tipo errado.
+ */
+function documentLabelFromValue(raw: unknown): string {
+  const digits = typeof raw === 'string' || typeof raw === 'number' ? String(raw).replace(/\D/g, '') : '';
+  if (digits.length === 14) return 'CNPJ';
+  if (digits.length === 11) return 'CPF';
+  return UNIQUE_FIELD_LABELS.document;
+}
 
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
@@ -37,13 +62,22 @@ export class AllExceptionsFilter implements ExceptionFilter {
    */
   private mapPrismaError(
     e: Prisma.PrismaClientKnownRequestError,
+    body?: any,
   ): { status: HttpStatus; message: string; code: string } | null {
     switch (e.code) {
       case 'P2002': {
         // meta.target: string[] (campos) ou string (nome do índice), conforme o caso.
         const target = e.meta?.target;
         const fields = Array.isArray(target) ? target.map(String) : target ? [String(target)] : [];
-        const labels = fields.map((f) => UNIQUE_FIELD_LABELS[f] ?? f);
+        const labels = fields.map((f) => {
+          // Campo de documento: tenta inferir CPF vs CNPJ pelo valor enviado.
+          const bodyKeys = DOCUMENT_FIELD_BODY_KEYS[f];
+          if (bodyKeys && body && typeof body === 'object') {
+            const value = bodyKeys.map((k) => body[k]).find((v) => v != null);
+            if (value != null) return documentLabelFromValue(value);
+          }
+          return UNIQUE_FIELD_LABELS[f] ?? f;
+        });
         const fieldsTxt = labels.length ? ` para: ${labels.join(', ')}` : '';
         return {
           status: HttpStatus.CONFLICT,
@@ -137,7 +171,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       }
     } else if (exception instanceof Prisma.PrismaClientKnownRequestError) {
       // Erro CONHECIDO do Prisma (P2002 unique, P2025 not found, P2003 FK...).
-      const mapped = this.mapPrismaError(exception);
+      const mapped = this.mapPrismaError(exception, request?.body);
       if (mapped) {
         httpStatus = mapped.status;
         message = mapped.message;

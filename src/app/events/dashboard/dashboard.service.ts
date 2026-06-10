@@ -250,6 +250,18 @@ export class DashboardService {
         total: Number(r.total_net),
       }));
 
+    // Líquido do organizador POR INGRESSO (centavos), reusando o mesmo rateio do
+    // ticketRanking (fonte única de verdade: queryTicketRanking → mesma fórmula do
+    // repasse/computeRefundImpact, já considera cupom e produtos via finalAmount).
+    // Sem query extra: derivamos do rankingRows já carregado. Só itens de ticket
+    // (is_modality=false) têm item_id == ticket.id.
+    const netByTicketId = new Map<string, number>(
+      rankingRows
+        .filter((r) => !r.is_modality)
+        .map((r) => [r.item_id, Number(r.total_net)]),
+    );
+    const ticketsWithNet = this.injectOrganizerNetIntoTickets(tickets, netByTicketId);
+
     const response = {
       message: 'Dashboard rankings fetched successfully',
       data: {
@@ -262,7 +274,7 @@ export class DashboardService {
             totalPages: Math.ceil(total / ticketRankingLimit),
           },
         },
-        tickets,
+        tickets: ticketsWithNet,
         topProductVariations,
         lotsNearDepletion,
         salesByPaymentMethod,
@@ -479,6 +491,33 @@ export class DashboardService {
         ${this.sqlTicketIdsFilter(ticketIds, 'r')}
       GROUP BY bucket_key;
     `);
+  }
+
+  /**
+   * Injeta `organizerNet` (centavos, líquido do organizador no período) em cada
+   * ingresso do bloco `tickets`, sem mutar o objeto recebido (que pode vir do
+   * cache compartilhado do TicketsService). Ingressos sem venda no período → 0.
+   *
+   * Defensivo contra mudanças de shape do TicketsService.findAll: se a estrutura
+   * esperada não existir, retorna o objeto original intacto.
+   */
+  private injectOrganizerNetIntoTickets(
+    tickets: any,
+    netByTicketId: Map<string, number>,
+  ): any {
+    const list = tickets?.data?.tickets;
+    if (!Array.isArray(list)) return tickets;
+
+    return {
+      ...tickets,
+      data: {
+        ...tickets.data,
+        tickets: list.map((t: any) => ({
+          ...t,
+          organizerNet: netByTicketId.get(t.id) ?? 0,
+        })),
+      },
+    };
   }
 
   /**

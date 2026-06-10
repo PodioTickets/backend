@@ -59,10 +59,12 @@ describe('OrderFinalizationService — métodos compartilhados', () => {
   });
 
   describe('reverseSaleSideEffects', () => {
-    const mkTx = (order: any) => ({
+    const mkTx = (order: any, regProducts: any[] = []) => ({
       order: { findUnique: jest.fn().mockResolvedValue(order) },
       $executeRaw: jest.fn().mockResolvedValue(1),
       voucher: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      // Reversão de estoque/venda de produto lê os RegistrationProduct do pedido.
+      registrationProduct: { findMany: jest.fn().mockResolvedValue(regProducts) },
     });
 
     it('cupom QUANTITY → decrementa 1', async () => {
