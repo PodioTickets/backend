@@ -84,20 +84,21 @@ function baseCookieOptions() {
   // domínio-pai em produção, ou quando COOKIE_DOMAIN é setado explicitamente.
   const configuredDomain = process.env.COOKIE_DOMAIN?.trim();
   const domain = configuredDomain || (isProd ? ".podioticket.com.br" : undefined);
-  // SameSite por ambiente:
-  //  - PROD: `Lax`. app./api.<domínio> são SAME-SITE (mesmo domínio registrável),
-  //    então o cookie viaja normalmente e o `Lax` ainda barra CSRF nos POST
-  //    cross-site (o vetor perigoso). Mantém a proteção.
-  //  - DEV: `None` + `Secure`. Aqui front (ex.: `tenant.localhost:3000`) e API
-  //    (`localhost:3333`) são CROSS-SITE para o browser (`.localhost` é TLD
-  //    especial e não compartilha cookie), e com `Lax` o cookie httpOnly NÃO é
-  //    anexado na XHR → todo request autenticado dá 401. `None` faz o cookie
-  //    viajar cross-site; `Secure` é exigido pelo `None` e é aceito em
-  //    `http://localhost` por ser secure-context. Trade-off DELIBERADO e restrito
-  //    a dev: perde-se a proteção CSRF do `Lax`, mas dev não é fronteira de
-  //    segurança. NUNCA deixar `None` chegar em produção (guard no `isProd`).
-  const sameSite: 'lax' | 'none' = isProd ? 'lax' : 'none';
-  // `None` obriga `Secure`; em prod já é https. Por isso `secure` é true nos dois.
+  // SameSite NÃO é decidido pelo NODE_ENV — é decidido pela TOPOLOGIA (front e API
+  // compartilham domínio-pai ou não). O sinal disso é o `COOKIE_DOMAIN`/prod:
+  //  - Há domínio-pai (COOKIE_DOMAIN setado OU prod) → front e API são SAME-SITE
+  //    (ex.: app./api.podioticket.com.br, inclusive no HOMOLOG rodando como
+  //    development). Usa `Lax`: o cookie viaja entre os subdomínios E mantém a
+  //    proteção CSRF nos POST cross-site. ESTE é o caminho de qualquer deploy real.
+  //  - Sem domínio-pai → dev LOCAL com `tenant.localhost:3000` ↔ `localhost:3333`,
+  //    que são CROSS-SITE pro browser (`.localhost` é TLD especial). Aí o `Lax`
+  //    barraria o cookie na XHR → precisa de `None` (+ `Secure`, aceito em
+  //    `http://localhost` por ser secure-context). Sem domínio-pai = sem CSRF, mas
+  //    é só a máquina local, não uma fronteira de segurança.
+  // Resultado: homolog (development + COOKIE_DOMAIN) ganha Lax + CSRF, sem precisar
+  // virar production. O `None` fica restrito a quem NÃO tem domínio-pai (dev local).
+  const sharesParentDomain = !!configuredDomain || isProd;
+  const sameSite: 'lax' | 'none' = sharesParentDomain ? 'lax' : 'none';
   const secure = true;
   return {
     httpOnly: true,
