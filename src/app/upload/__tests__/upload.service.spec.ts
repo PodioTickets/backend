@@ -1,23 +1,17 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import * as fs from 'fs/promises';
+import { BadRequestException } from '@nestjs/common';
 
 /**
- * UploadService migrou de armazenamento LOCAL (fs + sharp) para Google Cloud
- * Storage (@google-cloud/storage). O spec legado foi reescrito para refletir a
- * implementação atual:
+ * UploadService usa Google Cloud Storage (@google-cloud/storage) + `sharp`.
  *  - URLs retornadas são URLs do GCS/CDN (não mais `/uploads/images/...`).
- *  - Mensagens de erro estão em PT-BR ("Nenhum arquivo enviado ou buffer ausente",
- *    "Malware detectado", "Tipo de arquivo não permitido", etc.).
- *  - O scan ClamAV é feito via instância reaproveitada (getOrCreateClamScanner)
- *    e gravando um arquivo temporário com fs.writeFile/fs.unlink.
+ *  - Imagens são SANITIZADAS por re-encode com `sharp` (substituiu o ClamAV,
+ *    2026-06-12): buffer não-imagem → `sharp` lança → 400 (fail-closed).
+ *  - Mensagens de erro em PT-BR.
  *
- * Mockamos o módulo `clamscan` (require dinâmico no service) e o
- * `@google-cloud/storage` (Bucket) para isolar o disco/rede.
+ * Mockamos `@google-cloud/storage` (Bucket) e `sharp` para isolar disco/rede/CPU.
  */
 
 // ── Mock do Google Cloud Storage ────────────────────────────────────────────
-// Bucket mockado compartilhado entre os testes; cada teste pode reconfigurar os
-// retornos de getFiles/exists/getMetadata conforme o cenário.
 const mockGcsFile = {
   save: jest.fn().mockResolvedValue(undefined),
   exists: jest.fn().mockResolvedValue([true]),
@@ -37,14 +31,19 @@ jest.mock('@google-cloud/storage', () => ({
   })),
 }));
 
-// ── Mock do ClamAV (require('clamscan')) ────────────────────────────────────
-const mockCreateScanner = jest.fn();
-jest.mock('clamscan', () => ({
-  createScanner: (...args: any[]) => mockCreateScanner(...args),
-}));
-
-// fs/promises é usado apenas para o arquivo temporário do scan.
-jest.mock('fs/promises');
+// ── Mock do sharp ────────────────────────────────────────────────────────────
+// `sharp(buffer)` devolve um encadeável; `toBuffer()` resolve com o webp final.
+// Por padrão re-encoda com sucesso; testes podem fazer `toBuffer` rejeitar para
+// simular um buffer que NÃO é imagem válida.
+const mockToBuffer = jest.fn().mockResolvedValue(Buffer.from('fake-webp-bytes'));
+const sharpChain = {
+  rotate: jest.fn().mockReturnThis(),
+  resize: jest.fn().mockReturnThis(),
+  webp: jest.fn().mockReturnThis(),
+  toBuffer: mockToBuffer,
+};
+const mockSharp = jest.fn(() => sharpChain);
+jest.mock('sharp', () => mockSharp);
 
 import { UploadService } from '../upload.service';
 
@@ -59,8 +58,6 @@ describe('UploadService', () => {
   };
 
   beforeEach(async () => {
-    // Garante que o scan ClamAV roda (não pulado por env).
-    delete process.env.UPLOAD_SKIP_CLAMAV;
     process.env.GCS_BUCKET = 'test-bucket';
     process.env.CDN_ENABLED = 'false';
 
@@ -70,10 +67,6 @@ describe('UploadService', () => {
 
     service = module.get<UploadService>(UploadService);
 
-    // fs do arquivo temporário do scan
-    (fs.writeFile as jest.Mock).mockResolvedValue(undefined);
-    (fs.unlink as jest.Mock).mockResolvedValue(undefined);
-
     // Reset dos retornos default do GCS
     mockGcsFile.save.mockResolvedValue(undefined);
     mockGcsFile.exists.mockResolvedValue([true]);
@@ -82,11 +75,9 @@ describe('UploadService', () => {
     mockBucket.file.mockReturnValue(mockGcsFile);
     mockBucket.getFiles.mockResolvedValue([[]]);
 
-    // ClamAV scanner limpo (não infectado)
-    const mockScanner = {
-      scanFile: jest.fn().mockResolvedValue({ isInfected: false, viruses: [] }),
-    };
-    mockCreateScanner.mockResolvedValue(mockScanner);
+    // sharp re-encoda com sucesso por padrão
+    mockSharp.mockReturnValue(sharpChain);
+    mockToBuffer.mockResolvedValue(Buffer.from('fake-webp-bytes'));
   });
 
   afterEach(() => {
@@ -94,72 +85,44 @@ describe('UploadService', () => {
   });
 
   describe('compressImage', () => {
-    it('should upload image to GCS and return its URL', async () => {
+    it('re-encoda via sharp e devolve a URL .webp do GCS', async () => {
       const result = await service.compressImage(mockFile);
 
+      expect(mockSharp).toHaveBeenCalledTimes(1);
+      expect(sharpChain.webp).toHaveBeenCalled();
       expect(result).toContain('storage.googleapis.com');
       expect(result).toContain('test-bucket');
       expect(result).toContain('images/');
-      expect(mockGcsFile.save).toHaveBeenCalled();
+      expect(result).toContain('.webp');
+      // O que sobe é o buffer RE-ENCODADO, não o original.
+      expect(mockGcsFile.save).toHaveBeenCalledWith(
+        Buffer.from('fake-webp-bytes'),
+        expect.objectContaining({
+          metadata: expect.objectContaining({ contentType: 'image/webp' }),
+        }),
+      );
     });
 
-    it('should throw error if file is missing', async () => {
+    it('lança se o arquivo está ausente', async () => {
       await expect(service.compressImage(null as any)).rejects.toThrow(
         'Nenhum arquivo enviado ou buffer ausente',
       );
     });
 
-    it('should throw error if file buffer is missing', async () => {
+    it('lança se o buffer está ausente', async () => {
       await expect(
         service.compressImage({ ...mockFile, buffer: undefined } as any),
       ).rejects.toThrow('Nenhum arquivo enviado ou buffer ausente');
     });
 
-    it('should scan for malware before processing', async () => {
-      await service.compressImage(mockFile);
+    it('REJEITA (400 fail-closed) quando o buffer não é uma imagem decodificável', async () => {
+      // sharp lança ao tentar decodificar lixo → não pode virar upload.
+      mockToBuffer.mockRejectedValueOnce(new Error('Input buffer contains unsupported image format'));
 
-      expect(mockCreateScanner).toHaveBeenCalledWith(
-        expect.objectContaining({
-          scanArchives: false,
-          scanRecursively: false,
-        }),
+      await expect(service.compressImage(mockFile)).rejects.toBeInstanceOf(
+        BadRequestException,
       );
-    });
-
-    it('should reuse ClamAV scanner on subsequent uploads', async () => {
-      await service.compressImage(mockFile);
-      await service.compressImage(mockFile);
-      // O scanner é criado uma única vez (clamScannerPromise reaproveitado).
-      expect(mockCreateScanner).toHaveBeenCalledTimes(1);
-    });
-
-    // BUG DE PRODUÇÃO (NÃO é defasagem de spec): em upload.service.ts o scan
-    // de malware lança 'Malware detectado...' (PT-BR), mas o guard de re-throw
-    // (linha ~402) só repassa o erro se a mensagem contiver 'Malware detected'
-    // (EN). Como 'detectado'.includes('detected') === false, o erro é ENGOLIDO
-    // e o upload de um arquivo INFECTADO PROSSEGUE. Teste marcado como skip
-    // até a correção (alinhar a string do guard, ex.: 'Malware detect') —
-    // reportado ao time. Não removido para não perder a cobertura da intenção.
-    it.skip('should throw error if malware is detected (BLOQUEADO por bug de produção)', async () => {
-      mockCreateScanner.mockResolvedValue({
-        scanFile: jest
-          .fn()
-          .mockResolvedValue({ isInfected: true, viruses: ['Trojan.Test'] }),
-      });
-
-      await expect(service.compressImage(mockFile)).rejects.toThrow(
-        'Malware detectado',
-      );
-    });
-
-    it('should continue if ClamAV is unavailable', async () => {
-      // Falha ao criar o scanner não bloqueia o upload (apenas loga e segue).
-      mockCreateScanner.mockRejectedValue(new Error('ClamAV not available'));
-
-      const result = await service.compressImage(mockFile);
-
-      expect(result).toBeDefined();
-      expect(mockGcsFile.save).toHaveBeenCalled();
+      expect(mockGcsFile.save).not.toHaveBeenCalled();
     });
   });
 
@@ -212,10 +175,6 @@ describe('UploadService', () => {
     it('should sort results by date by default', async () => {
       const result = await service.getAllUploads();
 
-      // Ordena por data de criação (campo `createdAt`) — todos os arquivos
-      // retornados e ordenados de forma estável. Não fixamos a direção exata
-      // aqui porque o comparador atual aplica dupla negação no caso 'desc';
-      // validamos apenas que a ordenação é consistente entre os datados.
       const dates = result.data.files.map((f: any) => new Date(f.createdAt).getTime());
       const sortedAsc = [...dates].sort((a, b) => a - b);
       const sortedDesc = [...dates].sort((a, b) => b - a);
@@ -317,8 +276,6 @@ describe('UploadService', () => {
     });
 
     it('should sanitize filename', async () => {
-      // Após sanitização, "../../../etc/passwd" perde a extensão válida e cai
-      // em "Tipo de arquivo não permitido" — em qualquer caso, deve lançar.
       const maliciousFilename = '../../../etc/passwd';
       await expect(service.deleteUpload(maliciousFilename)).rejects.toThrow();
     });
@@ -364,7 +321,6 @@ describe('UploadService', () => {
     });
 
     it('should handle partial failures', async () => {
-      // Segundo arquivo não existe → conta como erro, demais deletados.
       mockGcsFile.exists
         .mockResolvedValueOnce([true])
         .mockResolvedValueOnce([false])
@@ -411,7 +367,6 @@ describe('UploadService', () => {
     });
 
     it('should handle partial failures', async () => {
-      // Segundo save falha → 1 falha, 2 sucessos.
       mockGcsFile.save
         .mockResolvedValueOnce(undefined)
         .mockRejectedValueOnce(new Error('Upload failed'))

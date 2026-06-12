@@ -14,6 +14,11 @@ import {
 import * as bcrypt from 'bcryptjs';
 import { Gender, Language } from '@prisma/client';
 
+// bcryptjs v3 exporta funções não-reconfiguráveis → `jest.spyOn(bcrypt,'compare')`
+// lança "Cannot redefine property". Auto-mock do módulo resolve: cada função vira
+// jest.fn() e os testes setam o retorno com `(bcrypt.compare as jest.Mock)`.
+jest.mock('bcryptjs');
+
 describe('AuthService', () => {
   let service: AuthService;
   let jwtService: JwtService;
@@ -120,7 +125,7 @@ describe('AuthService', () => {
     };
 
     beforeEach(() => {
-      jest.spyOn(bcrypt, 'compare').mockImplementation(() => Promise.resolve(true));
+      (bcrypt.compare as jest.Mock).mockResolvedValue(true);
     });
 
     it('should validate user by email successfully', async () => {
@@ -133,7 +138,7 @@ describe('AuthService', () => {
       expect(result.email).toBe(mockUser.email);
       expect(result.password).toBeUndefined();
       expect(mockPrismaService.user.findUnique).toHaveBeenCalledWith({
-        where: { email: 'test@example.com' },
+        where: { email_accountType: { email: 'test@example.com', accountType: 'USER' } },
         select: expect.any(Object),
       });
     });
@@ -145,7 +150,12 @@ describe('AuthService', () => {
 
       expect(result).toBeDefined();
       expect(mockPrismaService.user.findUnique).toHaveBeenCalledWith({
-        where: { documentNumber: '12345678901' },
+        where: {
+          documentNumberClean_accountType: {
+            documentNumberClean: '12345678901',
+            accountType: 'USER',
+          },
+        },
         select: expect.any(Object),
       });
     });
@@ -171,7 +181,7 @@ describe('AuthService', () => {
 
     it('should return null if password is invalid', async () => {
       mockPrismaService.user.findUnique.mockResolvedValue(mockUser);
-      jest.spyOn(bcrypt, 'compare').mockImplementation(() => Promise.resolve(false));
+      (bcrypt.compare as jest.Mock).mockResolvedValue(false);
 
       const result = await service.validateUser('test@example.com', 'wrongpassword');
 
@@ -294,7 +304,10 @@ describe('AuthService', () => {
     };
 
     beforeEach(() => {
-      jest.spyOn(bcrypt, 'hash').mockImplementation(() => Promise.resolve('hashedPassword'));
+      (bcrypt.hash as jest.Mock).mockResolvedValue('hashedPassword');
+      // register() faz auto-login no fim → precisa de JWT secret + sign mockados.
+      mockConfigService.get.mockReturnValue('test-secret');
+      mockJwtService.sign.mockReturnValue('access-token');
     });
 
     it('should register user successfully', async () => {
@@ -303,8 +316,10 @@ describe('AuthService', () => {
 
       const result = await service.register(registerDto);
 
-      expect(result).toHaveProperty('message', 'User registered successfully');
-      expect(result.data.user).toEqual(mockCreatedUser);
+      // register() faz auto-login no fim → devolve o resultado do login.
+      expect(result).toHaveProperty('message', 'Login successful');
+      expect(result.data).toHaveProperty('access_token');
+      expect(result.data.user.id).toBe(mockCreatedUser.id);
       expect(mockPrismaService.user.findUnique).toHaveBeenCalledTimes(2);
       expect(mockPrismaService.user.create).toHaveBeenCalled();
     });
@@ -341,7 +356,7 @@ describe('AuthService', () => {
         ConflictException,
       );
       await expect(service.register(registerDto)).rejects.toThrow(
-        'User with this email already exists',
+        'Já existe um usuário com este e-mail',
       );
     });
 
@@ -396,6 +411,7 @@ describe('AuthService', () => {
       lastName: 'Doe',
       documentNumber: '12345678901',
       role: 'USER',
+      accountType: 'USER',
     };
 
     beforeEach(() => {
@@ -417,6 +433,7 @@ describe('AuthService', () => {
       expect(mockJwtService.sign).toHaveBeenCalledWith({
         email: mockUser.email,
         sub: mockUser.id,
+        accountType: 'USER',
       });
     });
 
@@ -428,8 +445,9 @@ describe('AuthService', () => {
       await expect(service.login(mockUser)).rejects.toThrow(
         UnauthorizedException,
       );
+      // O service repassa a mensagem do erro interno (error?.message).
       await expect(service.login(mockUser)).rejects.toThrow(
-        'Failed to generate tokens',
+        'Token generation failed',
       );
     });
   });
@@ -486,7 +504,7 @@ describe('AuthService', () => {
         UnauthorizedException,
       );
       await expect(service.refreshToken(refreshTokenDto)).rejects.toThrow(
-        'Invalid refresh token',
+        'Token de atualização inválido',
       );
     });
 
@@ -512,7 +530,7 @@ describe('AuthService', () => {
       );
     });
 
-    it('should use JWT_SECRET if JWT_REFRESH_SECRET is not available', async () => {
+    it('deriva segredo de refresh DISTINTO do JWT_SECRET quando JWT_REFRESH_SECRET ausente', async () => {
       mockConfigService.get
         .mockReturnValueOnce(undefined) // JWT_REFRESH_SECRET
         .mockReturnValueOnce('jwt-secret'); // JWT_SECRET
@@ -521,8 +539,9 @@ describe('AuthService', () => {
 
       await service.refreshToken(refreshTokenDto);
 
+      // resolveRefreshSecret() → `${JWT_SECRET}:refresh` (nunca igual ao access).
       expect(mockJwtService.verify).toHaveBeenCalledWith(refreshTokenDto.refreshToken, {
-        secret: 'jwt-secret',
+        secret: 'jwt-secret:refresh',
       });
     });
   });
@@ -546,7 +565,7 @@ describe('AuthService', () => {
       const result = await service.forgotPassword(forgotPasswordDto);
 
       expect(result).toHaveProperty('message');
-      expect(result.message).toContain('password reset link has been sent');
+      expect(result.message).toContain('redefinir a senha');
     });
 
     it('should return success message if user exists', async () => {
@@ -558,7 +577,7 @@ describe('AuthService', () => {
       const result = await service.forgotPassword(forgotPasswordDto);
 
       expect(result).toHaveProperty('message');
-      expect(result.message).toContain('password reset link has been sent');
+      expect(result.message).toContain('redefinir a senha');
     });
   });
 
@@ -569,13 +588,28 @@ describe('AuthService', () => {
     };
 
     beforeEach(() => {
-      jest.spyOn(bcrypt, 'hash').mockImplementation(() => Promise.resolve('hashedPassword'));
+      (bcrypt.hash as jest.Mock).mockResolvedValue('hashedPassword');
     });
 
     it('should reset password successfully', async () => {
+      // Token não-JWT → caminho opaque: precisa do payload no cache + usuário.
+      mockCacheManager.get.mockResolvedValue({
+        userId: 'user-id',
+        email: 'test@example.com',
+        accountType: 'USER',
+      });
+      mockPrismaService.user.findUnique.mockResolvedValue({
+        id: 'user-id',
+        email: 'test@example.com',
+        firstName: 'John',
+        isActive: true,
+        password: null,
+      });
+      mockPrismaService.user.update.mockResolvedValue({ id: 'user-id' });
+
       const result = await service.resetPassword(resetPasswordDto);
 
-      expect(result).toHaveProperty('message', 'Password reset successfully');
+      expect(result).toHaveProperty('message', 'Senha redefinida com sucesso');
     });
 
     it('should throw BadRequestException if password is too short', async () => {
@@ -588,7 +622,7 @@ describe('AuthService', () => {
         BadRequestException,
       );
       await expect(service.resetPassword(shortPasswordDto)).rejects.toThrow(
-        'Password must be at least 8 characters long',
+        'A senha deve ter no mínimo 8 caracteres',
       );
     });
   });

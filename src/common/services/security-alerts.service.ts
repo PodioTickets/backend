@@ -57,8 +57,15 @@ export class SecurityAlertsService implements OnModuleInit {
       type: 'email',
       enabled: true,
       config: {
-        recipients: this.configService.get<string>('ALERT_EMAIL_RECIPIENTS', 'admin@loot4fun.com').split(','),
-        subject: '🚨 Loot4Fun Security Alert',
+        // Sem domínio padrão: se ALERT_EMAIL_RECIPIENTS não estiver setado, NÃO
+        // envia pra um destino externo herdado de outro projeto. Vazio = sem
+        // destinatário (o envio é ignorado), em vez de mandar pra fora.
+        recipients: this.configService
+          .get<string>('ALERT_EMAIL_RECIPIENTS', '')
+          .split(',')
+          .map((r) => r.trim())
+          .filter(Boolean),
+        subject: '🚨 PodioTickets Security Alert',
       },
       rules: [
         { id: 'high-severity', name: 'High Severity Alerts', severity: 'high', enabled: true, cooldown: 5 * 60 * 1000 },

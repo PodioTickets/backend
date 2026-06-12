@@ -10,7 +10,6 @@ import { useContainer } from 'class-validator';
 import helmet from 'helmet';
 import { SecurityHeadersInterceptor } from './common/interceptors/security-headers.interceptor';
 import { ConcurrencyLimiterMiddleware } from './common/middleware/concurrency-limiter.middleware';
-import { SSRFProtectionMiddleware } from './common/middleware/ssrf-protection.middleware';
 import { HttpAdapterHost } from '@nestjs/core';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import compression from 'compression';
@@ -19,6 +18,7 @@ import session from 'express-session';
 import express, { type Request, type Response } from 'express';
 import cookieParser from 'cookie-parser';
 import { initializeSentry } from './config/sentry.config';
+import { ALLOWED_ORIGINS } from './common/config/allowed-origins';
 
 type RequestWithRawBody = Request & { rawBody?: Buffer };
 
@@ -62,57 +62,7 @@ async function bootstrap() {
   app.use(compression());
   app.use(cookieParser());
 
-  const allowedOrigins = [
-    'http://localhost:3000',
-    'http://app.localhost:3000',
-    "http://test890.localhost:3000",
-    'https://podioticket.com.br',
-    'https://www.podioticket.com.br',
-    'https://app.podioticket.com.br',
-    'https://test890.podioticket.com.br',
-    'https://homologacao.podioticket.com.br',
-    'https://homologacao.app.podioticket.com.br',
-    'https://homologacao.test890.podioticket.com.br',
-  ];
-
-  app.use((req, res, next) => {
-    if (req.method === 'OPTIONS') {
-      const origin = req.headers.origin;
-      if (origin && allowedOrigins.includes(origin)) {
-        res.header('Access-Control-Allow-Origin', origin);
-      }
-      res.header(
-        'Access-Control-Allow-Methods',
-        'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-      );
-      res.header(
-        'Access-Control-Allow-Headers',
-        'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With,Idempotency-Key,x-session-id',
-      );
-      res.header('Access-Control-Allow-Credentials', 'true');
-      res.header('Access-Control-Max-Age', '86400');
-      res.status(204).end();
-      return;
-    }
-    next();
-  });
-
-  app.use('/api/v1/auth', (req, res, next) => {
-    const origin = req.headers.origin;
-    if (origin && allowedOrigins.includes(origin)) {
-      res.header('Access-Control-Allow-Origin', origin);
-    }
-    res.header(
-      'Access-Control-Allow-Methods',
-      'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-    );
-    res.header(
-      'Access-Control-Allow-Headers',
-      'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With,x-session-id',
-    );
-    res.header('Access-Control-Allow-Credentials', 'true');
-    next();
-  });
+  const allowedOrigins = ALLOWED_ORIGINS;
 
   app.use(
     session({
@@ -145,7 +95,10 @@ async function bootstrap() {
       crossOriginEmbedderPolicy: false,
       crossOriginOpenerPolicy: false,
       crossOriginResourcePolicy: { policy: 'cross-origin' },
-      hsts: false,
+      // HSTS só em prod (https). Em dev (http) o browser ignora; ligar atrapalha.
+      // Fonte ÚNICA dos security headers agora é o helmet — não há mais middleware
+      // manual setando HSTS/nosniff/referrer (removido com a consolidação do CORS).
+      hsts: isDev ? false : { maxAge: 31536000, includeSubDomains: true },
     }),
   );
 
@@ -174,68 +127,13 @@ async function bootstrap() {
       // Telemetria de atividade (UserActivityLog) — sem ele o preflight do
       // browser bloqueia TODA request do front (que envia o header sempre)
       'x-session-id',
+      // Superfície de sessão (admin/organizer/client) — idem: o front envia em
+      // toda request; sem o allow-header o preflight cross-origin bloquearia tudo.
+      'x-pt-surface',
     ],
     credentials: true,
     preflightContinue: false,
     optionsSuccessStatus: 204,
-  });
-
-  app.use((req, res, next) => {
-    const origin = req.headers.origin;
-
-    if (
-      isDev ||
-      req.path.startsWith('/uploads/') ||
-      req.path.startsWith('/api/v1/auth') ||
-      req.path.startsWith('/api/v1/upload') ||
-      req.path.startsWith('/api/v1/payments/sandbox/') ||
-      // Webhook da Cielo é server-to-server, SEM header Origin — não pode ser
-      // bloqueado pelo guard de origem (a autenticidade é validada via assinatura
-      // cielo-signature no handler). Sem esta isenção, a Cielo recebe 403 e o
-      // pagamento PIX nunca é confirmado.
-      req.path === '/api/v1/payments/webhook' ||
-      req.headers['x-api-bypass'] ===
-      configService.get<string>('API_BYPASS_SECRET')
-    ) {
-      if (origin && allowedOrigins.includes(origin)) {
-        res.header('Access-Control-Allow-Origin', origin);
-      } else {
-        res.header('Access-Control-Allow-Origin', '*');
-      }
-      res.header(
-        'Access-Control-Allow-Methods',
-        'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-      );
-      res.header(
-        'Access-Control-Allow-Headers',
-        'Content-Type,Authorization,x-api-bypass,x-csrf-token,Origin,Accept,X-Requested-With,Idempotency-Key,x-session-id',
-      );
-      res.header('Access-Control-Allow-Credentials', 'true');
-      res.header('Access-Control-Max-Age', '86400');
-
-      if (req.method === 'OPTIONS') {
-        res.status(204).end();
-        return;
-      }
-      return next();
-    }
-
-    if (!origin || !allowedOrigins.includes(origin)) {
-      return res.status(403).json({
-        statusCode: 403,
-        message: 'Access Forbidden - Origin not allowed',
-      });
-    }
-
-    res.header('Access-Control-Allow-Origin', origin);
-    res.header('X-Content-Type-Options', 'nosniff');
-    res.header('X-XSS-Protection', '1; mode=block');
-    res.header(
-      'Strict-Transport-Security',
-      'max-age=31536000; includeSubDomains',
-    );
-    res.header('Referrer-Policy', 'strict-origin-when-cross-origin');
-    next();
   });
 
   if (isDev) {
@@ -274,10 +172,6 @@ async function bootstrap() {
   const concurrencyLimiter = new ConcurrencyLimiterMiddleware();
   app.use(concurrencyLimiter.use.bind(concurrencyLimiter));
 
-  app.use(
-    new SSRFProtectionMiddleware().use.bind(new SSRFProtectionMiddleware()),
-  );
-
   const uploadsPath = join(process.cwd(), 'uploads');
   app.use(
     '/uploads',
@@ -289,35 +183,61 @@ async function bootstrap() {
   );
 
   useContainer(app.select(AppModule), { fallbackOnErrors: true });
+
+  // Campos cujo valor NUNCA pode voltar no corpo do erro nem nos logs: senhas,
+  // tokens, segredos, documentos. Sem isto, uma falha de validação (ex.: senha
+  // curta) ecoava a própria senha submetida na resposta 400 e no log.
+  const SENSITIVE_FIELDS = new Set([
+    'password',
+    'currentPassword',
+    'newPassword',
+    'confirmPassword',
+    'oldPassword',
+    'token',
+    'refreshToken',
+    'refresh_token',
+    'accessToken',
+    'access_token',
+    'mfaToken',
+    'code',
+    'totpSecret',
+    'turnstileToken',
+    'cpf',
+    'documentNumber',
+  ]);
+  const redactValue = (property: string, value: any): any =>
+    SENSITIVE_FIELDS.has(property) ? '[REDACTED]' : value;
+  const validationExceptionFactory = (errors: any[]) => {
+    const formatError = (error: any): any => {
+      const constraints = error.constraints || {};
+      const messages = Object.values(constraints);
+      const formatted: any = {
+        property: error.property,
+        value: redactValue(error.property, error.value),
+        message:
+          messages[0] || `Validation failed for property ${error.property}`,
+        constraints: constraints,
+      };
+      if (error.children && error.children.length > 0) {
+        formatted.children = error.children.map((child: any) => formatError(child));
+      }
+      return formatted;
+    };
+    const formattedErrors = errors.map(formatError);
+    return new BadRequestException({
+      message: 'Validation failed',
+      errors: formattedErrors.map((e) => e.message),
+      details: formattedErrors,
+    });
+  };
+
   app.useGlobalPipes(
     new ValidationPipe({
       transform: true,
       forbidNonWhitelisted: true,
       whitelist: true,
       forbidUnknownValues: true,
-      exceptionFactory: (errors) => {
-        const formatError = (error: any): any => {
-          const constraints = error.constraints || {};
-          const messages = Object.values(constraints);
-          const formatted: any = {
-            property: error.property,
-            value: error.value,
-            message:
-              messages[0] || `Validation failed for property ${error.property}`,
-            constraints: constraints,
-          };
-          if (error.children && error.children.length > 0) {
-            formatted.children = error.children.map((child: any) => formatError(child));
-          }
-          return formatted;
-        };
-        const formattedErrors = errors.map(formatError);
-        return new BadRequestException({
-          message: 'Validation failed',
-          errors: formattedErrors.map((e) => e.message),
-          details: formattedErrors,
-        });
-      },
+      exceptionFactory: validationExceptionFactory,
     }),
   );
 

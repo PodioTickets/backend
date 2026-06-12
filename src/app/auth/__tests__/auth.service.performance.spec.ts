@@ -3,7 +3,13 @@ import { AuthService } from '../auth.service';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { EmailService } from '../../../common/services/email.service';
+import { HttpService } from '@nestjs/axios';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import * as bcrypt from 'bcryptjs';
+
+// bcryptjs v3: auto-mock (spyOn lança "Cannot redefine property"). Ver auth.service.spec.
+jest.mock('bcryptjs');
 
 describe('AuthService - Performance Tests', () => {
   let service: AuthService;
@@ -24,25 +30,34 @@ describe('AuthService - Performance Tests', () => {
     user: {
       findUnique: jest.fn(),
       create: jest.fn(),
+      update: jest.fn(),
     },
+    getReadClient: jest.fn(),
+    getWriteClient: jest.fn(),
+  };
+
+  const mockCacheManager = {
+    get: jest.fn().mockResolvedValue(null),
+    set: jest.fn().mockResolvedValue(undefined),
+    del: jest.fn().mockResolvedValue(undefined),
+  };
+
+  const mockHttpService = { get: jest.fn(), post: jest.fn() };
+  const mockEmailService = {
+    sendWelcomeUser: jest.fn().mockResolvedValue(undefined),
+    sendPasswordChangedNotification: jest.fn().mockResolvedValue(undefined),
   };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AuthService,
-        {
-          provide: JwtService,
-          useValue: mockJwtService,
-        },
-        {
-          provide: ConfigService,
-          useValue: mockConfigService,
-        },
-        {
-          provide: PrismaService,
-          useValue: mockPrismaService,
-        },
+        { provide: JwtService, useValue: mockJwtService },
+        { provide: ConfigService, useValue: mockConfigService },
+        { provide: PrismaService, useValue: mockPrismaService },
+        { provide: CACHE_MANAGER, useValue: mockCacheManager },
+        { provide: HttpService, useValue: mockHttpService },
+        { provide: EmailService, useValue: mockEmailService },
       ],
     }).compile();
 
@@ -51,8 +66,10 @@ describe('AuthService - Performance Tests', () => {
     configService = module.get<ConfigService>(ConfigService);
     prisma = module.get<PrismaService>(PrismaService);
 
-    jest.spyOn(bcrypt, 'compare').mockImplementation(() => Promise.resolve(true));
-    jest.spyOn(bcrypt, 'hash').mockImplementation(() => Promise.resolve('hashedPassword'));
+    mockPrismaService.getReadClient.mockReturnValue(mockPrismaService);
+    mockPrismaService.getWriteClient.mockReturnValue(mockPrismaService);
+    (bcrypt.compare as jest.Mock).mockResolvedValue(true);
+    (bcrypt.hash as jest.Mock).mockResolvedValue('hashedPassword');
   });
 
   afterEach(() => {

@@ -2,18 +2,17 @@
  * ============================================================================
  *  O QUE ESTE TESTE VERIFICA   (explicado para qualquer pessoa)
  * ============================================================================
- *  RECURSO: a checagem de "de onde veio o pedido" — uma proteção que, em ações que
- *           alteram dados (criar/editar/excluir), exige que o pedido tenha vindo do
- *           site oficial, não de um site estranho.
+ *  RECURSO: defesa CSRF stateless — em ações que ALTERAM dados (POST/PUT/PATCH/
+ *           DELETE), bloqueia o pedido quando o navegador declara uma ORIGEM
+ *           estrangeira (site que não é o nosso). Pedidos SEM origem (server-to-
+ *           server, webhook, app nativo) são liberados — não são CSRF.
  *
- *  O QUE PRECISA SEMPRE FUNCIONAR (cada item é um teste aqui embaixo):
- *    • Pedidos de leitura (GET) passam sempre.
- *    • Pedidos que alteram dados só passam se a origem for o site permitido.
- *    • Quando não há origem, mas há "referer" válido, usa o referer.
- *    • Origem desconhecida em ação que altera dados → bloqueado.
- *
- *  COMO CONFERIMOS:
- *    Montamos pedidos de mentira (método + origem) e conferimos se libera ou bloqueia. Sem banco.
+ *  O QUE PRECISA SEMPRE FUNCIONAR:
+ *    • Leitura (GET) passa sempre.
+ *    • Mutação com origem do site oficial → passa.
+ *    • Mutação usando o referer quando não há origin → passa se for do site.
+ *    • Mutação com origem ESTRANHA → bloqueada (provável CSRF).
+ *    • Mutação SEM origem nem referer → LIBERADA (não é navegador → não é CSRF).
  * ============================================================================
  */
 import { ForbiddenException } from '@nestjs/common';
@@ -33,7 +32,7 @@ describe('RequestOriginGuard', () => {
     expect(guard.canActivate(ctxFor('POST', { origin: 'http://localhost:3000' }))).toBe(true);
   });
 
-  it('POST usando o referer quando não há origin', () => {
+  it('PUT usando o referer quando não há origin', () => {
     expect(guard.canActivate(ctxFor('PUT', { referer: 'http://localhost:3000/checkout' }))).toBe(true);
   });
 
@@ -43,7 +42,13 @@ describe('RequestOriginGuard', () => {
     );
   });
 
-  it('POST sem origem nem referer é bloqueado', () => {
-    expect(() => guard.canActivate(ctxFor('DELETE', {}))).toThrow(ForbiddenException);
+  it('mutação SEM origem nem referer é LIBERADA (server-to-server/webhook, não é CSRF)', () => {
+    expect(guard.canActivate(ctxFor('DELETE', {}))).toBe(true);
+  });
+
+  it('referer de site estranho é bloqueado', () => {
+    expect(() => guard.canActivate(ctxFor('POST', { referer: 'http://site-malicioso.com/x' }))).toThrow(
+      ForbiddenException,
+    );
   });
 });

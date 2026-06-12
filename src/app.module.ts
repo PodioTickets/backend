@@ -9,6 +9,7 @@ import { ResponseCompressionInterceptor } from './common/interceptors/response-c
 import { ScheduleModule } from '@nestjs/schedule';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { IpThrottlerGuard } from './common/guards/ip-throttler.guard';
+import { RequestOriginGuard } from './common/guards/request-origin.guard';
 import { ConfigModule } from '@nestjs/config';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { CommonModule } from './common/common.module';
@@ -78,6 +79,9 @@ import { GeoModule } from './app/geo/geo.module';
     ResponseCompressionInterceptor,
     CdnService,
     { provide: APP_GUARD, useClass: IpThrottlerGuard },
+    // CSRF stateless: bloqueia mutações com Origin estrangeiro (libera sem Origin
+    // = server-to-server/webhook). Global pra cobrir toda rota que muda estado.
+    { provide: APP_GUARD, useClass: RequestOriginGuard },
     // HttpCacheInterceptor REMOVIDO (2026-05-31): não cacheamos resposta de NENHUMA rota GET
     // server-side. O cache-manager (CacheModule) continua para auth (rate-limit/MFA/reset) e os
     // caches internos de domínio usam CacheRedisService. Toda resposta sai fresca + `no-store`

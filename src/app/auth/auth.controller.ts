@@ -15,7 +15,6 @@ import {
   ForbiddenException,
   Request,
 } from '@nestjs/common';
-import * as crypto from 'crypto';
 import {
   ApiTags,
   ApiOperation,
@@ -51,7 +50,8 @@ import { NoCache } from 'src/common/decorators/cache.decorator';
 import {
   applyAuthCookiesFromResult,
   clearAuthCookies,
-  REFRESH_TOKEN_COOKIE,
+  resolveAuthSurface,
+  refreshCookieName,
 } from './auth-cookies.util';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { TrackActivity } from 'src/common/decorators/track-activity.decorator';
@@ -132,9 +132,9 @@ export class AuthController {
   })
   async loginEmail(@Request() req, @Res({ passthrough: true }) res: Response) {
     const result = await this.authService.login(req.user, { userAgent: req.headers?.['user-agent'] });
-    // Seta cookies httpOnly (no-op se for desafio MFA). Mantém tokens no body
-    // para compatibilidade durante a transição.
-    return applyAuthCookiesFromResult(res, result);
+    // Login do CLIENTE → cookies da superfície 'client' (no-op se desafio MFA).
+    // Mantém tokens no body para compatibilidade durante a transição.
+    return applyAuthCookiesFromResult(res, 'client', result);
   }
 
   @Post('login/admin')
@@ -160,7 +160,7 @@ export class AuthController {
       throw new ForbiddenException('Admin access required');
     }
     const result = await this.authService.login(req.user, { userAgent: req.headers?.['user-agent'] });
-    return applyAuthCookiesFromResult(res, result);
+    return applyAuthCookiesFromResult(res, 'admin', result);
   }
 
   @Post('login/organizer')
@@ -205,7 +205,7 @@ export class AuthController {
       throw new UnauthorizedException('Credenciais inválidas');
     }
     const result = await this.authService.login(user, { userAgent: req.headers?.['user-agent'] });
-    return applyAuthCookiesFromResult(res, result);
+    return applyAuthCookiesFromResult(res, 'organizer', result);
   }
 
   @Get('google')
@@ -301,6 +301,7 @@ export class AuthController {
     },
   })
   async validateGoogleCode(
+    @Request() req,
     @Body() body: { code: string; redirectUri: string },
     @Res({ passthrough: true }) res: Response,
   ) {
@@ -313,7 +314,9 @@ export class AuthController {
     }
 
     const result = await this.authService.validateGoogleCode(body.code, body.redirectUri);
-    return applyAuthCookiesFromResult(res, result);
+    // Superfície vem do header `x-pt-surface` (o front que finaliza o OAuth está
+    // numa superfície específica — cliente ou organizador via "entrar com Google").
+    return applyAuthCookiesFromResult(res, resolveAuthSurface(req), result);
   }
 
   @Post('refresh')
@@ -326,10 +329,11 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
     @Body() body: { refresh_token?: string; refreshToken?: string },
   ) {
-    // Token vem do cookie httpOnly (fluxo novo) ou do body (legado: o front
-    // enviava `refresh_token`). Não dependemos do DTO para suportar ambos.
+    // Refresh é por SUPERFÍCIE: lê o `pt_rt_<surface>` da superfície declarada no
+    // header. Token vem do cookie httpOnly (fluxo novo) ou do body (legado).
+    const surface = resolveAuthSurface(req);
     const token =
-      req.cookies?.[REFRESH_TOKEN_COOKIE] ||
+      req.cookies?.[refreshCookieName(surface)] ||
       body?.refresh_token ||
       body?.refreshToken;
     if (!token) {
@@ -337,7 +341,7 @@ export class AuthController {
     }
     // O service lê `refreshTokenDto.refreshToken` (camelCase).
     const result = await this.authService.refreshToken({ refreshToken: token });
-    return applyAuthCookiesFromResult(res, result);
+    return applyAuthCookiesFromResult(res, surface, result);
   }
 
   @Post('logout')
@@ -347,13 +351,16 @@ export class AuthController {
   @ApiResponse({ status: 200, description: 'Logged out successfully' })
   @ApiBearerAuth()
   async logout(@Request() req, @Res({ passthrough: true }) res: Response) {
+    // Logout SÓ da superfície atual — as outras sessões (admin/organizer/client)
+    // permanecem logadas.
+    const surface = resolveAuthSurface(req);
     const refreshToken =
-      req.cookies?.[REFRESH_TOKEN_COOKIE] || req.headers['x-refresh-token'];
+      req.cookies?.[refreshCookieName(surface)] || req.headers['x-refresh-token'];
     if (refreshToken) {
       await this.authService.logout(refreshToken);
     }
-    // Limpa os cookies httpOnly de auth no browser.
-    clearAuthCookies(res);
+    // Limpa os cookies httpOnly de auth DA SUPERFÍCIE no browser.
+    clearAuthCookies(res, surface);
     return { message: 'Logged out successfully' };
   }
 
@@ -606,9 +613,15 @@ export class AuthController {
   })
   @ApiResponse({ status: 400, description: 'Código incorreto, expirado ou tentativas esgotadas' })
   @ApiResponse({ status: 401, description: 'Token MFA inválido ou expirado' })
-  async verifyLoginMfa(@Body() dto: VerifyLoginMfaDto, @Res({ passthrough: true }) res: Response) {
+  async verifyLoginMfa(
+    @Request() req,
+    @Body() dto: VerifyLoginMfaDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     const result = await this.authService.verifyLoginMfa(dto.mfaToken, dto.code);
-    return applyAuthCookiesFromResult(res, result);
+    // MFA conclui o login iniciado numa superfície (admin/organizer/client) → o
+    // header `x-pt-surface` da request de verificação diz qual cookie setar.
+    return applyAuthCookiesFromResult(res, resolveAuthSurface(req), result);
   }
 
   @Post('2fa/resend-login-code')
@@ -624,71 +637,5 @@ export class AuthController {
   @ApiResponse({ status: 401, description: 'Token MFA inválido ou expirado' })
   async resendLoginMfaCode(@Body() dto: { mfaToken: string }, @Request() req) {
     return this.authService.resendLoginMfaCode(dto.mfaToken, { userAgent: req.headers?.['user-agent'] });
-  }
-
-  @Get('csrf-token')
-  @ApiOperation({
-    summary: 'Obter token CSRF para requisições da API',
-    description:
-      'Gera um token CSRF seguro que deve ser usado no header x-csrf-token para endpoints protegidos como compras.',
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'CSRF token generated successfully',
-    schema: {
-      type: 'object',
-      properties: {
-        csrfToken: {
-          type: 'string',
-          example: '1703123456789.a1b2c3d4e5f6...',
-          description: 'Token to use in x-csrf-token header',
-        },
-        message: {
-          type: 'string',
-          example:
-            'Use this token in x-csrf-token header for subsequent requests',
-        },
-        expiresAt: {
-          type: 'string',
-          format: 'date-time',
-          description: 'Token expiration time',
-        },
-      },
-    },
-  })
-  @ApiResponse({ status: 500, description: 'Failed to generate CSRF token' })
-  async getCsrfToken(@Res({ passthrough: true }) response: Response) {
-    try {
-      const timestamp = Date.now().toString();
-      const secret = crypto.randomBytes(32).toString('hex');
-      const signature = crypto
-        .createHmac('sha256', secret)
-        .update(timestamp)
-        .digest('hex');
-      const csrfToken = `${timestamp}.${signature}`;
-      response.cookie('csrf_secret', secret, {
-        httpOnly: true,
-        secure: false,
-        sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
-        maxAge: 60 * 60 * 1000,
-        path: '/',
-      });
-      const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
-      return {
-        data: csrfToken,
-        message:
-          'Use this token in x-csrf-token header for subsequent requests',
-        expiresAt: expiresAt.toISOString(),
-        instructions: {
-          header: 'x-csrf-token',
-          value: csrfToken,
-          note: 'Cookie csrf_secret is automatically set and will be validated',
-        },
-      };
-    } catch (error) {
-      throw new BadRequestException(
-        `Failed to generate CSRF token: ${error.message}`,
-      );
-    }
   }
 }
