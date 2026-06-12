@@ -2737,9 +2737,10 @@ export class OrdersService {
       }
       const unitPrice = resolveProductUnitPrice(product, variation);
       productsSubtotal += unitPrice * item.quantity;
-      // Segura estoque quando: produto NÃO é incluso-e-obrigatório, tem variação selecionada e
-      // o estoque é LIMITADO (stock > 0). Incluso+obrigatório é gated pela vaga do ingresso;
-      // ilimitado nunca segura. A marca persiste no JSON p/ release no cancel/expire.
+      // Segura estoque quando: tem variação selecionada e o estoque é LIMITADO (stock > 0).
+      // TODO produto segura agora (inclusive incluso+obrigatório — holdsStock=true);
+      // ilimitado (stock=0) nunca segura. A marca persiste no JSON p/ release no
+      // cancel/expire e é congelada no productSnapshot (estorno/chargeback).
       const stockHeld = holdsStock(product) && !!variation && (variation.stock ?? 0) > 0;
       if (stockHeld && item.variationId) {
         variationLabels.set(item.variationId, `${product.name} — ${variation.name}`);

@@ -529,8 +529,9 @@ export class OrderFinalizationService {
                 productSnapshot,
               },
             });
-            // Contabiliza a venda da variação (vale p/ incluso+obrigatório também). O availableStock
-            // NÃO é tocado aqui — o hold já foi feito no patchProducts para opcional/não-incluso.
+            // Contabiliza a venda da variação. O availableStock NÃO é tocado aqui — o hold
+            // (decremento) já foi feito no patchProducts (reserva) p/ TODO produto que segura
+            // estoque, inclusive incluso+obrigatório; aqui só soldCount++ converte reserva→venda.
             if (item.variationId) {
               await incrementVariationSold(tx, item.variationId, item.quantity ?? 1);
             }
