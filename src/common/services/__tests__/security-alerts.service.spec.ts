@@ -347,7 +347,8 @@ describe('SecurityAlertsService (porteiro de avisos de segurança)', () => {
     });
 
     it('assunto do email inclui emoji + título; HTML inclui título/descrição/categoria', async () => {
-      const { service } = await bootstrap();
+      // Destinatário vem de ALERT_EMAIL_RECIPIENTS (sem default externo herdado).
+      const { service } = await bootstrap({ ALERT_EMAIL_RECIPIENTS: 'sec@podioticket.com.br' });
       await service.handleSecurityAlert(
         buildAlert({ severity: 'critical', title: 'Brute force', description: 'demais falhas' }),
       );
@@ -357,8 +358,7 @@ describe('SecurityAlertsService (porteiro de avisos de segurança)', () => {
       expect(payload.html).toContain('Brute force');
       expect(payload.html).toContain('demais falhas');
       expect(payload.html).toContain('CRITICAL'); // severity em maiúsculas
-      // destinatário default do config
-      expect(payload.to).toEqual(['admin@loot4fun.com']);
+      expect(payload.to).toEqual(['sec@podioticket.com.br']);
     });
 
     it('payload do Slack carrega cor e campos de severidade/categoria', async () => {

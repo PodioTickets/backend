@@ -4,6 +4,8 @@ import {
   UnauthorizedException,
   BadRequestException,
   ConflictException,
+  HttpException,
+  HttpStatus,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -38,6 +40,11 @@ type PasswordResetLinkPayload = {
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
 
+  /** Lockout de login: nº de falhas de senha por conta antes de travar... */
+  private static readonly LOGIN_MAX_FAILS = 8;
+  /** ...e por quanto tempo (janela deslizante). */
+  private static readonly LOGIN_FAIL_WINDOW_MS = 15 * 60 * 1000;
+
   constructor(
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
@@ -66,9 +73,28 @@ export class AuthService {
       return null;
     }
 
+    // Identificador normalizado p/ o balde de lockout (mesma conta = mesmo balde,
+    // independente de formatação do CPF ou caixa do email).
+    const isEmail = emailOrCpf.includes('@');
+    const lockId = isEmail
+      ? emailOrCpf.toLowerCase().trim()
+      : emailOrCpf.replace(/\D/g, '');
+    const lockKey = `login_fail:${accountType}:${lockId}`;
+
+    // Lockout por conta: trava o brute-force de SENHA mesmo dentro do limite por
+    // IP (um atacante distribuído em vários IPs ainda bate na mesma conta). Janela
+    // curta (15min) e teto moderado (LOGIN_MAX_FAILS) p/ limitar griefing de
+    // bloqueio de vítima. Conta só falhas de SENHA (não "usuário inexistente").
+    const fails = (await this.cacheManager.get<number>(lockKey)) || 0;
+    if (fails >= AuthService.LOGIN_MAX_FAILS) {
+      throw new HttpException(
+        'Muitas tentativas de login. Tente novamente em alguns minutos.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
     try {
       // Tentar buscar por email ou CPF com accountType
-      const isEmail = emailOrCpf.includes('@');
       let user;
 
       const prismaWrite = this.prisma.getWriteClient();
@@ -153,8 +179,17 @@ export class AuthService {
 
       const isPasswordValid = await bcrypt.compare(password, user.password);
       if (!isPasswordValid) {
+        // Falha de SENHA → incrementa o balde de lockout (janela deslizante).
+        await this.cacheManager.set(
+          lockKey,
+          fails + 1,
+          AuthService.LOGIN_FAIL_WINDOW_MS,
+        );
         return null;
       }
+
+      // Sucesso → zera o balde para não punir o próximo login legítimo.
+      if (fails > 0) await this.cacheManager.del(lockKey);
 
       const { password: _, ...result } = user;
       return result;
@@ -547,9 +582,7 @@ export class AuthService {
       // Buscar refresh token no banco (implementar modelo RefreshToken se necessário)
       // Por enquanto, validar diretamente o JWT
       const decoded = this.jwtService.verify(refreshToken, {
-        secret:
-          this.configService.get<string>('JWT_REFRESH_SECRET') ||
-          this.configService.get<string>('JWT_SECRET'),
+        secret: this.resolveRefreshSecret(),
       });
 
       const prismaRead = this.prisma.getReadClient();
@@ -1307,11 +1340,25 @@ export class AuthService {
     return { success: true, message: 'E-mail alterado com sucesso.' };
   }
 
+  /**
+   * Segredo de assinatura do REFRESH token. Usa `JWT_REFRESH_SECRET` quando
+   * configurado; caso contrário deriva um segredo DISTINTO do access (`JWT_SECRET`
+   * + sufixo dedicado). Garante que access e refresh NUNCA compartilhem chave —
+   * sem isso, um access token poderia ser reapresentado como refresh (mesma chave,
+   * verificação passava). Idempotente (mesma entrada → mesmo segredo).
+   * Nota de deploy: ao passar a derivar, refresh tokens antigos (assinados com o
+   * fallback antigo = JWT_SECRET puro) deixam de validar → re-login único.
+   */
+  private resolveRefreshSecret(): string | undefined {
+    const explicit = this.configService.get<string>('JWT_REFRESH_SECRET');
+    if (explicit) return explicit;
+    const base = this.configService.get<string>('JWT_SECRET');
+    return base ? `${base}:refresh` : undefined;
+  }
+
   private async createRefreshToken(userId: string): Promise<string> {
     const payload = { sub: userId };
-    const refreshSecret =
-      this.configService.get<string>('JWT_REFRESH_SECRET') ||
-      this.configService.get<string>('JWT_SECRET');
+    const refreshSecret = this.resolveRefreshSecret();
 
     if (!refreshSecret) {
       throw new UnauthorizedException('JWT secret not configured');

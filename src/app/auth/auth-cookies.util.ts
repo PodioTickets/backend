@@ -1,4 +1,4 @@
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 
 /**
  * Cookies de autenticação httpOnly.
@@ -21,14 +21,49 @@ import type { Response } from 'express';
  * host já é compartilhado entre portas — deixar `COOKIE_DOMAIN` vazio.
  */
 
-export const ACCESS_TOKEN_COOKIE = 'access_token';
-export const REFRESH_TOKEN_COOKIE = 'refresh_token';
 /**
- * Cookie-dica de sessão: NÃO-httpOnly, NÃO-secreto (valor fixo "1"). Só sinaliza
- * ao frontend "provavelmente logado" para evitar um GET /profile (401) a cada
+ * Superfícies de sessão ISOLADAS. Cada uma (admin/organizador/cliente) tem seu
+ * PRÓPRIO jogo de cookies → as três coexistem no mesmo navegador sem se
+ * sobrescrever (logar no admin não derruba o organizador/cliente). Antes havia
+ * um cookie ÚNICO compartilhado no domínio-pai, o que misturava as sessões.
+ */
+export type AuthSurface = 'admin' | 'organizer' | 'client';
+const SURFACES: readonly AuthSurface[] = ['admin', 'organizer', 'client'];
+const DEFAULT_SURFACE: AuthSurface = 'client';
+
+/** Header enviado pelo front em TODA request declarando a superfície atual. */
+export const SURFACE_HEADER = 'x-pt-surface';
+
+/**
+ * Resolve a superfície da request pelo header `x-pt-surface`. Fallback p/
+ * 'client' (rota anônima, SSR, ou cliente que não envia o header). É o sinal
+ * autoritativo de QUAL cookie de sessão usar — não dá pra deduzir do host em dev
+ * (tudo em localhost), por isso o front declara explicitamente.
+ */
+export function resolveAuthSurface(req: Request): AuthSurface {
+  const raw = (req?.headers?.[SURFACE_HEADER] as string | undefined)
+    ?.toLowerCase()
+    .trim();
+  return SURFACES.includes(raw as AuthSurface) ? (raw as AuthSurface) : DEFAULT_SURFACE;
+}
+
+/** Nomes de cookie por superfície (access/refresh httpOnly + dica não-httpOnly). */
+export const accessCookieName = (s: AuthSurface): string => `pt_at_${s}`;
+export const refreshCookieName = (s: AuthSurface): string => `pt_rt_${s}`;
+/**
+ * Cookie-dica de sessão (por superfície): NÃO-httpOnly, NÃO-secreto ("1"). Só
+ * sinaliza ao front "provavelmente logado" p/ evitar um GET /profile (401) a cada
  * visita anônima. Não dá acesso a nada — o token de verdade segue httpOnly.
  */
-export const SESSION_HINT_COOKIE = 'pt_authed';
+export const sessionHintCookieName = (s: AuthSurface): string => `pt_authed_${s}`;
+
+/**
+ * Cookies LEGADOS do modelo antigo (cookie único compartilhado). Limpos no
+ * set/clear p/ não "sombrear" os novos por-superfície durante a transição —
+ * sessões logadas antes do deploy re-logam 1×.
+ */
+const LEGACY_SHARED_COOKIES = ['access_token', 'refresh_token'] as const;
+const LEGACY_HINT_COOKIE = 'pt_authed';
 
 const ACCESS_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 dias (mirror do legado)
 const REFRESH_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000; // 90 dias
@@ -42,68 +77,103 @@ function baseCookieOptions() {
   //    subdomínios de um domínio real de dev (*.lvh.me) com COOKIE_DOMAIN=.lvh.me.
   //    `*.localhost` NÃO funciona: o browser não compartilha cookie entre
   //    `localhost` e `test890.localhost`/`app.localhost`.
-  const domain = process.env.COOKIE_DOMAIN?.trim() || ".podioticket.com.br".trim();
+  // Em DEV (localhost) o domain DEVE ser host-only (undefined): um cookie com
+  // Domain=.podioticket.com.br é DESCARTADO pelo browser quando a página está em
+  // `localhost` → a sessão httpOnly nunca é gravada e todo request autenticado
+  // (ex.: /auth/profile) responde 401, embora o login retorne 200. Só força o
+  // domínio-pai em produção, ou quando COOKIE_DOMAIN é setado explicitamente.
+  const configuredDomain = process.env.COOKIE_DOMAIN?.trim();
+  const domain = configuredDomain || (isProd ? ".podioticket.com.br" : undefined);
+  // SameSite por ambiente:
+  //  - PROD: `Lax`. app./api.<domínio> são SAME-SITE (mesmo domínio registrável),
+  //    então o cookie viaja normalmente e o `Lax` ainda barra CSRF nos POST
+  //    cross-site (o vetor perigoso). Mantém a proteção.
+  //  - DEV: `None` + `Secure`. Aqui front (ex.: `tenant.localhost:3000`) e API
+  //    (`localhost:3333`) são CROSS-SITE para o browser (`.localhost` é TLD
+  //    especial e não compartilha cookie), e com `Lax` o cookie httpOnly NÃO é
+  //    anexado na XHR → todo request autenticado dá 401. `None` faz o cookie
+  //    viajar cross-site; `Secure` é exigido pelo `None` e é aceito em
+  //    `http://localhost` por ser secure-context. Trade-off DELIBERADO e restrito
+  //    a dev: perde-se a proteção CSRF do `Lax`, mas dev não é fronteira de
+  //    segurança. NUNCA deixar `None` chegar em produção (guard no `isProd`).
+  const sameSite: 'lax' | 'none' = isProd ? 'lax' : 'none';
+  // `None` obriga `Secure`; em prod já é https. Por isso `secure` é true nos dois.
+  const secure = true;
   return {
     httpOnly: true,
-    secure: isProd,
-    sameSite: 'lax' as const,
+    secure,
+    sameSite,
     domain,
     path: '/',
   };
 }
 
-/** Seta access + refresh token como cookies httpOnly na resposta. */
+/** Remove os cookies LEGADOS (modelo de cookie único) p/ não sombrear os novos. */
+function clearLegacySharedCookies(res: Response): void {
+  const { httpOnly, secure, sameSite, domain, path } = baseCookieOptions();
+  const opts = { httpOnly, secure, sameSite, domain, path };
+  for (const name of LEGACY_SHARED_COOKIES) res.clearCookie(name, opts);
+  res.clearCookie(LEGACY_HINT_COOKIE, { ...opts, httpOnly: false });
+}
+
+/** Seta access + refresh token como cookies httpOnly DA SUPERFÍCIE na resposta. */
 export function setAuthCookies(
   res: Response,
+  surface: AuthSurface,
   accessToken: string,
   refreshToken?: string | null,
 ): void {
   const base = baseCookieOptions();
+  // Limpa o cookie único legado: se persistir, o jwt strategy nem o lê (nomes
+  // novos), mas evita confusão/lixo no navegador na 1ª sessão pós-deploy.
+  clearLegacySharedCookies(res);
   if (accessToken) {
-    res.cookie(ACCESS_TOKEN_COOKIE, accessToken, {
+    res.cookie(accessCookieName(surface), accessToken, {
       ...base,
       maxAge: ACCESS_MAX_AGE_MS,
     });
   }
   if (refreshToken) {
-    res.cookie(REFRESH_TOKEN_COOKIE, refreshToken, {
+    res.cookie(refreshCookieName(surface), refreshToken, {
       ...base,
       maxAge: REFRESH_MAX_AGE_MS,
     });
   }
   // Dica de sessão legível por JS (sem segredo): o front a usa só para decidir
   // se vale chamar /profile. Mesma janela do refresh.
-  res.cookie(SESSION_HINT_COOKIE, '1', {
+  res.cookie(sessionHintCookieName(surface), '1', {
     ...base,
     httpOnly: false,
     maxAge: REFRESH_MAX_AGE_MS,
   });
 }
 
-/** Limpa os cookies de auth (logout). Mesmas flags de domínio/path do set. */
-export function clearAuthCookies(res: Response): void {
+/** Limpa os cookies de auth DA SUPERFÍCIE (logout). Mantém as outras sessões. */
+export function clearAuthCookies(res: Response, surface: AuthSurface): void {
   const { httpOnly, secure, sameSite, domain, path } = baseCookieOptions();
   const opts = { httpOnly, secure, sameSite, domain, path };
-  res.clearCookie(ACCESS_TOKEN_COOKIE, opts);
-  res.clearCookie(REFRESH_TOKEN_COOKIE, opts);
-  res.clearCookie(SESSION_HINT_COOKIE, { ...opts, httpOnly: false });
+  res.clearCookie(accessCookieName(surface), opts);
+  res.clearCookie(refreshCookieName(surface), opts);
+  res.clearCookie(sessionHintCookieName(surface), { ...opts, httpOnly: false });
+  clearLegacySharedCookies(res);
 }
 
 /**
- * Aplica cookies de auth a partir de um resultado de login/refresh que carrega
- * `{ data: { access_token, refresh_token } }`. No-op quando o resultado é um
- * desafio MFA (`mfaRequired`) ou não tem tokens. Retorna o próprio resultado
- * para encadear no controller.
+ * Aplica cookies de auth (DA SUPERFÍCIE) a partir de um resultado de login/refresh
+ * que carrega `{ data: { access_token, refresh_token } }`. No-op quando o
+ * resultado é um desafio MFA (`mfaRequired`) ou não tem tokens. Retorna o próprio
+ * resultado para encadear no controller.
  */
 export function applyAuthCookiesFromResult<T extends Record<string, any>>(
   res: Response,
+  surface: AuthSurface,
   result: T,
 ): T {
   const data = result?.data ?? result;
   const accessToken = data?.access_token;
   const refreshToken = data?.refresh_token;
   if (accessToken) {
-    setAuthCookies(res, accessToken, refreshToken);
+    setAuthCookies(res, surface, accessToken, refreshToken);
   }
   return result;
 }

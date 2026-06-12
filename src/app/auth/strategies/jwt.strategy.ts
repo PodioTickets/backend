@@ -5,15 +5,18 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { CacheRedisService } from '../../../common/services/cache-redis.service';
-import { ACCESS_TOKEN_COOKIE } from '../auth-cookies.util';
+import { resolveAuthSurface, accessCookieName } from '../auth-cookies.util';
 
 /**
- * Extrai o JWT do cookie httpOnly `access_token` (auth por cookie, fonte
- * primária). cookie-parser popula `req.cookies`.
+ * Extrai o JWT do cookie httpOnly da SUPERFÍCIE da request (admin/organizer/
+ * client), resolvida pelo header `x-pt-surface`. Cada superfície tem seu cookie
+ * (`pt_at_<surface>`) → sessões isoladas no mesmo navegador. cookie-parser
+ * popula `req.cookies`.
  */
 function cookieTokenExtractor(req: Request): string | null {
+  const surface = resolveAuthSurface(req);
   const token = (req?.cookies as Record<string, string> | undefined)?.[
-    ACCESS_TOKEN_COOKIE
+    accessCookieName(surface)
   ];
   return token && token !== 'undefined' && token !== 'null' ? token : null;
 }
@@ -34,6 +37,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       ]),
       ignoreExpiration: false,
       secretOrKey: configService.get('JWT_SECRET'),
+      // Fixa o algoritmo de verificação. Sem isto, o passport-jwt aceita qualquer
+      // alg da família suportada pelo jsonwebtoken — fechamos a janela de confusão
+      // de algoritmo (ex.: token forjado pedindo outro alg). Usamos HMAC simétrico.
+      algorithms: ['HS256'],
       passReqToCallback: false,
     });
   }

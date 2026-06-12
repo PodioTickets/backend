@@ -323,8 +323,10 @@ export class UploadController {
           helmetConfigured: true,
           corsEnabled: true,
           rateLimitingActive: true,
-          csrfProtection: true,
-          ssrfProtection: true,
+          // CSRF/SSRF dedicados removidos (2026-06-12): confiamos em SameSite +
+          // validação pontual. Refletido aqui pra não mentir no audit.
+          csrfProtection: false,
+          ssrfProtection: false,
           mfaAvailable: true,
           secretRotation: true,
         },

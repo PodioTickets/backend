@@ -131,7 +131,12 @@
       "Bash(cd \"C:/Users/muril/Projects/PodioTickets/server\")",
       "Bash(echo \"ready\")",
       "Bash(break)",
-      "Bash(sleep 1)"
+      "Bash(sleep 1)",
+      "Bash(echo \"EXIT: $?\")",
+      "Read(//c/Users/muril/AppData/Local/nvm/v24.1.0/node_modules/@anthropic-ai/claude-code/bin/**)",
+      "Read(//c/Users/muril/AppData/Local/nvm/v24.1.0/node_modules/@anthropic-ai/claude-code/**)",
+      "Bash(\"C:/nvm4w/nodejs/node_modules/@anthropic-ai/claude-code/bin/claude.exe\" --version)",
+      "Bash(pnpm remove *)"
     ]
   }
 }

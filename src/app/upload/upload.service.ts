@@ -1,21 +1,14 @@
-import { Injectable } from '@nestjs/common';
-import * as os from 'os';
+import { Injectable, BadRequestException } from '@nestjs/common';
 import * as path from 'path';
-import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
+import sharp from 'sharp';
 import { Storage, Bucket } from '@google-cloud/storage';
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const ClamScan = require('clamscan');
 
 @Injectable()
 export class UploadService {
   private readonly bucket: Bucket;
   private readonly cdnUrl: string;
   private readonly cdnEnabled: boolean;
-
-  /** ClamAV scanner instance reused across uploads to avoid recreating it on every file. */
-  private clamScannerPromise: Promise<{ scanFile: (p: string) => Promise<{ isInfected: boolean; viruses?: string[] }> }> | null =
-    null;
 
   constructor() {
     this.cdnEnabled = process.env.CDN_ENABLED === 'true';
@@ -43,16 +36,31 @@ export class UploadService {
     try {
       if (!file || !file.buffer) throw new Error('Nenhum arquivo enviado ou buffer ausente');
 
-      await this.scanForMalware(file.buffer, file.originalname || 'uploaded-file');
+      // Sanitização por RE-ENCODE: o sharp decodifica e re-codifica a imagem,
+      // descartando QUALQUER conteúdo que não seja pixel (scripts em EXIF, SVG/HTML
+      // disfarçado, polyglots). Substitui o antivírus (que era pesado e fail-open):
+      // se o buffer não for uma imagem raster válida, o sharp lança → rejeitamos
+      // (fail-CLOSED). Também já comprime/otimiza num passo só.
+      // `limitInputPixels` (default ~268MP) protege contra decompression bombs.
+      let webp: Buffer;
+      try {
+        webp = await sharp(file.buffer, { failOn: 'truncated' })
+          .rotate() // aplica orientação do EXIF e remove o metadado
+          .resize({ width: 2560, height: 2560, fit: 'inside', withoutEnlargement: true })
+          .webp({ quality: 82 })
+          .toBuffer();
+      } catch {
+        // Não é uma imagem decodificável (ou está corrompida/maliciosa).
+        throw new BadRequestException('Arquivo inválido: envie uma imagem válida (JPG, PNG, WEBP, etc.).');
+      }
 
-      const originalExt = path.extname(file.originalname || '').toLowerCase() || '.jpg';
-      const objectName = `images/${Date.now()}-${Math.round(Math.random() * 1e9)}${originalExt}`;
+      const objectName = `images/${Date.now()}-${Math.round(Math.random() * 1e9)}.webp`;
+      await this.uploadToGcs(objectName, webp, 'image/webp');
 
-      await this.uploadToGcs(objectName, file.buffer, file.mimetype || 'image/jpeg');
-
-      console.log(`✅ Image uploaded to GCS: ${objectName} (${this.formatFileSize(file.buffer.length)})`);
+      console.log(`✅ Image re-encoded & uploaded to GCS: ${objectName} (${this.formatFileSize(webp.length)})`);
       return this.buildUrl(objectName);
     } catch (error) {
+      if (error instanceof BadRequestException) throw error;
       console.error('❌ Failed to upload image:', error);
       throw new Error(`Failed to process image: ${error.message}`);
     }
@@ -65,7 +73,12 @@ export class UploadService {
       const fileExtension = path.extname(file.originalname || '').toLowerCase();
       if (fileExtension !== '.pdf') throw new Error('O arquivo deve ser um PDF');
 
-      await this.scanForMalware(file.buffer, file.originalname || 'uploaded-file');
+      // Reforço de tipo: além da extensão, exige o magic-number do PDF (%PDF-) no
+      // início do buffer. Barra arquivo renomeado p/ .pdf. PDF não é re-encodável
+      // como imagem; servido do GCS como anexo (não executa no nosso domínio).
+      if (!file.buffer.subarray(0, 5).toString('latin1').startsWith('%PDF-')) {
+        throw new Error('Arquivo inválido: o conteúdo não é um PDF.');
+      }
 
       const maxSize = 10 * 1024 * 1024;
       if (file.buffer.length > maxSize) {
@@ -360,48 +373,6 @@ export class UploadService {
     }
     const bucketName = this.bucket.name;
     return `https://storage.googleapis.com/${bucketName}/${objectName}`;
-  }
-
-  private getOrCreateClamScanner(): Promise<{
-    scanFile: (p: string) => Promise<{ isInfected: boolean; viruses?: string[] }>;
-  }> {
-    if (!this.clamScannerPromise) {
-      this.clamScannerPromise = ClamScan.createScanner({
-        removeInfected: false,
-        quarantineInfected: false,
-        scanLog: null,
-        debugMode: false,
-        fileList: null,
-        scanArchives: false,
-        scanRecursively: false,
-      }).catch((err) => {
-        this.clamScannerPromise = null;
-        throw err;
-      });
-    }
-    return this.clamScannerPromise;
-  }
-
-  private async scanForMalware(buffer: Buffer, filename: string): Promise<void> {
-    if (process.env.UPLOAD_SKIP_CLAMAV === 'true') return;
-    try {
-      const clamscan = await this.getOrCreateClamScanner();
-      const tempFilePath = path.join(os.tmpdir(), `scan-${Date.now()}-${Math.round(Math.random() * 1e9)}`);
-      try {
-        await fs.writeFile(tempFilePath, buffer);
-        const scanResult = await clamscan.scanFile(tempFilePath);
-        if (scanResult.isInfected) {
-          console.error(`🚨 Malware detected in file: ${filename}`, { viruses: scanResult.viruses });
-          throw new Error('Malware detectado no arquivo enviado. Arquivo rejeitado por razões de segurança.');
-        }
-        console.log(`✅ Malware scan passed for: ${filename}`);
-      } finally {
-        try { await fs.unlink(tempFilePath); } catch { /* ignore */ }
-      }
-    } catch (error) {
-      if (error.message.includes('Malware detected')) throw error;
-      console.warn(`⚠️ Malware scan unavailable: ${error.message}. Upload allowed but logged.`);
-    }
   }
 
   private formatFileSize(bytes: number): string {
