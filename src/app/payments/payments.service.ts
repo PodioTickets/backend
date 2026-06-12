@@ -1,10 +1,12 @@
 import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { PaymentStatus, PaymentMethod } from '@prisma/client';
+import { PaymentStatus, PaymentMethod, RegistrationStatus } from '@prisma/client';
 import { CieloService } from './cielo.service';
 import { PaymentGateway } from './payment.gateway';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
+import { ReceiptPdfService } from '../../common/services/receipt-pdf.service';
+import { buildReceiptPdfData } from '../../common/services/receipt-pdf.builder';
 import { OrderFinalizationService, OrderFinalizationAbortError } from './order-finalization.service';
 import { PaymentCompensationService } from './payment-compensation.service';
 import {
@@ -44,6 +46,7 @@ export class PaymentsService {
     private readonly gateway: PaymentGateway,
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
+    private readonly receiptPdfService: ReceiptPdfService,
     private readonly orderFinalization: OrderFinalizationService,
     private readonly compensation: PaymentCompensationService,
   ) { }
@@ -687,6 +690,115 @@ export class PaymentsService {
     };
   }
 
+  /**
+   * Gera o PDF do COMPROVANTE (recibo) de um pedido — o mesmo documento de
+   * `ReceiptPdfService` usado como anexo de e-mail. O recibo é por PEDIDO (não
+   * por participante), então resolvemos o pedido a partir da inscrição e
+   * agregamos todas as inscrições pagas do pedido.
+   *
+   * Controle de acesso: comprador (dono do pedido), admin/staff, ou membro da
+   * organização dona do evento — mesmo critério de `getPaymentDetails`.
+   *
+   * Valores em CENTAVOS de ponta a ponta (campos escalares do Order + preço por
+   * inscrição vindo dos reservedTickets), unidade que o template do PDF espera.
+   *
+   * @returns buffer do PDF + nome de arquivo saneado para o Content-Disposition.
+   */
+  async generateReceiptPdf(
+    registrationId: string,
+    userId: string,
+  ): Promise<{ buffer: Buffer; fileName: string }> {
+    const prismaRead = this.prisma.getReadClient();
+
+    const registration = await prismaRead.registration.findUnique({
+      where: { id: registrationId },
+      select: { orderId: true },
+    });
+    if (!registration?.orderId) {
+      throw new NotFoundException('Pedido não encontrado para esta inscrição');
+    }
+
+    const order: any = await prismaRead.order.findUnique({
+      where: { id: registration.orderId },
+      include: {
+        reservedTickets: true,
+        payment: true,
+        coupon: { select: { id: true, code: true, type: true, value: true } },
+        voucher: { select: { id: true, code: true, name: true } },
+        // Comprador (dono do pedido) — nome/documento/país no cabeçalho do recibo.
+        user: {
+          select: {
+            firstName: true,
+            lastName: true,
+            documentNumber: true,
+            country: true,
+          },
+        },
+        event: {
+          select: {
+            id: true,
+            name: true,
+            eventDate: true,
+            location: true,
+            neighborhood: true,
+            city: true,
+            state: true,
+            zipCode: true,
+            organizationId: true,
+            participantFeePercent: true,
+            organization: {
+              select: { name: true, tradeName: true, document: true, logoUrl: true },
+            },
+          },
+        },
+        registrations: {
+          where: { status: { not: RegistrationStatus.PENDING } },
+          select: {
+            id: true,
+            participantName: true,
+            participantEmail: true,
+            user: { select: { firstName: true, lastName: true, email: true } },
+            tickets: {
+              select: {
+                ticketId: true,
+                batchId: true,
+                ticketSnapshot: true,
+                ticket: {
+                  select: { name: true, category: { select: { name: true } } },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException('Pedido não encontrado');
+    }
+
+    // Controle de acesso: comprador / admin / organizador (membro da org do evento).
+    const isBuyer = order.userId === userId;
+    let authorized = isBuyer || (await this.isAdminUser(userId));
+    if (!authorized && order.event?.organizationId) {
+      const member = await prismaRead.organizationMember.findFirst({
+        where: { organizationId: order.event.organizationId, userId },
+        select: { id: true },
+      });
+      authorized = !!member;
+    }
+    if (!authorized) {
+      throw new BadRequestException(
+        'Acesso negado — você não tem permissão para baixar este comprovante',
+      );
+    }
+
+    const data = buildReceiptPdfData(order);
+    const buffer = await this.receiptPdfService.generateReceiptPdf(data);
+
+    return { buffer, fileName: `comprovante-${data.orderNumber}.pdf` };
+  }
+
   async pollPixStatus(orderId: string, userId: string): Promise<{ status: PaymentStatus; paid: boolean }> {
     const prismaRead = this.prisma.getReadClient();
     const prismaWrite = this.prisma.getWriteClient();
@@ -951,6 +1063,10 @@ export class PaymentsService {
     const order = await this.prisma.getReadClient().order.findUnique({
       where: { id: orderId },
       include: {
+        // Comprador (dono do pedido) — nome/documento/país no cabeçalho do recibo.
+        user: true,
+        // Base de preço por inscrição do recibo (chave ticketId:batchId).
+        reservedTickets: true,
         event: { include: { organization: true } },
         payment: true,
         coupon: true,
@@ -1081,6 +1197,12 @@ export class PaymentsService {
     // Envios SMTP em paralelo
     const emailPromises: Promise<unknown>[] = [];
 
+    // Comprovante (recibo) do PEDIDO — anexado SÓ ao comprador (prova de pagamento).
+    // Mesmo builder do download (`buildReceiptPdfData`) → documento idêntico.
+    const receiptPdf = await this.receiptPdfService
+      .generateReceiptPdf(buildReceiptPdfData(order))
+      .catch((e: any) => { this.logger.warn(`Recibo PDF falhou para pedido ${orderId}:`, e?.message); return undefined; });
+
     // Comprador recebe todos os PDFs individuais como anexos separados
     if (buyerEmail) {
       const buyerPdfs = individualPdfs
@@ -1092,6 +1214,7 @@ export class PaymentsService {
           firstName: buyerUser?.firstName || 'Participante',
           eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
           ticketPdfs: buyerPdfs,
+          receiptPdf,
         }).catch((err: any) => this.logger.warn('Email comprador falhou:', err)),
       );
     }

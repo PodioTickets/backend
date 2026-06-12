@@ -98,18 +98,31 @@ const C = {
   white: '#FFFFFF',
 } as const;
 
+// Fuso de Brasília (UTC-3 fixo desde 2019). Usado para INSTANTES REAIS (emissão).
+// O servidor roda em UTC em produção → `getHours()` cravaria UTC; formatamos
+// explicitamente no fuso de Brasília.
+const TZ_BR = 'America/Sao_Paulo';
+
+/** Data do EVENTO: wall-clock "naive" (sem fuso) → UTC pra não deslocar o dia. */
 function fmtDate(d: Date | string | null | undefined): string {
   if (!d) return '—';
   const dt = new Date(d as string);
   if (isNaN(dt.getTime())) return '—';
-  return dt.toLocaleDateString('pt-BR');
+  return dt.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
 }
 
+/** Data+hora de um INSTANTE REAL (emissão) no fuso de Brasília. */
 function fmtDateTime(d: Date): string {
-  const day = d.toLocaleDateString('pt-BR');
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return `${day} · ${hh}h${mm}`;
+  const date = d.toLocaleDateString('pt-BR', { timeZone: TZ_BR });
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: TZ_BR,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(d);
+  const hh = parts.find((p) => p.type === 'hour')?.value ?? '00';
+  const mm = parts.find((p) => p.type === 'minute')?.value ?? '00';
+  return `${date} · ${hh}h${mm}`;
 }
 
 function fmtCurrency(cents: number): string {

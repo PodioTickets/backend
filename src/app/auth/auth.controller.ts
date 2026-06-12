@@ -48,6 +48,11 @@ import { ConfigService } from '@nestjs/config';
 import { OAuthStateService } from './oauth-state.service';
 import { sanitizeRelativePath } from 'src/common/utils/safe-redirect.util';
 import { NoCache } from 'src/common/decorators/cache.decorator';
+import {
+  applyAuthCookiesFromResult,
+  clearAuthCookies,
+  REFRESH_TOKEN_COOKIE,
+} from './auth-cookies.util';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { TrackActivity } from 'src/common/decorators/track-activity.decorator';
 import { TrackActivityInterceptor } from 'src/common/interceptors/track-activity.interceptor';
@@ -125,8 +130,11 @@ export class AuthController {
       required: ['emailOrCpf', 'password', 'turnstileToken'],
     },
   })
-  async loginEmail(@Request() req) {
-    return this.authService.login(req.user, { userAgent: req.headers?.['user-agent'] });
+  async loginEmail(@Request() req, @Res({ passthrough: true }) res: Response) {
+    const result = await this.authService.login(req.user, { userAgent: req.headers?.['user-agent'] });
+    // Seta cookies httpOnly (no-op se for desafio MFA). Mantém tokens no body
+    // para compatibilidade durante a transição.
+    return applyAuthCookiesFromResult(res, result);
   }
 
   @Post('login/admin')
@@ -146,12 +154,13 @@ export class AuthController {
       required: ['emailOrCpf', 'password'],
     },
   })
-  async loginAdmin(@Request() req) {
+  async loginAdmin(@Request() req, @Res({ passthrough: true }) res: Response) {
     const role = req.user?.role;
     if (role !== 'ADMIN' && role !== 'PODIOGO_STAFF') {
       throw new ForbiddenException('Admin access required');
     }
-    return this.authService.login(req.user, { userAgent: req.headers?.['user-agent'] });
+    const result = await this.authService.login(req.user, { userAgent: req.headers?.['user-agent'] });
+    return applyAuthCookiesFromResult(res, result);
   }
 
   @Post('login/organizer')
@@ -185,13 +194,18 @@ export class AuthController {
       required: ['emailOrCpf', 'password', 'turnstileToken'],
     },
   })
-  async loginOrganizer(@Request() req, @Body() body: { emailOrCpf: string; password: string }) {
+  async loginOrganizer(
+    @Request() req,
+    @Body() body: { emailOrCpf: string; password: string },
+    @Res({ passthrough: true }) res: Response,
+  ) {
     // Validar como organizador
     const user = await this.authService.validateUser(body.emailOrCpf, body.password, 'ORGANIZER');
     if (!user) {
       throw new UnauthorizedException('Credenciais inválidas');
     }
-    return this.authService.login(user, { userAgent: req.headers?.['user-agent'] });
+    const result = await this.authService.login(user, { userAgent: req.headers?.['user-agent'] });
+    return applyAuthCookiesFromResult(res, result);
   }
 
   @Get('google')
@@ -286,7 +300,10 @@ export class AuthController {
       required: ['code', 'redirectUri'],
     },
   })
-  async validateGoogleCode(@Body() body: { code: string; redirectUri: string }) {
+  async validateGoogleCode(
+    @Body() body: { code: string; redirectUri: string },
+    @Res({ passthrough: true }) res: Response,
+  ) {
     if (!body.code) {
       throw new BadRequestException('Código de autorização do Google é obrigatório');
     }
@@ -296,7 +313,7 @@ export class AuthController {
     }
 
     const result = await this.authService.validateGoogleCode(body.code, body.redirectUri);
-    return result;
+    return applyAuthCookiesFromResult(res, result);
   }
 
   @Post('refresh')
@@ -304,8 +321,23 @@ export class AuthController {
   @ApiOperation({ summary: 'Refresh access token' })
   @ApiResponse({ status: 200, description: 'Token refreshed successfully' })
   @ApiResponse({ status: 401, description: 'Invalid refresh token' })
-  async refreshToken(@Body() refreshTokenDto: RefreshTokenDto) {
-    return this.authService.refreshToken(refreshTokenDto);
+  async refreshToken(
+    @Request() req,
+    @Res({ passthrough: true }) res: Response,
+    @Body() body: { refresh_token?: string; refreshToken?: string },
+  ) {
+    // Token vem do cookie httpOnly (fluxo novo) ou do body (legado: o front
+    // enviava `refresh_token`). Não dependemos do DTO para suportar ambos.
+    const token =
+      req.cookies?.[REFRESH_TOKEN_COOKIE] ||
+      body?.refresh_token ||
+      body?.refreshToken;
+    if (!token) {
+      throw new UnauthorizedException('Refresh token ausente');
+    }
+    // O service lê `refreshTokenDto.refreshToken` (camelCase).
+    const result = await this.authService.refreshToken({ refreshToken: token });
+    return applyAuthCookiesFromResult(res, result);
   }
 
   @Post('logout')
@@ -314,11 +346,14 @@ export class AuthController {
   @ApiOperation({ summary: 'Logout user' })
   @ApiResponse({ status: 200, description: 'Logged out successfully' })
   @ApiBearerAuth()
-  async logout(@Request() req) {
-    const refreshToken = req.headers['x-refresh-token'];
+  async logout(@Request() req, @Res({ passthrough: true }) res: Response) {
+    const refreshToken =
+      req.cookies?.[REFRESH_TOKEN_COOKIE] || req.headers['x-refresh-token'];
     if (refreshToken) {
       await this.authService.logout(refreshToken);
     }
+    // Limpa os cookies httpOnly de auth no browser.
+    clearAuthCookies(res);
     return { message: 'Logged out successfully' };
   }
 
@@ -571,8 +606,9 @@ export class AuthController {
   })
   @ApiResponse({ status: 400, description: 'Código incorreto, expirado ou tentativas esgotadas' })
   @ApiResponse({ status: 401, description: 'Token MFA inválido ou expirado' })
-  async verifyLoginMfa(@Body() dto: VerifyLoginMfaDto) {
-    return this.authService.verifyLoginMfa(dto.mfaToken, dto.code);
+  async verifyLoginMfa(@Body() dto: VerifyLoginMfaDto, @Res({ passthrough: true }) res: Response) {
+    const result = await this.authService.verifyLoginMfa(dto.mfaToken, dto.code);
+    return applyAuthCookiesFromResult(res, result);
   }
 
   @Post('2fa/resend-login-code')

@@ -28,6 +28,8 @@ import { PayOrderDto } from './dto/pay-order.dto';
 import { PatchCouponDto } from './dto/patch-coupon.dto';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
+import { ReceiptPdfService } from '../../common/services/receipt-pdf.service';
+import { buildReceiptPdfData } from '../../common/services/receipt-pdf.builder';
 import { UserActivityService } from '../../common/services/user-activity.service';
 import { parseAppliesToArray } from '../../helpers/AppliesToHelper';
 import {
@@ -812,6 +814,7 @@ export class OrdersService {
     private readonly redisService: OrdersRedisService,
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
+    private readonly receiptPdfService: ReceiptPdfService,
     private readonly orderFinalization: OrderFinalizationService,
     private readonly activity: UserActivityService,
   ) {}
@@ -3912,6 +3915,9 @@ export class OrdersService {
       r2.order.findUnique({
         where: { id: orderId },
         include: {
+          // Comprador + reservedTickets: insumos do comprovante (recibo) do pedido.
+          user: true,
+          reservedTickets: true,
           event: { include: { organization: true } },
           payment: true,
           coupon: true,
@@ -4044,6 +4050,12 @@ export class OrdersService {
           individualPdfs.push({ pdf, participantEmail, participantName });
         }
 
+        // Comprovante (recibo) do PEDIDO — anexado SÓ ao comprador. Mesmo builder
+        // do download (`buildReceiptPdfData`) → documento idêntico.
+        const receiptPdf = await this.receiptPdfService
+          .generateReceiptPdf(buildReceiptPdfData(order))
+          .catch((e: any) => { this.logger.warn(`Recibo PDF falhou para pedido ${orderId}:`, e?.message); return undefined; });
+
         // Comprador recebe todos os PDFs individuais como anexos separados
         if (buyerEmail) {
           const buyerPdfs = individualPdfs
@@ -4058,6 +4070,7 @@ export class OrdersService {
             eventAddress: location,
             eventBannerUrl,
             ticketPdfs: buyerPdfs,
+            receiptPdf,
           }).catch((err: any) => this.logger.warn('Email comprador falhou:', err));
         }
 

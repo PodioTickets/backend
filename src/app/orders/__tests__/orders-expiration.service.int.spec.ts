@@ -72,6 +72,7 @@ describe('OrdersExpirationService (integração, banco real)', () => {
       {} as any, // OrdersRedisService
       {} as any, // EmailService
       {} as any, // TicketPdfService
+      {} as any, // ReceiptPdfService
       {} as any, // OrderFinalizationService
       { record: () => {} } as any, // UserActivityService (telemetria — no-op no teste)
     );

@@ -1,9 +1,22 @@
 import { ExtractJwt, Strategy } from 'passport-jwt';
+import type { Request } from 'express';
 import { PassportStrategy } from '@nestjs/passport';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { CacheRedisService } from '../../../common/services/cache-redis.service';
+import { ACCESS_TOKEN_COOKIE } from '../auth-cookies.util';
+
+/**
+ * Extrai o JWT do cookie httpOnly `access_token` (auth por cookie, fonte
+ * primária). cookie-parser popula `req.cookies`.
+ */
+function cookieTokenExtractor(req: Request): string | null {
+  const token = (req?.cookies as Record<string, string> | undefined)?.[
+    ACCESS_TOKEN_COOKIE
+  ];
+  return token && token !== 'undefined' && token !== 'null' ? token : null;
+}
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -13,7 +26,12 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     private cache: CacheRedisService,
   ) {
     super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      // Cookie primeiro; header Bearer como fallback (SSR helpers do front e
+      // clientes legados durante a transição continuam funcionando).
+      jwtFromRequest: ExtractJwt.fromExtractors([
+        cookieTokenExtractor,
+        ExtractJwt.fromAuthHeaderAsBearerToken(),
+      ]),
       ignoreExpiration: false,
       secretOrKey: configService.get('JWT_SECRET'),
       passReqToCallback: false,

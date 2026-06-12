@@ -115,6 +115,7 @@ describe('PaymentsWebhookService.handleWebhook (integração, banco real)', () =
 
   const emailMock = { sendRegistrationConfirmed: jest.fn().mockResolvedValue(undefined) } as any;
   const pdfMock = { generateTicketPdf: jest.fn().mockResolvedValue(Buffer.from('pdf')) } as any;
+  const receiptPdfMock = { generateReceiptPdf: jest.fn().mockResolvedValue(Buffer.from('receipt')) } as any;
   const gatewayMock = () => ({ emitPaymentConfirmed: jest.fn() }) as any;
 
   /** Monta o serviço sob teste com Cielo configurável e finalization REAL. */
@@ -135,6 +136,7 @@ describe('PaymentsWebhookService.handleWebhook (integração, banco real)', () =
       cielo,
       emailMock,
       pdfMock,
+      receiptPdfMock,
       gateway,
       finalization,
       compensation,

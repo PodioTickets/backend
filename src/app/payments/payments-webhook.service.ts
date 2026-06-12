@@ -3,6 +3,8 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from './cielo.service';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
+import { ReceiptPdfService } from '../../common/services/receipt-pdf.service';
+import { buildReceiptPdfData } from '../../common/services/receipt-pdf.builder';
 import { PaymentGateway } from './payment.gateway';
 import { OrderFinalizationService, OrderFinalizationAbortError } from './order-finalization.service';
 import { PaymentCompensationService } from './payment-compensation.service';
@@ -47,6 +49,7 @@ export class PaymentsWebhookService {
     private readonly cieloService: CieloService,
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
+    private readonly receiptPdfService: ReceiptPdfService,
     private readonly gateway: PaymentGateway,
     private readonly orderFinalization: OrderFinalizationService,
     private readonly compensation: PaymentCompensationService,
@@ -197,6 +200,9 @@ export class PaymentsWebhookService {
       this.prisma.getReadClient().order.findUnique({
         where: { id: orderId },
         include: {
+          // Comprador + reservedTickets: insumos do comprovante (recibo) do pedido.
+          user: true,
+          reservedTickets: true,
           event: {
             include: { organization: true },
           },
@@ -329,6 +335,12 @@ export class PaymentsWebhookService {
         // Envios SMTP em paralelo
         const emailPromises: Promise<unknown>[] = [];
 
+        // Comprovante (recibo) do PEDIDO — anexado SÓ ao comprador. Mesmo builder
+        // do download (`buildReceiptPdfData`) → documento idêntico.
+        const receiptPdf = await this.receiptPdfService
+          .generateReceiptPdf(buildReceiptPdfData(order))
+          .catch((e: any) => { this.logger.warn(`Recibo PDF falhou para pedido ${orderId}:`, e?.message); return undefined; });
+
         // Comprador recebe todos os PDFs individuais como anexos separados
         if (buyerEmail) {
           const buyerPdfs = individualPdfs
@@ -340,6 +352,7 @@ export class PaymentsWebhookService {
               firstName: buyerUser?.firstName || 'Participante',
               eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
               ticketPdfs: buyerPdfs,
+              receiptPdf,
             }).catch((err: any) => this.logger.warn('Email comprador falhou:', err)),
           );
         }
@@ -489,6 +502,9 @@ export class PaymentsWebhookService {
       this.prisma.getReadClient().order.findUnique({
         where: { id: oid },
         include: {
+          // Comprador + reservedTickets: insumos do comprovante (recibo) do pedido.
+          user: true,
+          reservedTickets: true,
           event: { include: { organization: true } },
           payment: true,
           coupon: true,
@@ -618,6 +634,12 @@ export class PaymentsWebhookService {
         // Envios SMTP em paralelo
         const emailPromises3ds: Promise<unknown>[] = [];
 
+        // Comprovante (recibo) do PEDIDO — anexado SÓ ao comprador. Mesmo builder
+        // do download (`buildReceiptPdfData`) → documento idêntico.
+        const receiptPdf3ds = await this.receiptPdfService
+          .generateReceiptPdf(buildReceiptPdfData(order))
+          .catch((e: any) => { this.logger.warn(`Recibo PDF (3DS) falhou para pedido ${oid}:`, e?.message); return undefined; });
+
         // Comprador recebe todos os PDFs individuais como anexos separados
         if (buyerEmail) {
           const buyerPdfs = individualPdfs3ds
@@ -629,6 +651,7 @@ export class PaymentsWebhookService {
               firstName: buyerUser?.firstName || 'Participante',
               eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
               ticketPdfs: buyerPdfs,
+              receiptPdf: receiptPdf3ds,
             }).catch((err: any) => this.logger.warn('3DS buyer email failed:', err)),
           );
         }

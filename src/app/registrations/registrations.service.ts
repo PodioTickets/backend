@@ -9,6 +9,44 @@ import { EmailService } from '../../common/services/email.service';
 import { isDocumentInList, resolveDocument } from '../../common/utils/document.util';
 import { tryConsumeVoucherUnreserved } from '../../common/utils/voucher-reservation.util';
 import { stripOrganizationContact } from '../../common/utils/organization-sanitizer.util';
+import {
+  TicketPdfService,
+  TicketPdfData,
+  TicketPdfProduct,
+  TicketPdfRegistration,
+} from '../../common/services/ticket-pdf.service';
+
+/**
+ * Normaliza a resposta de uma pergunta do organizador para texto plano do PDF.
+ * Arrays (múltipla escolha) e JSON serializado viram lista separada por vírgula
+ * — mesmo tratamento do modal de visualização no front.
+ */
+function formatPdfAnswer(answer: unknown): string {
+  if (answer == null) return '';
+  if (Array.isArray(answer)) return answer.join(', ');
+  if (typeof answer === 'string') {
+    try {
+      const parsed = JSON.parse(answer);
+      if (Array.isArray(parsed)) return parsed.join(', ');
+    } catch {
+      /* não é JSON — usa a string crua */
+    }
+    return answer;
+  }
+  return String(answer);
+}
+
+/**
+ * Compõe a localização do evento para o PDF a partir do snapshot. `location`
+ * pode vir como objeto estruturado (snapshot novo) ou string crua (legado).
+ */
+function formatSnapshotLocation(location: unknown): string {
+  if (!location) return '';
+  if (typeof location === 'string') return location;
+  const loc = location as Record<string, unknown>;
+  const cityState = [loc.city, loc.state].filter(Boolean).join(' - ');
+  return [loc.name, loc.neighborhood, cityState].filter(Boolean).join(', ');
+}
 
 @Injectable()
 export class RegistrationsService {
@@ -18,6 +56,7 @@ export class RegistrationsService {
     private readonly prisma: PrismaService,
     private readonly kitsService: KitsService,
     private readonly emailService: EmailService,
+    private readonly ticketPdfService: TicketPdfService,
   ) { }
 
   private async isAdminUser(userId: string): Promise<boolean> {
@@ -757,6 +796,155 @@ export class RegistrationsService {
     // Fallback: inscrição legada/PENDING sem snapshot — mantém o build ao vivo apenas
     // quando não há snapshot a retornar (do contrário a rota ficaria sem dados).
     return this.findOneLive(id, userId);
+  }
+
+  /**
+   * Gera o PDF do ingresso de UMA inscrição (download sob demanda no painel do
+   * organizador/admin e na área do participante). Reaproveita `findOne`, que já
+   * concentra o controle de acesso (comprador / participante / convidante /
+   * admin / organizador do evento) e a normalização do `receiptSnapshot`
+   * imutável — evitando segunda query e garantindo que o PDF baixado reflita o
+   * ingresso EXATAMENTE como foi comprado, idêntico ao enviado por e-mail.
+   *
+   * @returns buffer do PDF + nome de arquivo já saneado para o Content-Disposition.
+   */
+  async generateTicketPdf(
+    id: string,
+    userId: string,
+  ): Promise<{ buffer: Buffer; fileName: string }> {
+    // findOne aplica o mesmo controle de acesso da visualização e devolve o
+    // registro normalizado (snapshot OU build ao vivo de fallback).
+    const result: any = await this.findOne(id, userId);
+    const registration = result?.data?.registration;
+    if (!registration) {
+      throw new NotFoundException('Inscrição não encontrada');
+    }
+
+    const pdfData = this.buildSingleTicketPdfData(registration);
+    const buffer = await this.ticketPdfService.generateTicketPdf(pdfData);
+
+    // Slug ASCII seguro p/ o header HTTP (sem acentos/espaços → sem quebra de
+    // Content-Disposition em navegadores/proxies).
+    const slug =
+      (pdfData.registrations[0]?.participantName || 'ingresso')
+        .normalize('NFD')
+        .replace(/[̀-ͯ]/g, '')
+        .replace(/[^a-zA-Z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .toLowerCase() || 'ingresso';
+
+    return { buffer, fileName: `ingresso-${slug}.pdf` };
+  }
+
+  /**
+   * Mapeia a inscrição normalizada (`findOne`) para o contrato `TicketPdfData`
+   * de UM participante. Tolera os dois shapes possíveis (snapshot imutável e
+   * build ao vivo legado), espelhando a mesma normalização do modal de
+   * visualização no front. Preços já estão em CENTAVOS no snapshot (mesma
+   * unidade que o template do PDF espera).
+   */
+  private buildSingleTicketPdfData(reg: any): TicketPdfData {
+    const snapshotParticipant = reg?.participant ?? null;
+    const user = reg?.user ?? reg?.buyer ?? null;
+
+    const participantName =
+      snapshotParticipant?.name ||
+      (user
+        ? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim() || user.fullName
+        : '') ||
+      'Participante';
+
+    const categoryName =
+      reg?.ticket?.category?.name ??
+      reg?.modalities?.[0]?.modality?.category?.name ??
+      '';
+    const baseTicketName =
+      reg?.ticket?.name ?? reg?.modalities?.[0]?.modality?.name ?? '';
+    const ticketName =
+      categoryName && baseTicketName && categoryName !== baseTicketName
+        ? `${categoryName} - ${baseTicketName}`
+        : baseTicketName || categoryName || '—';
+
+    // Produtos: snapshot traz os campos no topo (name/images/selectedVariation/
+    // unitPrice); o legado (findOneLive) aninha em product/variation. Detecta
+    // pelo shape, igual ao modal de visualização.
+    const products: TicketPdfProduct[] = (reg?.products ?? []).map(
+      (item: any): TicketPdfProduct => {
+        const isSnapshot =
+          item?.name !== undefined ||
+          item?.images !== undefined ||
+          item?.selectedVariation !== undefined;
+
+        if (isSnapshot) {
+          const images = Array.isArray(item.images) ? item.images : [];
+          const imageUrl = images[item.primaryImageIndex ?? 0] ?? images[0];
+          const unitPrice = item.unitPrice ?? item.basePrice ?? 0;
+          return {
+            name: item.name || 'Produto',
+            price: unitPrice,
+            variationName: item.selectedVariation?.name ?? undefined,
+            imageUrl: imageUrl ?? undefined,
+            isIncluded: unitPrice === 0,
+          };
+        }
+
+        const price = item.unitPrice ?? item.totalPrice ?? 0;
+        return {
+          name: item.product?.name || 'Produto',
+          price,
+          variationName: item.variation?.name ?? item.variationName ?? undefined,
+          imageUrl: item.product?.image ?? undefined,
+          isIncluded: price === 0,
+        };
+      },
+    );
+
+    const questionAnswers = (reg?.questionAnswers ?? []).map((qa: any) => ({
+      question: qa?.question?.question ?? qa?.question ?? '',
+      answer: formatPdfAnswer(qa?.answer),
+    }));
+
+    const eventSnap = reg?.event ?? {};
+    const organizationName =
+      eventSnap?.organization?.tradeName ||
+      eventSnap?.organization?.name ||
+      '';
+
+    const registration: TicketPdfRegistration = {
+      index: 1,
+      qrCode: reg?.qrCode ?? reg?.id,
+      participantName,
+      ticketName,
+      email: snapshotParticipant?.email ?? user?.email ?? undefined,
+      cpf:
+        snapshotParticipant?.documentNumber ?? user?.documentNumber ?? undefined,
+      country:
+        snapshotParticipant?.country ??
+        user?.country ??
+        user?.nationality ??
+        null,
+      documentType:
+        snapshotParticipant?.documentType ?? user?.documentType ?? null,
+      dateOfBirth: snapshotParticipant?.birthDate ?? user?.dateOfBirth ?? null,
+      phone: snapshotParticipant?.phone ?? user?.phone ?? undefined,
+      gender: snapshotParticipant?.gender ?? user?.gender ?? undefined,
+      questionAnswers,
+      products,
+    };
+
+    return {
+      orderId: reg?.id ?? '',
+      orderNumber: String(reg?.id ?? '').slice(0, 8).toUpperCase(),
+      issuedAt: new Date(),
+      event: {
+        name: eventSnap?.name ?? '',
+        date: eventSnap?.eventDate ?? new Date(),
+        organization: organizationName,
+        location: formatSnapshotLocation(eventSnap?.location) || '—',
+        participantCount: 1,
+      },
+      registrations: [registration],
+    };
   }
 
   /**
