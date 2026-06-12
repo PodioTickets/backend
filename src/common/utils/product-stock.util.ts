@@ -17,15 +17,25 @@
  */
 
 /**
- * Um produto SEGURA estoque quando NÃO é incluso-e-obrigatório ao mesmo tempo.
- * Incluso + obrigatório já é gated pela vaga do ingresso → não consome estoque próprio da
- * variação (só conta venda). Qualquer outro caso (opcional OU não-incluso) segura estoque.
+ * Política ATUAL: TODO produto segura o próprio estoque da variação — inclusive
+ * incluso+obrigatório. Antes esse caso era gated SÓ pela vaga do ingresso; agora
+ * o organizador pode limitar o item de forma independente (ex.: kit com 100
+ * camisetas num evento de 500 vagas). `stock = 0` segue sendo "ilimitado"
+ * (no-op atômico no hold/release), então quem não define limite não muda nada.
+ *
+ * Mantida como FONTE ÚNICA da regra (checkout e front espelham daqui). O param é
+ * preservado p/ compat de chamada e caso a política volte a depender do produto.
+ *
+ * ⚠️ A reversão de pedidos ANTIGOS (estorno/chargeback) NÃO usa esta função: usa
+ * o `stockHeld` CONGELADO no productSnapshot. O fallback p/ snapshots pré-feature
+ * aplica a regra LEGADA explicitamente (ver order-finalization.service) — senão
+ * restauraria estoque que aqueles pedidos nunca reservaram.
  */
-export function holdsStock(product: {
+export function holdsStock(_product: {
   isIncludedInTicket?: boolean | null;
   isRequired?: boolean | null;
 }): boolean {
-  return !(product?.isIncludedInTicket === true && product?.isRequired === true);
+  return true;
 }
 
 /**
