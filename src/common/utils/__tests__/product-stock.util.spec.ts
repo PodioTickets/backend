@@ -12,9 +12,12 @@ import {
  * "esgotado" no checkout).
  */
 describe('product-stock.util', () => {
-  describe('holdsStock — opcional OU não-incluso segura estoque', () => {
-    it('incluso E obrigatório → NÃO segura (gated pelo ingresso)', () => {
-      expect(holdsStock({ isIncludedInTicket: true, isRequired: true })).toBe(false);
+  describe('holdsStock — TODO produto segura estoque (política atual)', () => {
+    // Política nova: incluso+obrigatório também segura estoque próprio (organizador
+    // pode limitar o item independentemente da vaga do ingresso). `stock=0` segue
+    // ilimitado (no-op atômico), então não definir limite não muda nada.
+    it('incluso E obrigatório → AGORA segura (limite próprio da variação)', () => {
+      expect(holdsStock({ isIncludedInTicket: true, isRequired: true })).toBe(true);
     });
     it('incluso mas opcional → segura', () => {
       expect(holdsStock({ isIncludedInTicket: true, isRequired: false })).toBe(true);
@@ -25,7 +28,7 @@ describe('product-stock.util', () => {
     it('não-incluso opcional → segura', () => {
       expect(holdsStock({ isIncludedInTicket: false, isRequired: false })).toBe(true);
     });
-    it('flags ausentes (undefined/null) → segura (default conservador)', () => {
+    it('flags ausentes (undefined/null) → segura', () => {
       expect(holdsStock({})).toBe(true);
       expect(holdsStock({ isIncludedInTicket: null, isRequired: null })).toBe(true);
     });

@@ -42,7 +42,7 @@ function baseCookieOptions() {
   //    subdomínios de um domínio real de dev (*.lvh.me) com COOKIE_DOMAIN=.lvh.me.
   //    `*.localhost` NÃO funciona: o browser não compartilha cookie entre
   //    `localhost` e `test890.localhost`/`app.localhost`.
-  const domain = process.env.COOKIE_DOMAIN?.trim() || undefined;
+  const domain = process.env.COOKIE_DOMAIN?.trim() || ".podioticket.com.br".trim();
   return {
     httpOnly: true,
     secure: isProd,

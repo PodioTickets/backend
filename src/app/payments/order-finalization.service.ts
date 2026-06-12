@@ -30,7 +30,6 @@ export class OrderFinalizationAbortError extends Error {
 import { resolveDocument } from '../../common/utils/document.util';
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
 import {
-  holdsStock,
   incrementVariationSold,
   decrementVariationSold,
   releaseVariationHold,
@@ -182,7 +181,7 @@ export class OrderFinalizationService {
 
     // Reverte estoque/venda das variações de produto (estorno + chargeback usam este ponto).
     // soldCount-- SEMPRE; availableStock++ só para itens que seguraram estoque (verdade
-    // congelada em productSnapshot.stockHeld; fallback p/ holdsStock em pedidos antigos).
+    // congelada em productSnapshot.stockHeld; fallback p/ regra LEGADA em pedidos antigos).
     const regProducts = await tx.registrationProduct.findMany({
       where: { registration: { orderId } },
       select: { variationId: true, quantity: true, productSnapshot: true },
@@ -195,7 +194,11 @@ export class OrderFinalizationService {
       const held =
         typeof snap.stockHeld === 'boolean'
           ? snap.stockHeld
-          : holdsStock({ isIncludedInTicket: snap.isIncludedInTicket, isRequired: snap.isRequired });
+          // Fallback p/ snapshots ANTIGOS (pré-feature de estoque em incluso+obrigatório):
+          // aplica a regra LEGADA — naquela época incluso+obrigatório NÃO segurava
+          // estoque, então NÃO restaura availableStock (evita vazar estoque que o
+          // pedido nunca reservou). Pedidos novos sempre têm `stockHeld` congelado.
+          : !(snap.isIncludedInTicket === true && snap.isRequired === true);
       // releaseVariationHold tem guard `stock > 0` → no-op seguro p/ variação ilimitada.
       if (held) {
         await releaseVariationHold(tx, rp.variationId, qty);
