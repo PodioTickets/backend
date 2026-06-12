@@ -18,7 +18,7 @@ import session from 'express-session';
 import express, { type Request, type Response } from 'express';
 import cookieParser from 'cookie-parser';
 import { initializeSentry } from './config/sentry.config';
-import { ALLOWED_ORIGINS } from './common/config/allowed-origins';
+import { isTrustedOrigin } from './common/config/allowed-origins';
 
 type RequestWithRawBody = Request & { rawBody?: Buffer };
 
@@ -62,8 +62,6 @@ async function bootstrap() {
   app.use(compression());
   app.use(cookieParser());
 
-  const allowedOrigins = ALLOWED_ORIGINS;
-
   app.use(
     session({
       secret: configService.get<string>('SESSION_SECRET', ''),
@@ -103,12 +101,13 @@ async function bootstrap() {
   );
 
   app.enableCors({
+    // Origem confiável = allowlist (+ localhost só em dev LOCAL), NÃO "qualquer
+    // origem quando isDev". Antes, rodar como development (caso do homolog) refletia
+    // QUALQUER Origin com credentials → qualquer site lia dados do usuário logado.
+    // `isTrustedOrigin` fecha isso mesmo em development. Sem Origin (server-to-server,
+    // webhook da Cielo, same-origin) continua liberado.
     origin: (origin, callback) => {
-      if (!origin || isDev) {
-        callback(null, true);
-        return;
-      }
-      if (allowedOrigins.includes(origin)) {
+      if (!origin || isTrustedOrigin(origin)) {
         callback(null, true);
         return;
       }
