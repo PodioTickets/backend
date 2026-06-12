@@ -5,6 +5,7 @@ import { CieloService } from '../cielo.service';
 import { PaymentGateway } from '../payment.gateway';
 import { EmailService } from '../../../common/services/email.service';
 import { TicketPdfService } from '../../../common/services/ticket-pdf.service';
+import { ReceiptPdfService } from '../../../common/services/receipt-pdf.service';
 import { OrderFinalizationService } from '../order-finalization.service';
 import { PaymentCompensationService } from '../payment-compensation.service';
 
@@ -47,6 +48,7 @@ describe('PaymentsService - Performance Tests', () => {
   const mockGateway = { emitPaymentConfirmed: jest.fn() };
   const mockEmailService = { sendRegistrationConfirmed: jest.fn() };
   const mockTicketPdfService = { generateTicketPdf: jest.fn() };
+  const mockReceiptPdfService = { generateReceiptPdf: jest.fn() };
   const mockOrderFinalization = { confirmAndFinalizeOrder: jest.fn() };
   const mockCompensation = { compensateOrphanPayment: jest.fn() };
 
@@ -59,6 +61,7 @@ describe('PaymentsService - Performance Tests', () => {
         { provide: PaymentGateway, useValue: mockGateway },
         { provide: EmailService, useValue: mockEmailService },
         { provide: TicketPdfService, useValue: mockTicketPdfService },
+        { provide: ReceiptPdfService, useValue: mockReceiptPdfService },
         { provide: OrderFinalizationService, useValue: mockOrderFinalization },
         { provide: PaymentCompensationService, useValue: mockCompensation },
       ],
