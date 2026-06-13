@@ -118,6 +118,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       exception.getStatus() === HttpStatus.UNAUTHORIZED
     ) {
       if (response.headersSent || response.finished) return;
+      response.redirect('/login?error=auth_failed');
       return;
     }
 

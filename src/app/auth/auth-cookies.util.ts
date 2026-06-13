@@ -99,7 +99,10 @@ function baseCookieOptions() {
   // virar production. O `None` fica restrito a quem NÃO tem domínio-pai (dev local).
   const sharesParentDomain = !!configuredDomain || isProd;
   const sameSite: 'lax' | 'none' = sharesParentDomain ? 'lax' : 'none';
-  const secure = true;
+  // secure: obrigatório em produção (https). Em dev local (http://localhost) deve ser
+  // false para o browser aceitar o cookie; mas se COOKIE_DOMAIN estiver configurado
+  // (homolog/staging com https), mantém true.
+  const secure = isProd || !!configuredDomain;
   return {
     httpOnly: true,
     secure,

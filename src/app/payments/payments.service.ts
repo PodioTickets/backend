@@ -844,6 +844,11 @@ export class PaymentsService {
     // deixando o pedido PIX pago porém quebrado quando o polling vencia a corrida.
     // timeout estendido: o finalize de pedidos grandes faz muitas escritas seriais.
     let orphanCancelledOrder = false;
+    // Só QUEM venceu a corrida (count=1 + finalize) emite WS/e-mails. O `return`
+    // do count=0 sai apenas do callback da tx — sem esta flag, o perdedor da
+    // corrida polling×webhook reenviava os e-mails de confirmação (com PDFs)
+    // pro comprador e todos os participantes, duplicando os do webhook.
+    let confirmedHere = false;
     try {
       await prismaWrite.$transaction(async (tx) => {
         const updated = await tx.payment.updateMany({
@@ -868,6 +873,7 @@ export class PaymentsService {
         const { finalized, orderStatus } = await this.orderFinalization.confirmAndFinalizeOrder(tx, orderId);
         // Pago TARDE DEMAIS (cron já cancelou o pedido) → compensação fora da tx.
         if (!finalized && orderStatus === 'CANCELLED') orphanCancelledOrder = true;
+        if (finalized) confirmedHere = true;
       }, { timeout: 30000, maxWait: 10000 });
     } catch (err: unknown) {
       // Finalize abortado pós-captura (voucher consumido / participantes vazios): rollback
@@ -885,14 +891,18 @@ export class PaymentsService {
       return { status: PaymentStatus.REFUNDED, paid: false };
     }
 
-    // Emit WebSocket event so the frontend updates immediately
-    this.gateway.emitPaymentConfirmed(orderId);
+    // Efeitos colaterais só pra quem CONFIRMOU aqui (webhook que venceu a corrida
+    // já emitiu/enviou os dele — sem o guard, e-mails iam em dobro).
+    if (confirmedHere) {
+      // Emit WebSocket event so the frontend updates immediately
+      this.gateway.emitPaymentConfirmed(orderId);
 
-    // Enviar email de confirmação fire-and-forget
-    this.sendConfirmationEmailForOrder(orderId)
-      .catch((err: any) => this.logger.warn('Falha ao enviar email de confirmação:', err));
+      // Enviar email de confirmação fire-and-forget
+      this.sendConfirmationEmailForOrder(orderId)
+        .catch((err: any) => this.logger.warn('Falha ao enviar email de confirmação:', err));
 
-    this.logger.log(`PIX confirmed via polling for order ${orderId}`);
+      this.logger.log(`PIX confirmed via polling for order ${orderId}`);
+    }
     return { status: PaymentStatus.PAID, paid: true };
   }
 

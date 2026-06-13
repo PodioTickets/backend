@@ -27,14 +27,18 @@ export class ConcurrencyLimiterMiddleware implements NestMiddleware {
   // Verificador de JWT para BUCKETAR o limite por USUÁRIO autenticado (não por IP).
   // Verifica assinatura + expiração com o mesmo JWT_SECRET — assim um token forjado NÃO
   // consegue criar buckets novos para furar o limite (cairia no IP). Null se não houver segredo.
-  private readonly jwt: JwtService | null = process.env.JWT_SECRET
-    ? new JwtService({ secret: process.env.JWT_SECRET })
-    : null;
+  private readonly jwt: JwtService | null;
 
   constructor(
     @Optional()
     private readonly concurrencyRedis?: ConcurrencyRedisService,
   ) {
+    // Lê JWT_SECRET no construtor em vez de field initializer para evitar que o valor
+    // seja capturado antes da inicialização completa do processo (ex.: variáveis de
+    // ambiente carregadas por dotenv após importação do módulo).
+    const secret = process.env.JWT_SECRET;
+    this.jwt = secret ? new JwtService({ secret }) : null;
+
     if (!concurrencyRedis) {
       this.logger.warn(
         'Redis not available — concurrency limiting is in-memory only. ' +

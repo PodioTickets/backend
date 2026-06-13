@@ -581,7 +581,9 @@ export class VouchersService {
   }
 
   private async generateUniqueCodes(eventId: string, quantity: number): Promise<string[]> {
-    const prismaRead = this.prisma.getReadClient();
+    // Fix #39: usa write client para verificar unicidade — a réplica pode estar defasada
+    // e retornar 'não encontrado' para um código recém-inserido, causando duplicatas.
+    const prismaWrite = this.prisma.getWriteClient();
     const codes: string[] = [];
     const maxAttempts = 1000; // Limite de tentativas para evitar loop infinito
 
@@ -593,9 +595,9 @@ export class VouchersService {
       while (!isUnique && attempts < maxAttempts) {
         // Gerar código aleatório: 8 caracteres alfanuméricos maiúsculos
         code = this.generateRandomCode();
-        
+
         // Verificar se o código já existe
-        const existing = await prismaRead.voucher.findUnique({
+        const existing = await prismaWrite.voucher.findUnique({
           where: {
             eventId_code: {
               eventId,

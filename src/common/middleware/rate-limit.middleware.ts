@@ -6,6 +6,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
+import { getClientIp } from '../utils/client-ip.util';
 
 interface RateLimitEntry {
   count: number;
@@ -61,14 +62,7 @@ export class RateLimitMiddleware implements NestMiddleware {
   }
 
   private getClientIP(req: Request): string {
-    return (
-      req.ip ||
-      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
-      (req.headers['x-real-ip'] as string) ||
-      (req.connection?.remoteAddress as string) ||
-      (req.socket?.remoteAddress as string) ||
-      'unknown'
-    );
+    return getClientIp(req) || 'unknown';
   }
 
   private getEndpointType(path: string): keyof typeof RateLimitMiddleware.prototype.limits {

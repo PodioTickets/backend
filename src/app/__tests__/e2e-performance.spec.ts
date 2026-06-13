@@ -31,6 +31,7 @@ describe('End-to-End Performance Tests - High Traffic Simulation', () => {
     },
     modality: {
       findUnique: jest.fn(),
+      findMany: jest.fn(),
       update: jest.fn(),
     },
     user: {
@@ -183,14 +184,14 @@ describe('End-to-End Performance Tests - High Traffic Simulation', () => {
         questions: [],
       });
 
-      mockPrismaService.modality.findUnique.mockResolvedValue({
+      mockPrismaService.modality.findMany.mockResolvedValue([{
         id: 'modality-123',
         eventId: 'event-123',
         isActive: true,
         price: 100,
         maxParticipants: 1000,
         currentParticipants: 0,
-      });
+      }]);
 
       mockPrismaService.registration.create.mockImplementation(({ data }) => ({
         id: `registration-${data.userId}`,
@@ -325,14 +326,14 @@ describe('End-to-End Performance Tests - High Traffic Simulation', () => {
         questions: [],
       });
 
-      mockPrismaService.modality.findUnique.mockResolvedValue({
+      mockPrismaService.modality.findMany.mockResolvedValue([{
         id: 'modality-123',
         eventId: 'popular-event',
         isActive: true,
         price: 50,
         maxParticipants: 2000,
         currentParticipants: 0,
-      });
+      }]);
 
       mockPrismaService.registration.create.mockImplementation(({ data }) => ({
         id: `registration-${data.userId}`,

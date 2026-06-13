@@ -138,6 +138,11 @@ export class CieloService {
     });
 
     this.logger.log(`Cielo service initialized (${this.isSandbox ? 'Sandbox' : 'Production'}, provider=${this.provider})`);
+
+    // Fix #11: webhookSecret obrigatório em produção para evitar boot silencioso sem segurança
+    if (!this.webhookSecret && process.env.NODE_ENV === 'production') {
+      throw new Error('CIELO_WEBHOOK_SECRET é obrigatório em produção');
+    }
   }
 
   async createPayment(
@@ -296,6 +301,8 @@ export class CieloService {
             Brand: cardBrand,
           };
 
+          // PCI-DSS: NUNCA logar SecurityCode (CVV) nem PAN completo — o CVV é
+          // proibido de persistir em qualquer hipótese. Log carrega só flags/derivados.
           this.logger.debug('Credit card payment data prepared:', {
             brand: cardBrand,
             installments: paymentData.Installments,
@@ -304,16 +311,6 @@ export class CieloService {
             hasHolder: !!cardData.holder,
             expiryDate: expiryDate,
             hasCvv: !!cardData.cvv,
-            fullPaymentData: JSON.stringify({
-              Type: paymentData.Type,
-              CreditCard: {
-                CardNumber: cardNumber.substring(0, 4) + '****' + cardNumber.substring(cardNumber.length - 4),
-                Holder: cardData.holder,
-                ExpirationDate: expiryDate,
-                SecurityCode: securityCodeStr,
-                Brand: cardBrand,
-              },
-            }),
           });
           break;
 
@@ -464,12 +461,17 @@ export class CieloService {
       // ENVIADO À CIELO, que recebia "4066****1799" e rejeitava (ProviderReturnCode
       // 001: "não é facet-valid com o pattern [0-9]"). Deep clone resolve.
       const maskedRequestBody = JSON.parse(JSON.stringify(requestBody));
-      if (maskedRequestBody.Payment?.CreditCard) {
-        const card = maskedRequestBody.Payment.CreditCard;
+      // PCI-DSS: mascara PAN e REMOVE o CVV (SecurityCode) de CRÉDITO **e DÉBITO**.
+      // Antes só CreditCard.CardNumber era mascarado — o DebitCard inteiro
+      // (PAN+CVV+validade) e o CVV do crédito iam em claro pro log.
+      for (const cardKey of ['CreditCard', 'DebitCard']) {
+        const card = maskedRequestBody.Payment?.[cardKey];
+        if (!card) continue;
         if (card.CardNumber) {
           card.CardNumber =
             card.CardNumber.substring(0, 4) + '****' + card.CardNumber.substring(card.CardNumber.length - 4);
         }
+        if (card.SecurityCode) card.SecurityCode = '***';
       }
       this.logger.debug('Request body (masked):', JSON.stringify(maskedRequestBody, null, 2));
 
@@ -503,7 +505,9 @@ export class CieloService {
             'Accept': this.axiosInstance.defaults.headers['Accept'],
             'Content-Type': this.axiosInstance.defaults.headers['Content-Type'],
             'MerchantId': this.axiosInstance.defaults.headers['MerchantId'],
-            'MerchantKey': this.axiosInstance.defaults.headers['MerchantKey'],
+            // Credencial integral da conta Cielo — NUNCA logar em claro (quem lê
+            // o log conseguiria criar vendas/voids). Igual ao log de PIX acima.
+            'MerchantKey': '***masked***',
           },
         });
 
@@ -970,14 +974,17 @@ export class CieloService {
     }
 
     try {
-      const secretBuf = Buffer.from(this.webhookSecret, 'utf8');
-      const sigBuf = Buffer.from(signature, 'utf8');
+      // Fix #10: a Cielo envia HMAC-SHA256 do payload assinado com o segredo,
+      // não o segredo em si. Comparação direta era incorreta e insegura.
+      const computedHmac = crypto
+        .createHmac('sha256', this.webhookSecret)
+        .update(payload)
+        .digest('hex');
 
-      const valid =
-        sigBuf.length === secretBuf.length &&
-        crypto.timingSafeEqual(sigBuf, secretBuf);
+      const sigBuf = Buffer.from(signature, 'hex');
+      const hmacBuf = Buffer.from(computedHmac, 'hex');
 
-      if (!valid) {
+      if (sigBuf.length !== hmacBuf.length || !crypto.timingSafeEqual(sigBuf, hmacBuf)) {
         this.logger.warn('Webhook signature verification failed');
         return null;
       }

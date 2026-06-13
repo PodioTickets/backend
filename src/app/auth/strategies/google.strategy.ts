@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { Strategy, VerifyCallback } from 'passport-google-oauth20';
 import { ConfigService } from '@nestjs/config';
@@ -39,7 +39,16 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
     done: VerifyCallback,
   ): Promise<any> {
     const { id, name, emails, photos } = profile;
-    
+
+    // E-mail NÃO verificado pelo Google é rejeitado: validateGoogleUser vincula
+    // a identidade Google a uma conta local existente só pelo e-mail — aceitar
+    // e-mail não verificado permitia account takeover (atacante cria conta
+    // Google com o e-mail da vítima sem confirmar a posse dele).
+    if (emails?.[0]?.verified === false || emails?.[0]?.verified === 'false') {
+      done(new UnauthorizedException('E-mail da conta Google não verificado'), false);
+      return;
+    }
+
     const user = {
       googleId: id,
       email: emails[0].value,
