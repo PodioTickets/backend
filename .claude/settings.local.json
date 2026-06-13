@@ -136,7 +136,10 @@
       "Read(//c/Users/muril/AppData/Local/nvm/v24.1.0/node_modules/@anthropic-ai/claude-code/bin/**)",
       "Read(//c/Users/muril/AppData/Local/nvm/v24.1.0/node_modules/@anthropic-ai/claude-code/**)",
       "Bash(\"C:/nvm4w/nodejs/node_modules/@anthropic-ai/claude-code/bin/claude.exe\" --version)",
-      "Bash(pnpm remove *)"
+      "Bash(pnpm remove *)",
+      "Read(//c/Users/muril/Projects/PodioTickets/**)",
+      "Read(//c/Users/muril/Projects/PodioTickets/frontend/**)",
+      "Bash(npx vitest *)"
     ]
   }
 }

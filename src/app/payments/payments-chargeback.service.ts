@@ -110,6 +110,9 @@ export class PaymentsChargebackService {
     }
   }
 
+  // Reversões são processadas SÓ aqui (cron diário). O webhook ignora status
+  // 10/11 de propósito e deixa o Payment PAID — é o que mantém o payment no
+  // filtro deste cron (que varre só PAID).
   private async processReversal(
     payment: { id: string; orderId: string; userId?: string; metadata: unknown; method?: string },
     cieloStatus: number,

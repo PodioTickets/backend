@@ -62,9 +62,14 @@ async function bootstrap() {
   app.use(compression());
   app.use(cookieParser());
 
+  const sessionSecret = configService.get<string>('SESSION_SECRET');
+  if (!sessionSecret && process.env.NODE_ENV === 'production') {
+    throw new Error('SESSION_SECRET é obrigatório em produção');
+  }
+
   app.use(
     session({
-      secret: configService.get<string>('SESSION_SECRET', ''),
+      secret: sessionSecret || 'dev-secret-insecure',
       resave: false,
       saveUninitialized: false,
       cookie: {

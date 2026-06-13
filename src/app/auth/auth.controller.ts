@@ -46,6 +46,7 @@ import { TurnstileGuard } from './guards/turnstile.guard';
 import { ConfigService } from '@nestjs/config';
 import { OAuthStateService } from './oauth-state.service';
 import { sanitizeRelativePath } from 'src/common/utils/safe-redirect.util';
+import { ALLOWED_ORIGINS } from 'src/common/config/allowed-origins';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 import {
   applyAuthCookiesFromResult,
@@ -138,12 +139,14 @@ export class AuthController {
   }
 
   @Post('login/admin')
-  @UseGuards(LocalAuthGuard)
+  // Turnstile TAMBÉM aqui: sem ele a rota validava senha de QUALQUER usuário
+  // sem captcha — brute-force/credential-stuffing livre, contornando a proteção
+  // do /login. A página de login do admin já envia o turnstileToken.
+  @UseGuards(TurnstileGuard, LocalAuthGuard)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: '[Admin] Login — no Turnstile, role-gated' })
+  @ApiOperation({ summary: '[Admin] Login — Turnstile + role-gated' })
   @ApiResponse({ status: 200, description: 'Login successful' })
   @ApiResponse({ status: 401, description: 'Invalid credentials' })
-  @ApiResponse({ status: 403, description: 'Admin role required' })
   @ApiBody({
     schema: {
       type: 'object',
@@ -157,7 +160,10 @@ export class AuthController {
   async loginAdmin(@Request() req, @Res({ passthrough: true }) res: Response) {
     const role = req.user?.role;
     if (role !== 'ADMIN' && role !== 'PODIOGO_STAFF') {
-      throw new ForbiddenException('Admin access required');
+      // 401 (não 403): a resposta distinta formava um oráculo — 403 confirmava
+      // que a senha estava CERTA (só faltava papel), validando credenciais
+      // roubadas. Indistinguível de credencial inválida.
+      throw new UnauthorizedException('Invalid credentials');
     }
     const result = await this.authService.login(req.user, { userAgent: req.headers?.['user-agent'] });
     return applyAuthCookiesFromResult(res, 'admin', result);
@@ -311,6 +317,27 @@ export class AuthController {
 
     if (!body.redirectUri) {
       throw new BadRequestException('URI de redirecionamento é obrigatória');
+    }
+
+    // Valida que o redirectUri pertence a uma origem permitida
+    try {
+      const redirectUrl = new URL(body.redirectUri);
+      const isAllowed = ALLOWED_ORIGINS.some(origin => {
+        try {
+          const allowed = new URL(origin);
+          return allowed.hostname === redirectUrl.hostname;
+        } catch { return false; }
+      });
+      // Em desenvolvimento, também aceita qualquer hostname localhost
+      const isLocalhost =
+        process.env.NODE_ENV === 'development' &&
+        (redirectUrl.hostname === 'localhost' || redirectUrl.hostname.endsWith('.localhost'));
+      if (!isAllowed && !isLocalhost) {
+        throw new BadRequestException('redirectUri não permitido');
+      }
+    } catch (e) {
+      if (e instanceof BadRequestException) throw e;
+      throw new BadRequestException('redirectUri inválido');
     }
 
     const result = await this.authService.validateGoogleCode(body.code, body.redirectUri);

@@ -69,16 +69,19 @@ export class PaymentsWebhookService {
      * O 3DS callback faz a mesma chamada e nunca foi gargalo.
      */
     let paymentStatus: PaymentStatus;
+    // Status REAL consultado na Cielo (não o do payload) — usado nas transições
+    // e na delegação de reversão abaixo.
+    let actualCieloStatus: number;
     try {
       const cieloPayment = await this.cieloService.getPayment(event.PaymentId);
       if (!cieloPayment) {
         this.logger.warn(`Webhook: getPayment(${event.PaymentId}) retornou null — payload pode ser forjado, abortando.`);
         return;
       }
-      const actualStatus = cieloPayment.Payment.Status;
-      paymentStatus = this.cieloService.mapCieloStatusToPaymentStatus(actualStatus);
-      if (actualStatus !== event.Status) {
-        this.logger.warn(`Webhook status divergente da Cielo: payload=${event.Status}, Cielo=${actualStatus}. Usando valor real (${actualStatus}).`);
+      actualCieloStatus = cieloPayment.Payment.Status;
+      paymentStatus = this.cieloService.mapCieloStatusToPaymentStatus(actualCieloStatus);
+      if (actualCieloStatus !== event.Status) {
+        this.logger.warn(`Webhook status divergente da Cielo: payload=${event.Status}, Cielo=${actualCieloStatus}. Usando valor real (${actualCieloStatus}).`);
       }
     } catch (err: any) {
       this.logger.error(`Webhook: erro ao validar status na Cielo: ${err?.message ?? 'unknown'}`);
@@ -94,6 +97,19 @@ export class PaymentsWebhookService {
     if (paymentStatus === PaymentStatus.PENDING) {
       this.logger.log(
         `Webhook ignorado (status intermediário ${event.Status}) para payment ${event.PaymentId}`,
+      );
+      return;
+    }
+
+    /* Reversão (10=Voided / 11=Refunded): o webhook NÃO trata — quem processa é
+     * o cron diário de chargeback (PaymentsChargebackService, 03:00), que faz a
+     * reversão completa e idempotente. CRÍTICO: o webhook precisa deixar o
+     * Payment INTACTO (PAID) — se rebaixasse pra REFUNDED aqui, o payment saía
+     * do filtro do cron (que varre só status PAID) e a reversão nunca rodava:
+     * comprador estornado ficava com ingressos válidos pra sempre. */
+    if (paymentStatus === PaymentStatus.REFUNDED) {
+      this.logger.log(
+        `Webhook reversão (status ${actualCieloStatus}) para ${event.PaymentId} — deixado para o cron diário de chargeback.`,
       );
       return;
     }
@@ -146,7 +162,9 @@ export class PaymentsWebhookService {
           data: {
             metadata: {
               ...(fresh.metadata as object),
-              cieloStatus: this.cieloService.mapCieloStatusToString(event.Status),
+              // Status REAL consultado na Cielo — não o do payload (que pode ser
+              // replay atrasado/forjado e divergir da transição aplicada).
+              cieloStatus: this.cieloService.mapCieloStatusToString(actualCieloStatus),
               webhookProcessedAt: new Date().toISOString(),
               returnCode: event.ReturnCode,
               returnMessage: event.ReturnMessage,

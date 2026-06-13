@@ -12,6 +12,7 @@ import {
   UploadedFiles,
   BadRequestException,
 } from '@nestjs/common';
+import { IsArray, ArrayMaxSize, IsString, MaxLength } from 'class-validator';
 import { SkipThrottle } from '@nestjs/throttler';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
@@ -34,6 +35,10 @@ import { NoCache } from 'src/common/decorators/cache.decorator';
 
 // DTOs para os endpoints de delete
 class DeleteFilesDto {
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  @MaxLength(500, { each: true })
   filenames: string[];
 }
 
@@ -554,7 +559,12 @@ export class UploadController {
 
   @Post('image')
   @SkipThrottle()
-  @UseInterceptors(FileInterceptor('file'))
+  @UseGuards(JwtAuthGuard)
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+    }),
+  )
   @ApiOperation({ summary: 'Upload de imagem' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({ description: 'Arquivo de imagem', type: UploadDto })
@@ -577,6 +587,9 @@ export class UploadController {
 
   @Post('pdf')
   @SkipThrottle()
+  // Mesma regra do /image: upload exige login. Sem o guard a rota era pública —
+  // qualquer um na internet gravava no bucket GCS de produção.
+  @UseGuards(JwtAuthGuard)
   @UseInterceptors(
     FileInterceptor('file', {
       storage: memoryStorage(),

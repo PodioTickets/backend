@@ -58,11 +58,11 @@ export class UserController {
   findAll(@Query('page') page?: string, @Query('limit') limit?: string) {
     const pageNum = page ? parseInt(page) : 1;
     const limitNum = limit ? parseInt(limit) : 50;
-    if (pageNum < 1) throw new Error('Página deve ser maior que 0');
+    if (pageNum < 1) throw new BadRequestException('Página deve ser maior que 0');
     if (limitNum < 1 || limitNum > 100) {
-      throw new Error('Limite deve estar entre 1 e 100');
+      throw new BadRequestException('Limite deve estar entre 1 e 100');
     }
-    if (limitNum > 100) throw new Error('Limite deve estar entre 1 e 100');
+    if (limitNum > 100) throw new BadRequestException('Limite deve estar entre 1 e 100');
     return this.userService.findAll({ page: pageNum, limit: limitNum });
   }
 

@@ -42,7 +42,7 @@ function formatPaymentMethod(method: string | undefined): string {
   if (m.includes('PIX')) return 'Pix';
   if (m === 'BOLETO') return 'Boleto';
   if (m === 'FREE') return 'Gratuito';
-  return method || 'Pix';
+  return method || '—';
 }
 
 Font.registerHyphenationCallback((w) => [w]);
@@ -92,14 +92,6 @@ const C = {
 // (pagamento/emissão). O servidor roda em UTC em produção, então `getHours()`
 // cravaria UTC — por isso formatamos explicitamente no fuso de Brasília.
 const TZ_BR = 'America/Sao_Paulo';
-
-/** Data do EVENTO: wall-clock "naive" (sem fuso) → UTC pra não deslocar o dia. */
-function fmtDate(d: Date | string | null | undefined): string {
-  if (!d) return '—';
-  const dt = new Date(d as string);
-  if (isNaN(dt.getTime())) return '—';
-  return dt.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
-}
 
 /** Componentes de data+hora de um INSTANTE REAL no fuso de Brasília. */
 function brDateTimeParts(d: Date): { date: string; hh: string; mm: string } {
@@ -357,11 +349,11 @@ const TableRow = ({ row }: { row: ReceiptPdfRegistrationRow }) => {
     // ID
     React.createElement(
       View,
-      { style: { width: 80, paddingHorizontal: 12, paddingVertical: 10 } },
+      { style: { width: 160, paddingHorizontal: 12, paddingVertical: 10 } },
       React.createElement(
         Text,
-        { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 600, color: C.gray12 } },
-        row.id.slice(0, 8).toUpperCase(),
+        { style: { fontFamily: 'DM Sans', fontSize: 9, fontWeight: 600, color: C.gray12 } },
+        row.id.toUpperCase(),
       ),
     ),
     // Participant
@@ -457,7 +449,12 @@ const TableRow = ({ row }: { row: ReceiptPdfRegistrationRow }) => {
 };
 
 export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
-  const isPix = data.payment.method?.toLowerCase().includes('pix');
+  // Pedido sem custo (R$ 0,00): detectado pelo TOTAL, não pelo método salvo.
+  // O schema não tem método "FREE" — pedidos grátis gravam o método selecionado
+  // no checkout (ex.: PIX). Nesses pedidos a barra de forma de pagamento é
+  // OMITIDA (mesma regra do modal de pedido), então não exibimos método/ícone.
+  const isFree = (data.financial?.total ?? 0) <= 0;
+  const isPix = !!data.payment.method?.toLowerCase().includes('pix');
   const totalCount = data.registrations.length;
 
   const declarationText =
@@ -612,10 +609,6 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
               ? React.createElement(InfoRow, { label: 'CNPJ', value: data.organization.document })
               : null,
             React.createElement(InfoRow, { label: 'Evento', value: data.event.name }),
-            React.createElement(InfoRow, {
-              label: 'Data',
-              value: `${fmtDate(data.event.date)} · ${data.event.location}`,
-            }),
           ),
         ),
         // buyer card
@@ -641,26 +634,21 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
             View,
             { style: { gap: 10 } },
             data.buyer.document
-              ? isBR(data.buyer.country)
-                ? React.createElement(InfoRow, {
-                    label: 'CPF / CNPJ',
-                    value: fmtCPF(data.buyer.document),
-                  })
-                : React.createElement(InfoRow, {
-                    label: 'Documento',
-                    value: data.buyer.document,
-                  })
+              ? React.createElement(InfoRow, {
+                  label: 'Documento',
+                  value: isBR(data.buyer.country)
+                    ? fmtCPF(data.buyer.document)
+                    : data.buyer.document,
+                })
               : null,
             React.createElement(InfoRow, { label: 'Evento', value: data.event.name }),
-            React.createElement(InfoRow, {
-              label: 'Data',
-              value: `${fmtDate(data.event.date)} · ${data.event.location}`,
-            }),
           ),
         ),
       ),
-      // payment method bar
-      React.createElement(
+      // payment method bar — OMITIDA em pedido gratuito (mesma regra do modal de pedido)
+      isFree
+        ? null
+        : React.createElement(
         View,
         {
           style: {
@@ -919,7 +907,7 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
             },
             React.createElement(
               View,
-              { style: { width: 80, padding: 12 } },
+              { style: { width: 160, padding: 12 } },
               React.createElement(
                 Text,
                 {
@@ -1073,52 +1061,6 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
               'Declaração: ',
             ),
             declarationText,
-          ),
-        ),
-      ),
-      React.createElement(HR, null),
-      // footer
-      React.createElement(
-        View,
-        { style: { gap: 14, marginTop: 16 } },
-        React.createElement(
-          View,
-          {
-            style: {
-              flexDirection: 'row',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-            },
-          },
-          React.createElement(
-            Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 400, color: C.gray11 } },
-            React.createElement(Text, { style: { fontWeight: 700 } }, 'PódioTicket Ltda.'),
-          ),
-          React.createElement(
-            Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 400, color: C.gray11 } },
-            'CNPJ 65.174.909/0001-01',
-          ),
-        ),
-        React.createElement(
-          View,
-          {
-            style: {
-              flexDirection: 'row',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-            },
-          },
-          React.createElement(
-            Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 400, color: C.gray11 } },
-            'Suporte: suporte@podioticket.com',
-          ),
-          React.createElement(
-            Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 400, color: C.gray11 } },
-            'Documento gerado eletronicamente, sem necessidade de assinatura',
           ),
         ),
       ),

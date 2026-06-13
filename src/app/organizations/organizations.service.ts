@@ -1154,7 +1154,14 @@ export class OrganizationsService {
       },
     });
 
-    // Remover membro e deletar usuário em uma única transação
+    // Remover membro e deletar usuário em uma única transação.
+    //
+    // Membro com SAQUES registrados (EventWithdrawal.requestedById) NÃO pode ter
+    // o User deletado: o histórico de saque é registro financeiro — apagá-lo em
+    // cascata fazia o valor já pago "voltar" ao saldo do repasse (calculado
+    // subtraindo essas linhas) e permitia sacar o mesmo dinheiro de novo. O FK
+    // agora é Restrict no schema; aqui removemos só o vínculo e mantemos a
+    // conta (desativada) como âncora do histórico financeiro.
     await prismaWrite.$transaction(async (tx: any) => {
       await tx.organizationMember.delete({
         where: {
@@ -1165,9 +1172,19 @@ export class OrganizationsService {
         },
       });
 
-      await tx.user.delete({
-        where: { id: memberUserId },
+      const withdrawals = await tx.eventWithdrawal.count({
+        where: { requestedById: memberUserId },
       });
+      if (withdrawals > 0) {
+        await tx.user.update({
+          where: { id: memberUserId },
+          data: { isActive: false },
+        });
+      } else {
+        await tx.user.delete({
+          where: { id: memberUserId },
+        });
+      }
     });
 
     return {
@@ -2462,7 +2479,14 @@ export class OrganizationsService {
       throw new NotFoundException('Member not found');
     }
 
-    // Remover membro e deletar usuário em uma única transação
+    // Remover membro e deletar usuário em uma única transação.
+    //
+    // Membro com SAQUES registrados (EventWithdrawal.requestedById) NÃO pode ter
+    // o User deletado: o histórico de saque é registro financeiro — apagá-lo em
+    // cascata fazia o valor já pago "voltar" ao saldo do repasse (calculado
+    // subtraindo essas linhas) e permitia sacar o mesmo dinheiro de novo. O FK
+    // agora é Restrict no schema; aqui removemos só o vínculo e mantemos a
+    // conta (desativada) como âncora do histórico financeiro.
     await prismaWrite.$transaction(async (tx: any) => {
       await tx.organizationMember.delete({
         where: {
@@ -2473,9 +2497,19 @@ export class OrganizationsService {
         },
       });
 
-      await tx.user.delete({
-        where: { id: memberUserId },
+      const withdrawals = await tx.eventWithdrawal.count({
+        where: { requestedById: memberUserId },
       });
+      if (withdrawals > 0) {
+        await tx.user.update({
+          where: { id: memberUserId },
+          data: { isActive: false },
+        });
+      } else {
+        await tx.user.delete({
+          where: { id: memberUserId },
+        });
+      }
     });
 
     return {
