@@ -44,8 +44,12 @@ export interface ReceiptPdfData {
   financial: {
     subtotal: number;
     discount: number;
-    voucherCode?: string;
-    voucherPercent?: number;
+    /**
+     * Rótulo da linha de desconto, já formatado como no resumo do checkout
+     * (ex.: "Cupom ABC (10% OFF)", "Cupom automático", "Voucher XYZ"). Só
+     * presente quando há desconto (> 0). Cupom e voucher são exclusivos.
+     */
+    discountLabel?: string;
     serviceFee: number;
     total: number;
   };

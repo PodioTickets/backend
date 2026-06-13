@@ -70,7 +70,7 @@ export function buildReceiptPdfData(
   const serviceFee = computeOrderServiceFee(order);
 
   return {
-    orderNumber: String(order.id).slice(0, 8).toUpperCase(),
+    orderNumber: String(order.id).toUpperCase(),
     issuedAt: new Date(),
     organization: {
       name: org.tradeName || org.name || '',
@@ -99,13 +99,44 @@ export function buildReceiptPdfData(
     financial: {
       subtotal: order.totalAmount ?? 0,
       discount,
-      // Voucher só conta como linha de desconto quando NÃO há cupom (exclusivos).
-      voucherCode: hasVoucher && !hasCoupon ? order.voucher?.code : undefined,
+      // Rótulo da linha de desconto, no mesmo formato do resumo do checkout.
+      // Cupom e voucher são exclusivos → no máximo um rótulo.
+      discountLabel: buildDiscountLabel(order, discount, hasCoupon, hasVoucher),
       serviceFee,
       total: computeOrderFinalAmount(order, serviceFee),
     },
     registrations: rows,
   };
+}
+
+/**
+ * Rótulo da linha de desconto, espelhando o resumo do checkout (`OrderSummary`):
+ *  - cupom QUANTITY/AGE → "Cupom automático" (+ "(N% OFF)" se PERCENTAGE);
+ *  - cupom DISCOUNT → "Cupom <code>" (+ "(N% OFF)" se PERCENTAGE);
+ *  - voucher → "Voucher <code>".
+ * Retorna `undefined` quando não há desconto. Cupom e voucher são exclusivos.
+ */
+function buildDiscountLabel(
+  order: any,
+  discount: number,
+  hasCoupon: boolean,
+  hasVoucher: boolean,
+): string | undefined {
+  if (discount <= 0) return undefined;
+  if (hasCoupon) {
+    const c = order.coupon ?? {};
+    const automatic = c.couponType === 'QUANTITY' || c.couponType === 'AGE';
+    const pct =
+      c.type === 'PERCENTAGE' && c.value ? ` (${c.value}% OFF)` : '';
+    if (automatic) return `Cupom automático${pct}`;
+    return `${`Cupom ${c.code ?? ''}`.trim()}${pct}`;
+  }
+  if (hasVoucher) {
+    return order.voucher?.code
+      ? `Voucher ${order.voucher.code}`
+      : 'Voucher aplicado';
+  }
+  return 'Desconto';
 }
 
 /**
