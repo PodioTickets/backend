@@ -286,6 +286,7 @@ export class EventsService {
     const memberships = await prismaWrite.organizationMember.findMany({
       where: { userId },
       include: { organization: true },
+      orderBy: { createdAt: 'asc' },
     });
 
     if (!memberships.length) {
@@ -786,6 +787,7 @@ export class EventsService {
           userId,
           role: 'OWNER',
         },
+        orderBy: { createdAt: 'asc' },
       });
 
       if (member) {
@@ -2562,32 +2564,31 @@ export class EventsService {
 
     const prismaRead = this.prisma.getReadClient();
 
-    const [registrations, modalities] = await Promise.all([
-      prismaRead.registration.findMany({
-        where: { eventId },
-        include: {
-          order: {
-            include: {
-              payment: true,
-            },
-          },
-          modalities: true,
+    const [
+      totalRegistrations,
+      confirmedRegistrations,
+      revenueAggregate,
+      ticketsSold,
+      modalities,
+    ] = await Promise.all([
+      prismaRead.registration.count({ where: { eventId } }),
+      prismaRead.registration.count({ where: { eventId, status: 'CONFIRMED' } }),
+      prismaRead.order.aggregate({
+        where: {
+          eventId,
+          payment: { status: 'PAID' },
         },
+        _sum: { finalAmount: true },
+      }),
+      prismaRead.registrationModality.count({
+        where: { registration: { eventId } },
       }),
       prismaRead.modality.findMany({
         where: { eventId, isActive: true },
       }),
     ]);
 
-    const totalRegistrations = registrations.length;
-    const confirmedRegistrations = registrations.filter((r) => r.status === 'CONFIRMED').length;
-    const totalRevenue = registrations
-      .filter((r) => r.order?.payment && r.order.payment.status === 'PAID')
-      .reduce((sum, r) => sum + this.normalizeToCents(r.order?.finalAmount), 0);
-
-    const ticketsSold = registrations.reduce((sum, r) => {
-      return sum + (r.modalities?.length || 0);
-    }, 0);
+    const totalRevenue = revenueAggregate._sum.finalAmount ?? 0;
 
     const ticketsAvailable = modalities.reduce((sum, m) => {
       return sum + (m.maxParticipants || 0) - m.currentParticipants;
@@ -4189,8 +4190,6 @@ export class EventsService {
                 email: true,
                 fiscalEmail: true,
                 phone: true,
-                ownerName: true,
-                ownerDocument: true,
                 bankName: true,
                 bankCode: true,
                 agency: true,
@@ -4329,7 +4328,10 @@ export class EventsService {
     });
     const organizerFeeRate: number = (eventConfig?.organizerFeePercent ?? 0) / 100;
 
-    // Buscar todos os pagamentos pagos do evento (agrupados por order para evitar duplicatas)
+    // Buscar pagamentos pagos do evento em lotes limitados para evitar carregar toda a tabela.
+    // A filtragem por releaseDate é feita em JS (depende de RETENTION_DAYS por método),
+    // então buscamos com um take máximo razoável e um count separado para métricas totais.
+    const MAX_ORDERS_FETCH = 2000;
     const paidOrders = await prismaRead.order.findMany({
       where: {
         eventId,
@@ -4359,6 +4361,7 @@ export class EventsService {
       orderBy: {
         createdAt: 'desc',
       },
+      take: MAX_ORDERS_FETCH,
     });
 
     const allPending: any[] = [];
@@ -4676,9 +4679,10 @@ export class EventsService {
         };
       });
 
-    // Contar total para paginação
-    // Buscar todos os refunded e filtrar por metadata no código (Prisma não suporta filtro JSON complexo)
-    const allRefundedRegistrations = await prismaRead.registration.findMany({
+    // Contar total para paginação via count no banco + filtro JSON em lote limitado.
+    // Prisma não suporta filtro JSON complexo; buscamos apenas os campos necessários
+    // com um limit generoso (5000) para evitar carregar toda a tabela em eventos grandes.
+    const refundedForCount = await prismaRead.registration.findMany({
       where: {
         eventId,
         order: {
@@ -4687,16 +4691,19 @@ export class EventsService {
           },
         },
       },
-      include: {
+      select: {
         order: {
-          include: {
-            payment: true,
+          select: {
+            payment: {
+              select: { metadata: true },
+            },
           },
         },
       },
+      take: 5000,
     });
 
-    const totalChargebacks = allRefundedRegistrations.filter((reg) => {
+    const totalChargebacks = refundedForCount.filter((reg) => {
       const metadata = reg.order?.payment?.metadata as any;
       return metadata?.refundType === 'CHARGEBACK';
     }).length;

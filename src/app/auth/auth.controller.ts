@@ -46,6 +46,7 @@ import { TurnstileGuard } from './guards/turnstile.guard';
 import { ConfigService } from '@nestjs/config';
 import { OAuthStateService } from './oauth-state.service';
 import { sanitizeRelativePath } from 'src/common/utils/safe-redirect.util';
+import { ALLOWED_ORIGINS } from 'src/common/config/allowed-origins';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 import {
   applyAuthCookiesFromResult,
@@ -311,6 +312,27 @@ export class AuthController {
 
     if (!body.redirectUri) {
       throw new BadRequestException('URI de redirecionamento é obrigatória');
+    }
+
+    // Valida que o redirectUri pertence a uma origem permitida
+    try {
+      const redirectUrl = new URL(body.redirectUri);
+      const isAllowed = ALLOWED_ORIGINS.some(origin => {
+        try {
+          const allowed = new URL(origin);
+          return allowed.hostname === redirectUrl.hostname;
+        } catch { return false; }
+      });
+      // Em desenvolvimento, também aceita qualquer hostname localhost
+      const isLocalhost =
+        process.env.NODE_ENV === 'development' &&
+        (redirectUrl.hostname === 'localhost' || redirectUrl.hostname.endsWith('.localhost'));
+      if (!isAllowed && !isLocalhost) {
+        throw new BadRequestException('redirectUri não permitido');
+      }
+    } catch (e) {
+      if (e instanceof BadRequestException) throw e;
+      throw new BadRequestException('redirectUri inválido');
     }
 
     const result = await this.authService.validateGoogleCode(body.code, body.redirectUri);

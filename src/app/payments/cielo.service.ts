@@ -138,6 +138,11 @@ export class CieloService {
     });
 
     this.logger.log(`Cielo service initialized (${this.isSandbox ? 'Sandbox' : 'Production'}, provider=${this.provider})`);
+
+    // Fix #11: webhookSecret obrigatório em produção para evitar boot silencioso sem segurança
+    if (!this.webhookSecret && process.env.NODE_ENV === 'production') {
+      throw new Error('CIELO_WEBHOOK_SECRET é obrigatório em produção');
+    }
   }
 
   async createPayment(
@@ -970,14 +975,17 @@ export class CieloService {
     }
 
     try {
-      const secretBuf = Buffer.from(this.webhookSecret, 'utf8');
-      const sigBuf = Buffer.from(signature, 'utf8');
+      // Fix #10: a Cielo envia HMAC-SHA256 do payload assinado com o segredo,
+      // não o segredo em si. Comparação direta era incorreta e insegura.
+      const computedHmac = crypto
+        .createHmac('sha256', this.webhookSecret)
+        .update(payload)
+        .digest('hex');
 
-      const valid =
-        sigBuf.length === secretBuf.length &&
-        crypto.timingSafeEqual(sigBuf, secretBuf);
+      const sigBuf = Buffer.from(signature, 'hex');
+      const hmacBuf = Buffer.from(computedHmac, 'hex');
 
-      if (!valid) {
+      if (sigBuf.length !== hmacBuf.length || !crypto.timingSafeEqual(sigBuf, hmacBuf)) {
         this.logger.warn('Webhook signature verification failed');
         return null;
       }

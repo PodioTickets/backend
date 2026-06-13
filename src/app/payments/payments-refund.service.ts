@@ -158,36 +158,13 @@ export class PaymentsRefundService {
     const refundFeeRate = order.event.refundFeeRate ?? REFUND_FEE_RATE;
     const refundFee = Math.round(refundSubtotal * refundFeeRate);
 
-    // ── 4. Chama a Cielo ─────────────────────────────────────────────────────
-    // V1 = estorno total: não passamos amount, a Cielo estorna o valor cheio.
-    const cieloResult = await this.cieloService.cancelPayment(cieloPaymentId);
-
-    if (!cieloResult.success) {
-      this.logger.error(
-        `[REFUND] Cielo recusou estorno do payment ${payment.id} (cieloId=${cieloPaymentId}): ${cieloResult.error}`,
-      );
-      throw new BadRequestException({
-        code: 'CIELO_REFUND_FAILED',
-        message: cieloResult.error ?? 'Cielo recusou a operação de estorno',
-        data: {
-          cieloStatus: cieloResult.cieloStatus,
-          returnCode: cieloResult.returnCode,
-          returnMessage: cieloResult.returnMessage,
-        },
-      });
-    }
-
-    const cieloStatusStr = cieloResult.cieloStatus ?? 'Unknown';
-    // 'Pending' = aceito mas não finalizado pela Cielo — aplicamos efeitos otimisticamente.
-    // O cron de chargeback vai re-checar e atualizar o metadata se necessário.
-    const isPending = cieloStatusStr === 'Pending';
-
-    // ── 5. Aplica efeitos colaterais transacionalmente ───────────────────────
-    // Retorna `true` quando ESTA chamada aplicou os efeitos (false = corrida/no-op),
-    // pra só registrar a telemetria de estorno quando o estorno de fato aconteceu aqui.
+    // ── 4. Aplica efeitos colaterais transacionalmente (ANTES de chamar a Cielo) ───
+    // Fix #38: transação Prisma é executada PRIMEIRO. Se ela falhar, a Cielo nunca é
+    // chamada. Se a Cielo falhar DEPOIS do commit, gravamos compensação e re-lançamos.
+    // Usa 'PENDING_CIELO_CALL' como placeholder de cieloStatus — atualizado pós-Cielo.
     const refundedAt = new Date();
     const applied = await this.prisma.getWriteClient().$transaction(async (tx: any): Promise<boolean> => {
-      // 5a. Marca o Payment como REFUNDED. updateMany com guard de status garante
+      // 4a. Marca o Payment como REFUNDED. updateMany com guard de status garante
       //     idempotência: se outro processo (ex: cron de chargeback) já tiver marcado,
       //     count=0 e o restante da transação vira no-op.
       const paymentUpdate = await tx.payment.updateMany({
@@ -196,7 +173,7 @@ export class PaymentsRefundService {
           status: PaymentStatus.REFUNDED,
           metadata: {
             ...(meta as object),
-            cieloStatus: cieloStatusStr,
+            cieloStatus: 'PENDING_CIELO_CALL',
             refundType: 'REFUND', // distinguir de CHARGEBACK (usado pelo fiscal-export e paymentMethodStats)
             refundReason: reason,
             refundedByUserId: adminUserId,
@@ -206,7 +183,6 @@ export class PaymentsRefundService {
             // RepasseService.getRefunded/getSummary.
             organizerNetReversed: refundOrgNet,
             refundFee,
-            ...(isPending && { refundPendingConfirmation: true }),
           } as any,
           updatedAt: refundedAt,
         },
@@ -220,7 +196,7 @@ export class PaymentsRefundService {
         return false;
       }
 
-      // 5b. Order → CANCELLED
+      // 4b. Order → CANCELLED
       await tx.order.updateMany({
         where: { id: order.id, status: OrderStatus.PAID },
         data: {
@@ -231,7 +207,7 @@ export class PaymentsRefundService {
         },
       });
 
-      // 5c. Registrations confirmadas → CANCELLED
+      // 4c. Registrations confirmadas → CANCELLED
       await tx.registration.updateMany({
         where: {
           orderId: order.id,
@@ -240,13 +216,13 @@ export class PaymentsRefundService {
         data: { status: RegistrationStatus.CANCELLED, updatedAt: refundedAt },
       });
 
-      // 5d+5e. Reverte efeitos de venda (cupom/voucher) — FONTE ÚNICA compartilhada com
+      // 4d+4e. Reverte efeitos de venda (cupom/voucher) — FONTE ÚNICA compartilhada com
       //        o chargeback (`OrderFinalizationService.reverseSaleSideEffects`):
       //        decrementa o cupom espelhando o incremento do finalize (não −1 fixo) e
       //        libera o voucher SOMENTE se foi este usuário quem o consumiu (guard usedBy).
       await this.orderFinalization.reverseSaleSideEffects(tx, order.id);
 
-      // 5f. Audit log para a organização do evento. Não bloqueante: rodamos dentro da tx
+      // 4f. Audit log para a organização do evento. Não bloqueante: rodamos dentro da tx
       //     para garantir que o registro só existe se o estorno também foi commitado.
       await tx.organizationAuditLog.create({
         data: {
@@ -265,16 +241,104 @@ export class PaymentsRefundService {
             organizerNetReversed: refundOrgNet,
             refundFee,
             cieloPaymentId,
-            cieloStatus: cieloStatusStr,
+            cieloStatus: 'PENDING_CIELO_CALL',
             reason,
             forced: force,
-            ...(isPending && { pendingConfirmation: true }),
           },
         },
       });
 
       return true;
     });
+
+    // ── 5. Chama a Cielo APÓS o commit da transação Prisma ────────────────────
+    // Fix #38: chamada Cielo depois da tx para garantir que os efeitos locais só
+    // existem quando a tx foi commitada. Se a Cielo falhar aqui, gravamos compensação.
+    let cieloStatusStr = 'Unknown';
+    let isPending = false;
+
+    if (applied) {
+      const cieloResult = await this.cieloService.cancelPayment(cieloPaymentId).catch(async (cieloError) => {
+        this.logger.error('COMPENSAÇÃO NECESSÁRIA: tx Prisma OK mas Cielo falhou', {
+          orderId: order.id,
+          cieloPaymentId,
+          error: cieloError?.message ?? String(cieloError),
+        });
+        await this.prisma.getWriteClient().payment.update({
+          where: { id: payment.id },
+          data: {
+            metadata: {
+              ...(meta as object),
+              cieloStatus: 'COMPENSATION_NEEDED',
+              refundCompensationPending: true,
+              cieloError: cieloError?.message ?? String(cieloError),
+              refundType: 'REFUND',
+              refundReason: reason,
+              refundedByUserId: adminUserId,
+              refundedAt: refundedAt.toISOString(),
+              organizerNetReversed: refundOrgNet,
+              refundFee,
+            } as any,
+          },
+        });
+        throw cieloError;
+      });
+
+      if (!cieloResult.success) {
+        this.logger.error(
+          `[REFUND] Cielo recusou estorno do payment ${payment.id} (cieloId=${cieloPaymentId}): ${cieloResult.error}`,
+        );
+        // Atualiza metadata com status de falha da Cielo
+        await this.prisma.getWriteClient().payment.update({
+          where: { id: payment.id },
+          data: {
+            metadata: {
+              ...(meta as object),
+              cieloStatus: cieloResult.cieloStatus ?? 'CIELO_REFUND_FAILED',
+              refundCompensationPending: true,
+              refundType: 'REFUND',
+              refundReason: reason,
+              refundedByUserId: adminUserId,
+              refundedAt: refundedAt.toISOString(),
+              organizerNetReversed: refundOrgNet,
+              refundFee,
+            } as any,
+          },
+        });
+        throw new BadRequestException({
+          code: 'CIELO_REFUND_FAILED',
+          message: cieloResult.error ?? 'Cielo recusou a operação de estorno',
+          data: {
+            cieloStatus: cieloResult.cieloStatus,
+            returnCode: cieloResult.returnCode,
+            returnMessage: cieloResult.returnMessage,
+          },
+        });
+      }
+
+      cieloStatusStr = cieloResult.cieloStatus ?? 'Unknown';
+      // 'Pending' = aceito mas não finalizado pela Cielo — aplicamos efeitos otimisticamente.
+      // O cron de chargeback vai re-checar e atualizar o metadata se necessário.
+      isPending = cieloStatusStr === 'Pending';
+
+      // Atualiza metadata com o cieloStatus real pós-chamada bem-sucedida
+      await this.prisma.getWriteClient().payment.update({
+        where: { id: payment.id },
+        data: {
+          metadata: {
+            ...(meta as object),
+            cieloStatus: cieloStatusStr,
+            refundType: 'REFUND',
+            refundReason: reason,
+            refundedByUserId: adminUserId,
+            refundedAt: refundedAt.toISOString(),
+            organizerNetReversed: refundOrgNet,
+            refundFee,
+            ...(isPending && { refundPendingConfirmation: true }),
+          } as any,
+        },
+      });
+    }
 
     // ── 6. Telemetria: evento na jornada do COMPRADOR ─────────────────────────
     // Complementa o `order.refund` (COMPLIANCE) gravado pelo controller admin, que fica

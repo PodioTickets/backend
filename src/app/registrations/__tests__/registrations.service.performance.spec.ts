@@ -16,6 +16,7 @@ describe('RegistrationsService - Performance Tests', () => {
     },
     modality: {
       findUnique: jest.fn(),
+      findMany: jest.fn(),
       update: jest.fn(),
     },
     user: {
@@ -136,7 +137,7 @@ describe('RegistrationsService - Performance Tests', () => {
 
     beforeEach(() => {
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
+      mockPrismaService.modality.findMany.mockResolvedValue([mockModality]);
       mockPrismaService.question.findMany.mockResolvedValue([]);
       mockKitsService.checkStock.mockResolvedValue(true);
       mockKitsService.updateStock.mockResolvedValue(true);

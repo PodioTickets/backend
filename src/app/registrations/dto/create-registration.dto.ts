@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsBoolean, IsArray, IsNumber, Min, ValidateNested } from 'class-validator';
+import { IsString, IsOptional, IsBoolean, IsArray, IsNumber, Min, ValidateNested, MaxLength } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class SelectedModalityDto {
@@ -24,6 +24,7 @@ export class QuestionAnswerDto {
   questionId: string;
 
   @IsString()
+  @MaxLength(5000)
   answer: string;
 }
 

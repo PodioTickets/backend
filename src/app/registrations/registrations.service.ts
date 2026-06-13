@@ -136,12 +136,16 @@ export class RegistrationsService {
       }
     }
 
-    // Verificar modalidades e calcular preço
+    // Verificar modalidades e calcular preço — busca em lote para evitar N+1
+    const modalityIds = modalities.map((m) => m.modalityId);
+    const foundModalities = await prismaRead.modality.findMany({
+      where: { id: { in: modalityIds } },
+    });
+    const modalityMap = new Map(foundModalities.map((m) => [m.id, m]));
+
     let totalAmount = 0;
     for (const modalitySelection of modalities) {
-      const modality = await prismaRead.modality.findUnique({
-        where: { id: modalitySelection.modalityId },
-      });
+      const modality = modalityMap.get(modalitySelection.modalityId);
 
       if (!modality || modality.eventId !== eventId || !modality.isActive) {
         throw new NotFoundException(`Modality ${modalitySelection.modalityId} not found`);

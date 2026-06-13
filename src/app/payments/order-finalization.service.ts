@@ -309,19 +309,17 @@ export class OrderFinalizationService {
           throw new BadRequestException('Cupom esgotado. Prossiga sem desconto ou escolha outro cupom.');
         }
       } else {
-        // DISCOUNT/AGE: uso é POR INGRESSO — incrementa pelo nº de ingressos que de fato
-        // receberam o desconto (slots elegíveis), NÃO pelo total do pedido. Espelha o
-        // effectiveUsage do `pay` via fonte única `computeCouponCoveredUnits`. Cap em maxUsage
-        // atômico — nunca ultrapassa sob concorrência.
+        // Fix #13: DISCOUNT/AGE — UPDATE atômico com LEAST para evitar race condition.
+        // O delta é calculado a partir dos slots cobertos (fonte única computeCouponCoveredUnits),
+        // mas o cap em maxUsage é feito DENTRO do UPDATE via LEAST, eliminando a race condition
+        // entre a leitura de usageCount e o UPDATE que existia antes.
         const ageRefDate = order.event?.eventDate ? new Date(order.event.eventDate) : new Date();
-        const coveredUnits = computeCouponCoveredUnits(order.coupon, reservedTickets, participants, ageRefDate);
-        const delta = couponForUsage?.maxUsage != null
-          ? Math.min(coveredUnits, Math.max(0, couponForUsage.maxUsage - couponForUsage.usageCount))
-          : coveredUnits;
+        const delta = computeCouponCoveredUnits(order.coupon, reservedTickets, participants, ageRefDate);
         if (delta > 0) {
-          await tx.$queryRaw`
+          await tx.$executeRaw`
             UPDATE "Coupon"
-            SET "usageCount" = LEAST("usageCount" + ${delta}, COALESCE("maxUsage", "usageCount" + ${delta}))
+            SET "usageCount" = LEAST("usageCount" + ${delta}, COALESCE("maxUsage", "usageCount" + ${delta})),
+                "updatedAt" = NOW()
             WHERE id = ${order.couponId}::uuid
           `;
         }

@@ -1036,8 +1036,14 @@ export class OrdersService {
         );
       }
 
-      // Camada 1 — pre-check otimista antes de entrar na transaction
-      if (batch.availableQuantity < item.quantity) {
+      // Fix #37: pre-check via write client (não réplica) para evitar leitura defasada
+      // que permitiria oversell em janelas de replicação. O UPDATE atômico dentro da
+      // transação ainda é a proteção real; este pre-check serve ao UX (falha cedo).
+      const batchFromWrite = await w.ticketBatch.findUnique({
+        where: { id: batch.id },
+        select: { availableQuantity: true },
+      });
+      if (!batchFromWrite || batchFromWrite.availableQuantity < item.quantity) {
         throw new AppConflictException(
           'BATCH_SOLD_OUT',
           `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
@@ -3288,7 +3294,10 @@ export class OrdersService {
     // alíquota usada no repasse/financeiro pra este pedido, mesmo que o evento mude depois.
     const organizerFeePercent: number =
       (order as any).event?.organizerFeePercent ?? 0;
-    const feeBase = Math.max(0, preDiscountTotal - couponDiscount - voucherDiscount);
+    // Fix #12: cap do total de descontos para não ultrapassar o valor pré-desconto,
+    // evitando feeBase negativo (e finalTotal negativo) quando cupom+voucher excedem o total.
+    const totalDiscount = Math.min(couponDiscount + voucherDiscount, preDiscountTotal);
+    const feeBase = Math.max(0, preDiscountTotal - totalDiscount);
     const serviceFee = Math.round(feeBase * (participantFeePercent / 100));
 
     // finalTotal = (preDiscountTotal − descontos) + serviceFee. A taxa entra na cobrança
@@ -3296,6 +3305,8 @@ export class OrdersService {
     const discountedTotal = feeBase + serviceFee;
     const pixDiscount = 0;
     const finalTotal = discountedTotal;
+    // Fix #12: pedido grátis apenas quando feeBase=0 e os descontos não ultrapassam o total
+    // (totalDiscount já é capado acima, então a condição é consistente).
 
     // Fragmento de auditoria de desconto para o metadata do pagamento. Persistido em
     // TODOS os métodos (PIX/cartão/débito), inclusive nas confirmações via webhook —
@@ -3882,10 +3893,17 @@ export class OrdersService {
         status: 'PAID',
         transactionId: cieloResult.paymentId ?? null,
         ...(dto.method === PaymentMethod.CREDIT_CARD && cardData && {
-          creditCard: {
-            installments: cardData.installments,
-            installmentValue: Math.floor(finalTotal / cardData.installments),
-          },
+          creditCard: (() => {
+            // Fix #63: distribui o centavo residual na primeira parcela para que a soma
+            // exata de todas as parcelas seja sempre igual ao totalizado.
+            const baseInstallment = Math.floor(finalTotal / cardData.installments);
+            const firstInstallmentValue = finalTotal - baseInstallment * (cardData.installments - 1);
+            return {
+              installments: cardData.installments,
+              installmentValue: baseInstallment,
+              firstInstallmentValue,
+            };
+          })(),
         }),
         ...(dto.method === PaymentMethod.DEBIT_CARD && cardData && {
           debitCard: {

@@ -463,10 +463,8 @@ export class AuthService {
         },
       };
     } catch (error) {
-      console.error('Login error:', error);
-      throw new UnauthorizedException(
-        error?.message || 'Failed to generate tokens',
-      );
+      this.logger.error(error);
+      throw new UnauthorizedException('Erro ao processar autenticação');
     }
   }
 
@@ -579,6 +577,11 @@ export class AuthService {
     try {
       const { refreshToken } = refreshTokenDto;
 
+      // Verificar se token está na blocklist (logout)
+      const hash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+      const blocked = await this.cacheManager.get('logout_rt:' + hash);
+      if (blocked) throw new UnauthorizedException('Token inválido');
+
       // Buscar refresh token no banco (implementar modelo RefreshToken se necessário)
       // Por enquanto, validar diretamente o JWT
       const decoded = this.jwtService.verify(refreshToken, {
@@ -625,8 +628,18 @@ export class AuthService {
   }
 
   async logout(refreshToken: string) {
-    // Implementar invalidação do refresh token se necessário
-    // Por enquanto, apenas retornar sucesso
+    try {
+      const decoded = this.jwtService.decode(refreshToken) as { exp?: number } | null;
+      if (decoded?.exp) {
+        const remainingTtlMs = decoded.exp * 1000 - Date.now();
+        if (remainingTtlMs > 0) {
+          const hash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+          await this.cacheManager.set('logout_rt:' + hash, 1, remainingTtlMs);
+        }
+      }
+    } catch {
+      // Ignora tokens mal-formados — o logout ainda limpa os cookies
+    }
     return { message: 'Logged out successfully' };
   }
 
@@ -768,13 +781,15 @@ export class AuthService {
       throw new BadRequestException('Muitas tentativas. Solicite um novo código');
     }
 
-    cached.attempts += 1;
-    await this.cacheManager.set(cacheKey, cached, 15 * 60 * 1000);
-
     if (cached.code !== code) {
+      // Código errado: incrementa attempts mas NÃO marca used=true
+      cached.attempts += 1;
+      await this.cacheManager.set(cacheKey, cached, 15 * 60 * 1000);
       throw new BadRequestException('Código inválido');
     }
 
+    // Código correto: marca used=true + incrementa attempts num único set (evita TOCTOU)
+    cached.attempts += 1;
     cached.used = true;
     await this.cacheManager.set(cacheKey, cached, 15 * 60 * 1000);
 
@@ -1036,7 +1051,7 @@ export class AuthService {
     const cleanIp = ip.replace(/^::ffff:/, '');
 
     try {
-      const token = this.configService.get<string>('IPINFO_TOKEN', 'f5f7bc542bbe40');
+      const token = this.configService.get<string>('IPINFO_TOKEN');
       const resp = await firstValueFrom(
         this.httpService.get(
           `https://ipinfo.io/${cleanIp}/json?token=${token}`,
@@ -1120,7 +1135,6 @@ export class AuthService {
       accountType,
     };
     const resetUrl = this.buildPasswordResetPageUrl(token);
-    console.log('[DEV] Password reset URL:', resetUrl);
     const accountLabel =
       accountType === 'ORGANIZER' ? 'conta de organizador' : 'sua conta PodioGo';
 
@@ -1557,11 +1571,8 @@ export class AuthService {
       // Fazer login e retornar tokens JWT
       return await this.login(user);
     } catch (error: any) {
-      console.error('Error validating Google code:', error.response?.data || error.message);
-      throw new BadRequestException(
-        error.response?.data?.error_description ||
-        'Failed to validate Google authorization code'
-      );
+      this.logger.error('Google OAuth error', error.response?.data);
+      throw new BadRequestException('Falha na autenticação com Google');
     }
   }
 

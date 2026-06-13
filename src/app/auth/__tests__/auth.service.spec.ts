@@ -28,6 +28,7 @@ describe('AuthService', () => {
   const mockJwtService = {
     sign: jest.fn(),
     verify: jest.fn(),
+    decode: jest.fn(),
   };
 
   const mockConfigService = {
@@ -445,9 +446,9 @@ describe('AuthService', () => {
       await expect(service.login(mockUser)).rejects.toThrow(
         UnauthorizedException,
       );
-      // O service repassa a mensagem do erro interno (error?.message).
+      // Fix #32: mensagem genérica ao cliente (erro interno não é exposto).
       await expect(service.login(mockUser)).rejects.toThrow(
-        'Token generation failed',
+        'Erro ao processar autenticação',
       );
     });
   });
