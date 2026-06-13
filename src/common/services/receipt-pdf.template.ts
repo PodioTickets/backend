@@ -35,6 +35,17 @@ function fmtCPF(cpf: string): string {
   return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
 }
 
+/**
+ * Mascara um id longo (UUID/CUID) como "AAAA...ZZZZ" — 4 primeiros + 4 últimos,
+ * uppercase. Usado na coluna estreita de participante (id completo quebra a linha).
+ * Ids curtos (≤ 8) são exibidos inteiros.
+ */
+function maskId(id: string): string {
+  const s = String(id ?? '').toUpperCase();
+  if (s.length <= 8) return s;
+  return `${s.slice(0, 4)}...${s.slice(-4)}`;
+}
+
 function formatPaymentMethod(method: string | undefined): string {
   const m = (method ?? '').toUpperCase();
   if (m === 'CREDIT_CARD') return 'Cartão de crédito';
@@ -349,11 +360,11 @@ const TableRow = ({ row }: { row: ReceiptPdfRegistrationRow }) => {
     // ID
     React.createElement(
       View,
-      { style: { width: 160, paddingHorizontal: 12, paddingVertical: 10 } },
+      { style: { width: 100, paddingHorizontal: 12, paddingVertical: 10 } },
       React.createElement(
         Text,
-        { style: { fontFamily: 'DM Sans', fontSize: 9, fontWeight: 600, color: C.gray12 } },
-        row.id.toUpperCase(),
+        { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 600, color: C.gray12 } },
+        maskId(row.id),
       ),
     ),
     // Participant
@@ -804,28 +815,32 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
               gap: 14,
             },
           },
+          // Resumo igual ao do checkout (OrderSummary): Subtotal → desconto
+          // (cupom/voucher) → taxa de serviço (só quando > 0) → Total, com um
+          // único divisor antes do Total.
           React.createElement(FinancialRow, {
-            label: `Subtotal (${totalCount} ingresso${totalCount !== 1 ? 's' : ''})`,
+            label: 'Subtotal',
             value: fmtCurrency(data.financial.subtotal),
           }),
-          ...(data.financial.discount > 0 && data.financial.voucherCode
+          ...(data.financial.discount > 0
             ? [
-                React.createElement(HR, null),
                 React.createElement(FinancialRow, {
-                  label:
-                    `Voucher ${data.financial.voucherCode}` +
-                    (data.financial.voucherPercent
-                      ? ` (-${data.financial.voucherPercent.toFixed(2)}%)`
-                      : ''),
+                  label: data.financial.discountLabel || 'Desconto',
                   value: `- ${fmtCurrency(data.financial.discount)}`,
                 }),
               ]
             : []),
-          React.createElement(HR, null),
-          React.createElement(FinancialRow, { label: 'Taxa de serviço', value: 'Inclusa' }),
+          ...(data.financial.serviceFee > 0
+            ? [
+                React.createElement(FinancialRow, {
+                  label: 'Taxa de serviço',
+                  value: fmtCurrency(data.financial.serviceFee),
+                }),
+              ]
+            : []),
           React.createElement(HR, null),
           React.createElement(FinancialRow, {
-            label: 'Total pago',
+            label: 'Total',
             value: fmtCurrency(data.financial.total),
             bold: true,
           }),
@@ -907,7 +922,7 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
             },
             React.createElement(
               View,
-              { style: { width: 160, padding: 12 } },
+              { style: { width: 100, padding: 12 } },
               React.createElement(
                 Text,
                 {
