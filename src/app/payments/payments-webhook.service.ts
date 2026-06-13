@@ -8,7 +8,6 @@ import { buildReceiptPdfData } from '../../common/services/receipt-pdf.builder';
 import { PaymentGateway } from './payment.gateway';
 import { OrderFinalizationService, OrderFinalizationAbortError } from './order-finalization.service';
 import { PaymentCompensationService } from './payment-compensation.service';
-import { PaymentsChargebackService } from './payments-chargeback.service';
 import { PaymentMethod, PaymentStatus } from '@prisma/client';
 
 function formatEventDate(date: Date | string | null | undefined): string {
@@ -54,7 +53,6 @@ export class PaymentsWebhookService {
     private readonly gateway: PaymentGateway,
     private readonly orderFinalization: OrderFinalizationService,
     private readonly compensation: PaymentCompensationService,
-    private readonly chargeback: PaymentsChargebackService,
   ) {}
 
   async handleWebhook(event: CieloWebhookEvent) {
@@ -103,26 +101,15 @@ export class PaymentsWebhookService {
       return;
     }
 
-    /* Reversão (10=Voided / 11=Refunded) notificada via webhook: delega para o
-     * MESMO processReversal do cron de chargeback, que faz a reversão COMPLETA
-     * e idempotente (Payment→REFUNDED com refundType, Order PAID→CANCELLED,
-     * inscrições→CANCELLED, cupom/voucher/estoque revertidos). Antes o webhook
-     * só rebaixava o Payment: o comprador estornado mantinha ingressos válidos
-     * pra sempre, e o payment saía do filtro do cron (status PAID) — estado
-     * inconsistente permanente, irreparável até pela UI de estorno. */
+    /* Reversão (10=Voided / 11=Refunded): o webhook NÃO trata — quem processa é
+     * o cron diário de chargeback (PaymentsChargebackService, 03:00), que faz a
+     * reversão completa e idempotente. CRÍTICO: o webhook precisa deixar o
+     * Payment INTACTO (PAID) — se rebaixasse pra REFUNDED aqui, o payment saía
+     * do filtro do cron (que varre só status PAID) e a reversão nunca rodava:
+     * comprador estornado ficava com ingressos válidos pra sempre. */
     if (paymentStatus === PaymentStatus.REFUNDED) {
-      const payment = await this.prisma.getWriteClient().payment.findFirst({
-        where: { transactionId: event.PaymentId },
-        select: { id: true, orderId: true, userId: true, metadata: true, method: true },
-      });
-      if (!payment) {
-        this.logger.warn(`Webhook reversão: nenhum payment local para ${event.PaymentId} — ignorando.`);
-        return;
-      }
-      await this.chargeback.processReversal(
-        { ...payment, userId: payment.userId ?? undefined, method: payment.method ?? undefined },
-        actualCieloStatus,
-        payment.metadata,
+      this.logger.log(
+        `Webhook reversão (status ${actualCieloStatus}) para ${event.PaymentId} — deixado para o cron diário de chargeback.`,
       );
       return;
     }

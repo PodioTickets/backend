@@ -87,17 +87,17 @@ resetPassword / reset por link. O `JwtStrategy` rejeita qualquer token com
 `iat` anterior à última troca (margem de 2s p/ clock skew) — a troca de senha
 passou a invalidar todas as sessões antigas.
 
-### 🟡 10. Webhook de estorno/chargeback não cancelava pedido/inscrições
+### 🟡 10. Webhook de estorno neutralizava o cron diário de chargeback
 **Arquivos:** `payments-webhook.service.ts`, `payments-chargeback.service.ts`
-Quando a Cielo notificava reversão (status 10/11), o webhook só rebaixava o
-Payment pra REFUNDED: o pedido ficava PAID, as inscrições CONFIRMED (ingressos
-válidos pra sempre), cupom/voucher/estoque não revertiam — e o payment saía do
-filtro do cron de chargeback (que só varre PAID). Estado inconsistente
-permanente, irreparável até pela UI de estorno.
-**Fix:** o webhook agora **delega** reversões ao `processReversal` (tornado
-público) do serviço de chargeback — a MESMA reversão completa e idempotente do
-cron: Payment→REFUNDED com refundType, Order→CANCELLED, inscrições→CANCELLED,
-cupom/voucher/estoque revertidos.
+Quando a Cielo notificava reversão (status 10/11), o webhook rebaixava o
+Payment pra REFUNDED **sem nenhum efeito colateral** (pedido ficava PAID,
+inscrições CONFIRMED, cupom/voucher/estoque não revertiam) — e, pior, o payment
+saía do filtro do cron diário de chargeback (que varre só status PAID), então a
+reversão completa nunca rodava. Estado inconsistente permanente.
+**Fix (decisão do time):** reversões são processadas **exclusivamente pelo cron
+diário** (`processReversal`, 03:00) — o webhook passa a IGNORAR status 10/11 e
+deixa o Payment intacto (PAID), garantindo que o cron o encontre e execute a
+reversão completa e idempotente.
 
 ### 🟡 11. Retry de PIX deixava QR antigo pagável (dinheiro órfão)
 **Arquivo:** `orders.service.ts`

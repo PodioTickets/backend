@@ -64,7 +64,6 @@ import { ConfigService } from '@nestjs/config';
 import { PaymentsWebhookService } from '../payments-webhook.service';
 import { OrderFinalizationService } from '../order-finalization.service';
 import { PaymentCompensationService } from '../payment-compensation.service';
-import { PaymentsChargebackService } from '../payments-chargeback.service';
 import { CieloService } from '../cielo.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import {
@@ -132,17 +131,6 @@ describe('PaymentsWebhookService.handleWebhook (integração, banco real)', () =
       cielo as any,
       { record: () => {} } as any,
     );
-    // Chargeback REAL (2026-06-12): o webhook passou a DELEGAR reversões
-    // (status 10/11) ao processReversal do PaymentsChargebackService — antes só
-    // rebaixava o Payment e deixava Order/inscrições PAID/CONFIRMED pra sempre.
-    // O construtor do webhook ganhou este 9º parâmetro; usamos o serviço real
-    // (mesma Cielo mockada + finalization real) pra cobrir o novo caminho.
-    const chargeback = new PaymentsChargebackService(
-      prisma,
-      cielo as any,
-      finalization,
-      { record: () => {} } as any,
-    );
     const service = new PaymentsWebhookService(
       prisma,
       cielo,
@@ -152,7 +140,6 @@ describe('PaymentsWebhookService.handleWebhook (integração, banco real)', () =
       gateway,
       finalization,
       compensation,
-      chargeback,
     );
     return { service, gateway, cielo };
   };
