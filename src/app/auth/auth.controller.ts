@@ -139,12 +139,14 @@ export class AuthController {
   }
 
   @Post('login/admin')
-  @UseGuards(LocalAuthGuard)
+  // Turnstile TAMBÉM aqui: sem ele a rota validava senha de QUALQUER usuário
+  // sem captcha — brute-force/credential-stuffing livre, contornando a proteção
+  // do /login. A página de login do admin já envia o turnstileToken.
+  @UseGuards(TurnstileGuard, LocalAuthGuard)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: '[Admin] Login — no Turnstile, role-gated' })
+  @ApiOperation({ summary: '[Admin] Login — Turnstile + role-gated' })
   @ApiResponse({ status: 200, description: 'Login successful' })
   @ApiResponse({ status: 401, description: 'Invalid credentials' })
-  @ApiResponse({ status: 403, description: 'Admin role required' })
   @ApiBody({
     schema: {
       type: 'object',
@@ -158,7 +160,10 @@ export class AuthController {
   async loginAdmin(@Request() req, @Res({ passthrough: true }) res: Response) {
     const role = req.user?.role;
     if (role !== 'ADMIN' && role !== 'PODIOGO_STAFF') {
-      throw new ForbiddenException('Admin access required');
+      // 401 (não 403): a resposta distinta formava um oráculo — 403 confirmava
+      // que a senha estava CERTA (só faltava papel), validando credenciais
+      // roubadas. Indistinguível de credencial inválida.
+      throw new UnauthorizedException('Invalid credentials');
     }
     const result = await this.authService.login(req.user, { userAgent: req.headers?.['user-agent'] });
     return applyAuthCookiesFromResult(res, 'admin', result);

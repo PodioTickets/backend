@@ -8,6 +8,7 @@ import { buildReceiptPdfData } from '../../common/services/receipt-pdf.builder';
 import { PaymentGateway } from './payment.gateway';
 import { OrderFinalizationService, OrderFinalizationAbortError } from './order-finalization.service';
 import { PaymentCompensationService } from './payment-compensation.service';
+import { PaymentsChargebackService } from './payments-chargeback.service';
 import { PaymentMethod, PaymentStatus } from '@prisma/client';
 
 function formatEventDate(date: Date | string | null | undefined): string {
@@ -53,6 +54,7 @@ export class PaymentsWebhookService {
     private readonly gateway: PaymentGateway,
     private readonly orderFinalization: OrderFinalizationService,
     private readonly compensation: PaymentCompensationService,
+    private readonly chargeback: PaymentsChargebackService,
   ) {}
 
   async handleWebhook(event: CieloWebhookEvent) {
@@ -69,16 +71,19 @@ export class PaymentsWebhookService {
      * O 3DS callback faz a mesma chamada e nunca foi gargalo.
      */
     let paymentStatus: PaymentStatus;
+    // Status REAL consultado na Cielo (não o do payload) — usado nas transições
+    // e na delegação de reversão abaixo.
+    let actualCieloStatus: number;
     try {
       const cieloPayment = await this.cieloService.getPayment(event.PaymentId);
       if (!cieloPayment) {
         this.logger.warn(`Webhook: getPayment(${event.PaymentId}) retornou null — payload pode ser forjado, abortando.`);
         return;
       }
-      const actualStatus = cieloPayment.Payment.Status;
-      paymentStatus = this.cieloService.mapCieloStatusToPaymentStatus(actualStatus);
-      if (actualStatus !== event.Status) {
-        this.logger.warn(`Webhook status divergente da Cielo: payload=${event.Status}, Cielo=${actualStatus}. Usando valor real (${actualStatus}).`);
+      actualCieloStatus = cieloPayment.Payment.Status;
+      paymentStatus = this.cieloService.mapCieloStatusToPaymentStatus(actualCieloStatus);
+      if (actualCieloStatus !== event.Status) {
+        this.logger.warn(`Webhook status divergente da Cielo: payload=${event.Status}, Cielo=${actualCieloStatus}. Usando valor real (${actualCieloStatus}).`);
       }
     } catch (err: any) {
       this.logger.error(`Webhook: erro ao validar status na Cielo: ${err?.message ?? 'unknown'}`);
@@ -94,6 +99,30 @@ export class PaymentsWebhookService {
     if (paymentStatus === PaymentStatus.PENDING) {
       this.logger.log(
         `Webhook ignorado (status intermediário ${event.Status}) para payment ${event.PaymentId}`,
+      );
+      return;
+    }
+
+    /* Reversão (10=Voided / 11=Refunded) notificada via webhook: delega para o
+     * MESMO processReversal do cron de chargeback, que faz a reversão COMPLETA
+     * e idempotente (Payment→REFUNDED com refundType, Order PAID→CANCELLED,
+     * inscrições→CANCELLED, cupom/voucher/estoque revertidos). Antes o webhook
+     * só rebaixava o Payment: o comprador estornado mantinha ingressos válidos
+     * pra sempre, e o payment saía do filtro do cron (status PAID) — estado
+     * inconsistente permanente, irreparável até pela UI de estorno. */
+    if (paymentStatus === PaymentStatus.REFUNDED) {
+      const payment = await this.prisma.getWriteClient().payment.findFirst({
+        where: { transactionId: event.PaymentId },
+        select: { id: true, orderId: true, userId: true, metadata: true, method: true },
+      });
+      if (!payment) {
+        this.logger.warn(`Webhook reversão: nenhum payment local para ${event.PaymentId} — ignorando.`);
+        return;
+      }
+      await this.chargeback.processReversal(
+        { ...payment, userId: payment.userId ?? undefined, method: payment.method ?? undefined },
+        actualCieloStatus,
+        payment.metadata,
       );
       return;
     }
@@ -146,7 +175,9 @@ export class PaymentsWebhookService {
           data: {
             metadata: {
               ...(fresh.metadata as object),
-              cieloStatus: this.cieloService.mapCieloStatusToString(event.Status),
+              // Status REAL consultado na Cielo — não o do payload (que pode ser
+              // replay atrasado/forjado e divergir da transição aplicada).
+              cieloStatus: this.cieloService.mapCieloStatusToString(actualCieloStatus),
               webhookProcessedAt: new Date().toISOString(),
               returnCode: event.ReturnCode,
               returnMessage: event.ReturnMessage,

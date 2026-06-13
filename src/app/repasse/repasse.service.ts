@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -153,8 +154,21 @@ export class RepasseService {
     await this.organizerMemberAccess.assertCanAccessEvent(userId, eventId, 'financial');
   }
 
+  /**
+   * Gate ADMIN de verdade (staff da plataforma). As rotas que usam este gate —
+   * auditEvent (libera a retenção de 10%), completeWithdrawal e cancelWithdrawal —
+   * são rotuladas [Admin] e existem em paralelo às rotas de AdminRepasseController.
+   * Antes esta função era IDÊNTICA ao assertAccess (só permissão financeira do
+   * organizador), permitindo o organizador SE AUTO-AUDITAR e liberar a própria
+   * retenção pré-repasse — derrotando o controle.
+   */
   private async assertAdminOrOwner(userId: string, eventId: string) {
-    await this.organizerMemberAccess.assertCanAccessEvent(userId, eventId, 'financial');
+    const user = await this.prisma.getReadClient().user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (user?.role === 'ADMIN' || user?.role === 'PODIOGO_STAFF') return;
+    throw new ForbiddenException('Apenas administradores da plataforma podem executar esta ação.');
   }
 
   // ─── Estorno (organizador c/ permissão financeira) ────────────────────────

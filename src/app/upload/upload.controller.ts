@@ -587,6 +587,9 @@ export class UploadController {
 
   @Post('pdf')
   @SkipThrottle()
+  // Mesma regra do /image: upload exige login. Sem o guard a rota era pública —
+  // qualquer um na internet gravava no bucket GCS de produção.
+  @UseGuards(JwtAuthGuard)
   @UseInterceptors(
     FileInterceptor('file', {
       storage: memoryStorage(),

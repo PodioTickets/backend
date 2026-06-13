@@ -301,6 +301,8 @@ export class CieloService {
             Brand: cardBrand,
           };
 
+          // PCI-DSS: NUNCA logar SecurityCode (CVV) nem PAN completo — o CVV é
+          // proibido de persistir em qualquer hipótese. Log carrega só flags/derivados.
           this.logger.debug('Credit card payment data prepared:', {
             brand: cardBrand,
             installments: paymentData.Installments,
@@ -309,16 +311,6 @@ export class CieloService {
             hasHolder: !!cardData.holder,
             expiryDate: expiryDate,
             hasCvv: !!cardData.cvv,
-            fullPaymentData: JSON.stringify({
-              Type: paymentData.Type,
-              CreditCard: {
-                CardNumber: cardNumber.substring(0, 4) + '****' + cardNumber.substring(cardNumber.length - 4),
-                Holder: cardData.holder,
-                ExpirationDate: expiryDate,
-                SecurityCode: securityCodeStr,
-                Brand: cardBrand,
-              },
-            }),
           });
           break;
 
@@ -469,12 +461,17 @@ export class CieloService {
       // ENVIADO À CIELO, que recebia "4066****1799" e rejeitava (ProviderReturnCode
       // 001: "não é facet-valid com o pattern [0-9]"). Deep clone resolve.
       const maskedRequestBody = JSON.parse(JSON.stringify(requestBody));
-      if (maskedRequestBody.Payment?.CreditCard) {
-        const card = maskedRequestBody.Payment.CreditCard;
+      // PCI-DSS: mascara PAN e REMOVE o CVV (SecurityCode) de CRÉDITO **e DÉBITO**.
+      // Antes só CreditCard.CardNumber era mascarado — o DebitCard inteiro
+      // (PAN+CVV+validade) e o CVV do crédito iam em claro pro log.
+      for (const cardKey of ['CreditCard', 'DebitCard']) {
+        const card = maskedRequestBody.Payment?.[cardKey];
+        if (!card) continue;
         if (card.CardNumber) {
           card.CardNumber =
             card.CardNumber.substring(0, 4) + '****' + card.CardNumber.substring(card.CardNumber.length - 4);
         }
+        if (card.SecurityCode) card.SecurityCode = '***';
       }
       this.logger.debug('Request body (masked):', JSON.stringify(maskedRequestBody, null, 2));
 
@@ -508,7 +505,9 @@ export class CieloService {
             'Accept': this.axiosInstance.defaults.headers['Accept'],
             'Content-Type': this.axiosInstance.defaults.headers['Content-Type'],
             'MerchantId': this.axiosInstance.defaults.headers['MerchantId'],
-            'MerchantKey': this.axiosInstance.defaults.headers['MerchantKey'],
+            // Credencial integral da conta Cielo — NUNCA logar em claro (quem lê
+            // o log conseguiria criar vendas/voids). Igual ao log de PIX acima.
+            'MerchantKey': '***masked***',
           },
         });
 

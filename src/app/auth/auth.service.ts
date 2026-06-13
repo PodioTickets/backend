@@ -915,6 +915,8 @@ export class AuthService {
       where: { id: user.id },
       data: {
         password: hashedPassword,
+        // Invalida tokens emitidos ANTES da troca (JwtStrategy compara iat).
+        passwordChangedAt: new Date(),
         ...(user.isActive ? {} : { isActive: true }),
       },
     });
@@ -978,6 +980,8 @@ export class AuthService {
       where: { id: user.id },
       data: {
         password: hashedPassword,
+        // Invalida tokens emitidos ANTES da troca (JwtStrategy compara iat).
+        passwordChangedAt: new Date(),
         ...(user.isActive ? {} : { isActive: true }),
       },
     });
@@ -1035,7 +1039,9 @@ export class AuthService {
   // ─── Email / device helpers ─────────────────────────────────────────────
 
   private generateCode(): { raw: string; display: string } {
-    const raw = Math.floor(100000 + Math.random() * 900000).toString();
+    // crypto.randomInt (CSPRNG): Math.random é previsível e estes códigos
+    // protegem reset de senha / troca de e-mail. Mesmo padrão do send2FACode.
+    const raw = crypto.randomInt(100000, 1000000).toString();
     return { raw, display: raw };
   }
 
@@ -1209,7 +1215,10 @@ export class AuthService {
 
     const updatedUser = await prismaWrite.user.update({
       where: { id: userId },
-      data: { password: hashedPassword },
+      // passwordChangedAt: invalida todos os access tokens emitidos antes da
+      // troca (JwtStrategy rejeita iat anterior). Sem isso, uma conta invadida
+      // continuava acessível por até 30 dias mesmo após trocar a senha.
+      data: { password: hashedPassword, passwordChangedAt: new Date() },
       select: { firstName: true, email: true },
     });
 
@@ -1557,6 +1566,13 @@ export class AuthService {
       );
 
       const googleUser = userInfoResponse.data;
+
+      // E-mail NÃO verificado pelo Google é rejeitado: validateGoogleUser vincula
+      // a identidade Google a uma conta local existente só pelo e-mail — aceitar
+      // e-mail não verificado permitia account takeover da conta local da vítima.
+      if (googleUser.verified_email === false) {
+        throw new UnauthorizedException('E-mail da conta Google não verificado');
+      }
 
       // Validar ou criar usuário
       const user = await this.validateGoogleUser({

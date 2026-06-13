@@ -84,11 +84,24 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         language: true,
         avatarUrl: true,
         mfaEnabled: true,
+        passwordChangedAt: true,
       },
     });
 
     if (!user || !user.isActive) {
       throw new UnauthorizedException('Usuário não encontrado ou inativo');
+    }
+
+    // Token emitido ANTES da última troca de senha é inválido — é assim que a
+    // troca/reset de senha derruba sessões roubadas (não há denylist de access
+    // token; o iat do JWT vs passwordChangedAt faz o papel de revogação).
+    // Margem de 2s contra clock skew entre emissor e banco.
+    if (
+      user.passwordChangedAt &&
+      typeof payload.iat === 'number' &&
+      payload.iat * 1000 < user.passwordChangedAt.getTime() - 2000
+    ) {
+      throw new UnauthorizedException('Sessão expirada — faça login novamente');
     }
 
     // Verificar se o accountType do token corresponde ao do banco

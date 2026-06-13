@@ -110,7 +110,11 @@ export class PaymentsChargebackService {
     }
   }
 
-  private async processReversal(
+  // Público: além do cron, o WEBHOOK delega reversões (status 10/11) pra cá.
+  // Antes o webhook só rebaixava o Payment pra REFUNDED e o pedido/inscrições
+  // ficavam PAID/CONFIRMED pra sempre (e o payment saía do filtro do cron, que
+  // só varre status PAID — estado inconsistente permanente).
+  async processReversal(
     payment: { id: string; orderId: string; userId?: string; metadata: unknown; method?: string },
     cieloStatus: number,
     existingMeta: any,
