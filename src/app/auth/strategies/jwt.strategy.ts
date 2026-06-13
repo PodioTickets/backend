@@ -46,6 +46,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: any) {
+    // Token emitido no meio do fluxo de MFA (mfaPending=true) não dá acesso
+    // a rotas protegidas — é apenas um challenge temporário para o endpoint
+    // POST /auth/2fa/verify-login, que o verifica no body, fora do JwtStrategy.
+    if (payload.mfaPending) {
+      throw new UnauthorizedException('MFA não concluído');
+    }
+
     // Buscar usuário com accountType do payload ou buscar por ID
     const accountType = payload.accountType || 'USER';
     
