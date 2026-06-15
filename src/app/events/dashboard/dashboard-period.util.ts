@@ -83,13 +83,16 @@ export function getComparisonBounds(
 
 /**
  * Variação % vs período de referência: (atual − anterior) / anterior × 100.
- * - 0/0 → 0
- * - 0 → x>0 → 100 (subida a partir de zero)
+ * - 0/0 → 0 (nada antes, nada agora: sem variação).
+ * - anterior 0 e atual > 0 → `null` (SEM BASELINE): a variação é matematicamente
+ *   indefinida (divisão por zero). Antes retornávamos `100` fixo, o que exibia um
+ *   "+100% vs ontem" ENGANOSO independentemente do valor atual. `null` sinaliza ao
+ *   front pra exibir "novo" em vez de um percentual inventado.
  * - Arredonda em 2 casas.
  */
-export function percentChange(current: number, previous: number): number {
+export function percentChange(current: number, previous: number): number | null {
   if (previous === 0 && current === 0) return 0;
-  if (previous === 0) return current > 0 ? 100 : 0;
+  if (previous === 0) return current > 0 ? null : 0;
   const raw = ((current - previous) / previous) * 100;
   return Math.round(raw * 100) / 100;
 }

@@ -15,7 +15,7 @@ import {
   Circle,
 } from '@react-pdf/renderer';
 import * as path from 'path';
-import { ReceiptPdfData, ReceiptPdfRegistrationRow } from './receipt-pdf.types';
+import { ReceiptPdfData } from './receipt-pdf.types';
 
 const LinearGradient = LinearGradientBase as any;
 
@@ -36,15 +36,12 @@ function fmtCPF(cpf: string): string {
 }
 
 /**
- * Mascara um id longo (UUID/CUID) como "AAAA...ZZZZ" — 4 primeiros + 4 últimos,
- * uppercase. Usado na coluna estreita de participante (id completo quebra a linha).
- * Ids curtos (≤ 8) são exibidos inteiros.
+ * Prefixo "#" SOMENTE de exibição para qualquer ID mostrado no recibo
+ * (pedido, inscrição, transação). Não altera o valor persistido/snapshot nem
+ * nada usado em busca/comparação — é puramente cosmético, alinhado ao padrão
+ * visual do frontend (`#{orderId}` / `#{registrationId}` no modal de pedido).
  */
-function maskId(id: string): string {
-  const s = String(id ?? '').toUpperCase();
-  if (s.length <= 8) return s;
-  return `${s.slice(0, 4)}...${s.slice(-4)}`;
-}
+const idTag = (v: string): string => `#${v}`;
 
 function formatPaymentMethod(method: string | undefined): string {
   const m = (method ?? '').toUpperCase();
@@ -343,122 +340,6 @@ const FinancialRow = ({
     ),
   );
 
-const TableRow = ({ row }: { row: ReceiptPdfRegistrationRow }) => {
-  const initial = (row.participantName || '?')[0].toUpperCase();
-  return React.createElement(
-    View,
-    {
-      style: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        borderBottomWidth: 1,
-        borderBottomColor: C.gray6,
-        borderBottomStyle: 'solid',
-      },
-    },
-    // ID
-    React.createElement(
-      View,
-      { style: { width: 100, paddingHorizontal: 12, paddingVertical: 10 } },
-      React.createElement(
-        Text,
-        { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 600, color: C.gray12 } },
-        maskId(row.id),
-      ),
-    ),
-    // Participant
-    React.createElement(
-      View,
-      {
-        style: {
-          flex: 1,
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: 8,
-          paddingHorizontal: 12,
-          paddingVertical: 10,
-        },
-      },
-      React.createElement(
-        View,
-        {
-          style: {
-            width: 32,
-            height: 32,
-            borderRadius: 8,
-            backgroundColor: C.gray3,
-            alignItems: 'center',
-            justifyContent: 'center',
-          },
-        },
-        React.createElement(
-          Text,
-          { style: { fontFamily: 'DM Sans', fontSize: 13, fontWeight: 700, color: C.gray11 } },
-          initial,
-        ),
-      ),
-      React.createElement(
-        View,
-        { style: { flex: 1, gap: 4 } },
-        React.createElement(
-          Text,
-          { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 600, color: C.gray12 } },
-          row.participantName,
-        ),
-        row.email
-          ? React.createElement(
-              Text,
-              {
-                style: {
-                  fontFamily: 'DM Sans',
-                  fontSize: 9,
-                  fontWeight: 400,
-                  color: C.gray11,
-                },
-              },
-              row.email,
-            )
-          : null,
-      ),
-    ),
-    // Ticket
-    React.createElement(
-      View,
-      { style: { flex: 1, paddingHorizontal: 12, paddingVertical: 10, gap: 4 } },
-      row.ticketCategory
-        ? React.createElement(
-            Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 9, fontWeight: 400, color: C.gray11 } },
-            row.ticketCategory,
-          )
-        : null,
-      React.createElement(
-        Text,
-        { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 600, color: C.gray12 } },
-        row.ticketName,
-      ),
-    ),
-    // Price
-    React.createElement(
-      View,
-      {
-        style: {
-          width: 96,
-          alignItems: 'flex-end',
-          paddingHorizontal: 12,
-          paddingVertical: 10,
-        },
-      },
-      React.createElement(
-        Text,
-        { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 600, color: C.gray12 } },
-        fmtCurrency(row.price),
-      ),
-    ),
-  );
-};
-
 export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
   // Pedido sem custo (R$ 0,00): detectado pelo TOTAL, não pelo método salvo.
   // O schema não tem método "FREE" — pedidos grátis gravam o método selecionado
@@ -466,10 +347,9 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
   // OMITIDA (mesma regra do modal de pedido), então não exibimos método/ícone.
   const isFree = (data.financial?.total ?? 0) <= 0;
   const isPix = !!data.payment.method?.toLowerCase().includes('pix');
-  const totalCount = data.registrations.length;
 
   const declarationText =
-    `O pagamento referente ao pedido ${data.orderNumber} foi recebido e processado com sucesso` +
+    `O pagamento referente ao pedido ${idTag(data.orderNumber)} foi recebido e processado com sucesso` +
     (data.payment.gateway ? ` pelo gateway ${data.payment.gateway}` : '') +
     ` em ${fmtDateTimeLong(data.payment.paidAt)}. Este recibo é o comprovante oficial da transação.` +
     ` Para detalhes dos participantes (QR Code, dados pessoais e perguntas do organizador), consulte o PDF de ingressos enviado junto com este documento.`;
@@ -481,6 +361,10 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
       Page,
       {
         size: 'A4',
+        // Sem a seção de ingressos, o conteúdo é fixo e curto: `wrap={false}`
+        // impede que o react-pdf abra uma 2ª página (documento contínuo, sem
+        // corte entre seções).
+        wrap: false,
         style: {
           fontFamily: 'DM Sans',
           backgroundColor: C.white,
@@ -531,7 +415,7 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
                   color: C.gray12,
                 },
               },
-              data.orderNumber,
+              idTag(data.orderNumber),
             ),
           ),
           React.createElement(
@@ -697,22 +581,15 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
             isPix
               ? React.createElement(
                   Svg,
-                  { width: 22, height: 22, viewBox: '0 0 24 24' },
-                  React.createElement(Path, { d: 'M12 2L17 7L12 12L7 7L12 2Z', fill: C.pixColor }),
+                  { width: 22, height: 22, viewBox: '0 0 20 20' },
+                  // Logo oficial do Pix (mesmo SVG do frontend, `PixIcon.tsx`).
                   React.createElement(Path, {
-                    d: 'M17 7L22 12L17 17L12 12L17 7Z',
+                    d: 'M15.5961 15.2993C15.2102 15.3001 14.828 15.2246 14.4715 15.077C14.1149 14.9294 13.7912 14.7126 13.5188 14.4393L10.5186 11.4393C10.4124 11.3384 10.2715 11.2821 10.125 11.2821C9.97852 11.2821 9.83762 11.3384 9.73141 11.4393L6.71977 14.4507C6.44752 14.7242 6.12376 14.941 5.76721 15.0886C5.41066 15.2362 5.02838 15.3117 4.64248 15.3107H4.051L7.85128 19.1107C9.03708 20.2964 10.9615 20.2964 12.1473 19.1107L15.9576 15.2993H15.5961ZM4.64248 4.68782C5.42825 4.68782 6.16544 4.99354 6.71977 5.54782L9.73141 8.55926C9.78316 8.61109 9.84463 8.65221 9.91229 8.68027C9.97995 8.70833 10.0525 8.72277 10.1257 8.72277C10.199 8.72277 10.2715 8.70833 10.3392 8.68027C10.4068 8.65221 10.4683 8.61109 10.52 8.55926L13.5203 5.55925C13.7923 5.28594 14.1159 5.06922 14.4721 4.92161C14.8284 4.774 15.2105 4.69843 15.5961 4.69925H15.9576L12.1473 0.889242C11.5775 0.319849 10.8049 0 9.99929 0C9.19371 0 8.4211 0.319849 7.85128 0.889242L4.051 4.68925L4.64248 4.68782Z',
                     fill: C.pixColor,
-                    opacity: 0.7,
                   }),
                   React.createElement(Path, {
-                    d: 'M12 12L17 17L12 22L7 17L12 12Z',
+                    d: 'M19.1107 7.85069L16.8076 5.54782C16.7559 5.56905 16.7006 5.5802 16.6448 5.58068H15.5975C15.0561 5.58068 14.526 5.80068 14.1446 6.18354L11.1444 9.18355C11.0109 9.31766 10.8523 9.42409 10.6776 9.49671C10.5029 9.56933 10.3156 9.60672 10.1264 9.60672C9.93725 9.60672 9.74993 9.56933 9.57524 9.49671C9.40055 9.42409 9.24193 9.31766 9.10851 9.18355L6.09686 6.17068C5.71048 5.78591 5.18778 5.56925 4.64247 5.56782H3.35667C3.30336 5.5674 3.25059 5.55723 3.20094 5.53782L0.889349 7.85069C-0.29645 9.0364 -0.29645 10.9607 0.889349 12.1478L3.20094 14.4593C3.25004 14.4395 3.30233 14.4289 3.35524 14.4278H4.64247C5.18537 14.4278 5.71398 14.2093 6.09686 13.8264L9.10708 10.8135C9.38175 10.5521 9.74647 10.4062 10.1257 10.4062C10.505 10.4062 10.8697 10.5521 11.1444 10.8135L14.1446 13.8136C14.526 14.1964 15.0561 14.415 15.5975 14.415H16.6448C16.7019 14.415 16.7576 14.4293 16.8076 14.4493L19.1107 12.1464C20.2964 10.9607 20.2964 9.0364 19.1107 7.85069Z',
                     fill: C.pixColor,
-                    opacity: 0.7,
-                  }),
-                  React.createElement(Path, {
-                    d: 'M7 7L12 12L7 17L2 12L7 7Z',
-                    fill: C.pixColor,
-                    opacity: 0.7,
                   }),
                 )
               : data.payment.iconDataUri
@@ -877,168 +754,17 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
               })
             : null,
           data.payment.txId
-            ? React.createElement(TxField, { label: 'TxID', value: data.payment.txId })
+            ? React.createElement(TxField, { label: 'TxID', value: idTag(data.payment.txId) })
             : null,
           data.payment.transactionId
             ? React.createElement(TxField, {
                 label: 'ID da transação',
-                value: data.payment.transactionId,
+                value: idTag(data.payment.transactionId),
               })
             : null,
           data.payment.e2eId
-            ? React.createElement(TxField, { label: 'E2E ID (Pix)', value: data.payment.e2eId })
+            ? React.createElement(TxField, { label: 'E2E ID (Pix)', value: idTag(data.payment.e2eId) })
             : null,
-        ),
-      ),
-      // Section 3: tickets
-      React.createElement(
-        View,
-        { style: { gap: 12, marginBottom: 20 } },
-        React.createElement(SectionBadge, { number: '3', title: 'Ingressos adquiridos' }),
-        React.createElement(
-          View,
-          {
-            style: {
-              backgroundColor: C.gray2,
-              borderRadius: 8,
-              borderWidth: 1,
-              borderColor: C.gray6,
-              borderStyle: 'solid',
-            },
-          },
-          // table header
-          React.createElement(
-            View,
-            {
-              style: {
-                flexDirection: 'row',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                backgroundColor: C.gray3,
-                borderBottomWidth: 1,
-                borderBottomColor: C.gray6,
-                borderBottomStyle: 'solid',
-              },
-            },
-            React.createElement(
-              View,
-              { style: { width: 100, padding: 12 } },
-              React.createElement(
-                Text,
-                {
-                  style: {
-                    fontFamily: 'DM Sans',
-                    fontSize: 10,
-                    fontWeight: 500,
-                    color: C.gray12,
-                  },
-                },
-                'ID',
-              ),
-            ),
-            React.createElement(
-              View,
-              { style: { flex: 1, padding: 12 } },
-              React.createElement(
-                Text,
-                {
-                  style: {
-                    fontFamily: 'DM Sans',
-                    fontSize: 10,
-                    fontWeight: 500,
-                    color: C.gray12,
-                  },
-                },
-                'Participante',
-              ),
-            ),
-            React.createElement(
-              View,
-              { style: { flex: 1, padding: 12 } },
-              React.createElement(
-                Text,
-                {
-                  style: {
-                    fontFamily: 'DM Sans',
-                    fontSize: 10,
-                    fontWeight: 500,
-                    color: C.gray12,
-                  },
-                },
-                'Ticket',
-              ),
-            ),
-            React.createElement(
-              View,
-              { style: { width: 96, padding: 12, alignItems: 'flex-end' } },
-              React.createElement(
-                Text,
-                {
-                  style: {
-                    fontFamily: 'DM Sans',
-                    fontSize: 10,
-                    fontWeight: 500,
-                    color: C.gray12,
-                  },
-                },
-                'Valor',
-              ),
-            ),
-          ),
-          // table rows
-          ...data.registrations.map((row) =>
-            React.createElement(TableRow, { key: row.id, row }),
-          ),
-          // footer
-          React.createElement(
-            View,
-            {
-              style: {
-                padding: 14,
-                flexDirection: 'row',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                backgroundColor: C.green3,
-                borderRadius: 8,
-                borderWidth: 1,
-                borderColor: C.green8,
-                borderStyle: 'solid',
-              },
-            },
-            React.createElement(
-              Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 500, color: C.green12 } },
-              `${totalCount} ingresso${totalCount !== 1 ? 's' : ''} vinculado${totalCount !== 1 ? 's' : ''} a este pedido`,
-            ),
-            React.createElement(
-              View,
-              { style: { flexDirection: 'row', gap: 3 } },
-              React.createElement(
-                Text,
-                {
-                  style: {
-                    fontFamily: 'DM Sans',
-                    fontSize: 11,
-                    fontWeight: 500,
-                    color: C.green12,
-                  },
-                },
-                'Subtotal: ',
-              ),
-              React.createElement(
-                Text,
-                {
-                  style: {
-                    fontFamily: 'DM Sans',
-                    fontSize: 11,
-                    fontWeight: 700,
-                    color: C.green12,
-                  },
-                },
-                fmtCurrency(data.financial.subtotal),
-              ),
-            ),
-          ),
         ),
       ),
       // declaration
