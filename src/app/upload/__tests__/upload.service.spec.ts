@@ -4,8 +4,8 @@ import { BadRequestException } from '@nestjs/common';
 /**
  * UploadService usa Google Cloud Storage (@google-cloud/storage) + `sharp`.
  *  - URLs retornadas são URLs do GCS/CDN (não mais `/uploads/images/...`).
- *  - Imagens são SANITIZADAS por re-encode com `sharp` (substituiu o ClamAV,
- *    2026-06-12): buffer não-imagem → `sharp` lança → 400 (fail-closed).
+ *  - Imagem é SANITIZADA por re-encode (sharp), mantendo o MESMO formato e SEM
+ *    resize; formato fora da allowlist raster (ex.: SVG) ou buffer não-imagem → 400.
  *  - Mensagens de erro em PT-BR.
  *
  * Mockamos `@google-cloud/storage` (Bucket) e `sharp` para isolar disco/rede/CPU.
@@ -32,15 +32,19 @@ jest.mock('@google-cloud/storage', () => ({
 }));
 
 // ── Mock do sharp ────────────────────────────────────────────────────────────
-// `sharp(buffer)` devolve um encadeável; `toBuffer()` resolve com o webp final.
-// Por padrão re-encoda com sucesso; testes podem fazer `toBuffer` rejeitar para
-// simular um buffer que NÃO é imagem válida.
-const mockToBuffer = jest.fn().mockResolvedValue(Buffer.from('fake-webp-bytes'));
+// `sharp(buffer)` devolve um encadeável; `metadata()` informa formato e nº de
+// frames; cada encoder (jpeg/png/webp/gif) retorna o próprio chain; `toBuffer()`
+// resolve com o buffer SANITIZADO. Default: JPEG estático.
+const mockToBuffer = jest.fn().mockResolvedValue(Buffer.from('sanitized-bytes'));
+const mockMetadata = jest.fn().mockResolvedValue({ format: 'jpeg', pages: 1 });
 const sharpChain = {
   rotate: jest.fn().mockReturnThis(),
-  resize: jest.fn().mockReturnThis(),
+  jpeg: jest.fn().mockReturnThis(),
+  png: jest.fn().mockReturnThis(),
   webp: jest.fn().mockReturnThis(),
+  gif: jest.fn().mockReturnThis(),
   toBuffer: mockToBuffer,
+  metadata: mockMetadata,
 };
 const mockSharp = jest.fn(() => sharpChain);
 jest.mock('sharp', () => mockSharp);
@@ -75,9 +79,10 @@ describe('UploadService', () => {
     mockBucket.file.mockReturnValue(mockGcsFile);
     mockBucket.getFiles.mockResolvedValue([[]]);
 
-    // sharp re-encoda com sucesso por padrão
+    // sharp: JPEG estático sanitizado por padrão
     mockSharp.mockReturnValue(sharpChain);
-    mockToBuffer.mockResolvedValue(Buffer.from('fake-webp-bytes'));
+    mockMetadata.mockResolvedValue({ format: 'jpeg', pages: 1 });
+    mockToBuffer.mockResolvedValue(Buffer.from('sanitized-bytes'));
   });
 
   afterEach(() => {
@@ -85,22 +90,46 @@ describe('UploadService', () => {
   });
 
   describe('compressImage', () => {
-    it('re-encoda via sharp e devolve a URL .webp do GCS', async () => {
+    it('sanitiza por re-encode mantendo o formato JPEG e devolve URL .jpg', async () => {
       const result = await service.compressImage(mockFile);
 
-      expect(mockSharp).toHaveBeenCalledTimes(1);
-      expect(sharpChain.webp).toHaveBeenCalled();
+      expect(mockMetadata).toHaveBeenCalled();
+      expect(sharpChain.rotate).toHaveBeenCalled(); // estático → aplica orientação EXIF
+      expect(sharpChain.jpeg).toHaveBeenCalled();
       expect(result).toContain('storage.googleapis.com');
       expect(result).toContain('test-bucket');
       expect(result).toContain('images/');
-      expect(result).toContain('.webp');
-      // O que sobe é o buffer RE-ENCODADO, não o original.
+      expect(result).toContain('.jpg');
+      // Sobe o buffer SANITIZADO (re-encodado), com content-type do MESMO formato.
       expect(mockGcsFile.save).toHaveBeenCalledWith(
-        Buffer.from('fake-webp-bytes'),
+        Buffer.from('sanitized-bytes'),
         expect.objectContaining({
-          metadata: expect.objectContaining({ contentType: 'image/webp' }),
+          metadata: expect.objectContaining({ contentType: 'image/jpeg' }),
         }),
       );
+    });
+
+    it('mantém o formato PNG (sem conversão para webp)', async () => {
+      mockMetadata.mockResolvedValueOnce({ format: 'png', pages: 1 });
+
+      const result = await service.compressImage({ ...mockFile, originalname: 'a.png', mimetype: 'image/png' });
+
+      expect(sharpChain.png).toHaveBeenCalled();
+      expect(result).toContain('.png');
+      expect(mockGcsFile.save).toHaveBeenCalledWith(
+        Buffer.from('sanitized-bytes'),
+        expect.objectContaining({ metadata: expect.objectContaining({ contentType: 'image/png' }) }),
+      );
+    });
+
+    it('preserva GIF animado e NÃO rotaciona (evita corromper os frames)', async () => {
+      mockMetadata.mockResolvedValueOnce({ format: 'gif', pages: 8 });
+
+      const result = await service.compressImage({ ...mockFile, originalname: 'a.gif', mimetype: 'image/gif' });
+
+      expect(sharpChain.gif).toHaveBeenCalled();
+      expect(sharpChain.rotate).not.toHaveBeenCalled();
+      expect(result).toContain('.gif');
     });
 
     it('lança se o arquivo está ausente', async () => {
@@ -116,12 +145,16 @@ describe('UploadService', () => {
     });
 
     it('REJEITA (400 fail-closed) quando o buffer não é uma imagem decodificável', async () => {
-      // sharp lança ao tentar decodificar lixo → não pode virar upload.
-      mockToBuffer.mockRejectedValueOnce(new Error('Input buffer contains unsupported image format'));
+      mockMetadata.mockRejectedValueOnce(new Error('Input buffer contains unsupported image format'));
 
-      await expect(service.compressImage(mockFile)).rejects.toBeInstanceOf(
-        BadRequestException,
-      );
+      await expect(service.compressImage(mockFile)).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockGcsFile.save).not.toHaveBeenCalled();
+    });
+
+    it('REJEITA (400) formato fora da allowlist raster (ex.: SVG)', async () => {
+      mockMetadata.mockResolvedValueOnce({ format: 'svg', pages: 1 });
+
+      await expect(service.compressImage(mockFile)).rejects.toBeInstanceOf(BadRequestException);
       expect(mockGcsFile.save).not.toHaveBeenCalled();
     });
   });

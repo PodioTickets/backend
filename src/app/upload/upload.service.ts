@@ -4,6 +4,17 @@ import * as fsSync from 'fs';
 import sharp from 'sharp';
 import { Storage, Bucket } from '@google-cloud/storage';
 
+// Saída por formato de ENTRADA (detectado pelo sharp). Re-encoda no MESMO formato
+// — mantém o tipo do arquivo — e serve como allowlist: formato fora daqui (ex.:
+// SVG) → 400. SVG é recusado de propósito (não é raster e é vetor de XSS).
+type SharpEncoder = (p: sharp.Sharp) => sharp.Sharp;
+const FORMAT_OUTPUT: Record<string, { ext: string; contentType: string; encode: SharpEncoder }> = {
+  jpeg: { ext: 'jpg', contentType: 'image/jpeg', encode: (p) => p.jpeg({ quality: 90 }) },
+  png: { ext: 'png', contentType: 'image/png', encode: (p) => p.png() },
+  webp: { ext: 'webp', contentType: 'image/webp', encode: (p) => p.webp({ quality: 90 }) },
+  gif: { ext: 'gif', contentType: 'image/gif', encode: (p) => p.gif() },
+};
+
 @Injectable()
 export class UploadService {
   private readonly bucket: Bucket;
@@ -32,32 +43,41 @@ export class UploadService {
     this.bucket = storage.bucket(bucketName);
   }
 
+  /**
+   * Sanitiza a imagem por RE-ENCODE (o sharp decodifica e re-grava → descarta EXIF,
+   * scripts disfarçados e polyglots; fail-CLOSED se o buffer não for imagem válida),
+   * MANTENDO o formato original e SEM redimensionar. O formato de saída é o mesmo da
+   * entrada (detectado pelo sharp), o que também funciona como allowlist (SVG e
+   * formatos não-raster → 400). Preserva animação de GIF/WebP (`animated: true`).
+   */
   async compressImage(file: any): Promise<string> {
     try {
       if (!file || !file.buffer) throw new Error('Nenhum arquivo enviado ou buffer ausente');
 
-      // Sanitização por RE-ENCODE: o sharp decodifica e re-codifica a imagem,
-      // descartando QUALQUER conteúdo que não seja pixel (scripts em EXIF, SVG/HTML
-      // disfarçado, polyglots). Substitui o antivírus (que era pesado e fail-open):
-      // se o buffer não for uma imagem raster válida, o sharp lança → rejeitamos
-      // (fail-CLOSED). Também já comprime/otimiza num passo só.
-      // `limitInputPixels` (default ~268MP) protege contra decompression bombs.
-      let webp: Buffer;
+      // Detecta o formato real (não confia no mimetype/nome, que são spoofáveis).
+      let meta: sharp.Metadata;
       try {
-        webp = await sharp(file.buffer, { failOn: 'truncated' })
-          .rotate() // aplica orientação do EXIF e remove o metadado
-          .resize({ width: 2560, height: 2560, fit: 'inside', withoutEnlargement: true })
-          .webp({ quality: 82 })
-          .toBuffer();
+        meta = await sharp(file.buffer, { failOn: 'truncated', animated: true }).metadata();
       } catch {
-        // Não é uma imagem decodificável (ou está corrompida/maliciosa).
-        throw new BadRequestException('Arquivo inválido: envie uma imagem válida (JPG, PNG, WEBP, etc.).');
+        throw new BadRequestException('Arquivo inválido: envie uma imagem JPG, PNG, WEBP ou GIF.');
       }
 
-      const objectName = `images/${Date.now()}-${Math.round(Math.random() * 1e9)}.webp`;
-      await this.uploadToGcs(objectName, webp, 'image/webp');
+      const fmt = FORMAT_OUTPUT[meta.format ?? ''];
+      if (!fmt) {
+        throw new BadRequestException('Arquivo inválido: envie uma imagem JPG, PNG, WEBP ou GIF.');
+      }
 
-      console.log(`✅ Image re-encoded & uploaded to GCS: ${objectName} (${this.formatFileSize(webp.length)})`);
+      const animated = (meta.pages ?? 1) > 1;
+      let pipeline = sharp(file.buffer, { failOn: 'truncated', animated });
+      // `rotate()` aplica a orientação do EXIF e remove o metadado. Só em estático:
+      // rotacionar quadros de imagem animada pode corromper a sequência.
+      if (!animated) pipeline = pipeline.rotate();
+
+      const sanitized = await fmt.encode(pipeline).toBuffer();
+      const objectName = `images/${Date.now()}-${Math.round(Math.random() * 1e9)}.${fmt.ext}`;
+      await this.uploadToGcs(objectName, sanitized, fmt.contentType);
+
+      console.log(`✅ Image sanitized (re-encode, mesmo formato) & uploaded: ${objectName} (${this.formatFileSize(sanitized.length)})`);
       return this.buildUrl(objectName);
     } catch (error) {
       if (error instanceof BadRequestException) throw error;
