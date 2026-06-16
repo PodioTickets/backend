@@ -6,6 +6,7 @@ import * as CardIcons from 'react-svg-credit-card-payment-icons';
 import * as sharpLib from 'sharp';
 import { ReceiptPdfDocument } from './receipt-pdf.template';
 import { ReceiptPdfData, ReceiptPdfRegistrationRow } from './receipt-pdf.types';
+import { buildPdfImageDataUri } from '../utils/pdf-image.util';
 
 export type { ReceiptPdfData, ReceiptPdfRegistrationRow };
 
@@ -45,13 +46,18 @@ async function buildCardIconDataUri(method: string, cardBrand?: string): Promise
 @Injectable()
 export class ReceiptPdfService {
   async generateReceiptPdf(data: ReceiptPdfData): Promise<Buffer> {
-    const iconDataUri = await buildCardIconDataUri(
-      data.payment.method,
-      data.payment.cardBrand,
-    ).catch(() => undefined);
+    // Pré-processa em paralelo: ícone do cartão + avatar do comprador + logo da org.
+    // Avatar/logo são re-encodados de WebP→PNG (o renderer não decodifica WebP).
+    const [iconDataUri, buyerImage, orgLogo] = await Promise.all([
+      buildCardIconDataUri(data.payment.method, data.payment.cardBrand).catch(() => undefined),
+      buildPdfImageDataUri(data.buyer.imageUrl).catch(() => undefined),
+      buildPdfImageDataUri(data.organization.logoUrl).catch(() => undefined),
+    ]);
 
     const enriched: ReceiptPdfData = {
       ...data,
+      organization: { ...data.organization, logoUrl: orgLogo },
+      buyer: { ...data.buyer, imageUrl: buyerImage },
       payment: { ...data.payment, iconDataUri },
     };
 

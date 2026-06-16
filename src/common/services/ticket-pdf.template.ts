@@ -305,15 +305,20 @@ function fmtPhone(
 }
 
 /**
- * Valida que URL de imagem seja https:// antes de passar ao renderer do PDF.
+ * Valida a fonte da imagem antes de passar ao renderer do PDF.
  * Previne SSRF: @react-pdf/renderer usa fetch nativo que pode acessar file:///,
  * http://localhost etc. se URLs arbitrárias forem aceitas sem validação.
+ *
+ * Aceita:
+ *  - `https://` — URL externa (o renderer faz o fetch);
+ *  - `data:image/` — imagem JÁ pré-processada server-side (via buildPdfImageDataUri,
+ *    WebP→PNG): o renderer NÃO faz fetch, então não há vetor de SSRF.
  */
 function safeImageUrl(url: string | null | undefined): string | null {
   if (!url) return null;
   const trimmed = url.trim();
-  if (!/^https:\/\//i.test(trimmed)) return null;
-  return trimmed;
+  if (/^https:\/\//i.test(trimmed) || /^data:image\//i.test(trimmed)) return trimmed;
+  return null;
 }
 
 const HR = () =>
