@@ -503,15 +503,17 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
         ),
         React.createElement(
           View,
-          { style: { flexDirection: 'row', gap: 4 } },
+          { style: { gap: 2 } },
+          // Categoria do ingresso (ou "Ingresso avulso") em destaque…
           React.createElement(
             Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 16, fontWeight: 400, color: C.gray11 } },
-            'Ingresso: ',
+            { style: { fontFamily: 'Manrope', fontSize: 12, fontWeight: 400, color: C.gray11 } },
+            reg.ticketCategory || 'Ingresso avulso',
           ),
+          // …e o nome do ingresso abaixo.
           React.createElement(
             Text,
-            { style: { fontFamily: 'Manrope', fontSize: 16, fontWeight: 600, color: C.gray12 } },
+            { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 500, color: C.gray12 } },
             reg.ticketName,
           ),
         ),

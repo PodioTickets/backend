@@ -298,7 +298,7 @@ describe('RegistrationsService', () => {
       expect(result.data.registration.id).toBe(registrationId);
       // produto enriquecido com variationEdited (default false, sem edição)
       expect(result.data.registration.products).toEqual([
-        { id: 'p-1', name: 'Camiseta', variationEdited: false },
+        { id: 'p-1', name: 'Camiseta', variationEdited: false, isIncludedInTicket: false },
       ]);
     });
 
@@ -332,6 +332,7 @@ describe('RegistrationsService', () => {
           name: 'Camiseta',
           variationEdited: true,
           selectedVariation: { id: 'v-G', name: 'G', price: 0 }, // ATUAL, não o snapshot "M"
+          isIncludedInTicket: false,
         },
       ]);
     });
@@ -463,9 +464,10 @@ describe('RegistrationsService', () => {
           gender: 'male',
         },
         products: [
-          // snapshot: campos no topo, preço em centavos
-          { id: 'p-1', name: 'Camiseta', images: ['https://img/x.png'], primaryImageIndex: 0, unitPrice: 5000, selectedVariation: { name: 'G' } },
-          { id: 'p-2', name: 'Brinde', unitPrice: 0 },
+          // snapshot: campos no topo, preço em centavos. isIncludedInTicket é o sinal
+          // REAL de "incluso" (exposto pelo findOne); Camiseta = adicional, Brinde = incluso.
+          { id: 'p-1', name: 'Camiseta', images: ['https://img/x.png'], primaryImageIndex: 0, unitPrice: 5000, selectedVariation: { name: 'G' }, isIncludedInTicket: false },
+          { id: 'p-2', name: 'Brinde', unitPrice: 0, isIncludedInTicket: true },
         ],
         questionAnswers: [
           { question: { question: 'Tamanho?' }, answer: 'G' },
@@ -498,7 +500,8 @@ describe('RegistrationsService', () => {
         index: 1,
         qrCode: 'https://podio/user/tickets/reg-abc12345',
         participantName: 'João Conceição',
-        ticketName: 'Corrida - 10K',
+        ticketCategory: 'Corrida',
+        ticketName: '10K',
         cpf: '12345678900',
         documentType: 'CPF',
         country: 'BR',

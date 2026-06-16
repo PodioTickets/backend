@@ -10,6 +10,12 @@ export interface TicketPdfRegistration {
   index: number;
   qrCode: string;
   participantName: string;
+  /**
+   * Categoria do ingresso (ex.: "Corrida", "Lote 1") exibida em destaque no
+   * cabeçalho do card. Quando o ingresso não tem categoria, os builders enviam
+   * "Ingresso avulso". O `ticketName` (nome do ingresso) é exibido abaixo dela.
+   */
+  ticketCategory?: string;
   ticketName: string;
   email?: string;
   cpf?: string;
