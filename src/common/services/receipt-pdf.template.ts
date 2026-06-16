@@ -288,6 +288,15 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
   const isFree = (data.financial?.total ?? 0) <= 0;
   const isPix = !!data.payment.method?.toLowerCase().includes('pix');
 
+  // Resumo financeiro espelha a tela de pagamento concluído do frontend
+  // (`PaymentSuccessStep`): os produtos NÃO são itemizados produto a produto —
+  // colapsam numa única linha "Produtos adicionais" com o total dos PAGOS (não
+  // inclusos). Produtos inclusos no ingresso (price = 0) não entram no total.
+  const paidTotal = data.registrations
+    .flatMap((reg) => reg.products)
+    .filter((p) => !p.isIncluded)
+    .reduce((sum, p) => sum + (p.price ?? 0), 0);
+
   const declarationText =
     `O pagamento referente ao pedido ${idTag(data.orderNumber)} foi recebido e processado com sucesso` +
     (data.payment.gateway ? ` pelo gateway ${data.payment.gateway}` : '') +
@@ -711,17 +720,13 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
               ),
             ),
           ),
-          // Produtos adicionais de todos os participantes — usa o FinancialRow padrão
-          // (mesma cor/peso de Subtotal/Total). Mesmo grátis: incluso → "Incluso".
-          ...data.registrations.flatMap((reg) =>
-            reg.products.map((p, pi) =>
-              React.createElement(FinancialRow, {
-                key: `pr-${reg.id}-${pi}`,
-                label: p.variationName ? `${p.name} (${p.variationName})` : p.name,
-                value: p.isIncluded ? 'Incluso' : fmtCurrency(p.price),
-              }),
-            ),
-          ),
+          // Produtos adicionais: UMA linha com o total dos não-inclusos — espelha
+          // a tela de pagamento concluído do frontend (não itemiza no resumo).
+          React.createElement(FinancialRow, {
+            key: 'additional-products',
+            label: 'Produtos adicionais',
+            value: fmtCurrency(paidTotal),
+          }),
           React.createElement(HR, { key: 'items-hr' }),
           // Resumo igual ao do checkout (OrderSummary): Subtotal → desconto
           // (cupom/voucher) → taxa de serviço (só quando > 0) → Total, com um
