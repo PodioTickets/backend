@@ -48,6 +48,24 @@ export function buildReceiptPdfData(
         reg.participantName ||
         `${reg.user?.firstName ?? ''} ${reg.user?.lastName ?? ''}`.trim() ||
         'Participante';
+      // Produtos adicionais do participante. Lê do productSnapshot (download) OU do
+      // product/variation ao vivo (fluxos de e-mail) — o que estiver carregado. Preço
+      // por linha = totalPrice (unitPrice × quantidade); 0 para incluso. "Sem interesse"
+      // (opt-out de produto opcional) é excluído.
+      const products = ((reg.products ?? []) as any[])
+        .map((rp: any) => {
+          const pSnap = (rp.productSnapshot ?? null) as Record<string, any> | null;
+          const variationName =
+            pSnap?.selectedVariation?.name ?? rp.variation?.name ?? undefined;
+          return {
+            name: pSnap?.name ?? rp.product?.name ?? 'Produto',
+            variationName,
+            price: rp.totalPrice ?? rp.unitPrice ?? 0,
+            isIncluded:
+              pSnap?.isIncludedInTicket ?? rp.product?.isIncludedInTicket ?? false,
+          };
+        })
+        .filter((p) => p.variationName !== 'Sem interesse');
       return {
         id: reg.id,
         participantName,
@@ -55,6 +73,7 @@ export function buildReceiptPdfData(
         ticketCategory,
         ticketName,
         price,
+        products,
       };
     },
   );
@@ -81,6 +100,8 @@ export function buildReceiptPdfData(
       name: `${buyer.firstName ?? ''} ${buyer.lastName ?? ''}`.trim() || '—',
       document: buyer.documentNumber ?? undefined,
       country: buyer.country ?? null,
+      imageUrl: buyer.avatarUrl ?? undefined,
+      birthDate: buyer.dateOfBirth ?? null,
     },
     event: {
       name: event.name ?? '',

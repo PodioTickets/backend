@@ -732,6 +732,9 @@ export class PaymentsService {
             lastName: true,
             documentNumber: true,
             country: true,
+            // Avatar + nascimento exibidos no card do comprador no recibo.
+            avatarUrl: true,
+            dateOfBirth: true,
           },
         },
         event: {
@@ -766,6 +769,17 @@ export class PaymentsService {
                 ticket: {
                   select: { name: true, category: { select: { name: true } } },
                 },
+              },
+            },
+            // Produtos adicionais itemizados no resumo financeiro do recibo.
+            products: {
+              select: {
+                unitPrice: true,
+                totalPrice: true,
+                quantity: true,
+                productSnapshot: true,
+                variation: { select: { name: true, price: true } },
+                product: { select: { name: true, isIncludedInTicket: true } },
               },
             },
           },
@@ -1127,13 +1141,13 @@ export class PaymentsService {
         const ticket = reg.tickets?.[0]?.ticket;
         const catName = ticket?.category?.name ?? '';
         const ticketName = ticket?.name ?? '';
-        const fullTicketName = catName && ticketName && catName !== ticketName
-          ? `${catName} - ${ticketName}` : ticketName || catName;
         return {
           index: idx + 1,
           qrCode: reg.qrCode ?? reg.id,
           participantName: (reg.participantName ?? `${(reg.user ?? {}).firstName ?? ''} ${(reg.user ?? {}).lastName ?? ''}`.trim()) || 'Participante',
-          ticketName: fullTicketName,
+          // Cabeçalho do PDF: categoria (ou "Ingresso avulso") em destaque + nome abaixo.
+          ticketCategory: catName || 'Ingresso avulso',
+          ticketName: ticketName || '—',
           email: reg.participantEmail ?? user.email,
           cpf: reg.participantCpf ?? user.documentNumber,
           /* Nacionalidade pra decidir label (CPF/Documento) e formatacao do

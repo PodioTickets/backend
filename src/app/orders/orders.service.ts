@@ -1767,6 +1767,13 @@ export class OrdersService {
             const selectedVar = variationEdited
               ? liveVar
               : (pSnap?.selectedVariation ?? liveVar);
+            // `price` exibido = valor EFETIVAMENTE cobrado por unidade (rp.unitPrice,
+            // centavos), não o catálogo cru da variação — cobre o fallback p/ basePrice
+            // (variação com price 0). Incluso/editado → unitPrice 0 (grátis), coerente.
+            // (Opção B — ver sessão 2026-06-15.)
+            const selectedVarPriced = selectedVar
+              ? { ...selectedVar, price: rp.unitPrice }
+              : null;
 
             // Janela de edição = config VIVA do produto (snapshot não serve: flags/prazo
             // podem ter mudado e as opções de variação precisam ser as atuais). Espelha
@@ -1796,7 +1803,7 @@ export class OrdersService {
                 variationType: pSnap?.variationType ?? liveP?.variationType ?? null,
                 isIncludedInTicket: liveP?.isIncludedInTicket ?? false,
               },
-              variation: selectedVar,
+              variation: selectedVarPriced,
               variationName: selectedVar?.name ?? null,
               quantity: rp.quantity,
               unitPrice: rp.unitPrice,
@@ -4047,13 +4054,13 @@ export class OrdersService {
             const ticket = reg.tickets?.[0]?.ticket;
             const catName = ticket?.category?.name ?? '';
             const ticketName = ticket?.name ?? '';
-            const fullTicketName = catName && ticketName && catName !== ticketName
-              ? `${catName} - ${ticketName}` : ticketName || catName;
             return {
               index: idx + 1,
               qrCode: reg.qrCode ?? reg.id,
               participantName: (reg.participantName ?? `${(reg.user ?? {}).firstName ?? ''} ${(reg.user ?? {}).lastName ?? ''}`.trim()) || 'Participante',
-              ticketName: fullTicketName,
+              // Cabeçalho do PDF: categoria (ou "Ingresso avulso") em destaque + nome abaixo.
+              ticketCategory: catName || 'Ingresso avulso',
+              ticketName: ticketName || '—',
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
               /* Nacionalidade pra decidir label (CPF/Documento) e formatacao

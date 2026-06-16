@@ -573,6 +573,10 @@ export class OrderFinalizationService {
             images: prod.images ?? [],
             primaryImageIndex: prod.primaryImageIndex ?? 0,
             basePrice: prod.basePrice,
+            // Flags do produto p/ o read do recibo (snapshot-only) saber se é incluso
+            // no ingresso — antes só existia no productSnapshot por-produto.
+            isIncludedInTicket: prod.isIncludedInTicket ?? false,
+            isRequired: prod.isRequired ?? false,
             variationType: prod.variationType ?? null,
             quantity: item.quantity ?? 1,
             unitPrice: prod.basePrice,

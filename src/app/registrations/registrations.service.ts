@@ -710,6 +710,12 @@ export class RegistrationsService {
           select: {
             productId: true,
             variationEdited: true,
+            // unitPrice (centavos) = valor efetivamente cobrado por unidade; usado
+            // p/ expor o `price` REAL da variação no read (vê map abaixo).
+            unitPrice: true,
+            // productSnapshot (Json congelado no pay) carrega isIncludedInTicket, que o
+            // receiptSnapshot.products legado não guardava — usado p/ expor o flag.
+            productSnapshot: true,
             variation: { select: { id: true, name: true, price: true } },
           },
         },
@@ -765,14 +771,29 @@ export class RegistrationsService {
       const snapshotProducts = Array.isArray(snapshot.products) ? snapshot.products : [];
       const products = snapshotProducts.map((p: any) => {
         const rp = regProductByProductId.get(p.id);
+        const pSnap = (rp?.productSnapshot ?? null) as any;
         const variationEdited = rp?.variationEdited ?? false;
+        const baseSelected =
+          variationEdited && rp?.variation
+            ? { id: rp.variation.id, name: rp.variation.name, price: rp.variation.price }
+            : p.selectedVariation;
+        // `price` da variação exibida = valor EFETIVAMENTE cobrado por unidade
+        // (RegistrationProduct.unitPrice, centavos), não o catálogo cru congelado no
+        // snapshot (price 0 quando a variação não tinha preço e o basePrice foi cobrado).
+        // Incluso → unitPrice 0 (grátis), coerente. Fallback p/ o price cru se rp ausente.
+        // (Opção B — ver sessão 2026-06-15.)
+        const selectedVariation = baseSelected
+          ? { ...baseSelected, price: rp?.unitPrice ?? baseSelected.price }
+          : baseSelected;
         return {
           ...p,
           variationEdited,
-          selectedVariation:
-            variationEdited && rp?.variation
-              ? { id: rp.variation.id, name: rp.variation.name, price: rp.variation.price }
-              : p.selectedVariation,
+          selectedVariation,
+          // Produto incluso no ingresso (custo embutido, não cobrado à parte). O
+          // receiptSnapshot legado não guardava o flag → fallback p/ o productSnapshot
+          // por-produto (congelado no pay). (2026-06-15.)
+          isIncludedInTicket:
+            p.isIncludedInTicket ?? pSnap?.isIncludedInTicket ?? false,
         };
       });
 
@@ -864,10 +885,10 @@ export class RegistrationsService {
       '';
     const baseTicketName =
       reg?.ticket?.name ?? reg?.modalities?.[0]?.modality?.name ?? '';
-    const ticketName =
-      categoryName && baseTicketName && categoryName !== baseTicketName
-        ? `${categoryName} - ${baseTicketName}`
-        : baseTicketName || categoryName || '—';
+    // Cabeçalho do PDF: categoria em destaque (ou "Ingresso avulso" quando o
+    // ingresso não tem categoria) e o nome do ingresso abaixo.
+    const ticketCategory = categoryName || 'Ingresso avulso';
+    const ticketName = baseTicketName || '—';
 
     // Produtos: snapshot traz os campos no topo (name/images/selectedVariation/
     // unitPrice); o legado (findOneLive) aninha em product/variation. Detecta
@@ -882,23 +903,35 @@ export class RegistrationsService {
         if (isSnapshot) {
           const images = Array.isArray(item.images) ? item.images : [];
           const imageUrl = images[item.primaryImageIndex ?? 0] ?? images[0];
-          const unitPrice = item.unitPrice ?? item.basePrice ?? 0;
+          // Incluso = flag REAL (item.isIncludedInTicket, exposto pelo findOne), não
+          // "price === 0" (produto avulso grátis também daria 0). Preço efetivo pago =
+          // preço da variação comprada (Opção B, já = unitPrice) com fallback p/
+          // unitPrice/basePrice. Incluso → 0 (template mostra só "Incluso").
+          const isIncluded = item.isIncludedInTicket === true;
+          const unitPrice = isIncluded
+            ? 0
+            : (item.selectedVariation?.price ?? item.unitPrice ?? item.basePrice ?? 0);
           return {
             name: item.name || 'Produto',
             price: unitPrice,
             variationName: item.selectedVariation?.name ?? undefined,
             imageUrl: imageUrl ?? undefined,
-            isIncluded: unitPrice === 0,
+            isIncluded,
           };
         }
 
-        const price = item.unitPrice ?? item.totalPrice ?? 0;
+        // Build ao vivo (findOneLive): incluso vem de product.isIncludedInTicket; preço
+        // efetivo = variation.price (Opção B) com fallback p/ unitPrice/totalPrice.
+        const isIncluded = item.product?.isIncludedInTicket === true;
+        const price = isIncluded
+          ? 0
+          : (item.variation?.price ?? item.unitPrice ?? item.totalPrice ?? 0);
         return {
           name: item.product?.name || 'Produto',
           price,
           variationName: item.variation?.name ?? item.variationName ?? undefined,
           imageUrl: item.product?.image ?? undefined,
-          isIncluded: price === 0,
+          isIncluded,
         };
       },
     );
@@ -918,6 +951,7 @@ export class RegistrationsService {
       index: 1,
       qrCode: reg?.qrCode ?? reg?.id,
       participantName,
+      ticketCategory,
       ticketName,
       email: snapshotParticipant?.email ?? user?.email ?? undefined,
       cpf:
@@ -1158,9 +1192,16 @@ export class RegistrationsService {
       products: (reg.products || []).map((rp: any) => {
         const snap = rp.productSnapshot as Record<string, any> | null;
         const productData = snap ?? rp.product ?? {};
-        const variationData = snap?.selectedVariation ?? (rp.variation ? {
+        const variationBase = snap?.selectedVariation ?? (rp.variation ? {
           id: rp.variation.id, name: rp.variation.name, price: rp.variation.price,
         } : null);
+        // `price` da variação exibida = valor EFETIVAMENTE cobrado por unidade
+        // (rp.unitPrice, centavos), não o preço cru de catálogo da variação.
+        // Cobre o fallback p/ basePrice quando a variação tem price 0; produto
+        // incluso fica 0 (grátis), coerente. (Opção B — ver sessão 2026-06-15.)
+        const variationData = variationBase
+          ? { ...variationBase, price: rp.unitPrice }
+          : null;
         return {
           id: rp.id,
           product: {
@@ -1384,11 +1425,17 @@ export class RegistrationsService {
         // Usa snapshot se disponível (produto pode ter sido deletado ou editado após a compra)
         const snap = rp.productSnapshot as Record<string, any> | null;
         const productData = snap ?? rp.product ?? {};
-        const variationData = snap?.selectedVariation ?? (rp.variation ? {
+        const variationBase = snap?.selectedVariation ?? (rp.variation ? {
           id: rp.variation.id,
           name: rp.variation.name,
           price: rp.variation.price,
         } : null);
+        // `price` da variação exibida = valor EFETIVAMENTE cobrado por unidade
+        // (rp.unitPrice, centavos), não o catálogo cru (price 0 c/ fallback basePrice).
+        // Incluso → unitPrice 0 (grátis), coerente. (Opção B — ver sessão 2026-06-15.)
+        const variationData = variationBase
+          ? { ...variationBase, price: rp.unitPrice }
+          : null;
         return {
           id: rp.id,
           product: {

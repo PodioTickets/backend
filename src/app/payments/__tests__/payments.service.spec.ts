@@ -316,8 +316,8 @@ describe('PaymentsService', () => {
       expect(data.financial).toMatchObject({ subtotal: 10000, discount: 2000, serviceFee: 1000, total: 9000, voucherCode: 'PROMO10' });
       // preço por inscrição: chave ticketId:batchId, fallback por ticketId
       expect(data.registrations).toEqual([
-        { id: 'reg-1', participantName: 'João', email: 'joao@x.com', ticketCategory: 'Corrida', ticketName: '10K', price: 6000 },
-        { id: 'reg-2', participantName: 'Ana Souza', email: 'ana@x.com', ticketCategory: 'Corrida', ticketName: '10K', price: 4000 },
+        { id: 'reg-1', participantName: 'João', email: 'joao@x.com', ticketCategory: 'Corrida', ticketName: '10K', price: 6000, products: [] },
+        { id: 'reg-2', participantName: 'Ana Souza', email: 'ana@x.com', ticketCategory: 'Corrida', ticketName: '10K', price: 4000, products: [] },
       ]);
     });
 

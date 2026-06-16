@@ -270,13 +270,13 @@ export class PaymentsWebhookService {
             const ticket = reg.tickets?.[0]?.ticket;
             const catName = ticket?.category?.name ?? '';
             const ticketName = ticket?.name ?? '';
-            const fullTicketName = catName && ticketName && catName !== ticketName
-              ? `${catName} - ${ticketName}` : ticketName || catName;
             return {
               index: idx + 1,
               qrCode: reg.qrCode ?? reg.id,
               participantName: (reg.participantName ?? `${(reg.user ?? {}).firstName ?? ''} ${(reg.user ?? {}).lastName ?? ''}`.trim()) || 'Participante',
-              ticketName: fullTicketName,
+              // Cabeçalho do PDF: categoria (ou "Ingresso avulso") em destaque + nome abaixo.
+              ticketCategory: catName || 'Ingresso avulso',
+              ticketName: ticketName || '—',
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
               /* Nacionalidade. Prioridade:
@@ -566,13 +566,13 @@ export class PaymentsWebhookService {
             const ticket = reg.tickets?.[0]?.ticket;
             const catName = ticket?.category?.name ?? '';
             const ticketName = ticket?.name ?? '';
-            const fullTicketName = catName && ticketName && catName !== ticketName
-              ? `${catName} - ${ticketName}` : ticketName || catName;
             return {
               index: idx + 1,
               qrCode: reg.qrCode ?? reg.id,
               participantName: (reg.participantName ?? `${(reg.user ?? {}).firstName ?? ''} ${(reg.user ?? {}).lastName ?? ''}`.trim()) || 'Participante',
-              ticketName: fullTicketName,
+              // Cabeçalho do PDF: categoria (ou "Ingresso avulso") em destaque + nome abaixo.
+              ticketCategory: catName || 'Ingresso avulso',
+              ticketName: ticketName || '—',
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
               /* País do participante: usado pelo template do PDF para decidir
