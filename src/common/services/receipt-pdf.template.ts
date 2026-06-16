@@ -668,79 +668,60 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
               gap: 14,
             },
           },
-          // Itemização: por participante, a linha do ingresso (categoria - nome) com seu
-          // preço e, abaixo, os produtos adicionais (mesmo grátis: incluso → "Incluso").
-          ...data.registrations.flatMap((reg) => {
-            const lines: any[] = [
-              // Linha do ingresso: coluna esquerda com a CATEGORIA por cima e o NOME
-              // embaixo (mesma View), e o preço à direita na mesma linha.
+          // Itemização. Ordem: linha "Participantes" com o total → ingressos (um por
+          // participante) → produtos adicionais (de todos) → divisor → Subtotal.
+          // Total de participantes do pedido (uma linha, acima dos ingressos).
+          React.createElement(FinancialRow, {
+            key: 'participants',
+            label: 'Participantes',
+            value: String(data.registrations.length),
+          }),
+          // Linha do ingresso: CATEGORIA por cima e NOME embaixo (mesma View), preço à direita.
+          ...data.registrations.map((reg) =>
+            React.createElement(
+              View,
+              {
+                key: `tk-${reg.id}`,
+                style: {
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 8,
+                },
+              },
               React.createElement(
                 View,
-                {
-                  key: `tk-${reg.id}`,
-                  style: {
-                    flexDirection: 'row',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    gap: 8,
-                  },
-                },
+                { style: { flex: 1, gap: 2 } },
                 React.createElement(
-                  View,
-                  { style: { flex: 1, gap: 2 } },
-                  React.createElement(
-                    Text,
-                    { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray11 } },
-                    reg.ticketCategory ?? "Ingresso avulso",
-                  ),
-                  React.createElement(
-                    Text,
-                    {
-                      style: {
-                        fontFamily: 'DM Sans',
-                        fontSize: 11,
-                        fontWeight: 600,
-                        color: C.gray12,
-                      },
-                    },
-                    reg.ticketName,
-                  ),
+                  Text,
+                  { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray11 } },
+                  reg.ticketCategory ?? 'Ingresso avulso',
                 ),
                 React.createElement(
                   Text,
-                  { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray12 } },
-                  fmtCurrency(reg.price),
+                  { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 600, color: C.gray12 } },
+                  reg.ticketName,
                 ),
               ),
-            ];
-            reg.products.forEach((p, pi) => {
-              const label = p.variationName ? `${p.name} (${p.variationName})` : p.name;
-              lines.push(
-                React.createElement(
-                  View,
-                  {
-                    key: `pr-${reg.id}-${pi}`,
-                    style: {
-                      flexDirection: 'row',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                    },
-                  },
-                  React.createElement(
-                    Text,
-                    { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray11 } },
-                    label,
-                  ),
-                  React.createElement(
-                    Text,
-                    { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray12 } },
-                    p.isIncluded ? 'Incluso' : fmtCurrency(p.price),
-                  ),
-                ),
-              );
-            });
-            return lines;
-          }),
+              // Preço alinhado ao valor do FinancialRow (gray12 / peso 600).
+              React.createElement(
+                Text,
+                { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 600, color: C.gray12 } },
+                fmtCurrency(reg.price),
+              ),
+            ),
+          ),
+          // Produtos adicionais de todos os participantes — usa o FinancialRow padrão
+          // (mesma cor/peso de Subtotal/Total). Mesmo grátis: incluso → "Incluso".
+          ...data.registrations.flatMap((reg) =>
+            reg.products.map((p, pi) =>
+              React.createElement(FinancialRow, {
+                key: `pr-${reg.id}-${pi}`,
+                label: p.variationName ? `${p.name} (${p.variationName})` : p.name,
+                value: p.isIncluded ? 'Incluso' : fmtCurrency(p.price),
+              }),
+            ),
+          ),
           React.createElement(HR, { key: 'items-hr' }),
           // Resumo igual ao do checkout (OrderSummary): Subtotal → desconto
           // (cupom/voucher) → taxa de serviço (só quando > 0) → Total, com um
@@ -767,7 +748,7 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
             : []),
           React.createElement(HR, null),
           React.createElement(FinancialRow, {
-            label: 'Total',
+            label: 'Total pago',
             value: fmtCurrency(data.financial.total),
             bold: true,
           }),
