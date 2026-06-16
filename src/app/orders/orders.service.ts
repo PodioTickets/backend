@@ -50,6 +50,7 @@ import {
 } from '../../common/utils/coupon-eligibility.util';
 import { claimVoucher, releaseVoucherByOrder } from '../../common/utils/voucher-reservation.util';
 import { stripOrganizationContact } from '../../common/utils/organization-sanitizer.util';
+import { formatPdfAnswer } from '../../common/utils/pdf-answer.util';
 
 // Fallback de expiração da reserva de voucher quando o pedido (excepcionalmente) não tem
 // `expiresAt` — mantém a rede de segurança da reserva sem prendê-la para sempre.
@@ -4056,6 +4057,7 @@ export class OrdersService {
             const ticketName = ticket?.name ?? '';
             return {
               index: idx + 1,
+              registrationId: reg.id,
               qrCode: reg.qrCode ?? reg.id,
               participantName: (reg.participantName ?? `${(reg.user ?? {}).firstName ?? ''} ${(reg.user ?? {}).lastName ?? ''}`.trim()) || 'Participante',
               // Cabeçalho do PDF: categoria (ou "Ingresso avulso") em destaque + nome abaixo.
@@ -4088,7 +4090,7 @@ export class OrdersService {
               gender: reg.participantGender ?? user.gender,
               questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => ({
                 question: qa.question?.question ?? '',
-                answer: qa.answer ?? '',
+                answer: formatPdfAnswer(qa.answer),
               })),
               products: (reg.products ?? []).map((rp: any) => ({
                 name: rp.product?.name ?? '',

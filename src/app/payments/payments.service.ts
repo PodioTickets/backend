@@ -7,6 +7,7 @@ import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
 import { ReceiptPdfService } from '../../common/services/receipt-pdf.service';
 import { buildReceiptPdfData } from '../../common/services/receipt-pdf.builder';
+import { formatPdfAnswer } from '../../common/utils/pdf-answer.util';
 import { OrderFinalizationService, OrderFinalizationAbortError } from './order-finalization.service';
 import { PaymentCompensationService } from './payment-compensation.service';
 import {
@@ -1143,6 +1144,7 @@ export class PaymentsService {
         const ticketName = ticket?.name ?? '';
         return {
           index: idx + 1,
+          registrationId: reg.id,
           qrCode: reg.qrCode ?? reg.id,
           participantName: (reg.participantName ?? `${(reg.user ?? {}).firstName ?? ''} ${(reg.user ?? {}).lastName ?? ''}`.trim()) || 'Participante',
           // Cabeçalho do PDF: categoria (ou "Ingresso avulso") em destaque + nome abaixo.
@@ -1169,7 +1171,7 @@ export class PaymentsService {
           gender: reg.participantGender ?? user.gender,
           questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => ({
             question: qa.question?.question ?? '',
-            answer: qa.answer ?? '',
+            answer: formatPdfAnswer(qa.answer),
           })),
           products: (reg.products ?? []).map((rp: any) => ({
             name: rp.product?.name ?? rp.productSnapshot?.name ?? '',

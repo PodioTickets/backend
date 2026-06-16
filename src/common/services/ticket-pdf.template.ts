@@ -362,28 +362,28 @@ const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
     /* Imagem 100×100 — safeImageUrl valida https:// para prevenir SSRF */
     safeImageUrl(product.imageUrl)
       ? React.createElement(Image, {
-          src: safeImageUrl(product.imageUrl) as string,
-          style: {
-            width: 100,
-            height: 100,
-            borderRadius: 8,
-            borderWidth: 1,
-            borderColor: C.gray6,
-            borderStyle: 'solid',
-            objectFit: 'fill',
-          },
-        })
+        src: safeImageUrl(product.imageUrl) as string,
+        style: {
+          width: 100,
+          height: 100,
+          borderRadius: 8,
+          borderWidth: 1,
+          borderColor: C.gray6,
+          borderStyle: 'solid',
+          objectFit: 'fill',
+        },
+      })
       : React.createElement(View, {
-          style: {
-            width: 100,
-            height: 100,
-            borderRadius: 8,
-            backgroundColor: C.gray6,
-            borderWidth: 1,
-            borderColor: C.gray6,
-            borderStyle: 'solid',
-          },
-        }),
+        style: {
+          width: 100,
+          height: 100,
+          borderRadius: 8,
+          backgroundColor: C.gray6,
+          borderWidth: 1,
+          borderColor: C.gray6,
+          borderStyle: 'solid',
+        },
+      }),
     /* Coluna de conteúdo: nome+variação em cima, preço+badge embaixo */
     React.createElement(
       View,
@@ -399,19 +399,19 @@ const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
         ),
         product.variationName
           ? React.createElement(
-              View,
-              { style: { flexDirection: 'row', gap: 4 } },
-              React.createElement(
-                Text,
-                { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 400, color: C.gray12 } },
-                'Tamanho: ',
-              ),
-              React.createElement(
-                Text,
-                { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 600, color: C.gray12 } },
-                product.variationName,
-              ),
-            )
+            View,
+            { style: { flexDirection: 'row', gap: 4 } },
+            React.createElement(
+              Text,
+              { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 400, color: C.gray12 } },
+              'Tamanho: ',
+            ),
+            React.createElement(
+              Text,
+              { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 600, color: C.gray12 } },
+              product.variationName,
+            ),
+          )
           : null,
       ),
       /* Rodapé: preço à esquerda (só se não incluso), badge à direita */
@@ -421,10 +421,10 @@ const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
         product.isIncluded
           ? React.createElement(View, { style: { flex: 1 } })
           : React.createElement(
-              Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 700, color: C.gray12 } },
-              fmtCurrency(product.price),
-            ),
+            Text,
+            { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 700, color: C.gray12 } },
+            fmtCurrency(product.price),
+          ),
         React.createElement(
           View,
           {
@@ -527,73 +527,73 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
     /* Seção: informações do participante */
     fields.length > 0
       ? React.createElement(
+        View,
+        { style: { paddingHorizontal: 20, paddingVertical: 24, gap: 20 } },
+        React.createElement(
+          Text,
+          { style: { fontFamily: 'Manrope', fontSize: 18, fontWeight: 800, color: C.gray12 } },
+          'Informações do participante',
+        ),
+        React.createElement(
+          View,
+          null,
+          ...fields.map((f, i) =>
+            React.createElement(FieldItem, { key: i, label: f.label, value: f.value }),
+          ),
+        ),
+      )
+      : null,
+    /* Seção: perguntas do organizador */
+    ...(reg.questionAnswers.length > 0
+      ? [
+        React.createElement(
+          View,
+          { style: { marginHorizontal: 16 } },
+          React.createElement(HR, null),
+        ),
+        React.createElement(
           View,
           { style: { paddingHorizontal: 20, paddingVertical: 24, gap: 20 } },
           React.createElement(
             Text,
             { style: { fontFamily: 'Manrope', fontSize: 18, fontWeight: 800, color: C.gray12 } },
-            'Informações do participante',
+            'Perguntas do Organizador',
           ),
           React.createElement(
             View,
             null,
-            ...fields.map((f, i) =>
-              React.createElement(FieldItem, { key: i, label: f.label, value: f.value }),
+            ...reg.questionAnswers.map((qa, i) =>
+              React.createElement(FieldItem, { key: i, label: qa.question, value: qa.answer }),
             ),
           ),
-        )
-      : null,
-    /* Seção: perguntas do organizador */
-    ...(reg.questionAnswers.length > 0
-      ? [
-          React.createElement(
-            View,
-            { style: { marginHorizontal: 16 } },
-            React.createElement(HR, null),
-          ),
-          React.createElement(
-            View,
-            { style: { paddingHorizontal: 20, paddingVertical: 24, gap: 20 } },
-            React.createElement(
-              Text,
-              { style: { fontFamily: 'Manrope', fontSize: 18, fontWeight: 800, color: C.gray12 } },
-              'Perguntas do Organizador',
-            ),
-            React.createElement(
-              View,
-              null,
-              ...reg.questionAnswers.map((qa, i) =>
-                React.createElement(FieldItem, { key: i, label: qa.question, value: qa.answer }),
-              ),
-            ),
-          ),
-        ]
+        ),
+      ]
       : []),
     /* Seção: produtos do kit */
     ...(reg.products.length > 0
       ? [
+        React.createElement(
+          View,
+          { style: { marginHorizontal: 16 } },
+          React.createElement(HR, null),
+        ),
+        React.createElement(
+          View,
+          { style: { paddingHorizontal: 20, paddingVertical: 24, gap: 20 } },
           React.createElement(
-            View,
-            { style: { marginHorizontal: 16 } },
-            React.createElement(HR, null),
+            Text,
+            { style: { fontFamily: 'Manrope', fontSize: 18, fontWeight: 800, color: C.gray12 } },
+            'Produtos do kit',
           ),
           React.createElement(
             View,
-            { style: { paddingHorizontal: 20, paddingVertical: 24, gap: 20 } },
-            React.createElement(
-              Text,
-              { style: { fontFamily: 'Manrope', fontSize: 18, fontWeight: 800, color: C.gray12 } },
-              'Produtos do kit',
-            ),
-            React.createElement(
-              View,
-              { style: { flexDirection: 'column', gap: 12 } },
-              ...reg.products.map((p, i) =>
-                React.createElement(ProductCard, { key: i, product: p }),
-              ),
+            { style: { flexDirection: 'column', gap: 12 } },
+            ...reg.products.map((p, i) =>
+              React.createElement(ProductCard, { key: i, product: p }),
             ),
           ),
-        ]
+        ),
+      ]
       : []),
   );
 };
@@ -726,7 +726,7 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) => 
           paddingVertical: 32,
         },
       },
-      /* Cabeçalho: logo + dados do pedido */
+      /* Cabeçalho: logo + dados do ingresso */
       React.createElement(
         View,
         {
@@ -750,12 +750,12 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) => 
             React.createElement(
               Text,
               { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray12 } },
-              'Pedido: ',
+              'Ingresso: ',
             ),
             React.createElement(
               Text,
               { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 600, color: C.gray12 } },
-              data.orderId,
+              `#${data.registrations[0]?.registrationId}`,
             ),
           ),
           React.createElement(

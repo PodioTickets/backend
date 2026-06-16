@@ -8,6 +8,12 @@ export interface TicketPdfProduct {
 
 export interface TicketPdfRegistration {
   index: number;
+  /**
+   * Id da INSCRIÇÃO (ingresso). Exibido no cabeçalho do PDF ("Ingresso: …"),
+   * já que cada documento gerado é sempre de um único participante/ingresso —
+   * o id do pedido (orderId) fica reservado ao recibo do pedido.
+   */
+  registrationId: string;
   qrCode: string;
   participantName: string;
   /**

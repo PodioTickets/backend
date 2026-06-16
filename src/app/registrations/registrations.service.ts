@@ -9,32 +9,13 @@ import { EmailService } from '../../common/services/email.service';
 import { isDocumentInList, resolveDocument } from '../../common/utils/document.util';
 import { tryConsumeVoucherUnreserved } from '../../common/utils/voucher-reservation.util';
 import { stripOrganizationContact } from '../../common/utils/organization-sanitizer.util';
+import { formatPdfAnswer } from '../../common/utils/pdf-answer.util';
 import {
   TicketPdfService,
   TicketPdfData,
   TicketPdfProduct,
   TicketPdfRegistration,
 } from '../../common/services/ticket-pdf.service';
-
-/**
- * Normaliza a resposta de uma pergunta do organizador para texto plano do PDF.
- * Arrays (múltipla escolha) e JSON serializado viram lista separada por vírgula
- * — mesmo tratamento do modal de visualização no front.
- */
-function formatPdfAnswer(answer: unknown): string {
-  if (answer == null) return '';
-  if (Array.isArray(answer)) return answer.join(', ');
-  if (typeof answer === 'string') {
-    try {
-      const parsed = JSON.parse(answer);
-      if (Array.isArray(parsed)) return parsed.join(', ');
-    } catch {
-      /* não é JSON — usa a string crua */
-    }
-    return answer;
-  }
-  return String(answer);
-}
 
 /**
  * Compõe a localização do evento para o PDF a partir do snapshot. `location`
@@ -949,6 +930,7 @@ export class RegistrationsService {
 
     const registration: TicketPdfRegistration = {
       index: 1,
+      registrationId: reg?.id ?? '',
       qrCode: reg?.qrCode ?? reg?.id,
       participantName,
       ticketCategory,
