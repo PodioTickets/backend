@@ -9,6 +9,25 @@ import { EmailService } from '../../common/services/email.service';
 import { isDocumentInList, resolveDocument } from '../../common/utils/document.util';
 import { tryConsumeVoucherUnreserved } from '../../common/utils/voucher-reservation.util';
 import { stripOrganizationContact } from '../../common/utils/organization-sanitizer.util';
+import { formatPdfAnswer } from '../../common/utils/pdf-answer.util';
+import {
+  TicketPdfService,
+  TicketPdfData,
+  TicketPdfProduct,
+  TicketPdfRegistration,
+} from '../../common/services/ticket-pdf.service';
+
+/**
+ * Compõe a localização do evento para o PDF a partir do snapshot. `location`
+ * pode vir como objeto estruturado (snapshot novo) ou string crua (legado).
+ */
+function formatSnapshotLocation(location: unknown): string {
+  if (!location) return '';
+  if (typeof location === 'string') return location;
+  const loc = location as Record<string, unknown>;
+  const cityState = [loc.city, loc.state].filter(Boolean).join(' - ');
+  return [loc.name, loc.neighborhood, cityState].filter(Boolean).join(', ');
+}
 
 @Injectable()
 export class RegistrationsService {
@@ -18,6 +37,7 @@ export class RegistrationsService {
     private readonly prisma: PrismaService,
     private readonly kitsService: KitsService,
     private readonly emailService: EmailService,
+    private readonly ticketPdfService: TicketPdfService,
   ) { }
 
   private async isAdminUser(userId: string): Promise<boolean> {
@@ -97,12 +117,16 @@ export class RegistrationsService {
       }
     }
 
-    // Verificar modalidades e calcular preço
+    // Verificar modalidades e calcular preço — busca em lote para evitar N+1
+    const modalityIds = modalities.map((m) => m.modalityId);
+    const foundModalities = await prismaRead.modality.findMany({
+      where: { id: { in: modalityIds } },
+    });
+    const modalityMap = new Map(foundModalities.map((m) => [m.id, m]));
+
     let totalAmount = 0;
     for (const modalitySelection of modalities) {
-      const modality = await prismaRead.modality.findUnique({
-        where: { id: modalitySelection.modalityId },
-      });
+      const modality = modalityMap.get(modalitySelection.modalityId);
 
       if (!modality || modality.eventId !== eventId || !modality.isActive) {
         throw new NotFoundException(`Modality ${modalitySelection.modalityId} not found`);
@@ -667,6 +691,12 @@ export class RegistrationsService {
           select: {
             productId: true,
             variationEdited: true,
+            // unitPrice (centavos) = valor efetivamente cobrado por unidade; usado
+            // p/ expor o `price` REAL da variação no read (vê map abaixo).
+            unitPrice: true,
+            // productSnapshot (Json congelado no pay) carrega isIncludedInTicket, que o
+            // receiptSnapshot.products legado não guardava — usado p/ expor o flag.
+            productSnapshot: true,
             variation: { select: { id: true, name: true, price: true } },
           },
         },
@@ -722,14 +752,29 @@ export class RegistrationsService {
       const snapshotProducts = Array.isArray(snapshot.products) ? snapshot.products : [];
       const products = snapshotProducts.map((p: any) => {
         const rp = regProductByProductId.get(p.id);
+        const pSnap = (rp?.productSnapshot ?? null) as any;
         const variationEdited = rp?.variationEdited ?? false;
+        const baseSelected =
+          variationEdited && rp?.variation
+            ? { id: rp.variation.id, name: rp.variation.name, price: rp.variation.price }
+            : p.selectedVariation;
+        // `price` da variação exibida = valor EFETIVAMENTE cobrado por unidade
+        // (RegistrationProduct.unitPrice, centavos), não o catálogo cru congelado no
+        // snapshot (price 0 quando a variação não tinha preço e o basePrice foi cobrado).
+        // Incluso → unitPrice 0 (grátis), coerente. Fallback p/ o price cru se rp ausente.
+        // (Opção B — ver sessão 2026-06-15.)
+        const selectedVariation = baseSelected
+          ? { ...baseSelected, price: rp?.unitPrice ?? baseSelected.price }
+          : baseSelected;
         return {
           ...p,
           variationEdited,
-          selectedVariation:
-            variationEdited && rp?.variation
-              ? { id: rp.variation.id, name: rp.variation.name, price: rp.variation.price }
-              : p.selectedVariation,
+          selectedVariation,
+          // Produto incluso no ingresso (custo embutido, não cobrado à parte). O
+          // receiptSnapshot legado não guardava o flag → fallback p/ o productSnapshot
+          // por-produto (congelado no pay). (2026-06-15.)
+          isIncludedInTicket:
+            p.isIncludedInTicket ?? pSnap?.isIncludedInTicket ?? false,
         };
       });
 
@@ -757,6 +802,172 @@ export class RegistrationsService {
     // Fallback: inscrição legada/PENDING sem snapshot — mantém o build ao vivo apenas
     // quando não há snapshot a retornar (do contrário a rota ficaria sem dados).
     return this.findOneLive(id, userId);
+  }
+
+  /**
+   * Gera o PDF do ingresso de UMA inscrição (download sob demanda no painel do
+   * organizador/admin e na área do participante). Reaproveita `findOne`, que já
+   * concentra o controle de acesso (comprador / participante / convidante /
+   * admin / organizador do evento) e a normalização do `receiptSnapshot`
+   * imutável — evitando segunda query e garantindo que o PDF baixado reflita o
+   * ingresso EXATAMENTE como foi comprado, idêntico ao enviado por e-mail.
+   *
+   * @returns buffer do PDF + nome de arquivo já saneado para o Content-Disposition.
+   */
+  async generateTicketPdf(
+    id: string,
+    userId: string,
+  ): Promise<{ buffer: Buffer; fileName: string }> {
+    // findOne aplica o mesmo controle de acesso da visualização e devolve o
+    // registro normalizado (snapshot OU build ao vivo de fallback).
+    const result: any = await this.findOne(id, userId);
+    const registration = result?.data?.registration;
+    if (!registration) {
+      throw new NotFoundException('Inscrição não encontrada');
+    }
+
+    const pdfData = this.buildSingleTicketPdfData(registration);
+    const buffer = await this.ticketPdfService.generateTicketPdf(pdfData);
+
+    // Slug ASCII seguro p/ o header HTTP (sem acentos/espaços → sem quebra de
+    // Content-Disposition em navegadores/proxies).
+    const slug =
+      (pdfData.registrations[0]?.participantName || 'ingresso')
+        .normalize('NFD')
+        .replace(/[̀-ͯ]/g, '')
+        .replace(/[^a-zA-Z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .toLowerCase() || 'ingresso';
+
+    return { buffer, fileName: `ingresso-${slug}.pdf` };
+  }
+
+  /**
+   * Mapeia a inscrição normalizada (`findOne`) para o contrato `TicketPdfData`
+   * de UM participante. Tolera os dois shapes possíveis (snapshot imutável e
+   * build ao vivo legado), espelhando a mesma normalização do modal de
+   * visualização no front. Preços já estão em CENTAVOS no snapshot (mesma
+   * unidade que o template do PDF espera).
+   */
+  private buildSingleTicketPdfData(reg: any): TicketPdfData {
+    const snapshotParticipant = reg?.participant ?? null;
+    const user = reg?.user ?? reg?.buyer ?? null;
+
+    const participantName =
+      snapshotParticipant?.name ||
+      (user
+        ? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim() || user.fullName
+        : '') ||
+      'Participante';
+
+    const categoryName =
+      reg?.ticket?.category?.name ??
+      reg?.modalities?.[0]?.modality?.category?.name ??
+      '';
+    const baseTicketName =
+      reg?.ticket?.name ?? reg?.modalities?.[0]?.modality?.name ?? '';
+    // Cabeçalho do PDF: categoria em destaque (ou "Ingresso avulso" quando o
+    // ingresso não tem categoria) e o nome do ingresso abaixo.
+    const ticketCategory = categoryName || 'Ingresso avulso';
+    const ticketName = baseTicketName || '—';
+
+    // Produtos: snapshot traz os campos no topo (name/images/selectedVariation/
+    // unitPrice); o legado (findOneLive) aninha em product/variation. Detecta
+    // pelo shape, igual ao modal de visualização.
+    const products: TicketPdfProduct[] = (reg?.products ?? []).map(
+      (item: any): TicketPdfProduct => {
+        const isSnapshot =
+          item?.name !== undefined ||
+          item?.images !== undefined ||
+          item?.selectedVariation !== undefined;
+
+        if (isSnapshot) {
+          const images = Array.isArray(item.images) ? item.images : [];
+          const imageUrl = images[item.primaryImageIndex ?? 0] ?? images[0];
+          // Incluso = flag REAL (item.isIncludedInTicket, exposto pelo findOne), não
+          // "price === 0" (produto avulso grátis também daria 0). Preço efetivo pago =
+          // preço da variação comprada (Opção B, já = unitPrice) com fallback p/
+          // unitPrice/basePrice. Incluso → 0 (template mostra só "Incluso").
+          const isIncluded = item.isIncludedInTicket === true;
+          const unitPrice = isIncluded
+            ? 0
+            : (item.selectedVariation?.price ?? item.unitPrice ?? item.basePrice ?? 0);
+          return {
+            name: item.name || 'Produto',
+            price: unitPrice,
+            variationName: item.selectedVariation?.name ?? undefined,
+            imageUrl: imageUrl ?? undefined,
+            isIncluded,
+          };
+        }
+
+        // Build ao vivo (findOneLive): incluso vem de product.isIncludedInTicket; preço
+        // efetivo = variation.price (Opção B) com fallback p/ unitPrice/totalPrice.
+        const isIncluded = item.product?.isIncludedInTicket === true;
+        const price = isIncluded
+          ? 0
+          : (item.variation?.price ?? item.unitPrice ?? item.totalPrice ?? 0);
+        return {
+          name: item.product?.name || 'Produto',
+          price,
+          variationName: item.variation?.name ?? item.variationName ?? undefined,
+          imageUrl: item.product?.image ?? undefined,
+          isIncluded,
+        };
+      },
+    )
+    // "Sem interesse" = opt-out de produto opcional → não exibir no PDF do ingresso
+    // (mesma regra do recibo/modal de pedido).
+    .filter((p: TicketPdfProduct) => p.variationName !== 'Sem interesse');
+
+    const questionAnswers = (reg?.questionAnswers ?? []).map((qa: any) => ({
+      question: qa?.question?.question ?? qa?.question ?? '',
+      answer: formatPdfAnswer(qa?.answer),
+    }));
+
+    const eventSnap = reg?.event ?? {};
+    const organizationName =
+      eventSnap?.organization?.tradeName ||
+      eventSnap?.organization?.name ||
+      '';
+
+    const registration: TicketPdfRegistration = {
+      index: 1,
+      registrationId: reg?.id ?? '',
+      qrCode: reg?.qrCode ?? reg?.id,
+      participantName,
+      ticketCategory,
+      ticketName,
+      email: snapshotParticipant?.email ?? user?.email ?? undefined,
+      cpf:
+        snapshotParticipant?.documentNumber ?? user?.documentNumber ?? undefined,
+      country:
+        snapshotParticipant?.country ??
+        user?.country ??
+        user?.nationality ??
+        null,
+      documentType:
+        snapshotParticipant?.documentType ?? user?.documentType ?? null,
+      dateOfBirth: snapshotParticipant?.birthDate ?? user?.dateOfBirth ?? null,
+      phone: snapshotParticipant?.phone ?? user?.phone ?? undefined,
+      gender: snapshotParticipant?.gender ?? user?.gender ?? undefined,
+      questionAnswers,
+      products,
+    };
+
+    return {
+      orderId: reg?.id ?? '',
+      orderNumber: String(reg?.id ?? '').slice(0, 8).toUpperCase(),
+      issuedAt: new Date(),
+      event: {
+        name: eventSnap?.name ?? '',
+        date: eventSnap?.eventDate ?? new Date(),
+        organization: organizationName,
+        location: formatSnapshotLocation(eventSnap?.location) || '—',
+        participantCount: 1,
+      },
+      registrations: [registration],
+    };
   }
 
   /**
@@ -966,9 +1177,16 @@ export class RegistrationsService {
       products: (reg.products || []).map((rp: any) => {
         const snap = rp.productSnapshot as Record<string, any> | null;
         const productData = snap ?? rp.product ?? {};
-        const variationData = snap?.selectedVariation ?? (rp.variation ? {
+        const variationBase = snap?.selectedVariation ?? (rp.variation ? {
           id: rp.variation.id, name: rp.variation.name, price: rp.variation.price,
         } : null);
+        // `price` da variação exibida = valor EFETIVAMENTE cobrado por unidade
+        // (rp.unitPrice, centavos), não o preço cru de catálogo da variação.
+        // Cobre o fallback p/ basePrice quando a variação tem price 0; produto
+        // incluso fica 0 (grátis), coerente. (Opção B — ver sessão 2026-06-15.)
+        const variationData = variationBase
+          ? { ...variationBase, price: rp.unitPrice }
+          : null;
         return {
           id: rp.id,
           product: {
@@ -1192,11 +1410,17 @@ export class RegistrationsService {
         // Usa snapshot se disponível (produto pode ter sido deletado ou editado após a compra)
         const snap = rp.productSnapshot as Record<string, any> | null;
         const productData = snap ?? rp.product ?? {};
-        const variationData = snap?.selectedVariation ?? (rp.variation ? {
+        const variationBase = snap?.selectedVariation ?? (rp.variation ? {
           id: rp.variation.id,
           name: rp.variation.name,
           price: rp.variation.price,
         } : null);
+        // `price` da variação exibida = valor EFETIVAMENTE cobrado por unidade
+        // (rp.unitPrice, centavos), não o catálogo cru (price 0 c/ fallback basePrice).
+        // Incluso → unitPrice 0 (grátis), coerente. (Opção B — ver sessão 2026-06-15.)
+        const variationData = variationBase
+          ? { ...variationBase, price: rp.unitPrice }
+          : null;
         return {
           id: rp.id,
           product: {

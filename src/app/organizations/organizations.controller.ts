@@ -37,6 +37,7 @@ import {
   RecordOrganizerPageViewDto,
 } from './dto/organization.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { AdminGuard } from '../auth/guards/admin.guard';
 import { BypassKeyGuard } from '../../common/guards/bypass-key.guard';
 import { PrismaService } from '../../prisma/prisma.service';
 import { NoCache } from 'src/common/decorators/cache.decorator';
@@ -563,12 +564,14 @@ export class OrganizationsController {
 
   @Get('admin/audit-logs')
   @NoCache()
-  @UseGuards(JwtAuthGuard)
+  // AdminGuard: rota retorna audit logs cross-org (PII, IP, old/new values).
+  // Antes só JwtAuthGuard — qualquer usuário comum enumerava tudo.
+  @UseGuards(JwtAuthGuard, AdminGuard)
   @ApiBearerAuth()
   @ApiOperation({
     summary: '[ADMIN] List all organization audit logs',
     description:
-      'Paginated audit trail across organizations. Includes full metadata and `changeDetails` (field, label, old/new values) when the log has `metadata.changes`. Filter by organizationId, metadata.kind, actor (userSearch), etc. (Checagem de papel admin temporariamente desabilitada.)',
+      'Paginated audit trail across organizations. Includes full metadata and `changeDetails` (field, label, old/new values) when the log has `metadata.changes`. Filter by organizationId, metadata.kind, actor (userSearch), etc. Requer papel ADMIN/PODIOGO_STAFF.',
   })
   @ApiQuery({ name: 'organizationId', required: false })
   @ApiQuery({ name: 'kind', required: false, description: 'e.g. EVENT_UPDATE, TICKET_UPDATE, PAGE_VIEW' })
@@ -590,12 +593,13 @@ export class OrganizationsController {
 
   @Get('admin/organizations')
   @NoCache()
-  @UseGuards(JwtAuthGuard)
+  // AdminGuard: lista TODAS as orgs com CNPJ/e-mail/telefone — admin-only.
+  @UseGuards(JwtAuthGuard, AdminGuard)
   @ApiBearerAuth()
   @ApiOperation({
     summary: '[ADMIN] List organizations (paginated)',
     description:
-      'Lista todas as organizações com paginação e busca opcional. Por enquanto só exige JWT (checagem de papel admin desabilitada).',
+      'Lista todas as organizações com paginação e busca opcional. Requer papel ADMIN/PODIOGO_STAFF.',
   })
   @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })

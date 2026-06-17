@@ -37,6 +37,7 @@ describe('End-to-End Performance Tests - Extreme High Traffic', () => {
     },
     modality: {
       findUnique: jest.fn(),
+      findMany: jest.fn(),
       update: jest.fn(),
     },
     user: {
@@ -153,14 +154,14 @@ describe('End-to-End Performance Tests - Extreme High Traffic', () => {
       questions: [],
     });
 
-    mockPrismaService.modality.findUnique.mockResolvedValue({
+    mockPrismaService.modality.findMany.mockResolvedValue([{
       id: 'modality-123',
       eventId: 'event-123',
       isActive: true,
       price: 100.0,
       maxParticipants: 1000,
       currentParticipants: 0,
-    });
+    }]);
 
     mockPrismaService.question.findMany.mockResolvedValue([]);
     mockKitsService.checkStock.mockResolvedValue(true);

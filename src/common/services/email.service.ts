@@ -344,6 +344,12 @@ export class EmailService {
      */
     invitedByName?: string;
     ticketPdfs?: Array<{ buffer: Buffer; participantName: string }>;
+    /**
+     * Comprovante (recibo) do pedido em PDF. Presente só no e-mail do COMPRADOR
+     * (prova de pagamento). Quando definido, o template ativa o trecho
+     * `{{#hasReceipt}}` ("ingresso e o recibo") e o PDF vai anexado.
+     */
+    receiptPdf?: Buffer;
   }) {
     const html = this.loadTemplate('inscricao-confirmada.html', {
       firstName: this.escapeHtml(data.firstName),
@@ -353,7 +359,8 @@ export class EmailService {
       eventAddress: this.escapeHtml(data.eventAddress ?? data.eventLocation),
       eventBannerUrl: this.escapeHtml(data.eventBannerUrl),
       invitedByName: this.escapeHtml(data.invitedByName ?? ''),
-      hasReceipt: '',
+      // Liga o trecho condicional "ingresso e o recibo" só quando há comprovante.
+      hasReceipt: data.receiptPdf ? 'x' : '',
     });
 
     const address = data.eventAddress ?? data.eventLocation;
@@ -381,10 +388,20 @@ export class EmailService {
       };
     });
 
+    // Comprovante do pedido (só no e-mail do comprador).
+    if (data.receiptPdf) {
+      attachments.push({
+        content: data.receiptPdf.toString('base64'),
+        filename: `comprovante_${safeName}.pdf`,
+        type: 'application/pdf',
+        disposition: 'attachment',
+      });
+    }
+
     if (attachments.length > 0) msg.attachments = attachments;
 
     await this.send(msg);
-    this.logger.log(`Registration confirmed email sent to: ${data.email}${attachments.length ? ` (${attachments.length} ticket PDF(s))` : ''}`);
+    this.logger.log(`Registration confirmed email sent to: ${data.email}${attachments.length ? ` (${attachments.length} PDF(s)${data.receiptPdf ? ', incl. comprovante' : ''})` : ''}`);
   }
 
   async sendProductVariationChanged(data: {

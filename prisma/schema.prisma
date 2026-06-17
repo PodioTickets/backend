@@ -187,6 +187,7 @@ model User {
   totpSecret            String? // Secret TOTP para 2FA
   mfaEnabled            Boolean       @default(false) // Se 2FA está habilitado
   lastLoginAt           DateTime? // Último login (email/senha ou fluxo que chama login())
+  passwordChangedAt     DateTime? // Última troca de senha — JwtStrategy rejeita tokens com iat anterior (invalida sessões roubadas)
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
 
@@ -1157,7 +1158,12 @@ model EventWithdrawal {
   updatedAt     DateTime         @updatedAt
 
   event       Event               @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  requestedBy User                @relation(fields: [requestedById], references: [id], onDelete: Cascade)
+  // Restrict (era Cascade): deletar o User que solicitou apagava o histórico de
+  // saques em cascata — o dinheiro já sacado "voltava" ao saldo do repasse
+  // (calculado subtraindo as linhas de EventWithdrawal) e podia ser sacado DE NOVO.
+  // Com Restrict, remover membro com saques registrados falha — o fluxo de
+  // remoção precisa tratar (ver organizations.service.removeMember).
+  requestedBy User                @relation(fields: [requestedById], references: [id], onDelete: Restrict)
   pixKey      OrganizationPixKey? @relation(fields: [pixKeyId], references: [id], onDelete: SetNull)
 
   @@index([eventId])

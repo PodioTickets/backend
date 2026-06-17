@@ -3,6 +3,7 @@ import { RegistrationsService } from '../registrations.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { KitsService } from '../../kits/kits.service';
 import { EmailService } from '../../../common/services/email.service';
+import { TicketPdfService } from '../../../common/services/ticket-pdf.service';
 import { NotFoundException, BadRequestException } from '@nestjs/common';
 import { RegistrationStatus } from '@prisma/client';
 
@@ -17,6 +18,7 @@ describe('RegistrationsService - Comprehensive Tests', () => {
     },
     modality: {
       findUnique: jest.fn(),
+      findMany: jest.fn(),
       update: jest.fn(),
     },
     user: {
@@ -90,6 +92,10 @@ describe('RegistrationsService - Comprehensive Tests', () => {
           provide: EmailService,
           useValue: {},
         },
+        {
+          provide: TicketPdfService,
+          useValue: {},
+        },
       ],
     }).compile();
 
@@ -161,7 +167,7 @@ describe('RegistrationsService - Comprehensive Tests', () => {
         };
 
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
+        mockPrismaService.modality.findMany.mockResolvedValue([mockModality]);
         mockKitsService.checkStock.mockResolvedValue(true);
         mockPrismaService.$transaction.mockImplementation(async (callback) => {
           return callback({
@@ -266,7 +272,7 @@ describe('RegistrationsService - Comprehensive Tests', () => {
         };
 
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
+        mockPrismaService.modality.findMany.mockResolvedValue([mockModality]);
         mockKitsService.checkStock.mockResolvedValue(true);
         // Convidado novo (e-mail inexistente): o service NÃO cria User — congela um
         // guestSnapshot na inscrição (participantName/Email/Document) e userId fica null.
@@ -421,7 +427,7 @@ describe('RegistrationsService - Comprehensive Tests', () => {
         };
 
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
+        mockPrismaService.modality.findMany.mockResolvedValue([mockModality]);
 
         await expect(service.create(userId, createDto)).rejects.toThrow(NotFoundException);
       });
@@ -451,7 +457,7 @@ describe('RegistrationsService - Comprehensive Tests', () => {
         };
 
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.modality.findUnique.mockResolvedValue(null);
+        mockPrismaService.modality.findMany.mockResolvedValue([]);
 
         await expect(service.create(userId, createDto)).rejects.toThrow(NotFoundException);
       });
@@ -490,7 +496,7 @@ describe('RegistrationsService - Comprehensive Tests', () => {
         };
 
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
+        mockPrismaService.modality.findMany.mockResolvedValue([mockModality]);
 
         await expect(service.create(userId, createDto)).rejects.toThrow(BadRequestException);
       });
@@ -528,7 +534,7 @@ describe('RegistrationsService - Comprehensive Tests', () => {
         };
 
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
+        mockPrismaService.modality.findMany.mockResolvedValue([mockModality]);
         mockKitsService.checkStock.mockResolvedValue(true);
         mockPrismaService.$transaction.mockImplementation(async (callback) => {
           return callback({
@@ -589,7 +595,7 @@ describe('RegistrationsService - Comprehensive Tests', () => {
         };
 
         mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-        mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
+        mockPrismaService.modality.findMany.mockResolvedValue([mockModality]);
         mockKitsService.checkStock.mockResolvedValue(true);
       const prismaError = new Error('Unique constraint failed');
       (prismaError as any).code = 'P2002';
@@ -669,15 +675,17 @@ describe('RegistrationsService - Comprehensive Tests', () => {
       };
 
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.modality.findUnique.mockImplementation((args) =>
-        Promise.resolve({
-          id: args.where.id,
-          eventId: 'event-123',
-          isActive: true,
-          price: 100,
-          maxParticipants: 100,
-          currentParticipants: 0,
-        }),
+      mockPrismaService.modality.findMany.mockImplementation((args) =>
+        Promise.resolve(
+          (args.where.id.in as string[]).map((id: string) => ({
+            id,
+            eventId: 'event-123',
+            isActive: true,
+            price: 100,
+            maxParticipants: 100,
+            currentParticipants: 0,
+          })),
+        ),
       );
       mockKitsService.checkStock.mockResolvedValue(true);
 
@@ -709,9 +717,9 @@ describe('RegistrationsService - Comprehensive Tests', () => {
       const endTime = Date.now();
       const executionTime = endTime - startTime;
 
-      // Deve processar 50 modalidades em menos de 2 segundos
+      // Deve processar 50 modalidades em menos de 2 segundos — com findMany (1 query só)
       expect(executionTime).toBeLessThan(2000);
-      expect(mockPrismaService.modality.findUnique).toHaveBeenCalledTimes(50);
+      expect(mockPrismaService.modality.findMany).toHaveBeenCalledTimes(1);
     });
 
     it('should batch database operations in transaction', async () => {
@@ -743,14 +751,14 @@ describe('RegistrationsService - Comprehensive Tests', () => {
       };
 
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.modality.findUnique.mockResolvedValue({
+      mockPrismaService.modality.findMany.mockResolvedValue([{
         id: 'mod-123',
         eventId: 'event-123',
         isActive: true,
         price: 100,
         maxParticipants: 100,
         currentParticipants: 0,
-      });
+      }]);
       mockKitsService.checkStock.mockResolvedValue(true);
 
       let transactionCallCount = 0;
@@ -815,7 +823,7 @@ describe('RegistrationsService - Comprehensive Tests', () => {
       };
 
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
+      mockPrismaService.modality.findMany.mockResolvedValue([mockModality]);
       mockKitsService.checkStock.mockResolvedValue(true);
         mockPrismaService.$transaction.mockImplementation(async (callback) => {
           return callback({
@@ -874,7 +882,7 @@ describe('RegistrationsService - Comprehensive Tests', () => {
       };
 
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
+      mockPrismaService.modality.findMany.mockResolvedValue([mockModality]);
 
       await expect(
         service.create(userId, {
@@ -912,7 +920,7 @@ describe('RegistrationsService - Comprehensive Tests', () => {
       };
 
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
+      mockPrismaService.modality.findMany.mockResolvedValue([mockModality]);
       mockKitsService.checkStock.mockResolvedValue(true);
 
       // Simular duas requisições simultâneas
@@ -954,10 +962,10 @@ describe('RegistrationsService - Comprehensive Tests', () => {
       await expect(service.create(userId1, createDto)).resolves.toBeDefined();
 
       // Segunda inscrição deve falhar (modality já cheia)
-      mockPrismaService.modality.findUnique.mockResolvedValue({
+      mockPrismaService.modality.findMany.mockResolvedValue([{
         ...mockModality,
         currentParticipants: 1,
-      });
+      }]);
 
       await expect(service.create(userId2, createDto)).rejects.toThrow(BadRequestException);
     });
@@ -994,7 +1002,7 @@ describe('RegistrationsService - Comprehensive Tests', () => {
       };
 
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
+      mockPrismaService.modality.findMany.mockResolvedValue([mockModality]);
       mockKitsService.checkStock.mockRejectedValue(
         new BadRequestException('Insufficient stock. Available: 2, Requested: 5'),
       );
@@ -1031,18 +1039,10 @@ describe('RegistrationsService - Comprehensive Tests', () => {
         questions: [],
       };
 
-      let callCount = 0;
-      mockPrismaService.modality.findUnique.mockImplementation(() => {
-        callCount++;
-        return Promise.resolve({
-          id: callCount === 1 ? 'mod-123' : 'mod-456',
-          eventId: 'event-123',
-          isActive: true,
-          price: callCount === 1 ? 100 : 200,
-          maxParticipants: 100,
-          currentParticipants: 0,
-        });
-      });
+      mockPrismaService.modality.findMany.mockResolvedValue([
+        { id: 'mod-123', eventId: 'event-123', isActive: true, price: 100, maxParticipants: 100, currentParticipants: 0 },
+        { id: 'mod-456', eventId: 'event-123', isActive: true, price: 200, maxParticipants: 100, currentParticipants: 0 },
+      ]);
 
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
       mockKitsService.checkStock.mockResolvedValue(true);
@@ -1113,17 +1113,13 @@ describe('RegistrationsService - Comprehensive Tests', () => {
         });
       });
 
-      mockPrismaService.modality.findUnique.mockImplementation((args) => {
-        const modalityId = args.where.id;
-        const eventId = modalityId === 'mod-123' ? 'event-123' : 'event-456';
-        return Promise.resolve({
-          id: modalityId,
-          eventId,
-          isActive: true,
-          price: 100,
-          maxParticipants: 100,
-          currentParticipants: 0,
-        });
+      mockPrismaService.modality.findMany.mockImplementation((args) => {
+        return Promise.resolve(
+          (args.where.id.in as string[]).map((modalityId: string) => {
+            const eventId = modalityId === 'mod-123' ? 'event-123' : 'event-456';
+            return { id: modalityId, eventId, isActive: true, price: 100, maxParticipants: 100, currentParticipants: 0 };
+          }),
+        );
       });
       mockKitsService.checkStock.mockResolvedValue(true);
 

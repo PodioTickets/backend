@@ -1,4 +1,5 @@
-import { Controller, Get, Post, Body, Param, Delete, Patch, UseGuards, Request, Query } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Delete, Patch, UseGuards, Request, Query, Res, StreamableFile } from '@nestjs/common';
+import type { Response } from 'express';
 import {
   ApiTags,
   ApiOperation,
@@ -116,6 +117,66 @@ export class RegistrationsController {
   @ApiResponse({ status: 404, description: 'Registration or payment not found' })
   getPaymentDetailsByRegistration(@Request() req, @Param('id') id: string) {
     return this.paymentsService.getPaymentDetails(id, 'registration', req.user.id);
+  }
+
+  @Get(':id/ticket-pdf')
+  @NoCache()
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Download registration ticket PDF',
+    description:
+      'Gera e baixa o PDF do ingresso de uma inscrição (QR Code + dados do participante, produtos e respostas). Acessível pelo comprador, participante, convidante, admin ou organizador do evento.',
+  })
+  @ApiParam({ name: 'id', description: 'Registration UUID' })
+  @ApiResponse({ status: 200, description: 'PDF do ingresso (application/pdf)' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Access denied' })
+  @ApiResponse({ status: 404, description: 'Registration not found' })
+  async downloadTicketPdf(
+    @Request() req,
+    @Param('id') id: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const { buffer, fileName } = await this.registrationsService.generateTicketPdf(
+      id,
+      req.user.id,
+    );
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${fileName}"`,
+    });
+    return new StreamableFile(buffer);
+  }
+
+  @Get(':id/receipt-pdf')
+  @NoCache()
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Download order receipt (comprovante) PDF',
+    description:
+      'Gera e baixa o PDF do comprovante (recibo) do PEDIDO ao qual a inscrição pertence — o mesmo documento anexado ao e-mail de confirmação. Acessível pelo comprador, admin ou organizador do evento.',
+  })
+  @ApiParam({ name: 'id', description: 'Registration UUID' })
+  @ApiResponse({ status: 200, description: 'PDF do comprovante (application/pdf)' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Access denied' })
+  @ApiResponse({ status: 404, description: 'Registration or order not found' })
+  async downloadReceiptPdf(
+    @Request() req,
+    @Param('id') id: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const { buffer, fileName } = await this.paymentsService.generateReceiptPdf(
+      id,
+      req.user.id,
+    );
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${fileName}"`,
+    });
+    return new StreamableFile(buffer);
   }
 
   @Delete(':id/cancel')

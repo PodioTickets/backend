@@ -15,7 +15,7 @@ import {
   Circle,
 } from '@react-pdf/renderer';
 import * as path from 'path';
-import { ReceiptPdfData, ReceiptPdfRegistrationRow } from './receipt-pdf.types';
+import { ReceiptPdfData } from './receipt-pdf.types';
 
 const LinearGradient = LinearGradientBase as any;
 
@@ -35,6 +35,14 @@ function fmtCPF(cpf: string): string {
   return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
 }
 
+/**
+ * Prefixo "#" SOMENTE de exibição para qualquer ID mostrado no recibo
+ * (pedido, inscrição, transação). Não altera o valor persistido/snapshot nem
+ * nada usado em busca/comparação — é puramente cosmético, alinhado ao padrão
+ * visual do frontend (`#{orderId}` / `#{registrationId}` no modal de pedido).
+ */
+const idTag = (v: string): string => `#${v}`;
+
 function formatPaymentMethod(method: string | undefined): string {
   const m = (method ?? '').toUpperCase();
   if (m === 'CREDIT_CARD') return 'Cartão de crédito';
@@ -42,7 +50,7 @@ function formatPaymentMethod(method: string | undefined): string {
   if (m.includes('PIX')) return 'Pix';
   if (m === 'BOLETO') return 'Boleto';
   if (m === 'FREE') return 'Gratuito';
-  return method || 'Pix';
+  return method || '—';
 }
 
 Font.registerHyphenationCallback((w) => [w]);
@@ -88,98 +96,49 @@ const C = {
   pixColor: '#62B7AF',
 } as const;
 
-function fmtDate(d: Date | string | null | undefined): string {
-  if (!d) return '—';
-  const dt = new Date(d as string);
-  if (isNaN(dt.getTime())) return '—';
-  return dt.toLocaleDateString('pt-BR');
+// Fuso de Brasília (UTC-3 fixo desde 2019). Usado para INSTANTES REAIS
+// (pagamento/emissão). O servidor roda em UTC em produção, então `getHours()`
+// cravaria UTC — por isso formatamos explicitamente no fuso de Brasília.
+const TZ_BR = 'America/Sao_Paulo';
+
+/** Componentes de data+hora de um INSTANTE REAL no fuso de Brasília. */
+function brDateTimeParts(d: Date): { date: string; hh: string; mm: string } {
+  const date = d.toLocaleDateString('pt-BR', { timeZone: TZ_BR });
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: TZ_BR,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(d);
+  const hh = parts.find((p) => p.type === 'hour')?.value ?? '00';
+  const mm = parts.find((p) => p.type === 'minute')?.value ?? '00';
+  return { date, hh, mm };
 }
 
 function fmtDateTime(d: Date): string {
-  const day = d.toLocaleDateString('pt-BR');
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return `${day} · ${hh}h${mm}`;
+  const { date, hh, mm } = brDateTimeParts(d);
+  return `${date} · ${hh}h${mm}`;
 }
 
 function fmtDateTimeLong(d: Date): string {
-  return `${d.toLocaleDateString('pt-BR')} - ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const { date, hh, mm } = brDateTimeParts(d);
+  return `${date} - ${hh}:${mm}`;
 }
 
 function fmtCurrency(cents: number): string {
   return (cents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
 
+/**
+ * Data-só (sem hora), para data de nascimento. Formata em UTC porque o valor é
+ * armazenado à meia-noite UTC — formatar no fuso BR (UTC-3) voltaria 1 dia.
+ */
+function fmtDateOnly(d: Date | string): string {
+  return new Date(d).toLocaleDateString('pt-BR', { timeZone: 'UTC' });
+}
+
 const HR = () =>
   React.createElement(View, { style: { height: 1, backgroundColor: C.gray6 } });
-
-const LogoVector = () =>
-  React.createElement(
-    Svg,
-    { width: 26, height: 25, viewBox: '0 0 29 28' },
-    React.createElement(
-      Defs,
-      null,
-      React.createElement(
-        LinearGradient,
-        {
-          id: 'rgrad',
-          x1: '22.5514',
-          y1: '-1.14754',
-          x2: '0.808587',
-          y2: '28.4166',
-          gradientUnits: 'userSpaceOnUse',
-        },
-        React.createElement(Stop, { offset: '0', stopColor: '#57D321' }),
-        React.createElement(Stop, { offset: '0.523222', stopColor: '#1CB757' }),
-        React.createElement(Stop, { offset: '1', stopColor: '#18773D' }),
-      ),
-    ),
-    React.createElement(Path, {
-      d: 'M28.023 12.4933C27.1431 11.4496 25.8464 10.8458 24.482 10.8458H18.8104C18.1477 10.8458 17.5122 11.1017 17.0364 11.5617L0 28L6.70384 11.0729C6.96406 10.4145 7.60094 9.98316 8.30828 9.98316H15.1156C15.8833 9.98316 16.4656 9.35346 16.4656 8.63463C16.4656 8.5038 16.4469 7.07476 16.4067 6.94249C16.2327 6.37462 15.7079 5.98788 15.1156 5.98788H7.60813C7.06757 5.98788 6.55864 5.73485 6.23229 5.30499L1.22921 0H17.1571C17.1974 0 17.2376 0.00143767 17.2779 0.004313C17.2836 0.004313 17.2908 0.004313 17.298 0.00575067C17.9981 0.0632573 18.5991 0.539125 18.8076 1.21914L19.2432 2.64243C19.4114 3.18875 19.9146 3.56254 20.4868 3.56254H25.6854C26.4444 3.56254 27.1144 4.0571 27.3358 4.78312L28.6009 8.91497C28.9733 10.1327 28.7605 11.4539 28.023 12.4933Z',
-      fill: 'url(#rgrad)',
-    }),
-  );
-
-const PodioBrand = () =>
-  React.createElement(
-    Svg,
-    { width: 54, height: 17, viewBox: '0 0 60 19' },
-    React.createElement(Path, {
-      d: 'M19.7389 5.00534C21.0148 5.00535 22.1414 5.29011 23.1078 5.8702C24.0692 6.44729 24.8164 7.24686 25.3468 8.26266C25.8783 9.273 26.1397 10.4298 26.1397 11.725C26.1397 13.0281 25.8745 14.1927 25.3352 15.2107L25.3351 15.2105C24.8044 16.2189 24.0573 17.0143 23.0965 17.5911L23.0949 17.592C22.129 18.1638 21.0069 18.4446 19.7389 18.4446C18.4701 18.4446 17.3473 18.1597 16.3811 17.5798C15.4201 17.0029 14.6728 16.2073 14.1421 15.1986L14.1415 15.1973L14.1408 15.1962C13.6178 14.1792 13.3605 13.0196 13.3605 11.725C13.3605 10.4076 13.6256 9.23867 14.1656 8.22726C14.7039 7.21913 15.4551 6.42731 16.4167 5.85801C17.3817 5.28666 18.4924 5.00534 19.7389 5.00534ZM39.2123 18.4576H36.2063V17.5318C35.3186 18.1512 34.2557 18.4446 33.0151 18.4446C31.8382 18.4446 30.7977 18.149 29.9052 17.549C29.0201 16.954 28.3367 16.1455 27.8548 15.1315C27.3729 14.1175 27.1351 12.9801 27.1351 11.725C27.1351 10.4555 27.3726 9.31384 27.8551 8.30648L27.8555 8.30561C28.3458 7.29072 29.0417 6.48574 29.9427 5.89864C30.8502 5.29985 31.9123 5.00534 33.1171 5.00534C34.1687 5.00534 35.0891 5.22715 35.8664 5.68202V0H39.2123V18.4576ZM53.3875 5.00534C54.6634 5.00534 55.7899 5.29011 56.7564 5.8702C57.7178 6.4473 58.4651 7.24684 58.9955 8.26266L59.0445 8.35784C59.5431 9.34546 59.7885 10.4703 59.7885 11.725C59.7885 13.0281 59.5231 14.1927 58.9838 15.2107L58.9836 15.2105C58.453 16.2189 57.7059 17.0143 56.745 17.5911L56.7436 17.592C55.7777 18.1638 54.6555 18.4446 53.3875 18.4446C52.1187 18.4446 50.996 18.1597 50.0299 17.5798C49.0688 17.0029 48.3213 16.2073 47.7907 15.1986L47.7901 15.1973L47.7895 15.1962C47.2666 14.1792 47.0091 13.0196 47.0091 11.725C47.0091 10.4076 47.2743 9.23868 47.8143 8.22726C48.3526 7.21913 49.1038 6.42731 50.0654 5.85801C51.0304 5.28668 52.141 5.00534 53.3875 5.00534ZM7.03517 0C7.20085 0 7.40944 0.00764142 7.65919 0.0226334C7.91622 0.0305294 8.15725 0.0540047 8.38166 0.0934353C9.36399 0.241995 10.1925 0.569408 10.8524 1.08771C11.5127 1.60048 12.0011 2.25094 12.315 3.03403L12.3728 3.17912C12.6528 3.90979 12.7905 5.99888 12.7906 6.86868C12.7906 7.78936 12.6337 8.63956 12.3154 9.41537L12.315 9.41638C11.9936 10.1918 11.5017 10.8377 10.8424 11.3501C10.1827 11.8687 9.35808 12.1967 8.38224 12.3455L8.3792 12.346C8.1584 12.3773 7.9162 12.4005 7.65311 12.4159C7.40137 12.4311 7.19467 12.4391 7.03517 12.4391H3.32309V18.4446H0V0H7.03517ZM45.1167 18.4446H41.7936V4.78252H45.1167V18.4446ZM33.5248 8.03343C32.8421 8.03343 32.3053 8.20072 31.8921 8.51395C31.4646 8.8314 31.1464 9.26313 30.9379 9.82306L30.9375 9.82422C30.7253 10.3871 30.6168 11.0195 30.6168 11.725C30.6168 12.4376 30.7214 13.0776 30.9262 13.6482L30.9665 13.7508C31.1746 14.2563 31.4732 14.6521 31.8594 14.9482C32.2574 15.2533 32.7748 15.4166 33.4341 15.4166C34.1231 15.4166 34.6439 15.2613 35.0239 14.9793C35.4226 14.6815 35.718 14.2649 35.9049 13.714L35.906 13.7108C36.0916 13.1833 36.193 12.57 36.205 11.8669L36.2063 11.725L36.205 11.5818C36.193 10.8722 36.0914 10.2598 35.9063 9.74022C35.7171 9.18246 35.4279 8.76983 35.0447 8.48058C34.6682 8.18999 34.1708 8.03343 33.5248 8.03343ZM19.7389 8.14616C19.051 8.14616 18.5104 8.30101 18.0962 8.58882C17.6815 8.87502 17.3692 9.27908 17.1619 9.81537L17.1615 9.81653C16.9512 10.3534 16.8422 10.9875 16.8422 11.725C16.8422 12.8604 17.1001 13.7332 17.5854 14.3728C18.0619 14.9838 18.7631 15.304 19.7389 15.304C20.7545 15.304 21.4628 14.9716 21.923 14.3436C22.4049 13.686 22.6582 12.8211 22.6582 11.725C22.6582 10.5891 22.4001 9.72061 21.9156 9.08907C21.4466 8.47157 20.7399 8.14617 19.7389 8.14616ZM53.3875 8.14616C52.6996 8.14616 52.1591 8.30102 51.7449 8.58882C51.3301 8.87502 51.0179 9.27908 50.8106 9.81537L50.81 9.81653C50.5998 10.3534 50.4908 10.9875 50.4908 11.725C50.4908 12.8603 50.7486 13.7331 51.2338 14.3727C51.7104 14.9838 52.4116 15.304 53.3875 15.304C54.4031 15.304 55.1113 14.9716 55.5715 14.3436C56.0535 13.686 56.3068 12.8211 56.3068 11.725C56.3068 10.589 56.0487 9.72061 55.5641 9.08907C55.0952 8.47156 54.3885 8.14616 53.3875 8.14616ZM3.32309 9.3096H6.92194C7.06339 9.3096 7.22519 9.30253 7.40793 9.28798C7.58 9.27429 7.73411 9.24719 7.87131 9.20819C8.28892 9.10422 8.58716 8.93066 8.79632 8.69807C9.03325 8.44191 9.19465 8.15911 9.28696 7.84424C9.39358 7.50431 9.44485 7.1813 9.44485 6.86868C9.44484 6.55606 9.39358 4.94596 9.28855 4.61155C9.19387 4.28194 9.03226 3.99598 8.79908 3.74408C8.58716 3.5083 8.28891 3.33488 7.88088 3.23338C7.73836 3.19312 7.58829 3.16972 7.41968 3.16301C7.22519 3.14774 7.06339 3.14082 6.92194 3.14082H3.32309V9.3096ZM21.0123 4.19127H18.2961L20.2887 0.0129956H23.0048L21.0123 4.19127ZM45.1167 3.15379H41.7936V0.0694119H45.1167V3.15379Z',
-      fill: '#202020',
-    }),
-  );
-
-const TicketBrand = () =>
-  React.createElement(
-    Svg,
-    { width: 63, height: 17, viewBox: '0 0 70 19' },
-    React.createElement(Path, {
-      d: 'M5.96792 18.4138L6.06698 2.26953H0V0.0126195H14.3334V2.26953H8.26642L8.16736 18.4138H5.96792Z',
-      fill: '#202020',
-    }),
-    React.createElement(Path, {
-      d: 'M16.3007 2.39514V0.0126195H18.5001V2.39514H16.3007ZM16.2017 18.4138L16.3007 4.74685H18.5001L18.4011 18.4138H16.2017Z',
-      fill: '#202020',
-    }),
-    React.createElement(Path, {
-      d: 'M27.5826 18.4138C26.2317 18.4138 25.0825 18.1142 24.1352 17.515C23.1961 16.9076 22.4794 16.0744 21.9852 15.0155C21.4909 13.9567 21.2356 12.75 21.2191 11.3956C21.2356 10.0084 21.4951 8.78948 21.9975 7.7388C22.5083 6.67992 23.2373 5.85498 24.1846 5.26397C25.1319 4.67297 26.2729 4.37747 27.6073 4.37747C29.016 4.37747 30.2269 4.72222 31.2401 5.41173C32.2616 6.10123 32.9453 7.0452 33.2913 8.24362L31.1166 8.89619C30.8365 8.1246 30.3793 7.52539 29.745 7.09855C29.1189 6.67171 28.3982 6.4583 27.5826 6.4583C26.6683 6.4583 25.9145 6.67171 25.3214 7.09855C24.7283 7.51718 24.2876 8.09997 23.9993 8.84694C23.711 9.58569 23.5627 10.4353 23.5545 11.3956C23.5709 12.8732 23.9128 14.0675 24.58 14.9786C25.2555 15.8815 26.2564 16.333 27.5826 16.333C28.4558 16.333 29.1807 16.136 29.7574 15.742C30.334 15.3398 30.7706 14.7611 31.0671 14.0059L33.2913 14.5846C32.83 15.8241 32.1092 16.7721 31.1289 17.4288C30.1486 18.0855 28.9665 18.4138 27.5826 18.4138Z',
-      fill: '#202020',
-    }),
-    React.createElement(Path, {
-      d: 'M35.5536 18.4138L35.566 0.0126195H37.7902V11.1494L43.3876 4.74685H46.2419L40.3479 11.3956L47.1471 18.4138H44.0704L37.7902 11.6419V18.4138H35.5536Z',
-      fill: '#202020',
-    }),
-    React.createElement(Path, {
-      d: 'M53.458 18.4138C52.1483 18.4138 51.0032 18.1265 50.023 17.5519C49.0509 16.9691 48.2931 16.1606 47.7494 15.1264C47.2057 14.0839 46.9339 12.869 46.9339 11.4818C46.9339 10.0289 47.2016 8.77306 47.737 7.71418C48.2725 6.64709 49.018 5.82625 49.9735 5.25166C50.9373 4.66887 52.0659 4.37747 53.3592 4.37747C54.7019 4.37747 55.8428 4.68528 56.7819 5.30091C57.7292 5.91654 58.4377 6.79484 58.9072 7.93581C59.385 9.07677 59.5909 10.4353 59.525 12.0113H57.3009V11.2233C57.2762 9.5898 56.9426 8.37085 56.3 7.56643C55.6575 6.7538 54.7019 6.34748 53.4333 6.34748C52.0741 6.34748 51.0403 6.78253 50.3319 7.65262C49.6234 8.52271 49.2692 9.77038 49.2692 11.3956C49.2692 12.9634 49.6234 14.1783 50.3319 15.0402C51.0403 15.9021 52.0494 16.333 53.3592 16.333C54.2406 16.333 55.0067 16.1319 55.6575 15.742C56.3083 15.3275 56.819 14.7488 57.1897 13.9936L59.3026 14.72C58.7836 15.8938 58.0011 16.805 56.9549 17.4534C55.917 18.0937 54.7514 18.4138 53.458 18.4138ZM48.5278 12.0113V10.2506H58.3882V12.0113H48.5278Z',
-      fill: '#202020',
-    }),
-    React.createElement(Path, {
-      d: 'M69.4798 18.1919C68.689 18.3479 67.9064 18.4094 67.1321 18.3766C66.366 18.352 65.6823 18.2001 65.081 17.921C64.4796 17.6337 64.0224 17.043 63.7094 16.4438C63.4458 15.9185 63.3016 15.389 63.2769 14.8555C63.2604 14.3137 63.2522 13.7022 63.2522 13.0209V0H65.4516V12.9224C65.4516 13.4642 65.4558 13.9279 65.464 14.3137C65.4805 14.6995 65.567 15.032 65.7235 15.311C66.02 15.8364 66.4896 16.1442 67.1321 16.2345C67.7829 16.3248 68.5655 16.3002 69.4798 16.1606V18.1919ZM60.5462 6.5568V4.74685H69.4798V6.5568H60.5462Z',
-      fill: '#202020',
-    }),
-  );
 
 const SectionBadge = ({ number, title }: { number: string; title: string }) =>
   React.createElement(
@@ -236,35 +195,35 @@ const TxField = ({
     ),
     amber
       ? React.createElement(
-          View,
-          { style: { flexDirection: 'row', alignItems: 'center', gap: 4 } },
-          React.createElement(
-            Svg,
-            { width: 14, height: 14, viewBox: '0 0 16 16' },
-            React.createElement(Rect, {
-              x: 1.33,
-              y: 1.33,
-              width: 13.33,
-              height: 13.33,
-              rx: 2,
-              stroke: C.amber12,
-              strokeWidth: 1.5,
-              fill: 'none',
-            }),
-          ),
-          React.createElement(
-            Text,
-            {
-              style: { fontFamily: 'DM Sans', fontSize: 12, fontWeight: 700, color: C.amber12 },
-            },
-            value,
-          ),
-        )
-      : React.createElement(
-          Text,
-          { style: { fontFamily: 'DM Sans', fontSize: 12, fontWeight: 700, color: C.gray12 } },
-          value || '—',
+        View,
+        { style: { flexDirection: 'row', alignItems: 'center', gap: 4 } },
+        React.createElement(
+          Svg,
+          { width: 14, height: 14, viewBox: '0 0 16 16' },
+          React.createElement(Rect, {
+            x: 1.33,
+            y: 1.33,
+            width: 13.33,
+            height: 13.33,
+            rx: 2,
+            stroke: C.amber12,
+            strokeWidth: 1.5,
+            fill: 'none',
+          }),
         ),
+        React.createElement(
+          Text,
+          {
+            style: { fontFamily: 'DM Sans', fontSize: 12, fontWeight: 700, color: C.amber12 },
+          },
+          value,
+        ),
+      )
+      : React.createElement(
+        Text,
+        { style: { fontFamily: 'DM Sans', fontSize: 12, fontWeight: 700, color: C.gray12 } },
+        value || '—',
+      ),
   );
 
 const InfoRow = ({ label, value }: { label: string; value: string }) =>
@@ -321,128 +280,25 @@ const FinancialRow = ({
     ),
   );
 
-const TableRow = ({ row }: { row: ReceiptPdfRegistrationRow }) => {
-  const initial = (row.participantName || '?')[0].toUpperCase();
-  return React.createElement(
-    View,
-    {
-      style: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        borderBottomWidth: 1,
-        borderBottomColor: C.gray6,
-        borderBottomStyle: 'solid',
-      },
-    },
-    // ID
-    React.createElement(
-      View,
-      { style: { width: 80, paddingHorizontal: 12, paddingVertical: 10 } },
-      React.createElement(
-        Text,
-        { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 600, color: C.gray12 } },
-        row.id.slice(0, 8).toUpperCase(),
-      ),
-    ),
-    // Participant
-    React.createElement(
-      View,
-      {
-        style: {
-          flex: 1,
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: 8,
-          paddingHorizontal: 12,
-          paddingVertical: 10,
-        },
-      },
-      React.createElement(
-        View,
-        {
-          style: {
-            width: 32,
-            height: 32,
-            borderRadius: 8,
-            backgroundColor: C.gray3,
-            alignItems: 'center',
-            justifyContent: 'center',
-          },
-        },
-        React.createElement(
-          Text,
-          { style: { fontFamily: 'DM Sans', fontSize: 13, fontWeight: 700, color: C.gray11 } },
-          initial,
-        ),
-      ),
-      React.createElement(
-        View,
-        { style: { flex: 1, gap: 4 } },
-        React.createElement(
-          Text,
-          { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 600, color: C.gray12 } },
-          row.participantName,
-        ),
-        row.email
-          ? React.createElement(
-              Text,
-              {
-                style: {
-                  fontFamily: 'DM Sans',
-                  fontSize: 9,
-                  fontWeight: 400,
-                  color: C.gray11,
-                },
-              },
-              row.email,
-            )
-          : null,
-      ),
-    ),
-    // Ticket
-    React.createElement(
-      View,
-      { style: { flex: 1, paddingHorizontal: 12, paddingVertical: 10, gap: 4 } },
-      row.ticketCategory
-        ? React.createElement(
-            Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 9, fontWeight: 400, color: C.gray11 } },
-            row.ticketCategory,
-          )
-        : null,
-      React.createElement(
-        Text,
-        { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 600, color: C.gray12 } },
-        row.ticketName,
-      ),
-    ),
-    // Price
-    React.createElement(
-      View,
-      {
-        style: {
-          width: 96,
-          alignItems: 'flex-end',
-          paddingHorizontal: 12,
-          paddingVertical: 10,
-        },
-      },
-      React.createElement(
-        Text,
-        { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 600, color: C.gray12 } },
-        fmtCurrency(row.price),
-      ),
-    ),
-  );
-};
-
 export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
-  const isPix = data.payment.method?.toLowerCase().includes('pix');
-  const totalCount = data.registrations.length;
+  // Pedido sem custo (R$ 0,00): detectado pelo TOTAL, não pelo método salvo.
+  // O schema não tem método "FREE" — pedidos grátis gravam o método selecionado
+  // no checkout (ex.: PIX). Nesses pedidos a barra de forma de pagamento é
+  // OMITIDA (mesma regra do modal de pedido), então não exibimos método/ícone.
+  const isFree = (data.financial?.total ?? 0) <= 0;
+  const isPix = !!data.payment.method?.toLowerCase().includes('pix');
+
+  // Resumo financeiro espelha a tela de pagamento concluído do frontend
+  // (`PaymentSuccessStep`): os produtos NÃO são itemizados produto a produto —
+  // colapsam numa única linha "Produtos adicionais" com o total dos PAGOS (não
+  // inclusos). Produtos inclusos no ingresso (price = 0) não entram no total.
+  const paidTotal = data.registrations
+    .flatMap((reg) => reg.products)
+    .filter((p) => !p.isIncluded)
+    .reduce((sum, p) => sum + (p.price ?? 0), 0);
 
   const declarationText =
-    `O pagamento referente ao pedido ${data.orderNumber} foi recebido e processado com sucesso` +
+    `O pagamento referente ao pedido ${idTag(data.orderNumber)} foi recebido e processado com sucesso` +
     (data.payment.gateway ? ` pelo gateway ${data.payment.gateway}` : '') +
     ` em ${fmtDateTimeLong(data.payment.paidAt)}. Este recibo é o comprovante oficial da transação.` +
     ` Para detalhes dos participantes (QR Code, dados pessoais e perguntas do organizador), consulte o PDF de ingressos enviado junto com este documento.`;
@@ -454,6 +310,10 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
       Page,
       {
         size: 'A4',
+        // Sem a seção de ingressos, o conteúdo é fixo e curto: `wrap={false}`
+        // impede que o react-pdf abra uma 2ª página (documento contínuo, sem
+        // corte entre seções).
+        wrap: false,
         style: {
           fontFamily: 'DM Sans',
           backgroundColor: C.white,
@@ -492,7 +352,7 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
                   color: C.gray12,
                 },
               },
-              'Pedido: ',
+              'ID do pedido: ',
             ),
             React.createElement(
               Text,
@@ -504,7 +364,7 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
                   color: C.gray12,
                 },
               },
-              data.orderNumber,
+              idTag(data.orderNumber),
             ),
           ),
           React.createElement(
@@ -548,30 +408,30 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
             { style: { flexDirection: 'row', alignItems: 'center', gap: 8 } },
             data.organization.logoUrl
               ? React.createElement(Image, {
-                  src: data.organization.logoUrl,
-                  style: { width: 36, height: 36, borderRadius: 124, objectFit: 'cover' },
-                })
+                src: data.organization.logoUrl,
+                style: { width: 36, height: 36, borderRadius: 124, objectFit: 'cover' },
+              })
               : React.createElement(
-                  View,
-                  {
-                    style: {
-                      width: 36,
-                      height: 36,
-                      backgroundColor: C.green12,
-                      borderRadius: 124,
-                      borderWidth: 1,
-                      borderColor: C.green8,
-                      borderStyle: 'solid',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    },
+                View,
+                {
+                  style: {
+                    width: 36,
+                    height: 36,
+                    backgroundColor: C.green12,
+                    borderRadius: 124,
+                    borderWidth: 1,
+                    borderColor: C.green8,
+                    borderStyle: 'solid',
+                    alignItems: 'center',
+                    justifyContent: 'center',
                   },
-                  React.createElement(
-                    Text,
-                    { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 700, color: C.white } },
-                    (data.organization.name || '?')[0].toUpperCase(),
-                  ),
+                },
+                React.createElement(
+                  Text,
+                  { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 700, color: C.white } },
+                  (data.organization.name || '?')[0].toUpperCase(),
                 ),
+              ),
             React.createElement(
               Text,
               {
@@ -593,10 +453,6 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
               ? React.createElement(InfoRow, { label: 'CNPJ', value: data.organization.document })
               : null,
             React.createElement(InfoRow, { label: 'Evento', value: data.event.name }),
-            React.createElement(InfoRow, {
-              label: 'Data',
-              value: `${fmtDate(data.event.date)} · ${data.event.location}`,
-            }),
           ),
         ),
         // buyer card
@@ -613,173 +469,197 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
               gap: 14,
             },
           },
+          // Cabeçalho do card: avatar do comprador (ou inicial) + nome — espelha o card da organização.
           React.createElement(
-            Text,
-            { style: { fontFamily: 'Manrope', fontSize: 13, fontWeight: 700, color: C.gray12 } },
-            data.buyer.name,
+            View,
+            { style: { flexDirection: 'row', alignItems: 'center', gap: 8 } },
+            data.buyer.imageUrl
+              ? React.createElement(Image, {
+                src: data.buyer.imageUrl,
+                style: { width: 36, height: 36, borderRadius: 124, objectFit: 'cover' },
+              })
+              : React.createElement(
+                View,
+                {
+                  style: {
+                    width: 36,
+                    height: 36,
+                    backgroundColor: C.green12,
+                    borderRadius: 124,
+                    borderWidth: 1,
+                    borderColor: C.green8,
+                    borderStyle: 'solid',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  },
+                },
+                React.createElement(
+                  Text,
+                  { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 700, color: C.white } },
+                  (data.buyer.name || '?')[0].toUpperCase(),
+                ),
+              ),
+            React.createElement(
+              Text,
+              { style: { fontFamily: 'Manrope', fontSize: 13, fontWeight: 700, color: C.gray12, flex: 1 } },
+              data.buyer.name,
+            ),
           ),
           React.createElement(
             View,
             { style: { gap: 10 } },
             data.buyer.document
-              ? isBR(data.buyer.country)
-                ? React.createElement(InfoRow, {
-                    label: 'CPF / CNPJ',
-                    value: fmtCPF(data.buyer.document),
-                  })
-                : React.createElement(InfoRow, {
-                    label: 'Documento',
-                    value: data.buyer.document,
-                  })
+              ? React.createElement(InfoRow, {
+                label: 'Documento',
+                value: isBR(data.buyer.country)
+                  ? fmtCPF(data.buyer.document)
+                  : data.buyer.document,
+              })
               : null,
-            React.createElement(InfoRow, { label: 'Evento', value: data.event.name }),
-            React.createElement(InfoRow, {
-              label: 'Data',
-              value: `${fmtDate(data.event.date)} · ${data.event.location}`,
-            }),
+            data.buyer.birthDate
+              ? React.createElement(InfoRow, {
+                label: 'Data de nascimento',
+                value: fmtDateOnly(data.buyer.birthDate),
+              })
+              : null,
           ),
         ),
       ),
-      // payment method bar
-      React.createElement(
-        View,
-        {
-          style: {
-            padding: 12,
-            backgroundColor: C.gray2,
-            borderRadius: 8,
-            borderWidth: 1,
-            borderColor: C.gray6,
-            borderStyle: 'solid',
-            flexDirection: 'row',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginBottom: 20,
-          },
-        },
-        React.createElement(
+      // payment method bar — OMITIDA em pedido gratuito (mesma regra do modal de pedido)
+      isFree
+        ? null
+        : React.createElement(
           View,
-          { style: { flexDirection: 'row', alignItems: 'center', gap: 12 } },
+          {
+            style: {
+              padding: 12,
+              backgroundColor: C.gray2,
+              borderRadius: 8,
+              borderWidth: 1,
+              borderColor: C.gray6,
+              borderStyle: 'solid',
+              flexDirection: 'row',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: 20,
+            },
+          },
+          React.createElement(
+            View,
+            { style: { flexDirection: 'row', alignItems: 'center', gap: 12 } },
+            React.createElement(
+              View,
+              {
+                style: {
+                  height: 32,
+                  width: 48,
+                  padding: 4,
+                  backgroundColor: C.white,
+                  borderRadius: 4,
+                  borderWidth: 1,
+                  borderColor: C.gray6,
+                  borderStyle: 'solid',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                },
+              },
+              isPix
+                ? React.createElement(
+                  Svg,
+                  { width: 22, height: 22, viewBox: '0 0 20 20' },
+                  // Logo oficial do Pix (mesmo SVG do frontend, `PixIcon.tsx`).
+                  React.createElement(Path, {
+                    d: 'M15.5961 15.2993C15.2102 15.3001 14.828 15.2246 14.4715 15.077C14.1149 14.9294 13.7912 14.7126 13.5188 14.4393L10.5186 11.4393C10.4124 11.3384 10.2715 11.2821 10.125 11.2821C9.97852 11.2821 9.83762 11.3384 9.73141 11.4393L6.71977 14.4507C6.44752 14.7242 6.12376 14.941 5.76721 15.0886C5.41066 15.2362 5.02838 15.3117 4.64248 15.3107H4.051L7.85128 19.1107C9.03708 20.2964 10.9615 20.2964 12.1473 19.1107L15.9576 15.2993H15.5961ZM4.64248 4.68782C5.42825 4.68782 6.16544 4.99354 6.71977 5.54782L9.73141 8.55926C9.78316 8.61109 9.84463 8.65221 9.91229 8.68027C9.97995 8.70833 10.0525 8.72277 10.1257 8.72277C10.199 8.72277 10.2715 8.70833 10.3392 8.68027C10.4068 8.65221 10.4683 8.61109 10.52 8.55926L13.5203 5.55925C13.7923 5.28594 14.1159 5.06922 14.4721 4.92161C14.8284 4.774 15.2105 4.69843 15.5961 4.69925H15.9576L12.1473 0.889242C11.5775 0.319849 10.8049 0 9.99929 0C9.19371 0 8.4211 0.319849 7.85128 0.889242L4.051 4.68925L4.64248 4.68782Z',
+                    fill: C.pixColor,
+                  }),
+                  React.createElement(Path, {
+                    d: 'M19.1107 7.85069L16.8076 5.54782C16.7559 5.56905 16.7006 5.5802 16.6448 5.58068H15.5975C15.0561 5.58068 14.526 5.80068 14.1446 6.18354L11.1444 9.18355C11.0109 9.31766 10.8523 9.42409 10.6776 9.49671C10.5029 9.56933 10.3156 9.60672 10.1264 9.60672C9.93725 9.60672 9.74993 9.56933 9.57524 9.49671C9.40055 9.42409 9.24193 9.31766 9.10851 9.18355L6.09686 6.17068C5.71048 5.78591 5.18778 5.56925 4.64247 5.56782H3.35667C3.30336 5.5674 3.25059 5.55723 3.20094 5.53782L0.889349 7.85069C-0.29645 9.0364 -0.29645 10.9607 0.889349 12.1478L3.20094 14.4593C3.25004 14.4395 3.30233 14.4289 3.35524 14.4278H4.64247C5.18537 14.4278 5.71398 14.2093 6.09686 13.8264L9.10708 10.8135C9.38175 10.5521 9.74647 10.4062 10.1257 10.4062C10.505 10.4062 10.8697 10.5521 11.1444 10.8135L14.1446 13.8136C14.526 14.1964 15.0561 14.415 15.5975 14.415H16.6448C16.7019 14.415 16.7576 14.4293 16.8076 14.4493L19.1107 12.1464C20.2964 10.9607 20.2964 9.0364 19.1107 7.85069Z',
+                    fill: C.pixColor,
+                  }),
+                )
+                : data.payment.iconDataUri
+                  ? React.createElement(Image, {
+                    src: data.payment.iconDataUri,
+                    style: { width: 40, height: 26, objectFit: 'contain' },
+                  })
+                  : React.createElement(
+                    Svg,
+                    { width: 20, height: 20, viewBox: '0 0 24 24' },
+                    React.createElement(Rect, {
+                      x: 2, y: 5, width: 20, height: 14, rx: 2,
+                      stroke: C.gray12, strokeWidth: 1.5, fill: 'none',
+                    }),
+                    React.createElement(Path, {
+                      d: 'M2 10H22',
+                      stroke: C.gray12, strokeWidth: 1.5,
+                    }),
+                    React.createElement(Path, {
+                      d: 'M6 15H10',
+                      stroke: C.gray12, strokeWidth: 1.5, strokeLinecap: 'round',
+                    }),
+                  ),
+            ),
+            React.createElement(
+              View,
+              { style: { gap: 6 } },
+              React.createElement(
+                Text,
+                {
+                  style: {
+                    fontFamily: 'DM Sans',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: C.gray12,
+                  },
+                },
+                formatPaymentMethod(data.payment.method),
+              ),
+              React.createElement(
+                Text,
+                {
+                  style: {
+                    fontFamily: 'DM Sans',
+                    fontSize: 11,
+                    fontWeight: 400,
+                    color: C.gray12,
+                  },
+                },
+                'Pagamento instantâneo',
+              ),
+            ),
+          ),
+          // "Pago" badge
           React.createElement(
             View,
             {
               style: {
-                height: 32,
-                width: 48,
-                padding: 4,
-                backgroundColor: C.white,
+                paddingHorizontal: 12,
+                paddingVertical: 6,
+                backgroundColor: C.green11,
                 borderRadius: 4,
-                borderWidth: 1,
-                borderColor: C.gray6,
-                borderStyle: 'solid',
+                flexDirection: 'row',
                 alignItems: 'center',
-                justifyContent: 'center',
+                gap: 4,
               },
             },
-            isPix
-              ? React.createElement(
-                  Svg,
-                  { width: 22, height: 22, viewBox: '0 0 24 24' },
-                  React.createElement(Path, { d: 'M12 2L17 7L12 12L7 7L12 2Z', fill: C.pixColor }),
-                  React.createElement(Path, {
-                    d: 'M17 7L22 12L17 17L12 12L17 7Z',
-                    fill: C.pixColor,
-                    opacity: 0.7,
-                  }),
-                  React.createElement(Path, {
-                    d: 'M12 12L17 17L12 22L7 17L12 12Z',
-                    fill: C.pixColor,
-                    opacity: 0.7,
-                  }),
-                  React.createElement(Path, {
-                    d: 'M7 7L12 12L7 17L2 12L7 7Z',
-                    fill: C.pixColor,
-                    opacity: 0.7,
-                  }),
-                )
-              : data.payment.iconDataUri
-              ? React.createElement(Image, {
-                  src: data.payment.iconDataUri,
-                  style: { width: 40, height: 26, objectFit: 'contain' },
-                })
-              : React.createElement(
-                  Svg,
-                  { width: 20, height: 20, viewBox: '0 0 24 24' },
-                  React.createElement(Rect, {
-                    x: 2, y: 5, width: 20, height: 14, rx: 2,
-                    stroke: C.gray12, strokeWidth: 1.5, fill: 'none',
-                  }),
-                  React.createElement(Path, {
-                    d: 'M2 10H22',
-                    stroke: C.gray12, strokeWidth: 1.5,
-                  }),
-                  React.createElement(Path, {
-                    d: 'M6 15H10',
-                    stroke: C.gray12, strokeWidth: 1.5, strokeLinecap: 'round',
-                  }),
-                ),
-          ),
-          React.createElement(
-            View,
-            { style: { gap: 6 } },
             React.createElement(
-              Text,
-              {
-                style: {
-                  fontFamily: 'DM Sans',
-                  fontSize: 13,
-                  fontWeight: 600,
-                  color: C.gray12,
-                },
-              },
-              formatPaymentMethod(data.payment.method),
+              Svg,
+              { width: 14, height: 14, viewBox: '0 0 20 20' },
+              React.createElement(Path, {
+                d: 'M6.66663 9.99996L8.77886 11.901C9.13845 12.2246 9.69712 12.175 9.99412 11.7932L13.3333 7.49996M9.99996 18.3333C14.6023 18.3333 18.3333 14.6023 18.3333 9.99996C18.3333 5.39759 14.6023 1.66663 9.99996 1.66663C5.39759 1.66663 1.66663 5.39759 1.66663 9.99996C1.66663 14.6023 5.39759 18.3333 9.99996 18.3333Z',
+                stroke: '#FBFEFB',
+                strokeWidth: 1.5,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+              }),
             ),
             React.createElement(
               Text,
-              {
-                style: {
-                  fontFamily: 'DM Sans',
-                  fontSize: 11,
-                  fontWeight: 400,
-                  color: C.gray12,
-                },
-              },
-              'Pagamento instantâneo',
+              { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: '#FBFEFB' } },
+              'Pago',
             ),
           ),
         ),
-        // "Pago" badge
-        React.createElement(
-          View,
-          {
-            style: {
-              paddingHorizontal: 12,
-              paddingVertical: 6,
-              backgroundColor: C.green11,
-              borderRadius: 4,
-              flexDirection: 'row',
-              alignItems: 'center',
-              gap: 4,
-            },
-          },
-          React.createElement(
-            Svg,
-            { width: 14, height: 14, viewBox: '0 0 20 20' },
-            React.createElement(Path, {
-              d: 'M6.66663 9.99996L8.77886 11.901C9.13845 12.2246 9.69712 12.175 9.99412 11.7932L13.3333 7.49996M9.99996 18.3333C14.6023 18.3333 18.3333 14.6023 18.3333 9.99996C18.3333 5.39759 14.6023 1.66663 9.99996 1.66663C5.39759 1.66663 1.66663 5.39759 1.66663 9.99996C1.66663 14.6023 5.39759 18.3333 9.99996 18.3333Z',
-              stroke: '#FBFEFB',
-              strokeWidth: 1.5,
-              strokeLinecap: 'round',
-              strokeLinejoin: 'round',
-            }),
-          ),
-          React.createElement(
-            Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: '#FBFEFB' } },
-            'Pago',
-          ),
-        ),
-      ),
       // Section 1: financial summary
       React.createElement(
         View,
@@ -797,25 +677,80 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
               gap: 14,
             },
           },
+          // Itemização. Ordem: linha "Participantes" com o total → ingressos (um por
+          // participante) → produtos adicionais (de todos) → divisor → Subtotal.
+          // Total de participantes do pedido (uma linha, acima dos ingressos).
           React.createElement(FinancialRow, {
-            label: `Subtotal (${totalCount} ingresso${totalCount !== 1 ? 's' : ''})`,
+            key: 'participants',
+            label: 'Participantes',
+            value: String(data.registrations.length),
+          }),
+          // Linha do ingresso: CATEGORIA por cima e NOME embaixo (mesma View), preço à direita.
+          ...data.registrations.map((reg) =>
+            React.createElement(
+              View,
+              {
+                key: `tk-${reg.id}`,
+                style: {
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 8,
+                },
+              },
+              React.createElement(
+                View,
+                { style: { flex: 1, gap: 2 } },
+                React.createElement(
+                  Text,
+                  { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray11 } },
+                  reg.ticketCategory ?? 'Ingresso avulso',
+                ),
+                React.createElement(
+                  Text,
+                  { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 600, color: C.gray12 } },
+                  reg.ticketName,
+                ),
+              ),
+              // Preço alinhado ao valor do FinancialRow (gray12 / peso 600).
+              React.createElement(
+                Text,
+                { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 600, color: C.gray12 } },
+                fmtCurrency(reg.price),
+              ),
+            ),
+          ),
+          // Produtos adicionais: UMA linha com o total dos não-inclusos — espelha
+          // a tela de pagamento concluído do frontend (não itemiza no resumo).
+          React.createElement(FinancialRow, {
+            key: 'additional-products',
+            label: 'Produtos adicionais',
+            value: fmtCurrency(paidTotal),
+          }),
+          React.createElement(HR, { key: 'items-hr' }),
+          // Resumo igual ao do checkout (OrderSummary): Subtotal → desconto
+          // (cupom/voucher) → taxa de serviço (só quando > 0) → Total, com um
+          // único divisor antes do Total.
+          React.createElement(FinancialRow, {
+            label: 'Subtotal',
             value: fmtCurrency(data.financial.subtotal),
           }),
-          ...(data.financial.discount > 0 && data.financial.voucherCode
+          ...(data.financial.discount > 0
             ? [
-                React.createElement(HR, null),
-                React.createElement(FinancialRow, {
-                  label:
-                    `Voucher ${data.financial.voucherCode}` +
-                    (data.financial.voucherPercent
-                      ? ` (-${data.financial.voucherPercent.toFixed(2)}%)`
-                      : ''),
-                  value: `- ${fmtCurrency(data.financial.discount)}`,
-                }),
-              ]
+              React.createElement(FinancialRow, {
+                label: data.financial.discountLabel || 'Desconto',
+                value: `- ${fmtCurrency(data.financial.discount)}`,
+              }),
+            ]
             : []),
-          React.createElement(HR, null),
-          React.createElement(FinancialRow, { label: 'Taxa de serviço', value: 'Inclusa' }),
+          ...(data.financial.serviceFee > 0
+            ? [
+              React.createElement(FinancialRow, {
+                label: 'Taxa de serviço',
+                value: fmtCurrency(data.financial.serviceFee),
+              }),
+            ]
+            : []),
           React.createElement(HR, null),
           React.createElement(FinancialRow, {
             label: 'Total pago',
@@ -849,174 +784,23 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
             : null,
           data.payment.voucherCode
             ? React.createElement(TxField, {
-                label: 'Voucher utilizado',
-                value: data.payment.voucherCode,
-                amber: true,
-              })
+              label: 'Voucher utilizado',
+              value: data.payment.voucherCode,
+              amber: true,
+            })
             : null,
           data.payment.txId
-            ? React.createElement(TxField, { label: 'TxID', value: data.payment.txId })
+            ? React.createElement(TxField, { label: 'TxID', value: idTag(data.payment.txId) })
             : null,
           data.payment.transactionId
             ? React.createElement(TxField, {
-                label: 'ID da transação',
-                value: data.payment.transactionId,
-              })
+              label: 'ID da transação',
+              value: idTag(data.payment.transactionId),
+            })
             : null,
           data.payment.e2eId
-            ? React.createElement(TxField, { label: 'E2E ID (Pix)', value: data.payment.e2eId })
+            ? React.createElement(TxField, { label: 'E2E ID (Pix)', value: idTag(data.payment.e2eId) })
             : null,
-        ),
-      ),
-      // Section 3: tickets
-      React.createElement(
-        View,
-        { style: { gap: 12, marginBottom: 20 } },
-        React.createElement(SectionBadge, { number: '3', title: 'Ingressos adquiridos' }),
-        React.createElement(
-          View,
-          {
-            style: {
-              backgroundColor: C.gray2,
-              borderRadius: 8,
-              borderWidth: 1,
-              borderColor: C.gray6,
-              borderStyle: 'solid',
-            },
-          },
-          // table header
-          React.createElement(
-            View,
-            {
-              style: {
-                flexDirection: 'row',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                backgroundColor: C.gray3,
-                borderBottomWidth: 1,
-                borderBottomColor: C.gray6,
-                borderBottomStyle: 'solid',
-              },
-            },
-            React.createElement(
-              View,
-              { style: { width: 80, padding: 12 } },
-              React.createElement(
-                Text,
-                {
-                  style: {
-                    fontFamily: 'DM Sans',
-                    fontSize: 10,
-                    fontWeight: 500,
-                    color: C.gray12,
-                  },
-                },
-                'ID',
-              ),
-            ),
-            React.createElement(
-              View,
-              { style: { flex: 1, padding: 12 } },
-              React.createElement(
-                Text,
-                {
-                  style: {
-                    fontFamily: 'DM Sans',
-                    fontSize: 10,
-                    fontWeight: 500,
-                    color: C.gray12,
-                  },
-                },
-                'Participante',
-              ),
-            ),
-            React.createElement(
-              View,
-              { style: { flex: 1, padding: 12 } },
-              React.createElement(
-                Text,
-                {
-                  style: {
-                    fontFamily: 'DM Sans',
-                    fontSize: 10,
-                    fontWeight: 500,
-                    color: C.gray12,
-                  },
-                },
-                'Ticket',
-              ),
-            ),
-            React.createElement(
-              View,
-              { style: { width: 96, padding: 12, alignItems: 'flex-end' } },
-              React.createElement(
-                Text,
-                {
-                  style: {
-                    fontFamily: 'DM Sans',
-                    fontSize: 10,
-                    fontWeight: 500,
-                    color: C.gray12,
-                  },
-                },
-                'Valor',
-              ),
-            ),
-          ),
-          // table rows
-          ...data.registrations.map((row) =>
-            React.createElement(TableRow, { key: row.id, row }),
-          ),
-          // footer
-          React.createElement(
-            View,
-            {
-              style: {
-                padding: 14,
-                flexDirection: 'row',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                backgroundColor: C.green3,
-                borderRadius: 8,
-                borderWidth: 1,
-                borderColor: C.green8,
-                borderStyle: 'solid',
-              },
-            },
-            React.createElement(
-              Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 500, color: C.green12 } },
-              `${totalCount} ingresso${totalCount !== 1 ? 's' : ''} vinculado${totalCount !== 1 ? 's' : ''} a este pedido`,
-            ),
-            React.createElement(
-              View,
-              { style: { flexDirection: 'row', gap: 3 } },
-              React.createElement(
-                Text,
-                {
-                  style: {
-                    fontFamily: 'DM Sans',
-                    fontSize: 11,
-                    fontWeight: 500,
-                    color: C.green12,
-                  },
-                },
-                'Subtotal: ',
-              ),
-              React.createElement(
-                Text,
-                {
-                  style: {
-                    fontFamily: 'DM Sans',
-                    fontSize: 11,
-                    fontWeight: 700,
-                    color: C.green12,
-                  },
-                },
-                fmtCurrency(data.financial.subtotal),
-              ),
-            ),
-          ),
         ),
       ),
       // declaration
@@ -1054,52 +838,6 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
               'Declaração: ',
             ),
             declarationText,
-          ),
-        ),
-      ),
-      React.createElement(HR, null),
-      // footer
-      React.createElement(
-        View,
-        { style: { gap: 14, marginTop: 16 } },
-        React.createElement(
-          View,
-          {
-            style: {
-              flexDirection: 'row',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-            },
-          },
-          React.createElement(
-            Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 400, color: C.gray11 } },
-            React.createElement(Text, { style: { fontWeight: 700 } }, 'PódioTicket Ltda.'),
-          ),
-          React.createElement(
-            Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 400, color: C.gray11 } },
-            'CNPJ 65.174.909/0001-01',
-          ),
-        ),
-        React.createElement(
-          View,
-          {
-            style: {
-              flexDirection: 'row',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-            },
-          },
-          React.createElement(
-            Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 400, color: C.gray11 } },
-            'Suporte: suporte@podioticket.com',
-          ),
-          React.createElement(
-            Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 10, fontWeight: 400, color: C.gray11 } },
-            'Documento gerado eletronicamente, sem necessidade de assinatura',
           ),
         ),
       ),

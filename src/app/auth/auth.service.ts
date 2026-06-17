@@ -4,6 +4,8 @@ import {
   UnauthorizedException,
   BadRequestException,
   ConflictException,
+  HttpException,
+  HttpStatus,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -38,6 +40,11 @@ type PasswordResetLinkPayload = {
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
 
+  /** Lockout de login: nº de falhas de senha por conta antes de travar... */
+  private static readonly LOGIN_MAX_FAILS = 8;
+  /** ...e por quanto tempo (janela deslizante). */
+  private static readonly LOGIN_FAIL_WINDOW_MS = 15 * 60 * 1000;
+
   constructor(
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
@@ -66,9 +73,28 @@ export class AuthService {
       return null;
     }
 
+    // Identificador normalizado p/ o balde de lockout (mesma conta = mesmo balde,
+    // independente de formatação do CPF ou caixa do email).
+    const isEmail = emailOrCpf.includes('@');
+    const lockId = isEmail
+      ? emailOrCpf.toLowerCase().trim()
+      : emailOrCpf.replace(/\D/g, '');
+    const lockKey = `login_fail:${accountType}:${lockId}`;
+
+    // Lockout por conta: trava o brute-force de SENHA mesmo dentro do limite por
+    // IP (um atacante distribuído em vários IPs ainda bate na mesma conta). Janela
+    // curta (15min) e teto moderado (LOGIN_MAX_FAILS) p/ limitar griefing de
+    // bloqueio de vítima. Conta só falhas de SENHA (não "usuário inexistente").
+    const fails = (await this.cacheManager.get<number>(lockKey)) || 0;
+    if (fails >= AuthService.LOGIN_MAX_FAILS) {
+      throw new HttpException(
+        'Muitas tentativas de login. Tente novamente em alguns minutos.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
     try {
       // Tentar buscar por email ou CPF com accountType
-      const isEmail = emailOrCpf.includes('@');
       let user;
 
       const prismaWrite = this.prisma.getWriteClient();
@@ -153,8 +179,17 @@ export class AuthService {
 
       const isPasswordValid = await bcrypt.compare(password, user.password);
       if (!isPasswordValid) {
+        // Falha de SENHA → incrementa o balde de lockout (janela deslizante).
+        await this.cacheManager.set(
+          lockKey,
+          fails + 1,
+          AuthService.LOGIN_FAIL_WINDOW_MS,
+        );
         return null;
       }
+
+      // Sucesso → zera o balde para não punir o próximo login legítimo.
+      if (fails > 0) await this.cacheManager.del(lockKey);
 
       const { password: _, ...result } = user;
       return result;
@@ -428,10 +463,8 @@ export class AuthService {
         },
       };
     } catch (error) {
-      console.error('Login error:', error);
-      throw new UnauthorizedException(
-        error?.message || 'Failed to generate tokens',
-      );
+      this.logger.error(error);
+      throw new UnauthorizedException('Erro ao processar autenticação');
     }
   }
 
@@ -544,12 +577,15 @@ export class AuthService {
     try {
       const { refreshToken } = refreshTokenDto;
 
+      // Verificar se token está na blocklist (logout)
+      const hash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+      const blocked = await this.cacheManager.get('logout_rt:' + hash);
+      if (blocked) throw new UnauthorizedException('Token inválido');
+
       // Buscar refresh token no banco (implementar modelo RefreshToken se necessário)
       // Por enquanto, validar diretamente o JWT
       const decoded = this.jwtService.verify(refreshToken, {
-        secret:
-          this.configService.get<string>('JWT_REFRESH_SECRET') ||
-          this.configService.get<string>('JWT_SECRET'),
+        secret: this.resolveRefreshSecret(),
       });
 
       const prismaRead = this.prisma.getReadClient();
@@ -592,8 +628,18 @@ export class AuthService {
   }
 
   async logout(refreshToken: string) {
-    // Implementar invalidação do refresh token se necessário
-    // Por enquanto, apenas retornar sucesso
+    try {
+      const decoded = this.jwtService.decode(refreshToken) as { exp?: number } | null;
+      if (decoded?.exp) {
+        const remainingTtlMs = decoded.exp * 1000 - Date.now();
+        if (remainingTtlMs > 0) {
+          const hash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+          await this.cacheManager.set('logout_rt:' + hash, 1, remainingTtlMs);
+        }
+      }
+    } catch {
+      // Ignora tokens mal-formados — o logout ainda limpa os cookies
+    }
     return { message: 'Logged out successfully' };
   }
 
@@ -735,13 +781,15 @@ export class AuthService {
       throw new BadRequestException('Muitas tentativas. Solicite um novo código');
     }
 
-    cached.attempts += 1;
-    await this.cacheManager.set(cacheKey, cached, 15 * 60 * 1000);
-
     if (cached.code !== code) {
+      // Código errado: incrementa attempts mas NÃO marca used=true
+      cached.attempts += 1;
+      await this.cacheManager.set(cacheKey, cached, 15 * 60 * 1000);
       throw new BadRequestException('Código inválido');
     }
 
+    // Código correto: marca used=true + incrementa attempts num único set (evita TOCTOU)
+    cached.attempts += 1;
     cached.used = true;
     await this.cacheManager.set(cacheKey, cached, 15 * 60 * 1000);
 
@@ -867,6 +915,8 @@ export class AuthService {
       where: { id: user.id },
       data: {
         password: hashedPassword,
+        // Invalida tokens emitidos ANTES da troca (JwtStrategy compara iat).
+        passwordChangedAt: new Date(),
         ...(user.isActive ? {} : { isActive: true }),
       },
     });
@@ -930,6 +980,8 @@ export class AuthService {
       where: { id: user.id },
       data: {
         password: hashedPassword,
+        // Invalida tokens emitidos ANTES da troca (JwtStrategy compara iat).
+        passwordChangedAt: new Date(),
         ...(user.isActive ? {} : { isActive: true }),
       },
     });
@@ -987,7 +1039,9 @@ export class AuthService {
   // ─── Email / device helpers ─────────────────────────────────────────────
 
   private generateCode(): { raw: string; display: string } {
-    const raw = Math.floor(100000 + Math.random() * 900000).toString();
+    // crypto.randomInt (CSPRNG): Math.random é previsível e estes códigos
+    // protegem reset de senha / troca de e-mail. Mesmo padrão do send2FACode.
+    const raw = crypto.randomInt(100000, 1000000).toString();
     return { raw, display: raw };
   }
 
@@ -1003,7 +1057,7 @@ export class AuthService {
     const cleanIp = ip.replace(/^::ffff:/, '');
 
     try {
-      const token = this.configService.get<string>('IPINFO_TOKEN', 'f5f7bc542bbe40');
+      const token = this.configService.get<string>('IPINFO_TOKEN');
       const resp = await firstValueFrom(
         this.httpService.get(
           `https://ipinfo.io/${cleanIp}/json?token=${token}`,
@@ -1087,7 +1141,6 @@ export class AuthService {
       accountType,
     };
     const resetUrl = this.buildPasswordResetPageUrl(token);
-    console.log('[DEV] Password reset URL:', resetUrl);
     const accountLabel =
       accountType === 'ORGANIZER' ? 'conta de organizador' : 'sua conta PodioGo';
 
@@ -1162,7 +1215,10 @@ export class AuthService {
 
     const updatedUser = await prismaWrite.user.update({
       where: { id: userId },
-      data: { password: hashedPassword },
+      // passwordChangedAt: invalida todos os access tokens emitidos antes da
+      // troca (JwtStrategy rejeita iat anterior). Sem isso, uma conta invadida
+      // continuava acessível por até 30 dias mesmo após trocar a senha.
+      data: { password: hashedPassword, passwordChangedAt: new Date() },
       select: { firstName: true, email: true },
     });
 
@@ -1307,11 +1363,25 @@ export class AuthService {
     return { success: true, message: 'E-mail alterado com sucesso.' };
   }
 
+  /**
+   * Segredo de assinatura do REFRESH token. Usa `JWT_REFRESH_SECRET` quando
+   * configurado; caso contrário deriva um segredo DISTINTO do access (`JWT_SECRET`
+   * + sufixo dedicado). Garante que access e refresh NUNCA compartilhem chave —
+   * sem isso, um access token poderia ser reapresentado como refresh (mesma chave,
+   * verificação passava). Idempotente (mesma entrada → mesmo segredo).
+   * Nota de deploy: ao passar a derivar, refresh tokens antigos (assinados com o
+   * fallback antigo = JWT_SECRET puro) deixam de validar → re-login único.
+   */
+  private resolveRefreshSecret(): string | undefined {
+    const explicit = this.configService.get<string>('JWT_REFRESH_SECRET');
+    if (explicit) return explicit;
+    const base = this.configService.get<string>('JWT_SECRET');
+    return base ? `${base}:refresh` : undefined;
+  }
+
   private async createRefreshToken(userId: string): Promise<string> {
     const payload = { sub: userId };
-    const refreshSecret =
-      this.configService.get<string>('JWT_REFRESH_SECRET') ||
-      this.configService.get<string>('JWT_SECRET');
+    const refreshSecret = this.resolveRefreshSecret();
 
     if (!refreshSecret) {
       throw new UnauthorizedException('JWT secret not configured');
@@ -1497,6 +1567,13 @@ export class AuthService {
 
       const googleUser = userInfoResponse.data;
 
+      // E-mail NÃO verificado pelo Google é rejeitado: validateGoogleUser vincula
+      // a identidade Google a uma conta local existente só pelo e-mail — aceitar
+      // e-mail não verificado permitia account takeover da conta local da vítima.
+      if (googleUser.verified_email === false) {
+        throw new UnauthorizedException('E-mail da conta Google não verificado');
+      }
+
       // Validar ou criar usuário
       const user = await this.validateGoogleUser({
         googleId: googleUser.id,
@@ -1510,11 +1587,8 @@ export class AuthService {
       // Fazer login e retornar tokens JWT
       return await this.login(user);
     } catch (error: any) {
-      console.error('Error validating Google code:', error.response?.data || error.message);
-      throw new BadRequestException(
-        error.response?.data?.error_description ||
-        'Failed to validate Google authorization code'
-      );
+      this.logger.error('Google OAuth error', error.response?.data);
+      throw new BadRequestException('Falha na autenticação com Google');
     }
   }
 

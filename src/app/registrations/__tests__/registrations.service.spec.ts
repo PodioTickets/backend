@@ -3,6 +3,7 @@ import { RegistrationsService } from '../registrations.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { KitsService } from '../../kits/kits.service';
 import { EmailService } from '../../../common/services/email.service';
+import { TicketPdfService } from '../../../common/services/ticket-pdf.service';
 import { NotFoundException, BadRequestException } from '@nestjs/common';
 import { RegistrationStatus } from '@prisma/client';
 
@@ -17,6 +18,7 @@ describe('RegistrationsService', () => {
     },
     modality: {
       findUnique: jest.fn(),
+      findMany: jest.fn(),
       update: jest.fn(),
     },
     user: {
@@ -63,6 +65,10 @@ describe('RegistrationsService', () => {
     updateStock: jest.fn(),
   };
 
+  const mockTicketPdfService = {
+    generateTicketPdf: jest.fn(),
+  };
+
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -78,6 +84,10 @@ describe('RegistrationsService', () => {
         {
           provide: EmailService,
           useValue: {},
+        },
+        {
+          provide: TicketPdfService,
+          useValue: mockTicketPdfService,
         },
       ],
     }).compile();
@@ -136,7 +146,7 @@ describe('RegistrationsService', () => {
       };
 
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
+      mockPrismaService.modality.findMany.mockResolvedValue([mockModality]);
       mockKitsService.checkStock.mockResolvedValue(true);
       mockPrismaService.$transaction.mockImplementation(async (callback) => {
         return callback({
@@ -288,7 +298,7 @@ describe('RegistrationsService', () => {
       expect(result.data.registration.id).toBe(registrationId);
       // produto enriquecido com variationEdited (default false, sem edição)
       expect(result.data.registration.products).toEqual([
-        { id: 'p-1', name: 'Camiseta', variationEdited: false },
+        { id: 'p-1', name: 'Camiseta', variationEdited: false, isIncludedInTicket: false },
       ]);
     });
 
@@ -322,6 +332,7 @@ describe('RegistrationsService', () => {
           name: 'Camiseta',
           variationEdited: true,
           selectedVariation: { id: 'v-G', name: 'G', price: 0 }, // ATUAL, não o snapshot "M"
+          isIncludedInTicket: false,
         },
       ]);
     });
@@ -424,6 +435,96 @@ describe('RegistrationsService', () => {
       await expect(service.cancel('reg-123', 'user-123')).rejects.toThrow(
         BadRequestException,
       );
+    });
+  });
+
+  describe('generateTicketPdf', () => {
+    it('mapeia o snapshot para TicketPdfData (1 participante, preço em centavos) e devolve um filename saneado', async () => {
+      // findOne já é coberto à parte (acesso + normalização); aqui isolamos o
+      // mapeamento snapshot → TicketPdfData via spy, sem reexercer o Prisma.
+      const normalizedRegistration = {
+        id: 'reg-abc12345',
+        status: 'CONFIRMED',
+        qrCode: 'https://podio/user/tickets/reg-abc12345',
+        event: {
+          name: 'Corrida da Praia',
+          eventDate: '2026-07-01T12:00:00.000Z',
+          organization: { name: 'Org X' },
+          location: { name: 'Parque', city: 'Maceió', state: 'AL' },
+        },
+        ticket: { name: '10K', category: { name: 'Corrida' } },
+        participant: {
+          name: 'João Conceição',
+          email: 'joao@x.com',
+          documentNumber: '12345678900',
+          documentType: 'CPF',
+          country: 'BR',
+          birthDate: '1990-05-20',
+          phone: '11999998888',
+          gender: 'male',
+        },
+        products: [
+          // snapshot: campos no topo, preço em centavos. isIncludedInTicket é o sinal
+          // REAL de "incluso" (exposto pelo findOne); Camiseta = adicional, Brinde = incluso.
+          { id: 'p-1', name: 'Camiseta', images: ['https://img/x.png'], primaryImageIndex: 0, unitPrice: 5000, selectedVariation: { name: 'G' }, isIncludedInTicket: false },
+          { id: 'p-2', name: 'Brinde', unitPrice: 0, isIncludedInTicket: true },
+        ],
+        questionAnswers: [
+          { question: { question: 'Tamanho?' }, answer: 'G' },
+          { question: { question: 'Alergias?' }, answer: '["Glúten","Lactose"]' },
+        ],
+      };
+
+      jest.spyOn(service, 'findOne').mockResolvedValue({
+        message: 'Registration fetched successfully',
+        data: { registration: normalizedRegistration },
+      } as any);
+      mockTicketPdfService.generateTicketPdf.mockResolvedValue(Buffer.from('pdf-bytes'));
+
+      const result = await service.generateTicketPdf('reg-abc12345', 'user-1');
+
+      expect(result.buffer).toBeInstanceOf(Buffer);
+      // filename ASCII, sem acentos/espaços
+      expect(result.fileName).toBe('ingresso-joao-conceicao.pdf');
+
+      const sent = mockTicketPdfService.generateTicketPdf.mock.calls[0][0];
+      expect(sent.event).toMatchObject({
+        name: 'Corrida da Praia',
+        organization: 'Org X',
+        location: 'Parque, Maceió - AL',
+        participantCount: 1,
+      });
+      expect(sent.registrations).toHaveLength(1);
+      const reg = sent.registrations[0];
+      expect(reg).toMatchObject({
+        index: 1,
+        qrCode: 'https://podio/user/tickets/reg-abc12345',
+        participantName: 'João Conceição',
+        ticketCategory: 'Corrida',
+        ticketName: '10K',
+        cpf: '12345678900',
+        documentType: 'CPF',
+        country: 'BR',
+      });
+      // produtos: preço em centavos preservado; incluído quando unitPrice=0
+      expect(reg.products).toEqual([
+        { name: 'Camiseta', price: 5000, variationName: 'G', imageUrl: 'https://img/x.png', isIncluded: false },
+        { name: 'Brinde', price: 0, variationName: undefined, imageUrl: undefined, isIncluded: true },
+      ]);
+      // respostas: array serializado em JSON vira lista separada por vírgula
+      expect(reg.questionAnswers).toEqual([
+        { question: 'Tamanho?', answer: 'G' },
+        { question: 'Alergias?', answer: 'Glúten, Lactose' },
+      ]);
+    });
+
+    it('propaga NotFoundException quando findOne não retorna registration', async () => {
+      jest.spyOn(service, 'findOne').mockResolvedValue({ data: {} } as any);
+
+      await expect(
+        service.generateTicketPdf('reg-x', 'user-1'),
+      ).rejects.toThrow(NotFoundException);
+      expect(mockTicketPdfService.generateTicketPdf).not.toHaveBeenCalled();
     });
   });
 });

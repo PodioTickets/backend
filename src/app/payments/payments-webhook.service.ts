@@ -3,6 +3,9 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from './cielo.service';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
+import { ReceiptPdfService } from '../../common/services/receipt-pdf.service';
+import { buildReceiptPdfData } from '../../common/services/receipt-pdf.builder';
+import { formatPdfAnswer } from '../../common/utils/pdf-answer.util';
 import { PaymentGateway } from './payment.gateway';
 import { OrderFinalizationService, OrderFinalizationAbortError } from './order-finalization.service';
 import { PaymentCompensationService } from './payment-compensation.service';
@@ -47,6 +50,7 @@ export class PaymentsWebhookService {
     private readonly cieloService: CieloService,
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
+    private readonly receiptPdfService: ReceiptPdfService,
     private readonly gateway: PaymentGateway,
     private readonly orderFinalization: OrderFinalizationService,
     private readonly compensation: PaymentCompensationService,
@@ -66,16 +70,19 @@ export class PaymentsWebhookService {
      * O 3DS callback faz a mesma chamada e nunca foi gargalo.
      */
     let paymentStatus: PaymentStatus;
+    // Status REAL consultado na Cielo (não o do payload) — usado nas transições
+    // e na delegação de reversão abaixo.
+    let actualCieloStatus: number;
     try {
       const cieloPayment = await this.cieloService.getPayment(event.PaymentId);
       if (!cieloPayment) {
         this.logger.warn(`Webhook: getPayment(${event.PaymentId}) retornou null — payload pode ser forjado, abortando.`);
         return;
       }
-      const actualStatus = cieloPayment.Payment.Status;
-      paymentStatus = this.cieloService.mapCieloStatusToPaymentStatus(actualStatus);
-      if (actualStatus !== event.Status) {
-        this.logger.warn(`Webhook status divergente da Cielo: payload=${event.Status}, Cielo=${actualStatus}. Usando valor real (${actualStatus}).`);
+      actualCieloStatus = cieloPayment.Payment.Status;
+      paymentStatus = this.cieloService.mapCieloStatusToPaymentStatus(actualCieloStatus);
+      if (actualCieloStatus !== event.Status) {
+        this.logger.warn(`Webhook status divergente da Cielo: payload=${event.Status}, Cielo=${actualCieloStatus}. Usando valor real (${actualCieloStatus}).`);
       }
     } catch (err: any) {
       this.logger.error(`Webhook: erro ao validar status na Cielo: ${err?.message ?? 'unknown'}`);
@@ -91,6 +98,19 @@ export class PaymentsWebhookService {
     if (paymentStatus === PaymentStatus.PENDING) {
       this.logger.log(
         `Webhook ignorado (status intermediário ${event.Status}) para payment ${event.PaymentId}`,
+      );
+      return;
+    }
+
+    /* Reversão (10=Voided / 11=Refunded): o webhook NÃO trata — quem processa é
+     * o cron diário de chargeback (PaymentsChargebackService, 03:00), que faz a
+     * reversão completa e idempotente. CRÍTICO: o webhook precisa deixar o
+     * Payment INTACTO (PAID) — se rebaixasse pra REFUNDED aqui, o payment saía
+     * do filtro do cron (que varre só status PAID) e a reversão nunca rodava:
+     * comprador estornado ficava com ingressos válidos pra sempre. */
+    if (paymentStatus === PaymentStatus.REFUNDED) {
+      this.logger.log(
+        `Webhook reversão (status ${actualCieloStatus}) para ${event.PaymentId} — deixado para o cron diário de chargeback.`,
       );
       return;
     }
@@ -143,7 +163,9 @@ export class PaymentsWebhookService {
           data: {
             metadata: {
               ...(fresh.metadata as object),
-              cieloStatus: this.cieloService.mapCieloStatusToString(event.Status),
+              // Status REAL consultado na Cielo — não o do payload (que pode ser
+              // replay atrasado/forjado e divergir da transição aplicada).
+              cieloStatus: this.cieloService.mapCieloStatusToString(actualCieloStatus),
               webhookProcessedAt: new Date().toISOString(),
               returnCode: event.ReturnCode,
               returnMessage: event.ReturnMessage,
@@ -197,6 +219,9 @@ export class PaymentsWebhookService {
       this.prisma.getReadClient().order.findUnique({
         where: { id: orderId },
         include: {
+          // Comprador + reservedTickets: insumos do comprovante (recibo) do pedido.
+          user: true,
+          reservedTickets: true,
           event: {
             include: { organization: true },
           },
@@ -246,13 +271,14 @@ export class PaymentsWebhookService {
             const ticket = reg.tickets?.[0]?.ticket;
             const catName = ticket?.category?.name ?? '';
             const ticketName = ticket?.name ?? '';
-            const fullTicketName = catName && ticketName && catName !== ticketName
-              ? `${catName} - ${ticketName}` : ticketName || catName;
             return {
               index: idx + 1,
+              registrationId: reg.id,
               qrCode: reg.qrCode ?? reg.id,
               participantName: (reg.participantName ?? `${(reg.user ?? {}).firstName ?? ''} ${(reg.user ?? {}).lastName ?? ''}`.trim()) || 'Participante',
-              ticketName: fullTicketName,
+              // Cabeçalho do PDF: categoria (ou "Ingresso avulso") em destaque + nome abaixo.
+              ticketCategory: catName || 'Ingresso avulso',
+              ticketName: ticketName || '—',
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
               /* Nacionalidade. Prioridade:
@@ -275,7 +301,7 @@ export class PaymentsWebhookService {
               gender: reg.participantGender ?? user.gender,
               questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => ({
                 question: qa.question?.question ?? '',
-                answer: qa.answer ?? '',
+                answer: formatPdfAnswer(qa.answer),
               })),
               products: (reg.products ?? []).map((rp: any) => ({
                 name: rp.product?.name ?? rp.productSnapshot?.name ?? '',
@@ -283,7 +309,9 @@ export class PaymentsWebhookService {
                 variationName: rp.variation?.name ?? rp.productSnapshot?.variationName,
                 imageUrl: rp.product?.images?.[rp.product?.primaryImageIndex ?? 0],
                 isIncluded: rp.product?.isIncludedInTicket ?? false,
-              })),
+              }))
+              // "Sem interesse" = opt-out de produto opcional → não exibir no PDF.
+              .filter((p: any) => p.variationName !== 'Sem interesse'),
             };
           }),
         };
@@ -329,6 +357,12 @@ export class PaymentsWebhookService {
         // Envios SMTP em paralelo
         const emailPromises: Promise<unknown>[] = [];
 
+        // Comprovante (recibo) do PEDIDO — anexado SÓ ao comprador. Mesmo builder
+        // do download (`buildReceiptPdfData`) → documento idêntico.
+        const receiptPdf = await this.receiptPdfService
+          .generateReceiptPdf(buildReceiptPdfData(order))
+          .catch((e: any) => { this.logger.warn(`Recibo PDF falhou para pedido ${orderId}:`, e?.message); return undefined; });
+
         // Comprador recebe todos os PDFs individuais como anexos separados
         if (buyerEmail) {
           const buyerPdfs = individualPdfs
@@ -340,6 +374,7 @@ export class PaymentsWebhookService {
               firstName: buyerUser?.firstName || 'Participante',
               eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
               ticketPdfs: buyerPdfs,
+              receiptPdf,
             }).catch((err: any) => this.logger.warn('Email comprador falhou:', err)),
           );
         }
@@ -489,6 +524,9 @@ export class PaymentsWebhookService {
       this.prisma.getReadClient().order.findUnique({
         where: { id: oid },
         include: {
+          // Comprador + reservedTickets: insumos do comprovante (recibo) do pedido.
+          user: true,
+          reservedTickets: true,
           event: { include: { organization: true } },
           payment: true,
           coupon: true,
@@ -532,13 +570,14 @@ export class PaymentsWebhookService {
             const ticket = reg.tickets?.[0]?.ticket;
             const catName = ticket?.category?.name ?? '';
             const ticketName = ticket?.name ?? '';
-            const fullTicketName = catName && ticketName && catName !== ticketName
-              ? `${catName} - ${ticketName}` : ticketName || catName;
             return {
               index: idx + 1,
+              registrationId: reg.id,
               qrCode: reg.qrCode ?? reg.id,
               participantName: (reg.participantName ?? `${(reg.user ?? {}).firstName ?? ''} ${(reg.user ?? {}).lastName ?? ''}`.trim()) || 'Participante',
-              ticketName: fullTicketName,
+              // Cabeçalho do PDF: categoria (ou "Ingresso avulso") em destaque + nome abaixo.
+              ticketCategory: catName || 'Ingresso avulso',
+              ticketName: ticketName || '—',
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
               /* País do participante: usado pelo template do PDF para decidir
@@ -565,7 +604,7 @@ export class PaymentsWebhookService {
               gender: reg.participantGender ?? user.gender,
               questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => ({
                 question: qa.question?.question ?? '',
-                answer: qa.answer ?? '',
+                answer: formatPdfAnswer(qa.answer),
               })),
               products: (reg.products ?? []).map((rp: any) => ({
                 name: rp.product?.name ?? rp.productSnapshot?.name ?? '',
@@ -573,7 +612,9 @@ export class PaymentsWebhookService {
                 variationName: rp.variation?.name ?? rp.productSnapshot?.variationName,
                 imageUrl: rp.product?.images?.[rp.product?.primaryImageIndex ?? 0],
                 isIncluded: rp.product?.isIncludedInTicket ?? false,
-              })),
+              }))
+              // "Sem interesse" = opt-out de produto opcional → não exibir no PDF.
+              .filter((p: any) => p.variationName !== 'Sem interesse'),
             };
           }),
         };
@@ -618,6 +659,12 @@ export class PaymentsWebhookService {
         // Envios SMTP em paralelo
         const emailPromises3ds: Promise<unknown>[] = [];
 
+        // Comprovante (recibo) do PEDIDO — anexado SÓ ao comprador. Mesmo builder
+        // do download (`buildReceiptPdfData`) → documento idêntico.
+        const receiptPdf3ds = await this.receiptPdfService
+          .generateReceiptPdf(buildReceiptPdfData(order))
+          .catch((e: any) => { this.logger.warn(`Recibo PDF (3DS) falhou para pedido ${oid}:`, e?.message); return undefined; });
+
         // Comprador recebe todos os PDFs individuais como anexos separados
         if (buyerEmail) {
           const buyerPdfs = individualPdfs3ds
@@ -629,6 +676,7 @@ export class PaymentsWebhookService {
               firstName: buyerUser?.firstName || 'Participante',
               eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
               ticketPdfs: buyerPdfs,
+              receiptPdf: receiptPdf3ds,
             }).catch((err: any) => this.logger.warn('3DS buyer email failed:', err)),
           );
         }

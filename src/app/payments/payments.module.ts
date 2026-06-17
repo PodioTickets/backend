@@ -12,6 +12,7 @@ import { PaymentGateway } from './payment.gateway';
 import { ConfigModule } from '@nestjs/config';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
+import { ReceiptPdfService } from '../../common/services/receipt-pdf.service';
 import { CommonModule } from '../../common/common.module';
 
 @Module({
@@ -30,6 +31,7 @@ import { CommonModule } from '../../common/common.module';
     PaymentGateway,
     EmailService,
     TicketPdfService,
+    ReceiptPdfService,
   ],
   exports: [PaymentsService, CieloService, PaymentsRefundService, OrderFinalizationService, PaymentCompensationService],
 })

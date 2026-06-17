@@ -30,7 +30,6 @@ export class OrderFinalizationAbortError extends Error {
 import { resolveDocument } from '../../common/utils/document.util';
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
 import {
-  holdsStock,
   incrementVariationSold,
   decrementVariationSold,
   releaseVariationHold,
@@ -182,7 +181,7 @@ export class OrderFinalizationService {
 
     // Reverte estoque/venda das variações de produto (estorno + chargeback usam este ponto).
     // soldCount-- SEMPRE; availableStock++ só para itens que seguraram estoque (verdade
-    // congelada em productSnapshot.stockHeld; fallback p/ holdsStock em pedidos antigos).
+    // congelada em productSnapshot.stockHeld; fallback p/ regra LEGADA em pedidos antigos).
     const regProducts = await tx.registrationProduct.findMany({
       where: { registration: { orderId } },
       select: { variationId: true, quantity: true, productSnapshot: true },
@@ -195,7 +194,11 @@ export class OrderFinalizationService {
       const held =
         typeof snap.stockHeld === 'boolean'
           ? snap.stockHeld
-          : holdsStock({ isIncludedInTicket: snap.isIncludedInTicket, isRequired: snap.isRequired });
+          // Fallback p/ snapshots ANTIGOS (pré-feature de estoque em incluso+obrigatório):
+          // aplica a regra LEGADA — naquela época incluso+obrigatório NÃO segurava
+          // estoque, então NÃO restaura availableStock (evita vazar estoque que o
+          // pedido nunca reservou). Pedidos novos sempre têm `stockHeld` congelado.
+          : !(snap.isIncludedInTicket === true && snap.isRequired === true);
       // releaseVariationHold tem guard `stock > 0` → no-op seguro p/ variação ilimitada.
       if (held) {
         await releaseVariationHold(tx, rp.variationId, qty);
@@ -306,19 +309,17 @@ export class OrderFinalizationService {
           throw new BadRequestException('Cupom esgotado. Prossiga sem desconto ou escolha outro cupom.');
         }
       } else {
-        // DISCOUNT/AGE: uso é POR INGRESSO — incrementa pelo nº de ingressos que de fato
-        // receberam o desconto (slots elegíveis), NÃO pelo total do pedido. Espelha o
-        // effectiveUsage do `pay` via fonte única `computeCouponCoveredUnits`. Cap em maxUsage
-        // atômico — nunca ultrapassa sob concorrência.
+        // Fix #13: DISCOUNT/AGE — UPDATE atômico com LEAST para evitar race condition.
+        // O delta é calculado a partir dos slots cobertos (fonte única computeCouponCoveredUnits),
+        // mas o cap em maxUsage é feito DENTRO do UPDATE via LEAST, eliminando a race condition
+        // entre a leitura de usageCount e o UPDATE que existia antes.
         const ageRefDate = order.event?.eventDate ? new Date(order.event.eventDate) : new Date();
-        const coveredUnits = computeCouponCoveredUnits(order.coupon, reservedTickets, participants, ageRefDate);
-        const delta = couponForUsage?.maxUsage != null
-          ? Math.min(coveredUnits, Math.max(0, couponForUsage.maxUsage - couponForUsage.usageCount))
-          : coveredUnits;
+        const delta = computeCouponCoveredUnits(order.coupon, reservedTickets, participants, ageRefDate);
         if (delta > 0) {
-          await tx.$queryRaw`
+          await tx.$executeRaw`
             UPDATE "Coupon"
-            SET "usageCount" = LEAST("usageCount" + ${delta}, COALESCE("maxUsage", "usageCount" + ${delta}))
+            SET "usageCount" = LEAST("usageCount" + ${delta}, COALESCE("maxUsage", "usageCount" + ${delta})),
+                "updatedAt" = NOW()
             WHERE id = ${order.couponId}::uuid
           `;
         }
@@ -526,8 +527,9 @@ export class OrderFinalizationService {
                 productSnapshot,
               },
             });
-            // Contabiliza a venda da variação (vale p/ incluso+obrigatório também). O availableStock
-            // NÃO é tocado aqui — o hold já foi feito no patchProducts para opcional/não-incluso.
+            // Contabiliza a venda da variação. O availableStock NÃO é tocado aqui — o hold
+            // (decremento) já foi feito no patchProducts (reserva) p/ TODO produto que segura
+            // estoque, inclusive incluso+obrigatório; aqui só soldCount++ converte reserva→venda.
             if (item.variationId) {
               await incrementVariationSold(tx, item.variationId, item.quantity ?? 1);
             }
@@ -571,6 +573,10 @@ export class OrderFinalizationService {
             images: prod.images ?? [],
             primaryImageIndex: prod.primaryImageIndex ?? 0,
             basePrice: prod.basePrice,
+            // Flags do produto p/ o read do recibo (snapshot-only) saber se é incluso
+            // no ingresso — antes só existia no productSnapshot por-produto.
+            isIncludedInTicket: prod.isIncludedInTicket ?? false,
+            isRequired: prod.isRequired ?? false,
             variationType: prod.variationType ?? null,
             quantity: item.quantity ?? 1,
             unitPrice: prod.basePrice,

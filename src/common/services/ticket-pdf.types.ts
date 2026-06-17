@@ -8,8 +8,20 @@ export interface TicketPdfProduct {
 
 export interface TicketPdfRegistration {
   index: number;
+  /**
+   * Id da INSCRIÇÃO (ingresso). Exibido no cabeçalho do PDF ("Ingresso: …"),
+   * já que cada documento gerado é sempre de um único participante/ingresso —
+   * o id do pedido (orderId) fica reservado ao recibo do pedido.
+   */
+  registrationId: string;
   qrCode: string;
   participantName: string;
+  /**
+   * Categoria do ingresso (ex.: "Corrida", "Lote 1") exibida em destaque no
+   * cabeçalho do card. Quando o ingresso não tem categoria, os builders enviam
+   * "Ingresso avulso". O `ticketName` (nome do ingresso) é exibido abaixo dela.
+   */
+  ticketCategory?: string;
   ticketName: string;
   email?: string;
   cpf?: string;

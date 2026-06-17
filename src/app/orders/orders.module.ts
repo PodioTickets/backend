@@ -8,6 +8,7 @@ import { OrdersRedisService } from './orders-redis.service';
 import { OrdersController } from './orders.controller';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
+import { ReceiptPdfService } from '../../common/services/receipt-pdf.service';
 import { CommonModule } from '../../common/common.module';
 
 @Module({
@@ -17,7 +18,7 @@ import { CommonModule } from '../../common/common.module';
     PaymentsModule, // exports CieloService
     CommonModule,
   ],
-  providers: [OrdersService, OrdersExpirationService, OrdersRedisService, EmailService, TicketPdfService],
+  providers: [OrdersService, OrdersExpirationService, OrdersRedisService, EmailService, TicketPdfService, ReceiptPdfService],
   controllers: [OrdersController],
   exports: [OrdersService],
 })

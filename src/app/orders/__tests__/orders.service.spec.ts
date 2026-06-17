@@ -6,6 +6,7 @@ import { OrdersRedisService } from '../orders-redis.service';
 import { CieloService } from '../../payments/cielo.service';
 import { EmailService } from '../../../common/services/email.service';
 import { TicketPdfService } from '../../../common/services/ticket-pdf.service';
+import { ReceiptPdfService } from '../../../common/services/receipt-pdf.service';
 import { OrderFinalizationService } from '../../payments/order-finalization.service';
 import { UserActivityService } from '../../../common/services/user-activity.service';
 
@@ -64,6 +65,7 @@ describe('OrdersService', () => {
   // Deps adicionais do construtor (não exercitadas pelos testes atuais de cancel/etc).
   const mockEmailService = {};
   const mockTicketPdfService = {};
+  const mockReceiptPdfService = {};
   const mockOrderFinalization = {
     finalizePaidOrder: jest.fn().mockResolvedValue([]),
     confirmAndFinalizeOrder: jest.fn().mockResolvedValue({ finalized: true, registrations: [] }),
@@ -85,6 +87,7 @@ describe('OrdersService', () => {
         { provide: OrdersRedisService, useValue: mockRedisService },
         { provide: EmailService, useValue: mockEmailService },
         { provide: TicketPdfService, useValue: mockTicketPdfService },
+        { provide: ReceiptPdfService, useValue: mockReceiptPdfService },
         { provide: OrderFinalizationService, useValue: mockOrderFinalization },
         { provide: UserActivityService, useValue: mockActivity },
       ],

@@ -28,6 +28,8 @@ import { PayOrderDto } from './dto/pay-order.dto';
 import { PatchCouponDto } from './dto/patch-coupon.dto';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
+import { ReceiptPdfService } from '../../common/services/receipt-pdf.service';
+import { buildReceiptPdfData } from '../../common/services/receipt-pdf.builder';
 import { UserActivityService } from '../../common/services/user-activity.service';
 import { parseAppliesToArray } from '../../helpers/AppliesToHelper';
 import {
@@ -48,6 +50,7 @@ import {
 } from '../../common/utils/coupon-eligibility.util';
 import { claimVoucher, releaseVoucherByOrder } from '../../common/utils/voucher-reservation.util';
 import { stripOrganizationContact } from '../../common/utils/organization-sanitizer.util';
+import { formatPdfAnswer } from '../../common/utils/pdf-answer.util';
 
 // Fallback de expiração da reserva de voucher quando o pedido (excepcionalmente) não tem
 // `expiresAt` — mantém a rede de segurança da reserva sem prendê-la para sempre.
@@ -812,6 +815,7 @@ export class OrdersService {
     private readonly redisService: OrdersRedisService,
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
+    private readonly receiptPdfService: ReceiptPdfService,
     private readonly orderFinalization: OrderFinalizationService,
     private readonly activity: UserActivityService,
   ) {}
@@ -1033,8 +1037,14 @@ export class OrdersService {
         );
       }
 
-      // Camada 1 — pre-check otimista antes de entrar na transaction
-      if (batch.availableQuantity < item.quantity) {
+      // Fix #37: pre-check via write client (não réplica) para evitar leitura defasada
+      // que permitiria oversell em janelas de replicação. O UPDATE atômico dentro da
+      // transação ainda é a proteção real; este pre-check serve ao UX (falha cedo).
+      const batchFromWrite = await w.ticketBatch.findUnique({
+        where: { id: batch.id },
+        select: { availableQuantity: true },
+      });
+      if (!batchFromWrite || batchFromWrite.availableQuantity < item.quantity) {
         throw new AppConflictException(
           'BATCH_SOLD_OUT',
           `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
@@ -1337,6 +1347,12 @@ export class OrdersService {
       }),
     ]);
 
+    // Checa null ANTES de desreferenciar — orderId inexistente derrubava a rota
+    // com TypeError (500 + stack trace) em vez do 404 documentado.
+    if (!order) {
+      throw new NotFoundException('Pedido não encontrado');
+    }
+
     const isOwner = order.userId === userId;
     const userCpfClean = currentUser?.documentNumberClean ?? null;
     const isParticipant = (order.registrations as any[]).some(
@@ -1345,7 +1361,7 @@ export class OrdersService {
         (userCpfClean && reg.user?.documentNumberClean === userCpfClean),
     );
 
-    if (!order || (!isOwner && !isParticipant)) {
+    if (!isOwner && !isParticipant) {
       throw new NotFoundException('Pedido não encontrado');
     }
 
@@ -1752,6 +1768,13 @@ export class OrdersService {
             const selectedVar = variationEdited
               ? liveVar
               : (pSnap?.selectedVariation ?? liveVar);
+            // `price` exibido = valor EFETIVAMENTE cobrado por unidade (rp.unitPrice,
+            // centavos), não o catálogo cru da variação — cobre o fallback p/ basePrice
+            // (variação com price 0). Incluso/editado → unitPrice 0 (grátis), coerente.
+            // (Opção B — ver sessão 2026-06-15.)
+            const selectedVarPriced = selectedVar
+              ? { ...selectedVar, price: rp.unitPrice }
+              : null;
 
             // Janela de edição = config VIVA do produto (snapshot não serve: flags/prazo
             // podem ter mudado e as opções de variação precisam ser as atuais). Espelha
@@ -1781,7 +1804,7 @@ export class OrdersService {
                 variationType: pSnap?.variationType ?? liveP?.variationType ?? null,
                 isIncludedInTicket: liveP?.isIncludedInTicket ?? false,
               },
-              variation: selectedVar,
+              variation: selectedVarPriced,
               variationName: selectedVar?.name ?? null,
               quantity: rp.quantity,
               unitPrice: rp.unitPrice,
@@ -2722,6 +2745,14 @@ export class OrdersService {
         include: { variations: true },
       });
       if (!product) throw new NotFoundException(`Produto ${item.productId} não encontrado`);
+      // Escopo por evento: sem esta checagem dava pra injetar produto de OUTRO
+      // evento no pedido (entrava no subtotal, na base de desconto, virava
+      // RegistrationProduct e segurava estoque do evento alheio).
+      if (product.eventId !== order.eventId) {
+        throw new UnprocessableEntityException(
+          `Produto "${product.name}" não pertence ao evento deste pedido.`,
+        );
+      }
 
       let variation: any = null;
       if (item.variationId) {
@@ -2734,9 +2765,10 @@ export class OrdersService {
       }
       const unitPrice = resolveProductUnitPrice(product, variation);
       productsSubtotal += unitPrice * item.quantity;
-      // Segura estoque quando: produto NÃO é incluso-e-obrigatório, tem variação selecionada e
-      // o estoque é LIMITADO (stock > 0). Incluso+obrigatório é gated pela vaga do ingresso;
-      // ilimitado nunca segura. A marca persiste no JSON p/ release no cancel/expire.
+      // Segura estoque quando: tem variação selecionada e o estoque é LIMITADO (stock > 0).
+      // TODO produto segura agora (inclusive incluso+obrigatório — holdsStock=true);
+      // ilimitado (stock=0) nunca segura. A marca persiste no JSON p/ release no
+      // cancel/expire e é congelada no productSnapshot (estorno/chargeback).
       const stockHeld = holdsStock(product) && !!variation && (variation.stock ?? 0) > 0;
       if (stockHeld && item.variationId) {
         variationLabels.set(item.variationId, `${product.name} — ${variation.name}`);
@@ -2910,6 +2942,13 @@ export class OrdersService {
     idempotencyKey: string | undefined,
     dto: PayOrderDto,
   ): Promise<Record<string, any>> {
+    // Escopa a chave por usuário+pedido. A chave crua vinha direto do cliente e era
+    // GLOBAL no Redis: colisão entre usuários devolvia o body cacheado de OUTRO
+    // pedido (QR PIX/transactionId alheios) sem cobrar, e a mesma chave reusada em
+    // dois pedidos do mesmo usuário pulava a cobrança do segundo silenciosamente.
+    if (idempotencyKey) {
+      idempotencyKey = `${userId}:${orderId}:${idempotencyKey}`;
+    }
     // 6.1 Idempotency check (resposta cacheada de uma execução anterior)
     if (idempotencyKey) {
       const cached = await this.redisService.getIdempotencyResult(idempotencyKey);
@@ -3284,7 +3323,10 @@ export class OrdersService {
     // alíquota usada no repasse/financeiro pra este pedido, mesmo que o evento mude depois.
     const organizerFeePercent: number =
       (order as any).event?.organizerFeePercent ?? 0;
-    const feeBase = Math.max(0, preDiscountTotal - couponDiscount - voucherDiscount);
+    // Fix #12: cap do total de descontos para não ultrapassar o valor pré-desconto,
+    // evitando feeBase negativo (e finalTotal negativo) quando cupom+voucher excedem o total.
+    const totalDiscount = Math.min(couponDiscount + voucherDiscount, preDiscountTotal);
+    const feeBase = Math.max(0, preDiscountTotal - totalDiscount);
     const serviceFee = Math.round(feeBase * (participantFeePercent / 100));
 
     // finalTotal = (preDiscountTotal − descontos) + serviceFee. A taxa entra na cobrança
@@ -3292,6 +3334,8 @@ export class OrdersService {
     const discountedTotal = feeBase + serviceFee;
     const pixDiscount = 0;
     const finalTotal = discountedTotal;
+    // Fix #12: pedido grátis apenas quando feeBase=0 e os descontos não ultrapassam o total
+    // (totalDiscount já é capado acima, então a condição é consistente).
 
     // Fragmento de auditoria de desconto para o metadata do pagamento. Persistido em
     // TODOS os métodos (PIX/cartão/débito), inclusive nas confirmações via webhook —
@@ -3458,6 +3502,29 @@ export class OrdersService {
     // Para pedidos grátis pulamos o QR — vai direto pro finalize.
     if (dto.method === PaymentMethod.PIX && !isFreeOrder) {
       const newExpiresAt = new Date(Date.now() + RESERVATION_TTL_MINUTES * 60 * 1000);
+
+      // Retry de PIX: o upsert abaixo SOBRESCREVE o transactionId com o novo
+      // PaymentId, mas o QR antigo continuava pagável na Cielo. Se o cliente
+      // pagasse o QR antigo (pixCode copiado antes do retry), o webhook não
+      // casava nenhuma linha local (count=0, descartado como "idempotente") —
+      // dinheiro capturado sem ingresso e sem estorno. Void best-effort do QR
+      // anterior ANTES de registrar o novo fecha a janela.
+      const prevPayment = await w.payment.findUnique({
+        where: { orderId },
+        select: { method: true, metadata: true },
+      });
+      const prevPixId = (prevPayment?.metadata as any)?.cieloPaymentId as string | undefined;
+      if (
+        prevPayment?.method === PaymentMethod.PIX &&
+        prevPixId &&
+        prevPixId !== cieloResult.paymentId
+      ) {
+        await this.cieloService.cancelPayment(prevPixId).catch((voidErr: any) => {
+          this.logger.warn(
+            `[PIX-RETRY] void do QR anterior ${prevPixId} falhou (order ${orderId}): ${voidErr?.message ?? voidErr} — QR antigo pode seguir pagável até expirar`,
+          );
+        });
+      }
 
       await w.$transaction(async (tx: any) => {
         await tx.order.update({
@@ -3859,6 +3926,22 @@ export class OrdersService {
         }
         throw new AppUnprocessableException(e.code, e.friendlyMessage);
       }
+      // ORDER_NOT_PENDING pós-captura: perdedor de uma corrida (duas abas pagando o
+      // mesmo pedido, ou cron de expiração cancelou na janela). A tx deu rollback —
+      // o Payment do perdedor NÃO existe no banco, mas a captura JÁ liquidou na
+      // Cielo. Sem este void a 2ª cobrança ficava órfã: invisível ao webhook (não
+      // casa transactionId), à compensação (busca por orderId) e ao suporte.
+      // Cliente cobrado 2x sem estorno automático.
+      if (e instanceof AppConflictException && cieloResult?.paymentId) {
+        const resp = (e.getResponse?.() ?? {}) as any;
+        if (resp?.code === 'ORDER_NOT_PENDING') {
+          await this.cieloService.cancelPayment(cieloResult.paymentId).catch((voidErr: any) => {
+            this.logger.error(
+              `[PAY-RACE] VOID falhou para captura órfã ${cieloResult.paymentId} (order ${orderId}, ORDER_NOT_PENDING): ${voidErr?.message ?? voidErr} — estornar manualmente na Cielo`,
+            );
+          });
+        }
+      }
       throw e;
     }
 
@@ -3878,10 +3961,17 @@ export class OrdersService {
         status: 'PAID',
         transactionId: cieloResult.paymentId ?? null,
         ...(dto.method === PaymentMethod.CREDIT_CARD && cardData && {
-          creditCard: {
-            installments: cardData.installments,
-            installmentValue: Math.floor(finalTotal / cardData.installments),
-          },
+          creditCard: (() => {
+            // Fix #63: distribui o centavo residual na primeira parcela para que a soma
+            // exata de todas as parcelas seja sempre igual ao totalizado.
+            const baseInstallment = Math.floor(finalTotal / cardData.installments);
+            const firstInstallmentValue = finalTotal - baseInstallment * (cardData.installments - 1);
+            return {
+              installments: cardData.installments,
+              installmentValue: baseInstallment,
+              firstInstallmentValue,
+            };
+          })(),
         }),
         ...(dto.method === PaymentMethod.DEBIT_CARD && cardData && {
           debitCard: {
@@ -3912,6 +4002,9 @@ export class OrdersService {
       r2.order.findUnique({
         where: { id: orderId },
         include: {
+          // Comprador + reservedTickets: insumos do comprovante (recibo) do pedido.
+          user: true,
+          reservedTickets: true,
           event: { include: { organization: true } },
           payment: true,
           coupon: true,
@@ -3962,13 +4055,14 @@ export class OrdersService {
             const ticket = reg.tickets?.[0]?.ticket;
             const catName = ticket?.category?.name ?? '';
             const ticketName = ticket?.name ?? '';
-            const fullTicketName = catName && ticketName && catName !== ticketName
-              ? `${catName} - ${ticketName}` : ticketName || catName;
             return {
               index: idx + 1,
+              registrationId: reg.id,
               qrCode: reg.qrCode ?? reg.id,
               participantName: (reg.participantName ?? `${(reg.user ?? {}).firstName ?? ''} ${(reg.user ?? {}).lastName ?? ''}`.trim()) || 'Participante',
-              ticketName: fullTicketName,
+              // Cabeçalho do PDF: categoria (ou "Ingresso avulso") em destaque + nome abaixo.
+              ticketCategory: catName || 'Ingresso avulso',
+              ticketName: ticketName || '—',
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
               /* Nacionalidade pra decidir label (CPF/Documento) e formatacao
@@ -3996,7 +4090,7 @@ export class OrdersService {
               gender: reg.participantGender ?? user.gender,
               questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => ({
                 question: qa.question?.question ?? '',
-                answer: qa.answer ?? '',
+                answer: formatPdfAnswer(qa.answer),
               })),
               products: (reg.products ?? []).map((rp: any) => ({
                 name: rp.product?.name ?? '',
@@ -4004,7 +4098,9 @@ export class OrdersService {
                 variationName: rp.variation?.name,
                 imageUrl: rp.product?.images?.[rp.product?.primaryImageIndex ?? 0],
                 isIncluded: rp.product?.isIncludedInTicket ?? false,
-              })),
+              }))
+              // "Sem interesse" = opt-out de produto opcional → não exibir no PDF.
+              .filter((p: any) => p.variationName !== 'Sem interesse'),
             };
           }),
         };
@@ -4044,6 +4140,12 @@ export class OrdersService {
           individualPdfs.push({ pdf, participantEmail, participantName });
         }
 
+        // Comprovante (recibo) do PEDIDO — anexado SÓ ao comprador. Mesmo builder
+        // do download (`buildReceiptPdfData`) → documento idêntico.
+        const receiptPdf = await this.receiptPdfService
+          .generateReceiptPdf(buildReceiptPdfData(order))
+          .catch((e: any) => { this.logger.warn(`Recibo PDF falhou para pedido ${orderId}:`, e?.message); return undefined; });
+
         // Comprador recebe todos os PDFs individuais como anexos separados
         if (buyerEmail) {
           const buyerPdfs = individualPdfs
@@ -4058,6 +4160,7 @@ export class OrdersService {
             eventAddress: location,
             eventBannerUrl,
             ticketPdfs: buyerPdfs,
+            receiptPdf,
           }).catch((err: any) => this.logger.warn('Email comprador falhou:', err));
         }
 

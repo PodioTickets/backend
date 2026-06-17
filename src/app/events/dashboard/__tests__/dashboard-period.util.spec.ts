@@ -80,8 +80,8 @@ describe('percentChange', () => {
     expect(percentChange(50, 100)).toBe(-50);
   });
 
-  it('de zero para um valor positivo → 100%', () => {
-    expect(percentChange(10, 0)).toBe(100);
+  it('de zero para um valor positivo → null (sem baseline, exibe "novo")', () => {
+    expect(percentChange(10, 0)).toBeNull();
   });
 
   it('zero para zero → 0%', () => {

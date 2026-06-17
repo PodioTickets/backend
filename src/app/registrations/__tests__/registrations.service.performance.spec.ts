@@ -3,6 +3,7 @@ import { RegistrationsService } from '../registrations.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { KitsService } from '../../kits/kits.service';
 import { EmailService } from '../../../common/services/email.service';
+import { TicketPdfService } from '../../../common/services/ticket-pdf.service';
 
 describe('RegistrationsService - Performance Tests', () => {
   let service: RegistrationsService;
@@ -15,6 +16,7 @@ describe('RegistrationsService - Performance Tests', () => {
     },
     modality: {
       findUnique: jest.fn(),
+      findMany: jest.fn(),
       update: jest.fn(),
     },
     user: {
@@ -83,6 +85,10 @@ describe('RegistrationsService - Performance Tests', () => {
           provide: EmailService,
           useValue: {},
         },
+        {
+          provide: TicketPdfService,
+          useValue: {},
+        },
       ],
     }).compile();
 
@@ -131,7 +137,7 @@ describe('RegistrationsService - Performance Tests', () => {
 
     beforeEach(() => {
       mockPrismaService.event.findUnique.mockResolvedValue(mockEvent);
-      mockPrismaService.modality.findUnique.mockResolvedValue(mockModality);
+      mockPrismaService.modality.findMany.mockResolvedValue([mockModality]);
       mockPrismaService.question.findMany.mockResolvedValue([]);
       mockKitsService.checkStock.mockResolvedValue(true);
       mockKitsService.updateStock.mockResolvedValue(true);

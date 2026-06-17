@@ -1,9 +1,25 @@
 import { ExtractJwt, Strategy } from 'passport-jwt';
+import type { Request } from 'express';
 import { PassportStrategy } from '@nestjs/passport';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { CacheRedisService } from '../../../common/services/cache-redis.service';
+import { resolveAuthSurface, accessCookieName } from '../auth-cookies.util';
+
+/**
+ * Extrai o JWT do cookie httpOnly da SUPERFÍCIE da request (admin/organizer/
+ * client), resolvida pelo header `x-pt-surface`. Cada superfície tem seu cookie
+ * (`pt_at_<surface>`) → sessões isoladas no mesmo navegador. cookie-parser
+ * popula `req.cookies`.
+ */
+function cookieTokenExtractor(req: Request): string | null {
+  const surface = resolveAuthSurface(req);
+  const token = (req?.cookies as Record<string, string> | undefined)?.[
+    accessCookieName(surface)
+  ];
+  return token && token !== 'undefined' && token !== 'null' ? token : null;
+}
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -13,14 +29,30 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     private cache: CacheRedisService,
   ) {
     super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      // Cookie primeiro; header Bearer como fallback (SSR helpers do front e
+      // clientes legados durante a transição continuam funcionando).
+      jwtFromRequest: ExtractJwt.fromExtractors([
+        cookieTokenExtractor,
+        ExtractJwt.fromAuthHeaderAsBearerToken(),
+      ]),
       ignoreExpiration: false,
       secretOrKey: configService.get('JWT_SECRET'),
+      // Fixa o algoritmo de verificação. Sem isto, o passport-jwt aceita qualquer
+      // alg da família suportada pelo jsonwebtoken — fechamos a janela de confusão
+      // de algoritmo (ex.: token forjado pedindo outro alg). Usamos HMAC simétrico.
+      algorithms: ['HS256'],
       passReqToCallback: false,
     });
   }
 
   async validate(payload: any) {
+    // Token emitido no meio do fluxo de MFA (mfaPending=true) não dá acesso
+    // a rotas protegidas — é apenas um challenge temporário para o endpoint
+    // POST /auth/2fa/verify-login, que o verifica no body, fora do JwtStrategy.
+    if (payload.mfaPending) {
+      throw new UnauthorizedException('MFA não concluído');
+    }
+
     // Buscar usuário com accountType do payload ou buscar por ID
     const accountType = payload.accountType || 'USER';
     
@@ -52,11 +84,24 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         language: true,
         avatarUrl: true,
         mfaEnabled: true,
+        passwordChangedAt: true,
       },
     });
 
     if (!user || !user.isActive) {
       throw new UnauthorizedException('Usuário não encontrado ou inativo');
+    }
+
+    // Token emitido ANTES da última troca de senha é inválido — é assim que a
+    // troca/reset de senha derruba sessões roubadas (não há denylist de access
+    // token; o iat do JWT vs passwordChangedAt faz o papel de revogação).
+    // Margem de 2s contra clock skew entre emissor e banco.
+    if (
+      user.passwordChangedAt &&
+      typeof payload.iat === 'number' &&
+      payload.iat * 1000 < user.passwordChangedAt.getTime() - 2000
+    ) {
+      throw new UnauthorizedException('Sessão expirada — faça login novamente');
     }
 
     // Verificar se o accountType do token corresponde ao do banco

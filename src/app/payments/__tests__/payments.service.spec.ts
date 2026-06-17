@@ -5,6 +5,7 @@ import { CieloService } from '../cielo.service';
 import { PaymentGateway } from '../payment.gateway';
 import { EmailService } from '../../../common/services/email.service';
 import { TicketPdfService } from '../../../common/services/ticket-pdf.service';
+import { ReceiptPdfService } from '../../../common/services/receipt-pdf.service';
 import { OrderFinalizationService } from '../order-finalization.service';
 import { PaymentCompensationService } from '../payment-compensation.service';
 import { NotFoundException, BadRequestException } from '@nestjs/common';
@@ -30,6 +31,12 @@ describe('PaymentsService', () => {
       findMany: jest.fn(),
       update: jest.fn(),
     },
+    order: {
+      findUnique: jest.fn(),
+    },
+    organizationMember: {
+      findFirst: jest.fn(),
+    },
     $transaction: jest.fn(),
   };
   // O service acessa o banco via getReadClient()/getWriteClient() — devolvem o próprio mock.
@@ -42,6 +49,10 @@ describe('PaymentsService', () => {
     getPayment: jest.fn(),
     mapCieloStatusToPaymentStatus: jest.fn(),
     mapCieloStatusToString: jest.fn(),
+  };
+
+  const mockReceiptPdfService = {
+    generateReceiptPdf: jest.fn(),
   };
 
   beforeEach(async () => {
@@ -60,6 +71,7 @@ describe('PaymentsService', () => {
         { provide: PaymentGateway, useValue: { emitPaymentConfirmed: jest.fn() } },
         { provide: EmailService, useValue: {} },
         { provide: TicketPdfService, useValue: {} },
+        { provide: ReceiptPdfService, useValue: mockReceiptPdfService },
         { provide: OrderFinalizationService, useValue: { confirmAndFinalizeOrder: jest.fn().mockResolvedValue({ finalized: true, registrations: [] }) } },
         { provide: PaymentCompensationService, useValue: { compensateOrphanPayment: jest.fn() } },
       ],
@@ -230,6 +242,114 @@ describe('PaymentsService', () => {
       await expect(
         service.getPaymentSummary(registrationId, userId),
       ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('generateReceiptPdf', () => {
+    const userId = 'buyer-1';
+
+    const buildOrder = () => ({
+      id: 'order-abc12345-aaaa-bbbb-cccc-1234567890ab',
+      userId,
+      totalAmount: 10000, // subtotal em centavos
+      serviceFee: 1000,
+      discount: 2000,
+      finalAmount: 9000,
+      reservedTickets: [
+        { ticketId: 'tk-1', batchId: 'b-1', unitPrice: 6000, quantity: 1 },
+        { ticketId: 'tk-1', batchId: null, unitPrice: 4000, quantity: 1 },
+      ],
+      payment: {
+        method: 'CREDIT_CARD',
+        gateway: 'cielo',
+        transactionId: 'txn-1',
+        cardBrand: 'visa',
+        paymentDate: new Date('2026-05-30T10:00:00.000Z'),
+        createdAt: new Date('2026-05-30T09:00:00.000Z'),
+      },
+      coupon: null,
+      voucher: { id: 'v-1', code: 'PROMO10', name: 'Promo' },
+      user: { firstName: 'Maria', lastName: 'Silva', documentNumber: '12345678900', country: 'BR' },
+      event: {
+        id: 'evt-1',
+        name: 'Corrida',
+        eventDate: new Date('2026-07-01T12:00:00.000Z'),
+        location: 'Parque',
+        city: 'Maceió',
+        state: 'AL',
+        organizationId: 'org-1',
+        participantFeePercent: 10,
+        organization: { name: 'Razão LTDA', tradeName: 'Org X', document: '11222333000144', logoUrl: null },
+      },
+      registrations: [
+        {
+          id: 'reg-1',
+          participantName: 'João',
+          participantEmail: 'joao@x.com',
+          user: null,
+          tickets: [{ ticketId: 'tk-1', batchId: 'b-1', ticketSnapshot: { name: '10K', category: { name: 'Corrida' } }, ticket: null }],
+        },
+        {
+          id: 'reg-2',
+          participantName: null,
+          participantEmail: null,
+          user: { firstName: 'Ana', lastName: 'Souza', email: 'ana@x.com' },
+          tickets: [{ ticketId: 'tk-1', batchId: null, ticketSnapshot: null, ticket: { name: '10K', category: { name: 'Corrida' } } }],
+        },
+      ],
+    });
+
+    it('mapeia o pedido → ReceiptPdfData (preços em centavos, voucher exclusivo) e devolve filename', async () => {
+      mockPrismaService.registration.findUnique.mockResolvedValue({ orderId: 'order-1' });
+      mockPrismaService.order.findUnique.mockResolvedValue(buildOrder());
+      mockReceiptPdfService.generateReceiptPdf.mockResolvedValue(Buffer.from('receipt'));
+
+      const result = await service.generateReceiptPdf('reg-1', userId);
+
+      expect(result.buffer).toBeInstanceOf(Buffer);
+      expect(result.fileName).toBe('comprovante-ORDER-AB.pdf');
+
+      const data = mockReceiptPdfService.generateReceiptPdf.mock.calls[0][0];
+      expect(data.organization).toMatchObject({ name: 'Org X', document: '11222333000144' });
+      expect(data.buyer).toMatchObject({ name: 'Maria Silva', document: '12345678900', country: 'BR' });
+      expect(data.event).toMatchObject({ name: 'Corrida', location: 'Maceió - AL, Parque' });
+      expect(data.financial).toMatchObject({ subtotal: 10000, discount: 2000, serviceFee: 1000, total: 9000, voucherCode: 'PROMO10' });
+      // preço por inscrição: chave ticketId:batchId, fallback por ticketId
+      expect(data.registrations).toEqual([
+        { id: 'reg-1', participantName: 'João', email: 'joao@x.com', ticketCategory: 'Corrida', ticketName: '10K', price: 6000, products: [] },
+        { id: 'reg-2', participantName: 'Ana Souza', email: 'ana@x.com', ticketCategory: 'Corrida', ticketName: '10K', price: 4000, products: [] },
+      ]);
+    });
+
+    it('autoriza o organizador (membro da org) quando não é o comprador', async () => {
+      mockPrismaService.registration.findUnique.mockResolvedValue({ orderId: 'order-1' });
+      mockPrismaService.order.findUnique.mockResolvedValue(buildOrder());
+      mockPrismaService.user.findUnique.mockResolvedValue({ role: 'USER' }); // não-admin
+      mockPrismaService.organizationMember.findFirst.mockResolvedValue({ id: 'm-1' });
+      mockReceiptPdfService.generateReceiptPdf.mockResolvedValue(Buffer.from('receipt'));
+
+      await expect(service.generateReceiptPdf('reg-1', 'organizer-9')).resolves.toMatchObject({
+        fileName: expect.stringContaining('comprovante-'),
+      });
+      expect(mockPrismaService.organizationMember.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { organizationId: 'org-1', userId: 'organizer-9' } }),
+      );
+    });
+
+    it('bloqueia quem não é comprador/admin/organizador', async () => {
+      mockPrismaService.registration.findUnique.mockResolvedValue({ orderId: 'order-1' });
+      mockPrismaService.order.findUnique.mockResolvedValue(buildOrder());
+      mockPrismaService.user.findUnique.mockResolvedValue({ role: 'USER' });
+      mockPrismaService.organizationMember.findFirst.mockResolvedValue(null);
+
+      await expect(service.generateReceiptPdf('reg-1', 'stranger')).rejects.toThrow(BadRequestException);
+      expect(mockReceiptPdfService.generateReceiptPdf).not.toHaveBeenCalled();
+    });
+
+    it('lança NotFound quando a inscrição não tem pedido', async () => {
+      mockPrismaService.registration.findUnique.mockResolvedValue(null);
+
+      await expect(service.generateReceiptPdf('reg-x', userId)).rejects.toThrow(NotFoundException);
     });
   });
 });

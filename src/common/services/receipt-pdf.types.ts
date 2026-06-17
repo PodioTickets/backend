@@ -1,3 +1,12 @@
+export interface ReceiptPdfProductRow {
+  name: string;
+  variationName?: string;
+  /** Preço pago pela linha do produto (centavos). 0 para produto incluso. */
+  price: number;
+  /** Produto incluso no ingresso (não cobrado à parte) → exibe "Incluso". */
+  isIncluded: boolean;
+}
+
 export interface ReceiptPdfRegistrationRow {
   id: string;
   participantName: string;
@@ -5,6 +14,8 @@ export interface ReceiptPdfRegistrationRow {
   ticketCategory?: string;
   ticketName: string;
   price: number;
+  /** Produtos adicionais do participante (exibidos no resumo financeiro). */
+  products: ReceiptPdfProductRow[];
 }
 
 export interface ReceiptPdfData {
@@ -23,6 +34,10 @@ export interface ReceiptPdfData {
      * para "Documento" e o valor é exibido sem formatação de CPF.
      */
     country?: string | null;
+    /** URL do avatar do comprador (exibida no card do comprador). */
+    imageUrl?: string;
+    /** Data de nascimento do comprador (exibida no lugar do "Evento" no card). */
+    birthDate?: Date | string | null;
   };
   event: {
     name: string;
@@ -44,8 +59,12 @@ export interface ReceiptPdfData {
   financial: {
     subtotal: number;
     discount: number;
-    voucherCode?: string;
-    voucherPercent?: number;
+    /**
+     * Rótulo da linha de desconto, já formatado como no resumo do checkout
+     * (ex.: "Cupom ABC (10% OFF)", "Cupom automático", "Voucher XYZ"). Só
+     * presente quando há desconto (> 0). Cupom e voucher são exclusivos.
+     */
+    discountLabel?: string;
     serviceFee: number;
     total: number;
   };
