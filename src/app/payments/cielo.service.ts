@@ -950,17 +950,19 @@ export class CieloService {
   }
 
   /**
-   * Valida assinatura do webhook Cielo e parseia o payload.
+   * Valida a autenticação do "Post de Notificação" da Cielo e parseia o payload.
+   *
+   * Esquema (docs oficiais Cielo): a Cielo NÃO assina o corpo — ela envia um HEADER
+   * ESTÁTICO cujo valor é o cadastrado no painel (KEY=cielosignature, VALUE=segredo).
+   * Validamos `header === CIELO_WEBHOOK_SECRET`.
    *
    * Segurança:
-   * - Comparação em tempo constante via `crypto.timingSafeEqual` para mitigar
-   *   timing attack na descoberta do secret.
-   * - Verifica comprimento ANTES do timingSafeEqual (Node lança se buffers
-   *   tiverem tamanhos diferentes); o pre-check NÃO é timing-sensitive porque
-   *   o tamanho do secret é conhecido e não revela seus bytes.
+   * - Comparação em tempo constante via `crypto.timingSafeEqual` sobre os DIGESTS
+   *   sha256 de ambos os lados (buffers fixos de 32 bytes): não lança por tamanho
+   *   diferente e não vaza o comprimento do segredo.
    *
-   * Retorna o evento parseado em caso de sucesso; null em qualquer falha
-   * (não exibe causa do erro para evitar oracle).
+   * Retorna o evento parseado (PaymentId/ChangeType) em caso de sucesso; null em
+   * qualquer falha (não expõe a causa para evitar oracle).
    */
   async handleWebhook(signature: string, payload: string): Promise<any | null> {
     if (!this.webhookSecret) {
@@ -974,17 +976,16 @@ export class CieloService {
     }
 
     try {
-      // Fix #10: a Cielo envia HMAC-SHA256 do payload assinado com o segredo,
-      // não o segredo em si. Comparação direta era incorreta e insegura.
-      const computedHmac = crypto
-        .createHmac('sha256', this.webhookSecret)
-        .update(payload)
-        .digest('hex');
+      // A Cielo NÃO assina o corpo: o "Post de Notificação" envia um HEADER ESTÁTICO
+      // (cielosignature) cujo valor é o segredo cadastrado no painel. Validamos
+      // `header === CIELO_WEBHOOK_SECRET` em tempo constante, comparando os DIGESTS
+      // sha256 (buffers fixos de 32 bytes) — evita o throw por tamanho diferente e não
+      // vaza o comprimento do segredo. O "Fix #10" (HMAC do payload) estava incorreto
+      // p/ este esquema e rejeitava 100% das notificações (PIX/3DS nunca confirmavam).
+      const expected = crypto.createHash('sha256').update(this.webhookSecret.trim()).digest();
+      const received = crypto.createHash('sha256').update(String(signature).trim()).digest();
 
-      const sigBuf = Buffer.from(signature, 'hex');
-      const hmacBuf = Buffer.from(computedHmac, 'hex');
-
-      if (sigBuf.length !== hmacBuf.length || !crypto.timingSafeEqual(sigBuf, hmacBuf)) {
+      if (!crypto.timingSafeEqual(received, expected)) {
         this.logger.warn('Webhook signature verification failed');
         return null;
       }
