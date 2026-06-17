@@ -915,7 +915,10 @@ export class RegistrationsService {
           isIncluded,
         };
       },
-    );
+    )
+    // "Sem interesse" = opt-out de produto opcional → não exibir no PDF do ingresso
+    // (mesma regra do recibo/modal de pedido).
+    .filter((p: TicketPdfProduct) => p.variationName !== 'Sem interesse');
 
     const questionAnswers = (reg?.questionAnswers ?? []).map((qa: any) => ({
       question: qa?.question?.question ?? qa?.question ?? '',

@@ -1179,7 +1179,9 @@ export class PaymentsService {
             variationName: rp.variation?.name ?? rp.productSnapshot?.variationName,
             imageUrl: rp.product?.images?.[rp.product?.primaryImageIndex ?? 0],
             isIncluded: rp.product?.isIncludedInTicket ?? false,
-          })),
+          }))
+          // "Sem interesse" = opt-out de produto opcional → não exibir no PDF.
+          .filter((p: any) => p.variationName !== 'Sem interesse'),
         };
       }),
     };
