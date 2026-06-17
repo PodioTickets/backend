@@ -750,7 +750,7 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) => 
             React.createElement(
               Text,
               { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray12 } },
-              'Ingresso: ',
+              'ID do ingresso: ',
             ),
             React.createElement(
               Text,

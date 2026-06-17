@@ -352,7 +352,7 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
                   color: C.gray12,
                 },
               },
-              'Pedido: ',
+              'ID do pedido: ',
             ),
             React.createElement(
               Text,
