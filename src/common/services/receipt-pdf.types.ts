@@ -47,6 +47,17 @@ export interface ReceiptPdfData {
   payment: {
     method: string;
     paidAt: Date;
+    /**
+     * Status atual do pagamento (`PaymentStatus`: PAID/REFUNDED/CANCELLED/…).
+     * Dirige o selo do recibo: o comprovante é gerado AO VIVO a partir do pedido,
+     * então após um estorno o selo verde "Pago" deve virar "Estornado".
+     */
+    status?: string;
+    /**
+     * Instante do estorno, quando houver (`payment.metadata.refundedAt`). Exibido
+     * no texto da declaração de um comprovante estornado.
+     */
+    refundedAt?: Date | string | null;
     gateway?: string;
     transactionId?: string;
     txId?: string;

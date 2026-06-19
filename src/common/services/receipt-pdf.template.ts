@@ -53,6 +53,37 @@ function formatPaymentMethod(method: string | undefined): string {
   return method || '—';
 }
 
+/**
+ * Selo de status do recibo. O comprovante é renderizado AO VIVO a partir do
+ * pedido, então reflete o status ATUAL do pagamento — não um valor congelado.
+ * Após um estorno (`PaymentStatus.REFUNDED`) o selo verde "Pago" vira o selo
+ * vermelho "Estornado". Espelha o mapa de status do modal de pedido no frontend
+ * (`PaymentDetailsModal`). `paid` controla o ícone (check vs. x) e o texto da
+ * declaração. Ausência de status → "Pago" (compat. com comprovantes antigos).
+ */
+function resolveReceiptStatus(status?: string): {
+  label: string;
+  bg: string;
+  fg: string;
+  paid: boolean;
+} {
+  switch ((status ?? 'PAID').toUpperCase()) {
+    case 'REFUNDED':
+      return { label: 'Estornado', bg: C.red11, fg: C.white, paid: false };
+    case 'CANCELLED':
+      return { label: 'Cancelado', bg: C.red11, fg: C.white, paid: false };
+    case 'CHARGEBACK':
+      return { label: 'Charge-back', bg: C.orange11, fg: C.white, paid: false };
+    case 'FAILED':
+      return { label: 'Falhou', bg: C.red11, fg: C.white, paid: false };
+    case 'PENDING':
+      return { label: 'Pendente', bg: C.amber11, fg: C.white, paid: false };
+    case 'PAID':
+    default:
+      return { label: 'Pago', bg: C.green11, fg: '#FBFEFB', paid: true };
+  }
+}
+
 Font.registerHyphenationCallback((w) => [w]);
 
 const FP = path.join(process.cwd(), 'node_modules', '@fontsource');
@@ -93,6 +124,9 @@ const C = {
   greenPrimary: '#308737',
   greenPrimaryText: '#F5FBF5',
   amber12: '#4F3422',
+  amber11: '#AD5700',
+  red11: '#CE2C31',
+  orange11: '#CC4E00',
   pixColor: '#62B7AF',
 } as const;
 
@@ -287,6 +321,9 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
   // OMITIDA (mesma regra do modal de pedido), então não exibimos método/ícone.
   const isFree = (data.financial?.total ?? 0) <= 0;
   const isPix = !!data.payment.method?.toLowerCase().includes('pix');
+  // Selo dirigido pelo status ATUAL do pagamento (estorno → "Estornado", etc.).
+  const status = resolveReceiptStatus(data.payment.status);
+  const isRefunded = (data.payment.status ?? '').toUpperCase() === 'REFUNDED';
 
   // Resumo financeiro espelha a tela de pagamento concluído do frontend
   // (`PaymentSuccessStep`): os produtos NÃO são itemizados produto a produto —
@@ -297,11 +334,23 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
     .filter((p) => !p.isIncluded)
     .reduce((sum, p) => sum + (p.price ?? 0), 0);
 
-  const declarationText =
-    `O pagamento referente ao pedido ${idTag(data.orderNumber)} foi recebido e processado com sucesso` +
-    (data.payment.gateway ? ` pelo gateway ${data.payment.gateway}` : '') +
-    ` em ${fmtDateTimeLong(data.payment.paidAt)}. Este recibo é o comprovante oficial da transação.` +
-    ` Para detalhes dos participantes (QR Code, dados pessoais e perguntas do organizador), consulte o PDF de ingressos enviado junto com este documento.`;
+  const participantsHint =
+    ' Para detalhes dos participantes (QR Code, dados pessoais e perguntas do organizador),' +
+    ' consulte o PDF de ingressos enviado junto com este documento.';
+  const declarationText = status.paid
+    ? `O pagamento referente ao pedido ${idTag(data.orderNumber)} foi recebido e processado com sucesso` +
+      (data.payment.gateway ? ` pelo gateway ${data.payment.gateway}` : '') +
+      ` em ${fmtDateTimeLong(data.payment.paidAt)}. Este recibo é o comprovante oficial da transação.` +
+      participantsHint
+    : isRefunded
+      ? `O pagamento referente ao pedido ${idTag(data.orderNumber)} foi estornado` +
+        (data.payment.refundedAt
+          ? ` em ${fmtDateTimeLong(new Date(data.payment.refundedAt))}`
+          : '') +
+        `. O valor foi devolvido ao comprador e as inscrições deste pedido foram canceladas.` +
+        ` Este documento reflete a situação atual da transação.`
+      : `O pedido ${idTag(data.orderNumber)} está com status "${status.label}".` +
+        ` Este documento reflete a situação atual da transação.`;
 
   return React.createElement(
     Document,
@@ -628,14 +677,14 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
               ),
             ),
           ),
-          // "Pago" badge
+          // Selo de status (Pago/Estornado/…), dirigido pelo status atual do pagamento.
           React.createElement(
             View,
             {
               style: {
                 paddingHorizontal: 12,
                 paddingVertical: 6,
-                backgroundColor: C.green11,
+                backgroundColor: status.bg,
                 borderRadius: 4,
                 flexDirection: 'row',
                 alignItems: 'center',
@@ -645,18 +694,34 @@ export const ReceiptPdfDocument = ({ data }: { data: ReceiptPdfData }) => {
             React.createElement(
               Svg,
               { width: 14, height: 14, viewBox: '0 0 20 20' },
+              // Círculo comum aos dois estados; conteúdo interno = check (pago) ou X (demais).
               React.createElement(Path, {
-                d: 'M6.66663 9.99996L8.77886 11.901C9.13845 12.2246 9.69712 12.175 9.99412 11.7932L13.3333 7.49996M9.99996 18.3333C14.6023 18.3333 18.3333 14.6023 18.3333 9.99996C18.3333 5.39759 14.6023 1.66663 9.99996 1.66663C5.39759 1.66663 1.66663 5.39759 1.66663 9.99996C1.66663 14.6023 5.39759 18.3333 9.99996 18.3333Z',
-                stroke: '#FBFEFB',
+                d: 'M9.99996 18.3333C14.6023 18.3333 18.3333 14.6023 18.3333 9.99996C18.3333 5.39759 14.6023 1.66663 9.99996 1.66663C5.39759 1.66663 1.66663 5.39759 1.66663 9.99996C1.66663 14.6023 5.39759 18.3333 9.99996 18.3333Z',
+                stroke: status.fg,
                 strokeWidth: 1.5,
                 strokeLinecap: 'round',
                 strokeLinejoin: 'round',
               }),
+              status.paid
+                ? React.createElement(Path, {
+                  d: 'M6.66663 9.99996L8.77886 11.901C9.13845 12.2246 9.69712 12.175 9.99412 11.7932L13.3333 7.49996',
+                  stroke: status.fg,
+                  strokeWidth: 1.5,
+                  strokeLinecap: 'round',
+                  strokeLinejoin: 'round',
+                })
+                : React.createElement(Path, {
+                  d: 'M12.5 7.5L7.5 12.5M7.5 7.5L12.5 12.5',
+                  stroke: status.fg,
+                  strokeWidth: 1.5,
+                  strokeLinecap: 'round',
+                  strokeLinejoin: 'round',
+                }),
             ),
             React.createElement(
               Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: '#FBFEFB' } },
-              'Pago',
+              { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: status.fg } },
+              status.label,
             ),
           ),
         ),
