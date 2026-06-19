@@ -111,6 +111,8 @@ export function buildReceiptPdfData(
     payment: {
       method: payment.method ?? '',
       paidAt: payment.paymentDate ?? payment.createdAt ?? new Date(),
+      status: payment.status ?? undefined,
+      refundedAt: extractRefundedAt(payment),
       gateway: payment.gateway ?? undefined,
       transactionId: payment.transactionId ?? undefined,
       cardBrand: payment.cardBrand ?? undefined,
@@ -128,6 +130,27 @@ export function buildReceiptPdfData(
     },
     registrations: rows,
   };
+}
+
+/**
+ * Instante do estorno a partir do `payment.metadata` (gravado pelo fluxo de
+ * estorno como `refundedAt` ISO). `metadata` pode vir como objeto (Prisma JSON)
+ * ou string serializada — tratamos os dois. Retorna `undefined` quando ausente
+ * ou inválido (comprovante não-estornado).
+ */
+function extractRefundedAt(payment: any): Date | undefined {
+  let meta = payment?.metadata;
+  if (typeof meta === 'string') {
+    try {
+      meta = JSON.parse(meta);
+    } catch {
+      return undefined;
+    }
+  }
+  const raw = meta?.refundedAt;
+  if (!raw) return undefined;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? undefined : d;
 }
 
 /**
