@@ -3148,8 +3148,14 @@ export class EventsService {
     const searchTrim = params.search?.trim();
     if (searchTrim) {
       const pat = `%${this.escapeIlikePattern(searchTrim)}%`;
+      // Métodos de pagamento casados pelo termo (ex.: "pix") — paridade com a listagem.
+      const methods = this.matchPaymentMethodsFromSearch(searchTrim);
+      const methodSql =
+        methods.length > 0
+          ? Prisma.sql` OR p.method::text IN (${Prisma.join(methods.map((m) => Prisma.sql`${m}`))})`
+          : Prisma.empty;
       parts.push(
-        Prisma.sql`(r.id::text ILIKE ${pat} ESCAPE '\\' OR EXISTS (SELECT 1 FROM "User" u WHERE u.id = r."userId" AND (u."firstName" ILIKE ${pat} ESCAPE '\\' OR u."lastName" ILIKE ${pat} ESCAPE '\\' OR u.email ILIKE ${pat} ESCAPE '\\' OR COALESCE(u."documentNumber", '') ILIKE ${pat} ESCAPE '\\')))`,
+        Prisma.sql`(r.id::text ILIKE ${pat} ESCAPE '\\' OR EXISTS (SELECT 1 FROM "User" u WHERE u.id = r."userId" AND (u."firstName" ILIKE ${pat} ESCAPE '\\' OR u."lastName" ILIKE ${pat} ESCAPE '\\' OR u.email ILIKE ${pat} ESCAPE '\\' OR COALESCE(u."documentNumber", '') ILIKE ${pat} ESCAPE '\\')) OR EXISTS (SELECT 1 FROM "Coupon" c WHERE c.id = o."couponId" AND COALESCE(c.code, '') ILIKE ${pat} ESCAPE '\\') OR EXISTS (SELECT 1 FROM "Voucher" v WHERE v.id = o."voucherId" AND COALESCE(v.code, '') ILIKE ${pat} ESCAPE '\\')${methodSql})`,
       );
     }
 
@@ -3364,6 +3370,85 @@ export class EventsService {
   /**
    * Obtém inscrições com filtros avançados
    */
+  /**
+   * Mapeia o texto da busca para métodos de pagamento (enum) — permite ao
+   * organizador filtrar a listagem digitando "pix", "cartão", "boleto" etc.
+   * direto no campo de pesquisa. Normaliza acentos/caixa e ignora termos
+   * curtos demais (< 2 chars) para evitar matches espúrios.
+   */
+  private matchPaymentMethodsFromSearch(search: string): PaymentMethod[] {
+    const term = search
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .trim();
+    if (term.length < 2) return [];
+
+    // Sinônimos por método (sem acento). Match bidirecional (kw contém termo
+    // ou termo contém kw) para casar tanto "cart" → cartão quanto "cartao de credito".
+    const keywords: Record<PaymentMethod, string[]> = {
+      PIX: ['pix'],
+      CREDIT_CARD: ['credito', 'credit', 'cartao de credito', 'cartao credito', 'cartao'],
+      DEBIT_CARD: ['debito', 'debit', 'cartao de debito', 'cartao debito', 'cartao'],
+      BOLETO: ['boleto'],
+      CRYPTO: ['cripto', 'crypto', 'criptomoeda'],
+    };
+
+    const matched: PaymentMethod[] = [];
+    for (const method of Object.keys(keywords) as PaymentMethod[]) {
+      if (keywords[method].some((kw) => kw.includes(term) || term.includes(kw))) {
+        matched.push(method);
+      }
+    }
+    return matched;
+  }
+
+  /**
+   * Cláusulas OR de busca textual da listagem de inscrições. Compartilhado entre
+   * a listagem paginada e o export para manter o mesmo comportamento de pesquisa:
+   * nome/e-mail/documento (conta e snapshot do participante), código de cupom,
+   * código de voucher e método de pagamento (via {@link matchPaymentMethodsFromSearch}).
+   * `uuidMatchIds` vem da pré-busca por ID (UUID não suporta `contains` no Prisma).
+   */
+  private buildRegistrationTextSearchOr(
+    searchTerm: string,
+    uuidMatchIds: string[],
+  ): any[] {
+    // CPF/CNPJ formatados (ex: 503.798.000-00) → buscar também sem pontuação
+    const searchTermDigits = searchTerm.replace(/[.\-\/]/g, '');
+    const methods = this.matchPaymentMethodsFromSearch(searchTerm);
+
+    return [
+      ...(uuidMatchIds.length > 0 ? [{ id: { in: uuidMatchIds } }] : []),
+      {
+        user: {
+          OR: [
+            { firstName: { contains: searchTerm, mode: 'insensitive' } },
+            { lastName: { contains: searchTerm, mode: 'insensitive' } },
+            { email: { contains: searchTerm, mode: 'insensitive' } },
+            { documentNumber: { contains: searchTerm, mode: 'insensitive' } },
+            ...(searchTermDigits !== searchTerm
+              ? [{ documentNumber: { contains: searchTermDigits, mode: 'insensitive' as const } }]
+              : []),
+          ],
+        },
+      },
+      { participantName: { contains: searchTerm, mode: 'insensitive' } },
+      { participantEmail: { contains: searchTerm, mode: 'insensitive' } },
+      { participantCpf: { contains: searchTerm, mode: 'insensitive' } },
+      ...(searchTermDigits !== searchTerm
+        ? [{ participantCpf: { contains: searchTermDigits, mode: 'insensitive' as const } }]
+        : []),
+      // Cupom/voucher aplicados no pedido — busca pelo código
+      { order: { coupon: { code: { contains: searchTerm, mode: 'insensitive' } } } },
+      { order: { voucher: { code: { contains: searchTerm, mode: 'insensitive' } } } },
+      // Método de pagamento (só adiciona quando o termo casa algum método)
+      ...(methods.length > 0
+        ? [{ order: { payment: { method: { in: methods } } } }]
+        : []),
+    ];
+  }
+
   async getRegistrations(userId: string, eventId: string, queryDto: RegistrationsQueryDto) {
     await this.verifyOrganizerAccess(userId, eventId, 'dashboard');
 
@@ -3492,8 +3577,6 @@ export class EventsService {
     if (search) {
       const isIdSearch = search.startsWith('#');
       const searchTerm = isIdSearch ? search.slice(1) : search;
-      // CPF/CNPJ formatados (ex: 503.798.000-00) → buscar também sem pontuação
-      const searchTermDigits = searchTerm.replace(/[.\-\/]/g, '');
 
       const uuidMatches = await prismaRead.$queryRaw<{ id: string }[]>`
         SELECT r.id FROM "Registration" r
@@ -3506,28 +3589,7 @@ export class EventsService {
       if (isIdSearch) {
         where.OR = uuidMatchIds.length > 0 ? [{ id: { in: uuidMatchIds } }] : [{ id: 'no-match' }];
       } else {
-        where.OR = [
-          ...(uuidMatchIds.length > 0 ? [{ id: { in: uuidMatchIds } }] : []),
-          {
-            user: {
-              OR: [
-                { firstName: { contains: searchTerm, mode: 'insensitive' } },
-                { lastName: { contains: searchTerm, mode: 'insensitive' } },
-                { email: { contains: searchTerm, mode: 'insensitive' } },
-                { documentNumber: { contains: searchTerm, mode: 'insensitive' } },
-                ...(searchTermDigits !== searchTerm
-                  ? [{ documentNumber: { contains: searchTermDigits, mode: 'insensitive' as const } }]
-                  : []),
-              ],
-            },
-          },
-          { participantName: { contains: searchTerm, mode: 'insensitive' } },
-          { participantEmail: { contains: searchTerm, mode: 'insensitive' } },
-          { participantCpf: { contains: searchTerm, mode: 'insensitive' } },
-          ...(searchTermDigits !== searchTerm
-            ? [{ participantCpf: { contains: searchTermDigits, mode: 'insensitive' as const } }]
-            : []),
-        ];
+        where.OR = this.buildRegistrationTextSearchOr(searchTerm, uuidMatchIds);
       }
     }
 
@@ -4840,22 +4902,7 @@ export class EventsService {
           AND (r.id::text ILIKE ${'%' + searchTerm + '%'} OR o.id::text ILIKE ${'%' + searchTerm + '%'})
       `;
       const uuidMatchIds = uuidMatches.map((row: any) => row.id);
-      where.OR = [
-        ...(uuidMatchIds.length > 0 ? [{ id: { in: uuidMatchIds } }] : []),
-        {
-          user: {
-            OR: [
-              { firstName: { contains: searchTerm, mode: 'insensitive' } },
-              { lastName: { contains: searchTerm, mode: 'insensitive' } },
-              { email: { contains: searchTerm, mode: 'insensitive' } },
-              { documentNumber: { contains: searchTerm, mode: 'insensitive' } },
-            ],
-          },
-        },
-        { participantName: { contains: searchTerm, mode: 'insensitive' } },
-        { participantEmail: { contains: searchTerm, mode: 'insensitive' } },
-        { participantCpf: { contains: searchTerm, mode: 'insensitive' } },
-      ];
+      where.OR = this.buildRegistrationTextSearchOr(searchTerm, uuidMatchIds);
     }
 
     const registrations = await prismaRead.registration.findMany({
