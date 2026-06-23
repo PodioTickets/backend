@@ -644,10 +644,20 @@ export class PaymentsService {
               ? queriedReg.emergencyContactPhone
               : (reg.emergencyContactPhone ?? null);
 
+            // Nome/e-mail do participante: prioriza os campos ESCALARES da
+            // inscrição (`participantName`/`participantEmail`) e cai p/ o `user`
+            // vinculado. Convidado SEM conta tem `reg.user` null e os dados só
+            // nos escalares — sem este fallback, a lista mostrava "Participante"
+            // genérico (bug intermitente: só aparecia em pedidos com 2º
+            // participante convidado sem conta). Mesma precedência do gerador de
+            // PDF/e-mail de confirmação.
+            const linkedUserName = reg.user
+              ? `${reg.user.firstName ?? ''} ${reg.user.lastName ?? ''}`.trim()
+              : '';
             return {
               id: reg.id,
-              name: reg.user ? `${reg.user.firstName} ${reg.user.lastName}` : null,
-              email: reg.user?.email || null,
+              name: (reg.participantName ?? linkedUserName) || null,
+              email: reg.participantEmail ?? reg.user?.email ?? null,
               avatarUrl: reg.user?.avatarUrl ?? null,
               ticket: reg.tickets && reg.tickets.length > 0 ? (() => {
                 const rt = reg.tickets[0];

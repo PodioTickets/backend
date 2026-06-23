@@ -4,6 +4,7 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { KitsService } from '../../kits/kits.service';
 import { EmailService } from '../../../common/services/email.service';
 import { TicketPdfService } from '../../../common/services/ticket-pdf.service';
+import { PaymentsService } from '../../payments/payments.service';
 
 describe('RegistrationsService - Performance Tests', () => {
   let service: RegistrationsService;
@@ -88,6 +89,10 @@ describe('RegistrationsService - Performance Tests', () => {
         {
           provide: TicketPdfService,
           useValue: {},
+        },
+        {
+          provide: PaymentsService,
+          useValue: { generateReceiptPdf: jest.fn() },
         },
       ],
     }).compile();

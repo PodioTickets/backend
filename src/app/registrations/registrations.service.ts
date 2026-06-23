@@ -16,6 +16,37 @@ import {
   TicketPdfProduct,
   TicketPdfRegistration,
 } from '../../common/services/ticket-pdf.service';
+import { PaymentsService } from '../payments/payments.service';
+
+/**
+ * Formata a data do evento (pt-BR, dia/mês/ano) para o envelope do e-mail.
+ * Espelha o helper homônimo de `payments.service` (mesma saída no template).
+ */
+function formatEventDate(date: Date | string | null | undefined): string {
+  if (!date) return '';
+  const d = new Date(date as string);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+/**
+ * Compõe o endereço do evento a partir das colunas estruturadas (cidade/estado/
+ * bairro/local/CEP). Espelha o helper homônimo de `payments.service`.
+ */
+function formatEventAddress(event: any): string {
+  const parts: string[] = [];
+  const cityState: string[] = [];
+  if (event?.city) cityState.push(event.city);
+  if (event?.state) cityState.push(event.state);
+  if (cityState.length) parts.push(cityState.join(' - '));
+  if (event?.neighborhood) parts.push(event.neighborhood);
+  if (event?.location) parts.push(event.location);
+  if (event?.zipCode) {
+    const cep = String(event.zipCode).replace(/\D/g, '');
+    parts.push(cep.length === 8 ? `${cep.slice(0, 5)}-${cep.slice(5)}` : cep);
+  }
+  return parts.join(', ');
+}
 
 /**
  * Compõe a localização do evento para o PDF a partir do snapshot. `location`
@@ -38,6 +69,10 @@ export class RegistrationsService {
     private readonly kitsService: KitsService,
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
+    // Reúso do gerador de comprovante (recibo) do pedido — mesmo PDF do download
+    // e do e-mail de confirmação. Sem ciclo: RegistrationsModule importa
+    // PaymentsModule, não o contrário.
+    private readonly paymentsService: PaymentsService,
   ) { }
 
   private async isAdminUser(userId: string): Promise<boolean> {
@@ -814,6 +849,167 @@ export class RegistrationsService {
    *
    * @returns buffer do PDF + nome de arquivo já saneado para o Content-Disposition.
    */
+  /**
+   * Reenvia o e-mail de confirmação do PEDIDO (TODOS os ingressos + comprovante)
+   * para o endereço informado — como se fosse o e-mail do comprador. Acionado no
+   * modal de pedido (comprador / organizador / admin).
+   *
+   * Reúso máximo + baixo risco: cada ingresso é gerado por `generateTicketPdf`
+   * (que já aplica o controle de acesso por inscrição) e o comprovante por
+   * `paymentsService.generateReceiptPdf` (idem). NÃO toca no caminho de
+   * pagamento já testado.
+   *
+   * Performance: os PDFs de ingresso são gerados SEQUENCIALMENTE — o gerador
+   * (yoga-layout) não suporta render paralelo, mesma restrição do envio
+   * pós-pagamento. Geração tolerante: um ingresso que falhe é logado e pulado,
+   * sem abortar o reenvio dos demais.
+   *
+   * Segurança: o destino é arbitrário (organizador reenvia p/ o cliente), mas o
+   * ACESSO ao pedido é checado (comprador/admin/organizador) antes de qualquer
+   * geração — princípio do menor privilégio.
+   */
+  async resendOrderConfirmation(
+    registrationId: string,
+    userId: string,
+    targetEmail: string,
+  ): Promise<{ message: string; ticketCount: number }> {
+    const prismaRead = this.prisma.getReadClient();
+
+    // 1. Resolve o pedido a partir da inscrição.
+    const registration = await prismaRead.registration.findUnique({
+      where: { id: registrationId },
+      select: { orderId: true },
+    });
+    if (!registration?.orderId) {
+      throw new NotFoundException('Pedido não encontrado para esta inscrição');
+    }
+
+    // 2. Carrega o pedido: envelope do e-mail + inscrições válidas + dados de auth.
+    const order: any = await prismaRead.order.findUnique({
+      where: { id: registration.orderId },
+      select: {
+        id: true,
+        userId: true,
+        user: { select: { firstName: true, lastName: true } },
+        event: {
+          select: {
+            organizationId: true,
+            name: true,
+            eventDate: true,
+            location: true,
+            neighborhood: true,
+            city: true,
+            state: true,
+            zipCode: true,
+            logoUrl: true,
+            bannerUrl: true,
+          },
+        },
+        registrations: {
+          where: {
+            status: {
+              notIn: [RegistrationStatus.PENDING, RegistrationStatus.CANCELLED],
+            },
+          },
+          select: {
+            id: true,
+            participantName: true,
+            user: { select: { firstName: true, lastName: true } },
+          },
+        },
+      },
+    });
+    if (!order) {
+      throw new NotFoundException('Pedido não encontrado');
+    }
+
+    // 3. Controle de acesso: comprador / admin / organizador (membro da org do
+    //    evento). Mesmo critério do download do comprovante.
+    const isBuyer = order.userId === userId;
+    let authorized = isBuyer || (await this.isAdminUser(userId));
+    if (!authorized && order.event?.organizationId) {
+      const member = await prismaRead.organizationMember.findFirst({
+        where: { organizationId: order.event.organizationId, userId },
+        select: { id: true },
+      });
+      authorized = !!member;
+    }
+    if (!authorized) {
+      throw new BadRequestException(
+        'Acesso negado — você não tem permissão para reenviar este pedido',
+      );
+    }
+
+    const regs: any[] = order.registrations ?? [];
+    if (regs.length === 0) {
+      throw new BadRequestException(
+        'O pedido não possui ingressos válidos para reenvio',
+      );
+    }
+
+    // 4. Gera os PDFs de ingresso (sequencial) reusando o gerador por inscrição.
+    const ticketPdfs: Array<{ buffer: Buffer; participantName: string }> = [];
+    for (const reg of regs) {
+      const participantName: string =
+        (reg.participantName ??
+          `${reg.user?.firstName ?? ''} ${reg.user?.lastName ?? ''}`.trim()) ||
+        'Participante';
+      try {
+        const { buffer } = await this.generateTicketPdf(reg.id, userId);
+        ticketPdfs.push({ buffer, participantName });
+      } catch (e: any) {
+        this.logger.warn(
+          `Ingresso PDF falhou no reenvio (reg ${reg.id}): ${e?.message}`,
+        );
+      }
+    }
+
+    // 5. Gera o comprovante (recibo) do pedido. Pedido gratuito pode não ter
+    //    recibo — tolera falha e segue só com os ingressos.
+    const receiptPdf = await this.paymentsService
+      .generateReceiptPdf(registrationId, userId)
+      .then((r) => r.buffer)
+      .catch((e: any) => {
+        this.logger.warn(
+          `Comprovante PDF falhou no reenvio (pedido ${order.id}): ${e?.message}`,
+        );
+        return undefined;
+      });
+
+    if (ticketPdfs.length === 0 && !receiptPdf) {
+      throw new BadRequestException(
+        'Não foi possível gerar os anexos do pedido. Tente novamente.',
+      );
+    }
+
+    // 6. Envia UM e-mail ao destino com TODOS os ingressos + comprovante, como
+    //    se fosse o comprador (sem banner "inscrição feita por"). Diferente do
+    //    envio pós-pagamento, aqui o erro NÃO é silencioso: propaga p/ o
+    //    controller dar feedback ao usuário.
+    const event = order.event ?? {};
+    await this.emailService.sendRegistrationConfirmed({
+      email: targetEmail,
+      firstName: order.user?.firstName || 'Participante',
+      eventName: event.name ?? '',
+      eventLocation: event.location ?? '',
+      eventDate: formatEventDate(event.eventDate),
+      eventAddress: formatEventAddress(event),
+      eventBannerUrl: event.logoUrl ?? event.bannerUrl ?? '',
+      ticketPdfs,
+      receiptPdf,
+    });
+
+    this.logger.log(
+      `Pedido ${order.id} reenviado para ${targetEmail} ` +
+        `(${ticketPdfs.length} ingresso(s)${receiptPdf ? ' + comprovante' : ''}) por ${userId}`,
+    );
+
+    return {
+      message: 'E-mail reenviado com sucesso',
+      ticketCount: ticketPdfs.length,
+    };
+  }
+
   async generateTicketPdf(
     id: string,
     userId: string,

@@ -4,6 +4,7 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { KitsService } from '../../kits/kits.service';
 import { EmailService } from '../../../common/services/email.service';
 import { TicketPdfService } from '../../../common/services/ticket-pdf.service';
+import { PaymentsService } from '../../payments/payments.service';
 import { NotFoundException, BadRequestException } from '@nestjs/common';
 import { RegistrationStatus } from '@prisma/client';
 
@@ -27,6 +28,7 @@ describe('RegistrationsService', () => {
     },
     order: {
       findMany: jest.fn(),
+      findUnique: jest.fn(),
       count: jest.fn(),
     },
     organizationMember: {
@@ -88,6 +90,10 @@ describe('RegistrationsService', () => {
         {
           provide: TicketPdfService,
           useValue: mockTicketPdfService,
+        },
+        {
+          provide: PaymentsService,
+          useValue: { generateReceiptPdf: jest.fn() },
         },
       ],
     }).compile();
@@ -525,6 +531,112 @@ describe('RegistrationsService', () => {
         service.generateTicketPdf('reg-x', 'user-1'),
       ).rejects.toThrow(NotFoundException);
       expect(mockTicketPdfService.generateTicketPdf).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('resendOrderConfirmation', () => {
+    // Anexa spies nas instâncias resolvidas (EmailService/PaymentsService são
+    // mockados como objetos no módulo de teste).
+    let sendEmail: jest.Mock;
+    let genReceipt: jest.Mock;
+
+    const ORDER = {
+      id: 'order-1',
+      userId: 'buyer-1',
+      user: { firstName: 'Ana', lastName: 'Silva' },
+      event: {
+        organizationId: 'org-1',
+        name: 'Corrida',
+        eventDate: '2026-07-01T12:00:00.000Z',
+        location: 'Parque',
+        city: 'SP',
+        state: 'SP',
+        logoUrl: 'logo.png',
+      },
+      registrations: [
+        { id: 'reg-1', participantName: 'Ana Silva', user: null },
+        { id: 'reg-2', participantName: 'Beto Souza', user: null },
+      ],
+    };
+
+    beforeEach(() => {
+      sendEmail = jest.fn().mockResolvedValue(undefined);
+      genReceipt = jest.fn().mockResolvedValue({ buffer: Buffer.from('rcpt'), fileName: 'r.pdf' });
+      (service as any).emailService.sendRegistrationConfirmed = sendEmail;
+      (service as any).paymentsService.generateReceiptPdf = genReceipt;
+      jest
+        .spyOn(service, 'generateTicketPdf')
+        .mockResolvedValue({ buffer: Buffer.from('tkt'), fileName: 't.pdf' });
+    });
+
+    it('404 quando a inscrição não tem pedido', async () => {
+      mockPrismaService.registration.findUnique.mockResolvedValue(null);
+      await expect(
+        service.resendOrderConfirmation('reg-x', 'buyer-1', 'd@e.com'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('comprador: gera 1 PDF por inscrição + comprovante e envia 1 e-mail ao destino', async () => {
+      mockPrismaService.registration.findUnique.mockResolvedValue({ orderId: 'order-1' });
+      mockPrismaService.order.findUnique.mockResolvedValue(ORDER);
+
+      const res = await service.resendOrderConfirmation('reg-1', 'buyer-1', 'Destino@Mail.com');
+
+      // Não consulta organização (comprador já autorizado).
+      expect(mockPrismaService.organizationMember.findFirst).not.toHaveBeenCalled();
+      expect(service.generateTicketPdf).toHaveBeenCalledTimes(2);
+      expect(genReceipt).toHaveBeenCalledWith('reg-1', 'buyer-1');
+      expect(sendEmail).toHaveBeenCalledTimes(1);
+      const arg = sendEmail.mock.calls[0][0];
+      expect(arg.email).toBe('Destino@Mail.com');
+      expect(arg.ticketPdfs).toHaveLength(2);
+      expect(arg.receiptPdf).toBeInstanceOf(Buffer);
+      expect(arg.invitedByName).toBeUndefined(); // envia como comprador
+      expect(res).toEqual({ message: 'E-mail reenviado com sucesso', ticketCount: 2 });
+    });
+
+    it('organizador (membro da org): autorizado mesmo não sendo o comprador', async () => {
+      mockPrismaService.registration.findUnique.mockResolvedValue({ orderId: 'order-1' });
+      mockPrismaService.order.findUnique.mockResolvedValue(ORDER);
+      mockPrismaService.user.findUnique.mockResolvedValue({ role: 'ORGANIZER' }); // não-admin
+      mockPrismaService.organizationMember.findFirst.mockResolvedValue({ id: 'm-1' });
+
+      await service.resendOrderConfirmation('reg-1', 'org-user', 'd@e.com');
+      expect(sendEmail).toHaveBeenCalledTimes(1);
+    });
+
+    it('não-autorizado (nem comprador, nem admin, nem membro): BadRequest', async () => {
+      mockPrismaService.registration.findUnique.mockResolvedValue({ orderId: 'order-1' });
+      mockPrismaService.order.findUnique.mockResolvedValue(ORDER);
+      mockPrismaService.user.findUnique.mockResolvedValue({ role: 'USER' });
+      mockPrismaService.organizationMember.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.resendOrderConfirmation('reg-1', 'estranho', 'd@e.com'),
+      ).rejects.toThrow(BadRequestException);
+      expect(sendEmail).not.toHaveBeenCalled();
+    });
+
+    it('comprovante falho (pedido gratuito): segue só com os ingressos', async () => {
+      mockPrismaService.registration.findUnique.mockResolvedValue({ orderId: 'order-1' });
+      mockPrismaService.order.findUnique.mockResolvedValue(ORDER);
+      genReceipt.mockRejectedValue(new Error('sem recibo'));
+
+      const res = await service.resendOrderConfirmation('reg-1', 'buyer-1', 'd@e.com');
+      const arg = sendEmail.mock.calls[0][0];
+      expect(arg.receiptPdf).toBeUndefined();
+      expect(arg.ticketPdfs).toHaveLength(2);
+      expect(res.ticketCount).toBe(2);
+    });
+
+    it('pedido sem inscrições válidas: BadRequest', async () => {
+      mockPrismaService.registration.findUnique.mockResolvedValue({ orderId: 'order-1' });
+      mockPrismaService.order.findUnique.mockResolvedValue({ ...ORDER, registrations: [] });
+
+      await expect(
+        service.resendOrderConfirmation('reg-1', 'buyer-1', 'd@e.com'),
+      ).rejects.toThrow(BadRequestException);
+      expect(service.generateTicketPdf).not.toHaveBeenCalled();
     });
   });
 });
