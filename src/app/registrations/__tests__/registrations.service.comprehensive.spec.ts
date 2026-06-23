@@ -4,6 +4,7 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { KitsService } from '../../kits/kits.service';
 import { EmailService } from '../../../common/services/email.service';
 import { TicketPdfService } from '../../../common/services/ticket-pdf.service';
+import { PaymentsService } from '../../payments/payments.service';
 import { NotFoundException, BadRequestException } from '@nestjs/common';
 import { RegistrationStatus } from '@prisma/client';
 
@@ -95,6 +96,10 @@ describe('RegistrationsService - Comprehensive Tests', () => {
         {
           provide: TicketPdfService,
           useValue: {},
+        },
+        {
+          provide: PaymentsService,
+          useValue: { generateReceiptPdf: jest.fn() },
         },
       ],
     }).compile();

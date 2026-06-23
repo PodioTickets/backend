@@ -1115,26 +1115,35 @@ export class EventsService {
       prismaRead.event.count({ where }),
     ]);
 
-    // Uma query agregada por eventId (evita N aggregates — um por evento da página)
+    // Receita LÍQUIDA por evento (uma query agregada — evita N aggregates).
+    // A coluna na UI é "Receita Líquida": precisa descontar a taxa do
+    // participante (`serviceFee`, 100% plataforma) E a alíquota do organizador
+    // (`organizerFeePercent`, snapshot do pedido c/ fallback ao vivo do evento).
+    // Antes somava `finalAmount` cru (BRUTO) sob o rótulo "líquida" — divergia do
+    // dashboard/financeiro. Fórmula idêntica à canônica (aggregateEventRegistration
+    // Metrics / dashboard): `(finalAmount − serviceFee) × (1 − feePercent/100)` por
+    // pedido. Agregado por PEDIDO (sem JOIN em registrations) → sem double-count.
+    // Pagamento PAID já exclui estorno/chargeback (rebaixam o Payment).
     const salesByEventId = new Map<string, number>();
     if (events.length > 0) {
-      const salesRows = await prismaRead.order.groupBy({
-        by: ['eventId'],
-        where: {
-          eventId: { in: events.map((e) => e.id) },
-          payment: {
-            status: PaymentStatus.PAID,
-          },
-        },
-        _sum: {
-          finalAmount: true,
-        },
-      });
-      for (const row of salesRows) {
-        salesByEventId.set(
-          row.eventId,
-          this.normalizeToCents(row._sum.finalAmount),
-        );
+      const eventIds = events.map((e) => e.id);
+      const netRows = await prismaRead.$queryRaw<
+        { eventId: string; net: bigint }[]
+      >(Prisma.sql`
+        SELECT o."eventId" AS "eventId",
+          COALESCE(SUM(ROUND(
+            GREATEST(0, o."finalAmount" - COALESCE(o."serviceFee", 0))::numeric
+              * (1 - COALESCE(o."organizerFeePercent", e."organizerFeePercent", 0)::numeric / 100)
+          )), 0)::bigint AS net
+        FROM "Order" o
+        INNER JOIN "Event" e ON e.id = o."eventId"
+        INNER JOIN "Payment" p ON p."orderId" = o.id
+        WHERE o."eventId" = ANY(${eventIds}::uuid[])
+          AND p.status::text = 'PAID'
+        GROUP BY o."eventId"
+      `);
+      for (const row of netRows) {
+        salesByEventId.set(row.eventId, Number(row.net));
       }
     }
 
@@ -3239,15 +3248,19 @@ export class EventsService {
         }[]
       >(Prisma.sql`
           WITH paid_orders AS (
-            SELECT DISTINCT r."orderId",
-              GREATEST(0, o."finalAmount" - COALESCE(o."serviceFee", 0))::numeric
-                * (1 - COALESCE(o."organizerFeePercent", e."organizerFeePercent", 0)::numeric / 100) AS "netCents"
-            FROM "Registration" r
-            INNER JOIN "Order" o ON o.id = r."orderId"
+            -- Receita LÍQUIDA por PEDIDO pago (fonte da verdade = financeiro/repasse:
+            -- todo pedido PAID conta, sem filtrar por status de inscrição). ROUND por
+            -- pedido (mesma unidade do orgNet do repasse). Order.eventId mapeia o
+            -- pedido ao evento sem precisar de JOIN em Registration.
+            SELECT o.id,
+              ROUND(
+                GREATEST(0, o."finalAmount" - COALESCE(o."serviceFee", 0))::numeric
+                  * (1 - COALESCE(o."organizerFeePercent", e."organizerFeePercent", 0)::numeric / 100)
+              ) AS "netCents"
+            FROM "Order" o
             INNER JOIN "Event" e ON e.id = o."eventId"
             INNER JOIN "Payment" p ON p."orderId" = o.id
-            WHERE r."eventId" = ${eventId}::uuid
-              AND r.status::text IN ('CONFIRMED', 'COMPLETED')
+            WHERE o."eventId" = ${eventId}::uuid
               AND p.status::text = 'PAID'
               AND o."createdAt" >= ${orderCreatedBetween.gte}
               ${upperBoundSql}
@@ -3262,7 +3275,7 @@ export class EventsService {
             )::bigint AS paid,
             COUNT(*) FILTER (WHERE r.status::text = 'CANCELLED')::bigint AS cancelled,
             COUNT(*) FILTER (WHERE p.status::text = 'REFUNDED')::bigint AS refunded,
-            COALESCE((SELECT SUM(ROUND("netCents")) FROM paid_orders), 0)::bigint AS collected
+            COALESCE((SELECT SUM("netCents") FROM paid_orders), 0)::bigint AS collected
           FROM "Registration" r
           INNER JOIN "Order" o ON o.id = r."orderId"
           LEFT JOIN "Payment" p ON p."orderId" = o.id
@@ -3281,15 +3294,17 @@ export class EventsService {
         }[]
       >(Prisma.sql`
           WITH paid_orders AS (
-            SELECT DISTINCT r."orderId",
-              GREATEST(0, o."finalAmount" - COALESCE(o."serviceFee", 0))::numeric
-                * (1 - COALESCE(o."organizerFeePercent", e."organizerFeePercent", 0)::numeric / 100) AS "netCents"
-            FROM "Registration" r
-            INNER JOIN "Order" o ON o.id = r."orderId"
+            -- Idem variante com data: receita líquida por PEDIDO pago (todo PAID),
+            -- ROUND por pedido. Sem JOIN/filtro de Registration (Order.eventId basta).
+            SELECT o.id,
+              ROUND(
+                GREATEST(0, o."finalAmount" - COALESCE(o."serviceFee", 0))::numeric
+                  * (1 - COALESCE(o."organizerFeePercent", e."organizerFeePercent", 0)::numeric / 100)
+              ) AS "netCents"
+            FROM "Order" o
             INNER JOIN "Event" e ON e.id = o."eventId"
             INNER JOIN "Payment" p ON p."orderId" = o.id
-            WHERE r."eventId" = ${eventId}::uuid
-              AND r.status::text IN ('CONFIRMED', 'COMPLETED')
+            WHERE o."eventId" = ${eventId}::uuid
               AND p.status::text = 'PAID'
           )
           SELECT
@@ -3302,7 +3317,7 @@ export class EventsService {
             )::bigint AS paid,
             COUNT(*) FILTER (WHERE r.status::text = 'CANCELLED')::bigint AS cancelled,
             COUNT(*) FILTER (WHERE p.status::text = 'REFUNDED')::bigint AS refunded,
-            COALESCE((SELECT SUM(ROUND("netCents")) FROM paid_orders), 0)::bigint AS collected
+            COALESCE((SELECT SUM("netCents") FROM paid_orders), 0)::bigint AS collected
           FROM "Registration" r
           INNER JOIN "Order" o ON o.id = r."orderId"
           LEFT JOIN "Payment" p ON p."orderId" = o.id
