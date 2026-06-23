@@ -336,20 +336,29 @@ export class DashboardService {
   ): Promise<MetricsAggregateRow> {
     const rows = await this.prisma.getReadClient().$queryRaw<MetricsAggregateRow[]>(Prisma.sql`
       WITH paid_orders AS (
-        SELECT DISTINCT o.id, o."finalAmount", o."serviceFee", o."organizerFeePercent"
+        -- Receita LÍQUIDA por PEDIDO pago — fonte da verdade = financeiro/repasse:
+        -- todo pedido PAID conta (sem filtrar status de inscrição), 1x por pedido.
+        -- Antes filtrava r.status='CONFIRMED' (excluía COMPLETED → zerava a receita
+        -- de eventos já realizados, divergindo das telas de inscrições/lista). O
+        -- filtro de ingressos vira EXISTS p/ não duplicar o pedido nem reintroduzir
+        -- o filtro de status. Alíquota: snapshot do pedido c/ fallback ao vivo.
+        SELECT o.id, o."finalAmount", o."serviceFee", o."organizerFeePercent",
+          e."organizerFeePercent" AS "eventFeePercent"
         FROM "Order" o
-        INNER JOIN "Registration" r ON r."orderId" = o.id
+        INNER JOIN "Event" e ON e.id = o."eventId"
         INNER JOIN "Payment" p ON p."orderId" = o.id
-        WHERE r."eventId" = ${eventId}::uuid
-          AND r.status = 'CONFIRMED'::"RegistrationStatus"
+        WHERE o."eventId" = ${eventId}::uuid
           AND p.status = 'PAID'::"PaymentStatus"
           ${this.sqlDateFilter(dateRange, 'o')}
-          ${this.sqlTicketIdsFilter(ticketIds, 'r')}
+          ${this.sqlTicketIdsExistsFilter(ticketIds, eventId)}
       )
       SELECT
         COUNT(*)::bigint AS order_count,
         COALESCE(
-          SUM(GREATEST("finalAmount" - "serviceFee", 0) * (1 - COALESCE("organizerFeePercent"::numeric / 100, ${organizerFeeRate}::numeric)))::bigint,
+          SUM(ROUND(
+            GREATEST("finalAmount" - "serviceFee", 0)::numeric
+              * (1 - COALESCE("organizerFeePercent", "eventFeePercent", 0)::numeric / 100)
+          ))::bigint,
           0::bigint
         ) AS net_revenue
       FROM paid_orders;
@@ -1282,6 +1291,26 @@ export class DashboardService {
     return Prisma.sql`AND EXISTS (
       SELECT 1 FROM "RegistrationTicket" rt_filter
       WHERE rt_filter."registrationId" = ${aliasSql}.id
+        AND rt_filter."ticketId" = ANY(${ticketIds}::uuid[])
+    )`;
+  }
+
+  /**
+   * Filtro de ingressos para queries agregadas por PEDIDO (alias `o`): o pedido
+   * conta se TIVER ao menos uma inscrição com um dos ingressos selecionados.
+   * EXISTS (em vez de JOIN Registration) preserva o agregado por pedido sem
+   * duplicar linhas nem reintroduzir filtro de status de inscrição.
+   */
+  private sqlTicketIdsExistsFilter(
+    ticketIds: string[] | null,
+    eventId: string,
+  ): Prisma.Sql {
+    if (!ticketIds || ticketIds.length === 0) return Prisma.empty;
+    return Prisma.sql`AND EXISTS (
+      SELECT 1 FROM "Registration" r_tk
+      INNER JOIN "RegistrationTicket" rt_filter ON rt_filter."registrationId" = r_tk.id
+      WHERE r_tk."orderId" = o.id
+        AND r_tk."eventId" = ${eventId}::uuid
         AND rt_filter."ticketId" = ANY(${ticketIds}::uuid[])
     )`;
   }

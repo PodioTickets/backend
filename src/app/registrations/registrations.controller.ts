@@ -12,6 +12,7 @@ import {
 import { RegistrationsService } from './registrations.service';
 import { CreateRegistrationWithInvitedUserDto } from './dto/create-registration.dto';
 import { FilterRegistrationsDto } from './dto/filter-registrations.dto';
+import { ResendRegistrationEmailDto } from './dto/resend-email.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PaymentsService } from '../payments/payments.service';
 import { NoCache } from 'src/common/decorators/cache.decorator';
@@ -177,6 +178,29 @@ export class RegistrationsController {
       'Content-Disposition': `attachment; filename="${fileName}"`,
     });
     return new StreamableFile(buffer);
+  }
+
+  @Post(':id/resend-email')
+  @NoCache()
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Reenviar e-mail do pedido (ingressos + comprovante)',
+    description:
+      'Reenvia o e-mail de confirmação do PEDIDO ao qual a inscrição pertence — com TODOS os ingressos e o comprovante anexados — para o endereço informado, como se fosse o e-mail do comprador. Acessível pelo comprador, admin ou organizador do evento.',
+  })
+  @ApiParam({ name: 'id', description: 'Registration UUID' })
+  @ApiBody({ type: ResendRegistrationEmailDto })
+  @ApiResponse({ status: 200, description: 'E-mail reenviado com sucesso' })
+  @ApiResponse({ status: 400, description: 'Bad request - Acesso negado ou dados inválidos' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 404, description: 'Registration or order not found' })
+  resendEmail(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: ResendRegistrationEmailDto,
+  ) {
+    return this.registrationsService.resendOrderConfirmation(id, req.user.id, dto.email);
   }
 
   @Delete(':id/cancel')

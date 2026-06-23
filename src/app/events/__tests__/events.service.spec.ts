@@ -51,6 +51,9 @@ describe('EventsService', () => {
     order: {
       groupBy: jest.fn(),
     },
+    // findByOrganizer agora calcula a receita LÍQUIDA por evento via $queryRaw
+    // (não mais order.groupBy de finalAmount bruto).
+    $queryRaw: jest.fn().mockResolvedValue([]),
     eventTopic: {
       create: jest.fn(),
       createMany: jest.fn(),
@@ -314,52 +317,46 @@ describe('EventsService', () => {
       });
     });
 
-    it('aggregates paid sales with a single order.groupBy for the current page', async () => {
+    it('agrega a receita LÍQUIDA por evento via uma única $queryRaw (não bruto)', async () => {
       const ev1 = baseEventRow('e1111111-1111-1111-1111-111111111111', 'Event A');
       const ev2 = baseEventRow('e2222222-2222-2222-2222-222222222222', 'Event B');
       mockPrismaService.event.findMany.mockResolvedValue([ev1, ev2]);
       mockPrismaService.event.count.mockResolvedValue(2);
-      mockPrismaService.order.groupBy.mockResolvedValue([
-        { eventId: ev1.id, _sum: { finalAmount: 10_000 } },
-        { eventId: ev2.id, _sum: { finalAmount: 2_500 } },
+      // SQL já devolve o líquido (centavos) por eventId.
+      mockPrismaService.$queryRaw.mockResolvedValue([
+        { eventId: ev1.id, net: BigInt(9_000) },
+        { eventId: ev2.id, net: BigInt(2_250) },
       ]);
 
       const result = await service.findByOrganizer('user-1', { page: 1, limit: 20 });
 
-      expect(mockPrismaService.order.groupBy).toHaveBeenCalledTimes(1);
-      expect(mockPrismaService.order.groupBy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          by: ['eventId'],
-          where: expect.objectContaining({
-            eventId: { in: [ev1.id, ev2.id] },
-            payment: { status: PaymentStatus.PAID },
-          }),
-          _sum: { finalAmount: true },
-        }),
-      );
+      // Uma única request de agregação (não N).
+      expect(mockPrismaService.$queryRaw).toHaveBeenCalledTimes(1);
+      // O líquido (não o finalAmount bruto via groupBy) é o que vai pra totalSales.
+      expect(mockPrismaService.order.groupBy).not.toHaveBeenCalled();
       expect(result.data.events).toHaveLength(2);
-      expect(result.data.events[0].totalSales).toBe(10_000);
-      expect(result.data.events[1].totalSales).toBe(2_500);
+      expect(result.data.events[0].totalSales).toBe(9_000);
+      expect(result.data.events[1].totalSales).toBe(2_250);
     });
 
-    it('does not call order.groupBy when the page has no events', async () => {
+    it('não consulta a receita quando a página não tem eventos', async () => {
       mockPrismaService.event.findMany.mockResolvedValue([]);
       mockPrismaService.event.count.mockResolvedValue(0);
 
       await service.findByOrganizer('user-1', { page: 1, limit: 20 });
 
-      expect(mockPrismaService.order.groupBy).not.toHaveBeenCalled();
+      expect(mockPrismaService.$queryRaw).not.toHaveBeenCalled();
     });
 
-    it('returns totalSales 0 when there are no matching paid orders for listed events', async () => {
+    it('retorna totalSales 0 quando não há pedidos pagos para os eventos listados', async () => {
       const ev1 = baseEventRow('e3333333-3333-3333-3333-333333333333', 'Lonely');
       mockPrismaService.event.findMany.mockResolvedValue([ev1]);
       mockPrismaService.event.count.mockResolvedValue(1);
-      mockPrismaService.order.groupBy.mockResolvedValue([]);
+      mockPrismaService.$queryRaw.mockResolvedValue([]);
 
       const result = await service.findByOrganizer('user-1', { page: 1, limit: 10 });
 
-      expect(mockPrismaService.order.groupBy).toHaveBeenCalledTimes(1);
+      expect(mockPrismaService.$queryRaw).toHaveBeenCalledTimes(1);
       expect(result.data.events[0].totalSales).toBe(0);
     });
   });
