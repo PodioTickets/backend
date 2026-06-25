@@ -233,6 +233,8 @@ export class CouponsService {
           appliesTo: true, // ingressos cobertos ('all' ou lista de ticketIds)
           minCartValue: true, // condição: valor mínimo do carrinho (centavos)
           minQuantity: true, // condição: qtd mínima de ingressos (cupons QUANTITY)
+          maxUsage: true, // limite de uso (null = ilimitado) — esconde cupom esgotado do link
+          usageCount: true, // usos já consumidos (só p/ checar esgotamento; NÃO exposto)
           status: true,
           expiryDate: true,
           deletedAt: true,
@@ -277,14 +279,19 @@ export class CouponsService {
 
     // 2) Cupom EXIBÍVEL: DISCOUNT/QUANTITY (AGE tem endpoint próprio — age-eligibility — e
     //    depende do usuário, então fica FORA do preview do link). Preview é só exibição:
-    //    NÃO rejeita por CPF/uso/valor mínimo (validação real no apply/pay). Só esconde o
-    //    que jamais poderia aplicar: inexistente, soft-deleted, expirado (data/status) ou inativo.
+    //    NÃO rejeita por CPF/valor mínimo (validação real no apply/pay). Esconde o que jamais
+    //    poderia aplicar: inexistente, soft-deleted, expirado (data/status), inativo OU ESGOTADO
+    //    (usageCount >= maxUsage). Esgotamento espelha o `COUPON_EXHAUSTED` do patchCoupon/pay e
+    //    o filtro do cupom AGE — sem isso o link mostrava "10% OFF" num cupom que o apply rejeita.
+    const couponExhausted =
+      !!coupon && coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage;
     const couponDisplayable =
       !!coupon &&
       !coupon.deletedAt &&
       coupon.couponType !== 'AGE' &&
       coupon.status !== 'EXPIRED' &&
       coupon.status !== 'INACTIVE' &&
+      !couponExhausted &&
       (!coupon.expiryDate || coupon.expiryDate >= now);
     if (couponDisplayable) {
       return {
@@ -303,6 +310,14 @@ export class CouponsService {
           // ResponseCompressionInterceptor remove chaves null do response.
           minCartValue: coupon!.minCartValue, // centavos
           minQuantity: coupon!.minQuantity, // cupons QUANTITY
+          // Uso RESTANTE (maxUsage − usageCount) — só p/ DISCOUNT (1 uso = 1 unidade
+          // coberta), pra o front capar o desconto do preview às N unidades mais caras.
+          // QUANTITY é all-or-nothing por PEDIDO (não por unidade) → não envia (null).
+          // Sem maxUsage → null (sem limite). Esgotado já foi filtrado em couponDisplayable.
+          remaining:
+            coupon!.couponType === 'DISCOUNT' && coupon!.maxUsage != null
+              ? Math.max(0, coupon!.maxUsage - coupon!.usageCount)
+              : null,
         },
       };
     }

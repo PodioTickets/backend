@@ -954,7 +954,7 @@ export class EventsController {
 The response is a binary file download with the appropriate Content-Type and Content-Disposition headers.
 
 **Formats**
-- \`txt\` → UTF-8 CSV with BOM (\`.csv\`), comma-separated
+- \`txt\` → UTF-8 plain text with BOM (\`.txt\`), comma-separated
 - \`excel\` → Excel workbook (\`.xlsx\`) — auto column widths, bold header row
 - \`pdf\` → Landscape A4 PDF with paginated, zebra-striped table
 
@@ -1017,7 +1017,7 @@ Example: \`fields=nome,email,cpf,status,valorPago\``,
       const buf = this.exportService.generateTxt(registrations, fields, eventName);
       res.set({
         'Content-Type': 'text/plain; charset=utf-8',
-        'Content-Disposition': `attachment; filename="${safeEventName}.csv"`,
+        'Content-Disposition': `attachment; filename="${safeEventName}.txt"`,
       });
       return new StreamableFile(buf);
     }

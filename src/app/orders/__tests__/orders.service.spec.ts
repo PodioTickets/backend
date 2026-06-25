@@ -931,6 +931,41 @@ describe('OrdersService', () => {
       expect(res.newDiscount).toBe(10000); // 50% dos 2 (slots vazios contam até preencher)
     });
 
+    it('DISCOUNT existente PERCENTAGE: 5 unidades, maxUsage=2 → desconto CAPADO em 2 (não infla)', async () => {
+      // Regressão do bug do cupom do link: ao adicionar participantes além do limite de
+      // uso, a branch PERCENTAGE recalculava o desconto sobre TODAS as unidades elegíveis.
+      const existing = {
+        id: 'c1', couponType: 'DISCOUNT', type: 'PERCENTAGE', value: 10, appliesTo: null,
+        maxUsage: 2, usageCount: 0, applyToProducts: false, cpfListStatus: 'DISABLED',
+        documentList: null, cpfList: null,
+      };
+      buildAutoClient([]); // nenhum auto-cupom candidato → cai no recálculo do cupom existente
+      const tickets5 = [{ ticketId: 'tk-A', quantity: 5, unitPrice: 10000 }];
+      const res = await call(
+        order({ couponId: 'c1', coupon: existing }),
+        [{}, {}, {}, {}, {}],
+        tickets5,
+      );
+      // Sem o cap (bug): 10% de 50000 = 5000. Com cap: 10% das 2 unidades mais caras = 2000.
+      expect(res.newDiscount).toBe(2000);
+    });
+
+    it('DISCOUNT existente PERCENTAGE: sem maxUsage → cobre todas as unidades (sem regressão)', async () => {
+      const existing = {
+        id: 'c1', couponType: 'DISCOUNT', type: 'PERCENTAGE', value: 10, appliesTo: null,
+        maxUsage: null, usageCount: 0, applyToProducts: false, cpfListStatus: 'DISABLED',
+        documentList: null, cpfList: null,
+      };
+      buildAutoClient([]);
+      const tickets5 = [{ ticketId: 'tk-A', quantity: 5, unitPrice: 10000 }];
+      const res = await call(
+        order({ couponId: 'c1', coupon: existing }),
+        [{}, {}, {}, {}, {}],
+        tickets5,
+      );
+      expect(res.newDiscount).toBe(5000); // 10% de 50000 — sem limite, cobre tudo
+    });
+
     it('QUANTITY existente: participantes abaixo do minQuantity → marca remoção', async () => {
       const existing = { couponType: 'QUANTITY', minQuantity: 3 };
       buildAutoClient([], existing);
@@ -991,6 +1026,73 @@ describe('OrdersService', () => {
       expect(tx.order.update).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ discount: 10000, finalAmount: 0, couponId: 'c100' }) }),
       );
+    });
+
+    it('GRÁTIS com método FORA da whitelist do evento → PAGA (whitelist só vale com cobrança)', async () => {
+      // Regressão: voucher/cupom 100% paga R$0 e pula o gateway; o `method` é nominal.
+      // Antes, finalizar PIX num evento que só aceita cartão dava PAYMENT_METHOD_NOT_ACCEPTED.
+      const order = {
+        id: orderId, userId: buyerId, status: 'PENDING', eventId: 'evt-1',
+        expiresAt: null, totalAmount: 10000,
+        billingPostalCode: '11850000', billingStreet: 'Rua X', billingCity: 'Maceió',
+        coupon: null, voucher: null, couponId: null, voucherId: null,
+        event: { participantFeePercent: 0, organizerFeePercent: 0, acceptedPaymentMethods: ['CREDIT_CARD'] },
+        reservedTickets: [{ ticketId: 'tk-A', quantity: 1, unitPrice: 10000 }],
+        pendingParticipants: [{ email: 'a@a.com', documentType: 'CPF', documentNumber: '11111111111' }],
+        pendingProducts: null,
+      };
+      const coupon100 = { id: 'c100', code: 'FREE100', status: 'ACTIVE', couponType: 'DISCOUNT', type: 'PERCENTAGE', value: 100, appliesTo: 'all', deletedAt: null, maxUsage: null, usageCount: 0, applyToProducts: false, cpfListStatus: 'DISABLED', documentList: null, cpfList: null, expiryDate: null };
+      const tx: any = {
+        $queryRaw: jest.fn().mockResolvedValue([{ id: orderId }]),
+        order: { update: jest.fn().mockResolvedValue({}) },
+        payment: { upsert: jest.fn().mockResolvedValue({}) },
+      };
+      const client: any = {
+        order: { findUnique: jest.fn().mockResolvedValue(order) },
+        user: { findUnique: jest.fn().mockResolvedValue({ firstName: 'A', lastName: 'B', email: 'a@a.com' }) },
+        coupon: { findFirst: jest.fn().mockResolvedValue(coupon100) },
+        voucher: { findUnique: jest.fn().mockResolvedValue(null) },
+        event: { findUnique: jest.fn().mockResolvedValue(null) },
+        $transaction: jest.fn().mockImplementation((fn: any) => fn(tx)),
+      };
+      mockPrisma.getReadClient.mockReturnValue(client);
+      mockPrisma.getWriteClient.mockReturnValue(client);
+      mockRedisService.getIdempotencyResult.mockResolvedValue(null);
+      mockOrderFinalization.finalizePaidOrder.mockResolvedValue([{ id: 'reg-1', status: 'CONFIRMED', qrCode: 'q' }]);
+
+      const res: any = await service.pay(buyerId, orderId, undefined, { method: 'PIX', couponCode: 'FREE100' } as any);
+      expect(res.status).toBe('PAID');
+      expect(res.pricing.finalTotal).toBe(0);
+    });
+
+    it('NÃO-grátis com método FORA da whitelist → PAYMENT_METHOD_NOT_ACCEPTED (whitelist preservada)', async () => {
+      const order = {
+        id: orderId, userId: buyerId, status: 'PENDING', eventId: 'evt-1',
+        expiresAt: null, totalAmount: 10000,
+        billingPostalCode: '11850000', billingStreet: 'Rua X', billingCity: 'Maceió',
+        coupon: null, voucher: null, couponId: null, voucherId: null,
+        event: { participantFeePercent: 0, organizerFeePercent: 0, acceptedPaymentMethods: ['CREDIT_CARD'] },
+        reservedTickets: [{ ticketId: 'tk-A', quantity: 1, unitPrice: 10000 }],
+        pendingParticipants: [{ email: 'a@a.com', documentType: 'CPF', documentNumber: '11111111111' }],
+        pendingProducts: null,
+      };
+      const client: any = {
+        order: { findUnique: jest.fn().mockResolvedValue(order) },
+        user: { findUnique: jest.fn().mockResolvedValue({ firstName: 'A', lastName: 'B', email: 'a@a.com' }) },
+        // Sem cupom/voucher aplicado → o pay varre auto-cupons (QUANTITY/AGE) via findMany.
+        coupon: { findFirst: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([]) },
+        voucher: { findUnique: jest.fn().mockResolvedValue(null) },
+        event: { findUnique: jest.fn() },
+        $transaction: jest.fn(),
+      };
+      mockPrisma.getReadClient.mockReturnValue(client);
+      mockPrisma.getWriteClient.mockReturnValue(client);
+      mockRedisService.getIdempotencyResult.mockResolvedValue(null);
+
+      await expect(
+        service.pay(buyerId, orderId, undefined, { method: 'PIX' } as any),
+      ).rejects.toThrow(/não aceita esta forma de pagamento/);
+      expect(client.$transaction).not.toHaveBeenCalled(); // barra antes de cobrar
     });
 
     it('slot ainda vazio (reservou 2, só 1 preenchido) → INCOMPLETE_PARTICIPANTS (não paga)', async () => {

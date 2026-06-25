@@ -255,7 +255,9 @@ export class FiscalExportService {
       extension = 'pdf';
     } else {
       buffer = this.renderTxtCsv(headers, rows);
-      contentType = 'text/csv; charset=utf-8';
+      // Rótulo TXT → text/plain (não text/csv), coerente com a extensão .txt e com o
+      // export de inscrições. O conteúdo segue separado por vírgulas (dados brutos).
+      contentType = 'text/plain; charset=utf-8';
       extension = 'txt';
     }
 

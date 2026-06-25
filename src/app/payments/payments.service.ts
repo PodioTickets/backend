@@ -679,22 +679,12 @@ export class PaymentsService {
             };
           });
 
-          // Verificar se o comprador (buyer) já está na lista de registrations
-          const buyerId = buyer?.id;
-          const buyerAlreadyInList = buyerId && orderRegistrations.some((reg: any) => reg.userId === buyerId);
-
-          // Se o comprador não estiver na lista, adicionar (mesmo sem registration, ele fez o pedido)
-          if (buyerId && !buyerAlreadyInList) {
-            mappedRegistrations.push({
-              id: null, // Comprador pode não ter registration própria
-              name: buyer ? `${buyer.firstName} ${buyer.lastName}` : null,
-              email: buyer?.email || null,
-              avatarUrl: (buyer as any)?.avatarUrl ?? null,
-              ticket: null, // Comprador pode não ter ticket se comprou apenas para outros
-              ticketCategory: null,
-            });
-          }
-
+          // "Ingressos vinculados a este pedido" lista apenas PARTICIPANTES reais
+          // (inscrições do pedido). O comprador NÃO é injetado aqui: quando ele
+          // não tem inscrição própria (comprou só para terceiros), não deve
+          // aparecer como participante. Os dados dele já saem em `buyer`
+          // ("Informações do comprador"). Se o comprador também for participante,
+          // sua inscrição já está em `orderRegistrations` e é mapeada acima.
           return mappedRegistrations;
         })(),
       },

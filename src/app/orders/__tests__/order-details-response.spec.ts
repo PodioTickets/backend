@@ -148,4 +148,45 @@ describe('OrdersService.getOrderDetails — contrato de pricing/ticket.unitPrice
     const nomes = res.data.registrations[0].products.map((p: any) => p.variationName);
     expect(nomes).not.toContain('Sem interesse');
   });
+
+  // ── Pedido GRÁTIS pago (2026-06-25) ─────────────────────────────────────────
+  // Bug: na tela de "pagamento aprovado", pedido cobrado R$0 mostrava "Total pago: 204"
+  // e a forma de pagamento PIX. Causa: pricing.total caía no RECÁLCULO (totalAmount −
+  // discount) em vez de confiar no finalAmount=0 congelado, quando serviceFee=0 (grátis).
+  const buildWith = (over: Record<string, any>) => {
+    const freeOrder = { ...order, ...over };
+    const client: any = {
+      order: { findUnique: jest.fn().mockResolvedValue(freeOrder) },
+      user: { findUnique: jest.fn().mockResolvedValue({ documentNumberClean: null }) },
+      productVariation: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const prisma: any = { getReadClient: () => client, getWriteClient: () => client };
+    return new OrdersService(prisma, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, { record: () => {} } as any);
+  };
+
+  it('pedido GRÁTIS pago (finalAmount=0, serviceFee=0) → pricing.total = 0 (confia no congelado, não recalcula)', async () => {
+    // finalAmount=0 (cobrado R$0) mas discount NÃO cobre o totalAmount → o recálculo antigo
+    // daria 21000. Pós-pagamento deve confiar no finalAmount congelado.
+    const svc = buildWith({
+      status: 'PAID', serviceFee: 0, finalAmount: 0, discount: 0, totalAmount: 21000,
+      payment: { id: 'pay1', method: 'PIX', status: 'PAID', amount: 0, transactionId: null, paymentDate: new Date('2026-06-01'), createdAt: new Date('2026-06-01'), metadata: {} },
+    });
+    const res = await svc.getOrderDetails(USER, 'order-1');
+    expect(res.data.order.pricing.total).toBe(0);
+    expect(res.data.order.pricing.serviceFee).toBe(0);
+  });
+
+  it('pedido grátis via cupom 100% (discount = totalAmount) → pricing.total = 0', async () => {
+    const svc = buildWith({
+      status: 'PAID', serviceFee: 0, finalAmount: 0, discount: 21000, totalAmount: 21000,
+    });
+    const res = await svc.getOrderDetails(USER, 'order-1');
+    expect(res.data.order.pricing.total).toBe(0);
+  });
+
+  it('pedido pago normal (finalAmount>0) → pricing.total = finalAmount congelado (sem regressão)', async () => {
+    const svc = buildWith({ status: 'PAID', serviceFee: 0, finalAmount: 21000, discount: 0, totalAmount: 21000 });
+    const res = await svc.getOrderDetails(USER, 'order-1');
+    expect(res.data.order.pricing.total).toBe(21000);
+  });
 });

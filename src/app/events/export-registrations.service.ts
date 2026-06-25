@@ -187,6 +187,15 @@ function collectAllQuestions(registrations: any[]): string[] {
  * Expande fields/headers/rows substituindo 'perguntasRespostas' por uma coluna
  * por pergunta única, preenchendo a resposta correspondente em cada linha.
  */
+/**
+ * ID curto da inscrição no MESMO formato da lista/modal (`#xxxxxx...xxxx`): `#` +
+ * 6 primeiros + `...` + 4 últimos. IDs curtos (≤10) saem inteiros com `#`.
+ */
+function formatShortRegistrationId(id: string | null | undefined): string {
+  if (!id) return '';
+  return id.length > 10 ? `#${id.slice(0, 6)}...${id.slice(-4)}` : `#${id}`;
+}
+
 function buildExpandedRows(
   registrations: any[],
   fields: ExportField[],
@@ -194,7 +203,8 @@ function buildExpandedRows(
   const hasPR = fields.includes('perguntasRespostas');
   const allQuestions = hasPR ? collectAllQuestions(registrations) : [];
 
-  const headers: string[] = [];
+  // Coluna fixa de ID (sempre 1ª), no mesmo formato curto da lista de inscrições.
+  const headers: string[] = ['ID inscrição'];
   for (const f of fields) {
     if (f === 'perguntasRespostas') {
       if (allQuestions.length === 0) {
@@ -208,7 +218,7 @@ function buildExpandedRows(
   }
 
   const rows = registrations.map((reg) => {
-    const row: string[] = [];
+    const row: string[] = [formatShortRegistrationId(reg.id)];
     for (const f of fields) {
       if (f === 'perguntasRespostas') {
         if (allQuestions.length === 0) {
