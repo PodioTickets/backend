@@ -1833,11 +1833,14 @@ export class RegistrationsService {
     }
 
     // Email best-effort — log warn em caso de falha, nao aborta a operacao.
+    // `userId` é repassado para regenerar o PDF do ingresso (findOne aplica o
+    // mesmo controle de acesso) já com a variação atualizada e reanexá-lo.
     void this.sendVariationChangedEmail({
       registrationId,
       productId,
       variationId,
       previousVariationId,
+      userId,
     }).catch((err) => {
       this.logger.warn(`Variation change email failed for reg ${registrationId}: ${err?.message ?? err}`);
     });
@@ -1850,6 +1853,7 @@ export class RegistrationsService {
     productId: string;
     variationId: string;
     previousVariationId: string | null;
+    userId: string;
   }) {
     const prismaRead = this.prisma.getReadClient();
 
@@ -1908,6 +1912,18 @@ export class RegistrationsService {
         : ticket.name
       : '';
 
+    // Regenera o PDF do ingresso já com a variação atualizada (findOne lê o
+    // estado pós-update e aplica o controle de acesso do solicitante). Sub-best-
+    // effort: se falhar, o e-mail de notificação sai mesmo assim, sem anexo.
+    let ticketPdf: { buffer: Buffer; fileName: string } | undefined;
+    try {
+      ticketPdf = await this.generateTicketPdf(args.registrationId, args.userId);
+    } catch (err: any) {
+      this.logger.warn(
+        `Ticket PDF regen failed for variation email (reg ${args.registrationId}): ${err?.message ?? err}`,
+      );
+    }
+
     await this.emailService.sendProductVariationChanged({
       email: recipient,
       productName: product.name,
@@ -1917,6 +1933,7 @@ export class RegistrationsService {
       eventName: reg.order?.event?.name ?? '',
       ticketName,
       changedAt: new Date(),
+      ticketPdf,
     });
   }
 

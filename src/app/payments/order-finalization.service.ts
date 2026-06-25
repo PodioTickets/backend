@@ -38,6 +38,30 @@ import { computeCouponCoveredUnits } from '../../common/utils/coupon-eligibility
 import { tryConsumeVoucher } from '../../common/utils/voucher-reservation.util';
 
 /**
+ * Casa um item de `pendingProducts` com um SLOT (participante↔ingresso) na materialização
+ * das inscrições. Slot-aware: quando o item traz `participantIndex` (pedidos novos), casa
+ * pelo ÍNDICE do slot — isso resolve o bug de 2 participantes com o MESMO e-mail (mesma
+ * pessoa em 2 ingressos), que pelo match por e-mail colapsava TODOS os produtos na 1ª
+ * inscrição e deixava a 2ª vazia. Legado (item sem índice): casa por e-mail (case-insensitive).
+ *
+ * Puro/sem estado — a deduplicação "1 item → no máx. 1 inscrição" é feita pelo chamador
+ * (consumedProductIdx), que garante o first-wins por slot no caminho legado por e-mail.
+ */
+export function productMatchesSlot(
+  item: { participantIndex?: number | null; participantEmail?: string | null } | null | undefined,
+  slotIndex: number,
+  slotEmail: string | null | undefined,
+): boolean {
+  if (!item) return false;
+  if (typeof item.participantIndex === 'number') {
+    return item.participantIndex === slotIndex;
+  }
+  return (
+    (item.participantEmail ?? '').toLowerCase() === (slotEmail ?? '').toLowerCase()
+  );
+}
+
+/**
  * Finalize compartilhado de pedido PAGO — fonte ÚNICA de verdade.
  *
  * Antes, só o pagamento por CARTÃO À VISTA finalizava (inline no `OrdersService.pay`):
@@ -482,7 +506,9 @@ export class OrderFinalizationService {
         const participantProducts = (pendingProducts ?? []).filter(
           (item: any, itemIdx: number) => {
             if (consumedProductIdx.has(itemIdx)) return false;
-            if (item.participantEmail?.toLowerCase() !== pData.email?.toLowerCase()) return false;
+            // Slot-aware com fallback por e-mail (ver `productMatchesSlot`). O
+            // consumedProductIdx mantém o first-wins por slot no caminho legado.
+            if (!productMatchesSlot(item, pIdx, pData.email)) return false;
             consumedProductIdx.add(itemIdx);
             return true;
           },

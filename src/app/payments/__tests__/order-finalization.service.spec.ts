@@ -1,4 +1,38 @@
-import { OrderFinalizationService } from '../order-finalization.service';
+import { OrderFinalizationService, productMatchesSlot } from '../order-finalization.service';
+
+describe('productMatchesSlot (vínculo produto↔slot na materialização)', () => {
+  it('slot-aware: item com participantIndex casa SÓ pelo índice (ignora e-mail)', () => {
+    const item = { participantIndex: 1, participantEmail: 'same@x.com' };
+    expect(productMatchesSlot(item, 1, 'same@x.com')).toBe(true);
+    expect(productMatchesSlot(item, 0, 'same@x.com')).toBe(false); // outro slot, MESMO e-mail
+  });
+
+  it('BUG do produto colapsado: 2 slots, MESMO e-mail → cada produto casa só o seu slot', () => {
+    // Mesma pessoa em 2 ingressos. Antes (match por e-mail) o slot 0 consumia os 2 produtos
+    // e o slot 1 ficava vazio. Com participantIndex, cada produto casa exatamente 1 slot.
+    const p0 = { participantIndex: 0, participantEmail: 'same@x.com' };
+    const p1 = { participantIndex: 1, participantEmail: 'same@x.com' };
+    expect(productMatchesSlot(p0, 0, 'same@x.com')).toBe(true);
+    expect(productMatchesSlot(p0, 1, 'same@x.com')).toBe(false);
+    expect(productMatchesSlot(p1, 1, 'same@x.com')).toBe(true);
+    expect(productMatchesSlot(p1, 0, 'same@x.com')).toBe(false);
+  });
+
+  it('legado (sem participantIndex): casa por e-mail, case-insensitive', () => {
+    const item = { participantEmail: 'Buyer@X.com' };
+    expect(productMatchesSlot(item, 5, 'buyer@x.com')).toBe(true);
+    expect(productMatchesSlot(item, 5, 'other@x.com')).toBe(false);
+  });
+
+  it('participantIndex=0 é índice válido (não cai no fallback por e-mail)', () => {
+    const item = { participantIndex: 0, participantEmail: 'a@x.com' };
+    expect(productMatchesSlot(item, 0, 'naoimporta@x.com')).toBe(true);
+  });
+
+  it('item nulo → false', () => {
+    expect(productMatchesSlot(null, 0, 'a@x.com')).toBe(false);
+  });
+});
 
 /**
  * Cobre os dois métodos compartilhados (fonte única) do OrderFinalizationService:

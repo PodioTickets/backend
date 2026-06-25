@@ -413,6 +413,12 @@ export class EmailService {
     eventName: string;
     ticketName: string;
     changedAt: Date;
+    /**
+     * Ingresso (PDF) regenerado já com a variação ATUALIZADA. Reanexa o ingresso
+     * ao mesmo e-mail da troca para o participante receber o documento atualizado
+     * sem precisar voltar à plataforma. Best-effort: ausente se a geração falhou.
+     */
+    ticketPdf?: { buffer: Buffer; fileName: string };
   }) {
     const formatChangedAt = (d: Date) => {
       const date = d.toLocaleDateString('pt-BR');
@@ -430,16 +436,32 @@ export class EmailService {
       changedAt: this.escapeHtml(formatChangedAt(data.changedAt)),
     });
 
-    const text = `Variação alterada com sucesso\n\nAtualizamos sua escolha. A nova variação já está vinculada ao seu ingresso.\n\nProduto: ${data.productName}\nVariação anterior: ${data.previousVariationName || '—'}\nVariação atual: ${data.newVariationName}\n\nEvento: ${data.eventName}\nIngresso: ${data.ticketName}\nAlterado em: ${formatChangedAt(data.changedAt)}\n\nPodioTicket — podioticket.com.br`;
+    const text = `Variação alterada com sucesso\n\nAtualizamos sua escolha. A nova variação já está vinculada ao seu ingresso.\n\nProduto: ${data.productName}\nVariação anterior: ${data.previousVariationName || '—'}\nVariação atual: ${data.newVariationName}\n\nEvento: ${data.eventName}\nIngresso: ${data.ticketName}\nAlterado em: ${formatChangedAt(data.changedAt)}\n\nO ingresso atualizado segue em anexo.\n\nPodioTicket — podioticket.com.br`;
 
-    await this.send({
+    const msg: any = {
       from: this.from,
       to: data.email,
       subject: `Variação alterada — ${data.productName}`,
       html,
       text,
-    });
-    this.logger.log(`Product variation changed email sent to: ${data.email}`);
+    };
+
+    // Reanexa o ingresso já regenerado com a variação nova (best-effort no caller).
+    if (data.ticketPdf) {
+      msg.attachments = [
+        {
+          content: data.ticketPdf.buffer.toString('base64'),
+          filename: data.ticketPdf.fileName,
+          type: 'application/pdf',
+          disposition: 'attachment',
+        },
+      ];
+    }
+
+    await this.send(msg);
+    this.logger.log(
+      `Product variation changed email sent to: ${data.email}${data.ticketPdf ? ' (incl. ingresso atualizado)' : ''}`,
+    );
   }
 
   async sendTransferRequested(data: {

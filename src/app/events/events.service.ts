@@ -48,6 +48,7 @@ import { EmailService } from '../../common/services/email.service';
 import { RepasseService, RETENTION_DAYS } from '../repasse/repasse.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { isChargeback, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
+import { brtDayStartUtc, brtDayEndUtc } from '../../common/utils/brt-date.util';
 
 /**
  * Taxas padrão aplicadas na CRIAÇÃO de um evento (escala 0–100, ex.: 4 = 4%).
@@ -3273,7 +3274,14 @@ export class EventsService {
               WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
                 AND p.status::text = 'PAID'
             )::bigint AS paid,
-            COUNT(*) FILTER (WHERE r.status::text = 'CANCELLED')::bigint AS cancelled,
+            -- "Cancelados" = cancelamento REAL, sem estorno/chargeback (esses tem card
+            -- proprio em refunded). Estorno/chargeback rebaixam a inscricao p/ CANCELLED E
+            -- marcam o Payment como REFUNDED; sem este AND, eram contados nos DOIS cards.
+            -- (p.status IS NULL mantem cancelamento de pedido sem pagamento.)
+            COUNT(*) FILTER (
+              WHERE r.status::text = 'CANCELLED'
+                AND (p.status IS NULL OR p.status::text <> 'REFUNDED')
+            )::bigint AS cancelled,
             COUNT(*) FILTER (WHERE p.status::text = 'REFUNDED')::bigint AS refunded,
             COALESCE((SELECT SUM("netCents") FROM paid_orders), 0)::bigint AS collected
           FROM "Registration" r
@@ -3315,7 +3323,14 @@ export class EventsService {
               WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
                 AND p.status::text = 'PAID'
             )::bigint AS paid,
-            COUNT(*) FILTER (WHERE r.status::text = 'CANCELLED')::bigint AS cancelled,
+            -- "Cancelados" = cancelamento REAL, sem estorno/chargeback (esses tem card
+            -- proprio em refunded). Estorno/chargeback rebaixam a inscricao p/ CANCELLED E
+            -- marcam o Payment como REFUNDED; sem este AND, eram contados nos DOIS cards.
+            -- (p.status IS NULL mantem cancelamento de pedido sem pagamento.)
+            COUNT(*) FILTER (
+              WHERE r.status::text = 'CANCELLED'
+                AND (p.status IS NULL OR p.status::text <> 'REFUNDED')
+            )::bigint AS cancelled,
             COUNT(*) FILTER (WHERE p.status::text = 'REFUNDED')::bigint AS refunded,
             COALESCE((SELECT SUM("netCents") FROM paid_orders), 0)::bigint AS collected
           FROM "Registration" r
@@ -3560,8 +3575,9 @@ export class EventsService {
       if (!where.order.createdAt) {
         where.order.createdAt = {};
       }
-      if (startDate) where.order.createdAt.gte = new Date(startDate);
-      if (endDate) where.order.createdAt.lte = new Date(endDate);
+      // Dia civil escolhido no seletor → fronteiras do DIA BRT (evita o skew de 3h).
+      if (startDate) where.order.createdAt.gte = brtDayStartUtc(startDate);
+      if (endDate) where.order.createdAt.lte = brtDayEndUtc(endDate);
     }
 
     // IMPORTANTE: Se where.order está definido mas vazio (sem filtros), remover para não excluir registrations
@@ -4904,8 +4920,9 @@ export class EventsService {
 
     if (filters?.startDate || filters?.endDate) {
       where.order = { createdAt: {} };
-      if (filters.startDate) where.order.createdAt.gte = new Date(filters.startDate);
-      if (filters.endDate) where.order.createdAt.lte = new Date(filters.endDate);
+      // Dia civil do seletor → fronteiras do DIA BRT (mesma regra da lista de inscrições).
+      if (filters.startDate) where.order.createdAt.gte = brtDayStartUtc(filters.startDate);
+      if (filters.endDate) where.order.createdAt.lte = brtDayEndUtc(filters.endDate);
     }
 
     if (filters?.search) {
