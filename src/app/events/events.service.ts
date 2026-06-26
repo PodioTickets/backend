@@ -4885,7 +4885,8 @@ export class EventsService {
       },
       questionAnswers: {
         include: {
-          question: { select: { id: true, question: true, type: true } },
+          // `isActive` p/ excluir do export perguntas soft-deletadas (delete = isActive:false).
+          question: { select: { id: true, question: true, type: true, isActive: true } },
         },
       },
       order: {
@@ -4898,6 +4899,8 @@ export class EventsService {
               amount: true,
               paymentDate: true,
               createdAt: true,
+              // `metadata` p/ distinguir estorno (REFUND) de chargeback no status do export.
+              metadata: true,
             },
           },
           user: {

@@ -32,4 +32,51 @@ describe('ExportRegistrationsService — coluna fixa de ID da inscrição', () =
     const buf = svc.generateExcel([reg], ['nome'], 'Evento X');
     expect(buf.length).toBeGreaterThan(0);
   });
+
+  // ── Status (espelha a lista: Pago / Cancelado / Estornado / Chargeback) ──────
+  const statusCell = (r: any) => txtLines([r], ['status'])[2].split(',').pop();
+
+  it('CONFIRMED + pagamento PAID → "Pago" (não "Confirmado")', () => {
+    expect(statusCell({ id: 'x', status: 'CONFIRMED', order: { payment: { status: 'PAID' } } })).toBe('Pago');
+  });
+
+  it('pagamento REFUNDED + refundType REFUND (inscrição CANCELLED) → "Estornado"', () => {
+    expect(statusCell({ id: 'x', status: 'CANCELLED', order: { payment: { status: 'REFUNDED', metadata: { refundType: 'REFUND' } } } })).toBe('Estornado');
+  });
+
+  it('pagamento REFUNDED + refundType CHARGEBACK → "Chargeback"', () => {
+    expect(statusCell({ id: 'x', status: 'CANCELLED', order: { payment: { status: 'REFUNDED', metadata: { refundType: 'CHARGEBACK' } } } })).toBe('Chargeback');
+  });
+
+  it('CANCELLED sem reembolso → "Cancelado"', () => {
+    expect(statusCell({ id: 'x', status: 'CANCELLED', order: { payment: { status: 'FAILED' } } })).toBe('Cancelado');
+  });
+
+  // ── Perguntas soft-deletadas NÃO entram no export ────────────────────────────
+  it('pergunta com deletedAt não vira coluna; a viva sim', () => {
+    const r = {
+      id: 'x', user: {},
+      questionAnswers: [
+        { answer: 'AZUL', question: { id: 'q1', question: 'Cor favorita?', isActive: true } },
+        { answer: 'XYZ', question: { id: 'q2', question: 'Pergunta removida?', isActive: false } },
+      ],
+    };
+    const lines = txtLines([r], ['perguntasRespostas']);
+    expect(lines[1]).toContain('Cor favorita?');
+    expect(lines[1]).not.toContain('Pergunta removida?');
+    expect(lines[2]).toContain('AZUL');
+    expect(lines[2]).not.toContain('XYZ');
+  });
+
+  // ── Quebras de linha embutidas viram espaço (sem célula de 2 linhas) ─────────
+  it('resposta com \\n é achatada em uma linha só', () => {
+    const r = {
+      id: 'x', user: {},
+      questionAnswers: [{ answer: 'linha1\nlinha2', question: { id: 'q1', question: 'Obs?', isActive: true } }],
+    };
+    const lines = txtLines([r], ['perguntasRespostas']);
+    // 4 linhas no total (meta, header, dados) — sem linha extra do \n na resposta.
+    expect(lines).toHaveLength(3);
+    expect(lines[2]).toContain('linha1 linha2');
+  });
 });
