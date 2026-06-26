@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 import PDFDocument from 'pdfkit';
 import { ExportField, EXPORT_FIELDS } from './dto/export-registrations.dto';
 import { formatCpfByCountry } from '../../common/utils/locale.util';
+import { isChargeback } from '../../common/utils/refund.util';
 
 /** Maps ExportField → human-readable column label */
 const FIELD_LABELS: Record<ExportField, string> = {
@@ -35,16 +36,25 @@ function formatCurrency(cents: number | null | undefined): string {
   return (cents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
 
-function formatStatus(status: string | null | undefined): string {
-  const map: Record<string, string> = {
-    CONFIRMED: 'Confirmado',
-    CANCELLED: 'Cancelado',
-    PENDING: 'Pendente',
-    COMPLETED: 'Concluído',
-    CHARGEBACK: 'Chargeback',
-    REFUNDED: 'Reembolsado',
-  };
-  return map[status ?? ''] ?? (status ?? '');
+/**
+ * Status exibido no export — ESPELHA a lista de inscrições (RegistrationRow):
+ * Pago / Cancelado / Estornado / Chargeback / Pendente. Estorno e chargeback rebaixam a
+ * inscrição p/ CANCELLED e marcam o Payment como REFUNDED; o tipo (REFUND vs CHARGEBACK)
+ * vem do metadata (via `isChargeback`). Por isso NÃO basta o `registration.status`.
+ */
+function formatStatus(reg: any): string {
+  const payment = reg.order?.payment ?? {};
+  const pStatus: string | undefined = payment.status;
+  if (pStatus === 'REFUNDED' || reg.status === 'REFUNDED' || reg.status === 'CHARGEBACK') {
+    return isChargeback(payment.metadata) || reg.status === 'CHARGEBACK'
+      ? 'Chargeback'
+      : 'Estornado';
+  }
+  if (reg.status === 'CONFIRMED' || reg.status === 'COMPLETED' || pStatus === 'PAID') {
+    return 'Pago';
+  }
+  if (reg.status === 'CANCELLED' || pStatus === 'FAILED') return 'Cancelado';
+  return 'Pendente';
 }
 
 function formatPaymentMethod(method: string | null | undefined): string {
@@ -150,6 +160,7 @@ function extractField(reg: any, field: ExportField): string {
     case 'perguntasRespostas': {
       const qas: any[] = reg.questionAnswers ?? [];
       return qas
+        .filter((qa: any) => qa.question?.isActive !== false) // exclui perguntas soft-deletadas
         .map((qa: any) => `${qa.question?.question ?? ''}: ${qa.answer ?? ''}`)
         .join(' | ');
     }
@@ -157,7 +168,7 @@ function extractField(reg: any, field: ExportField): string {
       // Data da compra = order creation date
       return formatDate(order.purchaseDate);
     case 'status':
-      return formatStatus(reg.status);
+      return formatStatus(reg);
     case 'formaPagamento':
       return formatPaymentMethod(payment.method);
     case 'valorPago':
@@ -173,6 +184,7 @@ function collectAllQuestions(registrations: any[]): string[] {
   const questions: string[] = [];
   for (const reg of registrations) {
     for (const qa of (reg.questionAnswers ?? [])) {
+      if (qa.question?.isActive === false) continue; // pergunta soft-deletada não vira coluna
       const q: string = qa.question?.question ?? '';
       if (q && !seen.has(q)) {
         seen.add(q);
@@ -187,6 +199,24 @@ function collectAllQuestions(registrations: any[]): string[] {
  * Expande fields/headers/rows substituindo 'perguntasRespostas' por uma coluna
  * por pergunta única, preenchendo a resposta correspondente em cada linha.
  */
+/**
+ * ID curto da inscrição no MESMO formato da lista/modal (`#xxxxxx...xxxx`): `#` +
+ * 6 primeiros + `...` + 4 últimos. IDs curtos (≤10) saem inteiros com `#`.
+ */
+function formatShortRegistrationId(id: string | null | undefined): string {
+  if (!id) return '';
+  return id.length > 10 ? `#${id.slice(0, 6)}...${id.slice(-4)}` : `#${id}`;
+}
+
+/**
+ * Achata o valor numa ÚNICA linha: quebras de linha/tab embutidas (ex.: resposta de
+ * pergunta com Enter, endereço multilinha) viravam células de 2 linhas no Excel/CSV e
+ * forçavam line-break no PDF. Normaliza p/ espaço e colapsa espaços repetidos.
+ */
+function oneLine(value: string): string {
+  return String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+}
+
 function buildExpandedRows(
   registrations: any[],
   fields: ExportField[],
@@ -194,7 +224,8 @@ function buildExpandedRows(
   const hasPR = fields.includes('perguntasRespostas');
   const allQuestions = hasPR ? collectAllQuestions(registrations) : [];
 
-  const headers: string[] = [];
+  // Coluna fixa de ID (sempre 1ª), no mesmo formato curto da lista de inscrições.
+  const headers: string[] = ['ID inscrição'];
   for (const f of fields) {
     if (f === 'perguntasRespostas') {
       if (allQuestions.length === 0) {
@@ -208,7 +239,7 @@ function buildExpandedRows(
   }
 
   const rows = registrations.map((reg) => {
-    const row: string[] = [];
+    const row: string[] = [formatShortRegistrationId(reg.id)];
     for (const f of fields) {
       if (f === 'perguntasRespostas') {
         if (allQuestions.length === 0) {
@@ -216,15 +247,16 @@ function buildExpandedRows(
         } else {
           const answerMap = new Map<string, string>();
           for (const qa of (reg.questionAnswers ?? [])) {
+            if (qa.question?.isActive === false) continue; // ignora resposta de pergunta deletada
             const q: string = qa.question?.question ?? '';
             if (q) answerMap.set(q, qa.answer ?? '');
           }
           for (const q of allQuestions) {
-            row.push(answerMap.get(q) ?? '');
+            row.push(oneLine(answerMap.get(q) ?? ''));
           }
         }
       } else {
-        row.push(extractField(reg, f));
+        row.push(oneLine(extractField(reg, f)));
       }
     }
     return row;

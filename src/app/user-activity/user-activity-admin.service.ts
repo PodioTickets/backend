@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { brtDayStartUtc, brtDayEndUtc } from '../../common/utils/brt-date.util';
 import {
   AdminUserActivityFunnelQueryDto,
   AdminUserActivityListQueryDto,
@@ -77,13 +78,12 @@ export class UserActivityAdminService {
 
     if (query.from || query.to) {
       const occurredAt: Prisma.DateTimeFilter = {};
+      // Dia civil do seletor → fronteiras do DIA BRT (occurredAt é timestamp real).
       if (query.from) {
-        occurredAt.gte = new Date(query.from);
+        occurredAt.gte = brtDayStartUtc(query.from);
       }
       if (query.to) {
-        const t = new Date(query.to);
-        t.setUTCHours(23, 59, 59, 999);
-        occurredAt.lte = t;
+        occurredAt.lte = brtDayEndUtc(query.to);
       }
       where.occurredAt = occurredAt;
     }
@@ -115,6 +115,7 @@ export class UserActivityAdminService {
               lastName: true,
               email: true,
               accountType: true,
+              avatarUrl: true,
             },
           },
         },
@@ -137,6 +138,7 @@ export class UserActivityAdminService {
                 fullName: `${row.user.firstName} ${row.user.lastName}`.trim(),
                 email: row.user.email,
                 accountType: row.user.accountType,
+                avatarUrl: row.user.avatarUrl,
               }
             : null,
           sessionId: row.sessionId,
@@ -176,10 +178,17 @@ export class UserActivityAdminService {
   async statsAsAdmin(query: AdminUserActivityStatsQueryDto) {
     const prismaRead = this.prisma.getReadClient();
 
-    const to = query.to ? new Date(query.to) : new Date();
-    to.setUTCHours(23, 59, 59, 999);
+    // `to`/`from` explícitos = dia civil do seletor → fronteiras do DIA BRT. Sem eles,
+    // mantém a janela relativa de 30 dias (default), que é instante e não tem skew de dia.
+    const to = query.to
+      ? brtDayEndUtc(query.to)
+      : (() => {
+          const d = new Date();
+          d.setUTCHours(23, 59, 59, 999);
+          return d;
+        })();
     const from = query.from
-      ? new Date(query.from)
+      ? brtDayStartUtc(query.from)
       : (() => {
           const d = new Date(to);
           d.setUTCDate(d.getUTCDate() - 29);
@@ -339,10 +348,17 @@ export class UserActivityAdminService {
   async funnelAsAdmin(query: AdminUserActivityFunnelQueryDto) {
     const prismaRead = this.prisma.getReadClient();
 
-    const to = query.to ? new Date(query.to) : new Date();
-    to.setUTCHours(23, 59, 59, 999);
+    // `to`/`from` explícitos = dia civil do seletor → fronteiras do DIA BRT. Sem eles,
+    // mantém a janela relativa de 30 dias (default), que é instante e não tem skew de dia.
+    const to = query.to
+      ? brtDayEndUtc(query.to)
+      : (() => {
+          const d = new Date();
+          d.setUTCHours(23, 59, 59, 999);
+          return d;
+        })();
     const from = query.from
-      ? new Date(query.from)
+      ? brtDayStartUtc(query.from)
       : (() => {
           const d = new Date(to);
           d.setUTCDate(d.getUTCDate() - 29);

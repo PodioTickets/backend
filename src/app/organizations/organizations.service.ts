@@ -14,6 +14,7 @@ import {
 } from './dto/organization.dto';
 import { OrganizationMemberRole } from '@prisma/client';
 import { MFAService } from '../../common/services/mfa.service';
+import { brtDayStartUtc, brtDayEndUtc } from '../../common/utils/brt-date.util';
 import * as bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import {
@@ -323,6 +324,7 @@ export class OrganizationsService {
         email: string;
         phone: string | null;
         lastLoginAt: Date | null;
+        avatarUrl: string | null;
       };
       eventAccesses: { eventId: string }[];
     },
@@ -1346,6 +1348,7 @@ export class OrganizationsService {
             email: true,
             phone: true,
             lastLoginAt: true,
+            avatarUrl: true,
           },
         },
         eventAccesses: { select: { eventId: true } },
@@ -1916,13 +1919,12 @@ export class OrganizationsService {
     }
     if (query.from || query.to) {
       where.occurredAt = {};
+      // Dia civil do seletor → fronteiras do DIA BRT (occurredAt é timestamp real).
       if (query.from) {
-        (where.occurredAt as Prisma.DateTimeFilter).gte = new Date(query.from);
+        (where.occurredAt as Prisma.DateTimeFilter).gte = brtDayStartUtc(query.from);
       }
       if (query.to) {
-        const t = new Date(query.to);
-        t.setUTCHours(23, 59, 59, 999);
-        (where.occurredAt as Prisma.DateTimeFilter).lte = t;
+        (where.occurredAt as Prisma.DateTimeFilter).lte = brtDayEndUtc(query.to);
       }
     }
     const [items, total] = await Promise.all([
@@ -1938,6 +1940,7 @@ export class OrganizationsService {
               firstName: true,
               lastName: true,
               email: true,
+              avatarUrl: true,
             },
           },
         },
@@ -1959,6 +1962,7 @@ export class OrganizationsService {
             userName: row.actor
               ? `${row.actor.firstName} ${row.actor.lastName}`.trim()
               : null,
+            userAvatarUrl: row.actor?.avatarUrl ?? null,
             action,
             editedFields,
             occurredAt: row.occurredAt,
@@ -2057,13 +2061,12 @@ export class OrganizationsService {
     }
     if (query.from || query.to) {
       where.occurredAt = {};
+      // Dia civil do seletor → fronteiras do DIA BRT (occurredAt é timestamp real).
       if (query.from) {
-        (where.occurredAt as Prisma.DateTimeFilter).gte = new Date(query.from);
+        (where.occurredAt as Prisma.DateTimeFilter).gte = brtDayStartUtc(query.from);
       }
       if (query.to) {
-        const t = new Date(query.to);
-        t.setUTCHours(23, 59, 59, 999);
-        (where.occurredAt as Prisma.DateTimeFilter).lte = t;
+        (where.occurredAt as Prisma.DateTimeFilter).lte = brtDayEndUtc(query.to);
       }
     }
     if (query.kind?.trim()) {
@@ -2095,6 +2098,7 @@ export class OrganizationsService {
               firstName: true,
               lastName: true,
               email: true,
+              avatarUrl: true,
             },
           },
           organization: {
@@ -2133,6 +2137,7 @@ export class OrganizationsService {
             userName: row.actor
               ? `${row.actor.firstName} ${row.actor.lastName}`.trim()
               : null,
+            userAvatarUrl: row.actor?.avatarUrl ?? null,
             kind,
             action,
             editedFields,

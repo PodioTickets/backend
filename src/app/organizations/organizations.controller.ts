@@ -140,13 +140,10 @@ export class OrganizationsController {
       throw new Error('Organizer not found');
     }
 
-    // WhatsApp/telefone da organização NÃO podem ser alterados pelo organizador —
-    // só pelo admin (PATCH /admin/organizations/:id). Remove do payload antes do
-    // update, fechando o bypass via request forjado (UI já bloqueia os inputs).
-    // O e-mail de contato é editável pelo organizador desde 2026-06-04.
-    const { whatsapp: _whatsapp, phone: _phone, ...safeDto } = updateDto;
-
-    return this.organizationsService.updateOrganization(req.user.id, member.organizationId, safeDto);
+    // O organizador pode editar os Contatos da organização (e-mail, WhatsApp e telefone)
+    // pela tela de Configurações. WhatsApp/telefone passam pelo `UpdateOrganizationDto`
+    // (validados, opcionais) e são persistidos junto com o restante.
+    return this.organizationsService.updateOrganization(req.user.id, member.organizationId, updateDto);
   }
 
   @Patch('me/logo')

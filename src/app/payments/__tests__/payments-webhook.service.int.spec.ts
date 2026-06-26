@@ -158,6 +158,12 @@ describe('PaymentsWebhookService.handleWebhook (integração, banco real)', () =
   async function seedPendingOrder(opts: {
     withCoupon?: boolean;
     withVoucher?: boolean;
+    /**
+     * Cenário do bug de produtos colapsados: os 2 slots são a MESMA pessoa (mesmo
+     * e-mail) e cada slot tem 1 produto. `'indexed'` envia `participantIndex` (correção);
+     * `'legacy'` omite o índice (payload antigo → finalize cai no match por e-mail).
+     */
+    sameEmailProducts?: 'indexed' | 'legacy';
   } = {}) {
     const w = prisma.getWriteClient();
     const { organizationId, adminUserId, eventId } = await seedOrgUserEvent(prisma);
@@ -208,8 +214,54 @@ describe('PaymentsWebhookService.handleWebhook (integração, banco real)', () =
       select: { email: true, firstName: true, lastName: true },
     });
 
-    // 2 participantes: o comprador + um convidado sem conta (vira guest snapshot).
-    const pendingParticipants = [
+    // 2 produtos (1 por slot) p/ o cenário de e-mail duplicado. Criados só quando pedido.
+    let productAId: string | null = null;
+    let productBId: string | null = null;
+    let pendingProducts: any[] = [];
+    if (opts.sameEmailProducts) {
+      const prodA = await w.product.create({
+        data: { eventId, name: 'Camiseta', basePrice: 3000 },
+        select: { id: true },
+      });
+      const prodB = await w.product.create({
+        data: { eventId, name: 'Boné', basePrice: 2000 },
+        select: { id: true },
+      });
+      productAId = prodA.id;
+      productBId = prodB.id;
+      const indexed = opts.sameEmailProducts === 'indexed';
+      pendingProducts = [
+        {
+          productId: prodA.id, variationId: null, quantity: 1,
+          participantEmail: buyer?.email, unitPrice: 3000, stockHeld: false,
+          ...(indexed ? { participantIndex: 0 } : {}),
+        },
+        {
+          productId: prodB.id, variationId: null, quantity: 1,
+          participantEmail: buyer?.email, unitPrice: 2000, stockHeld: false,
+          ...(indexed ? { participantIndex: 1 } : {}),
+        },
+      ];
+    }
+
+    // 2 participantes. Default: comprador + convidado sem conta. Cenário de e-mail
+    // duplicado: os DOIS slots são o comprador (mesmo e-mail = mesma pessoa em 2 ingressos).
+    const pendingParticipants = opts.sameEmailProducts
+      ? [
+          {
+            name: `${buyer?.firstName ?? 'Fulano'} ${buyer?.lastName ?? ''}`.trim(),
+            email: buyer?.email, cpf: '39053344705', documentType: 'CPF',
+            documentNumber: '39053344705', phone: '11999990000', birthDate: '1990-05-10',
+            gender: 'M', questionAnswers: [],
+          },
+          {
+            name: `${buyer?.firstName ?? 'Fulano'} ${buyer?.lastName ?? ''}`.trim(),
+            email: buyer?.email, cpf: '39053344705', documentType: 'CPF',
+            documentNumber: '39053344705', phone: '11999990000', birthDate: '1990-05-10',
+            gender: 'M', questionAnswers: [],
+          },
+        ]
+      : [
       {
         name: `${buyer?.firstName ?? 'Fulano'} ${buyer?.lastName ?? ''}`.trim(),
         email: buyer?.email,
@@ -252,7 +304,7 @@ describe('PaymentsWebhookService.handleWebhook (integração, banco real)', () =
         billingCity: 'São Paulo',
         billingStateUf: 'SP',
         pendingParticipants: pendingParticipants as any,
-        pendingProducts: [] as any,
+        pendingProducts: pendingProducts as any,
       },
       select: { id: true },
     });
@@ -306,7 +358,7 @@ describe('PaymentsWebhookService.handleWebhook (integração, banco real)', () =
       data: { eventId, orderId: order.id, userId: adminUserId, status: RegistrationStatus.PENDING },
     });
 
-    return { organizationId, adminUserId, eventId, orderId: order.id, couponId, voucherId };
+    return { organizationId, adminUserId, eventId, orderId: order.id, couponId, voucherId, productAId, productBId };
   }
 
   /** Payload "de pago" da Cielo — PaymentId casa com o transactionId semeado. */
@@ -630,5 +682,59 @@ describe('PaymentsWebhookService.handleWebhook (integração, banco real)', () =
     const confirmed = await r.registration.count({ where: { orderId, status: RegistrationStatus.CONFIRMED } });
     expect(confirmed).toBe(0);
     expect(gateway.emitPaymentConfirmed).not.toHaveBeenCalled();
+  });
+
+  // ── BUG GRAVE: produtos colapsam quando 2 participantes são a MESMA pessoa (2026-06-25) ──
+  // Antes: o vínculo produto→inscrição era por participantEmail → a 1ª inscrição consumia
+  // TODOS os produtos do e-mail e a 2ª ficava vazia. Fix: `participantIndex` (slot) por item.
+
+  it('e-mail DUPLICADO com participantIndex → cada inscrição recebe SEU produto (1 + 1, não 2 + 0)', async () => {
+    const { service } = makeService(2);
+    const { orderId, productAId, productBId } = await seedPendingOrder({ sameEmailProducts: 'indexed' });
+
+    await service.handleWebhook(paidPayload());
+    await tick();
+
+    const r = prisma.getReadClient();
+    const regs = await r.registration.findMany({
+      where: { orderId, status: RegistrationStatus.CONFIRMED },
+      include: { products: { select: { productId: true } } },
+      orderBy: { createdAt: 'asc' }, // ordem dos slots (pIdx)
+    });
+    expect(regs).toHaveLength(2);
+    // Slot 0 → produto A; slot 1 → produto B. Distribuído, não colapsado.
+    expect(regs[0].products.map((p) => p.productId)).toEqual([productAId]);
+    expect(regs[1].products.map((p) => p.productId)).toEqual([productBId]);
+    // Total materializado = 2 (cada produto entregue UMA vez).
+    const total = await r.registrationProduct.count({
+      where: { registration: { orderId } },
+    });
+    expect(total).toBe(2);
+  });
+
+  it('e-mail DUPLICADO sem participantIndex (payload LEGADO) → fallback por e-mail colapsa na 1ª (2 + 0)', async () => {
+    // Documenta o comportamento de retrocompatibilidade: pedidos antigos (sem índice)
+    // seguem o match por e-mail. Por isso o índice é necessário para a correção.
+    const { service } = makeService(2);
+    const { orderId } = await seedPendingOrder({ sameEmailProducts: 'legacy' });
+
+    await service.handleWebhook(paidPayload());
+    await tick();
+
+    const r = prisma.getReadClient();
+    const regs = await r.registration.findMany({
+      where: { orderId, status: RegistrationStatus.CONFIRMED },
+      include: { products: { select: { productId: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(regs).toHaveLength(2);
+    // Legado: 1ª inscrição leva os 2; a 2ª fica sem nenhum (first-wins por e-mail).
+    expect(regs[0].products).toHaveLength(2);
+    expect(regs[1].products).toHaveLength(0);
+    // Mas cada item ainda é entregue UMA única vez (sem duplicar a cobrança/entrega).
+    const total = await r.registrationProduct.count({
+      where: { registration: { orderId } },
+    });
+    expect(total).toBe(2);
   });
 });

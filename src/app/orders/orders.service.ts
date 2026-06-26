@@ -184,7 +184,11 @@ function resolveAgeReferenceDate(order: any): Date {
  *   Requer que o caller tenha incluído `event` no select.
  */
 function computeServiceFee(order: any): number {
-  if (order?.serviceFee && order.serviceFee > 0) return order.serviceFee;
+  // Pós-pagamento (PAID): confia no snapshot congelado, MESMO quando 0 (pedido grátis /
+  // evento sem taxa). O proxy antigo `serviceFee > 0` recomputava em pedido grátis pago.
+  if (order?.status === 'PAID' || (order?.serviceFee && order.serviceFee > 0)) {
+    return order?.serviceFee ?? 0;
+  }
   const percent = order?.event?.participantFeePercent ?? 0;
   const total = order?.totalAmount ?? 0;
   const discount = order?.discount ?? 0;
@@ -195,12 +199,16 @@ function computeServiceFee(order: any): number {
 
 /**
  * Valor final exibido ao usuário: `(totalAmount - discount) + serviceFee`.
- * - Pós-pagamento (serviceFee já gravado): confia em `order.finalAmount` da DB
- *   (valor congelado no momento do pagamento).
+ * - Pós-pagamento (PAID): confia em `order.finalAmount` da DB (valor CONGELADO/cobrado
+ *   no pagamento), inclusive 0 em pedido grátis. O proxy antigo `serviceFee > 0` caía no
+ *   recálculo em pedido grátis pago (serviceFee=0) e, se o `discount` não cobrisse todo o
+ *   `totalAmount`, exibia o total CHEIO num pedido que foi cobrado R$0.
  * - PENDING: recompõe a partir do serviceFee calculado.
  */
 function computeFinalAmount(order: any, serviceFee: number): number {
-  if (order?.serviceFee && order.serviceFee > 0) return order.finalAmount ?? 0;
+  if (order?.status === 'PAID' || (order?.serviceFee && order.serviceFee > 0)) {
+    return order?.finalAmount ?? 0;
+  }
   const total = order?.totalAmount ?? 0;
   const discount = order?.discount ?? 0;
   return Math.max(0, total - discount) + serviceFee;
@@ -712,8 +720,9 @@ export function orderShape(order: any, discountOverride?: number, extra?: Record
 
   const serviceFee = computeServiceFee(order);
   // Em PENDING, o `order.finalAmount` da DB não soma a taxa de serviço — recompomos aqui.
-  // Pós-pagamento, mantemos o valor congelado (representa o cobrado de fato).
-  const finalAmount = (order.serviceFee && order.serviceFee > 0)
+  // Pós-pagamento (PAID), mantemos o valor CONGELADO (cobrado de fato), inclusive 0 em
+  // pedido grátis — o proxy `serviceFee > 0` exibia o total cheio nesses casos.
+  const finalAmount = (order?.status === 'PAID' || (order.serviceFee && order.serviceFee > 0))
     ? (order.finalAmount ?? 0)
     : Math.max(0, (order.totalAmount ?? 0) + serviceFee - discount);
 
@@ -2101,16 +2110,35 @@ export class OrdersService {
           const allowed = parseAppliesToArray(activeCoupon.appliesTo);
           applicableTickets = reservedTickets.filter((rt: any) => allowed.includes(rt.ticketId));
         }
-        const applicableSubtotal = applicableTickets.reduce(
-          (s: number, rt: any) => s + rt.unitPrice * rt.quantity,
-          0,
-        );
         // applyToProducts escopado: só os produtos dos participantes com ingresso no appliesTo.
         const productsContribution = activeCoupon.applyToProducts ? scopedCouponProducts(activeCoupon.appliesTo) : 0;
-        const applicableRatio = ticketsSubtotal > 0 ? applicableSubtotal / ticketsSubtotal : 1;
-        const applicableBase = applicableSubtotal + Math.round(productsContribution * applicableRatio);
-        newDiscount = Math.floor(applicableBase * (activeCoupon.value / 100));
-        newDiscount = Math.min(newDiscount, applicableBase);
+        if (activeCoupon.couponType === 'DISCOUNT') {
+          // DISCOUNT (cupom do link): 1 uso por UNIDADE coberta. O desconto DEVE ser capado
+          // pelo limite restante (maxUsage − usageCount), espelhando patchCoupon/pay e a
+          // branch da lista de documento acima. Sem isso, adicionar participantes recalculava
+          // o desconto sobre TODAS as unidades elegíveis e inflava o valor persistido/exibido
+          // além do que o pay realmente cobra (over-aplicação do cupom do link). As unidades
+          // mais caras são cobertas primeiro (computePartialCouponDiscount); o excedente paga cheio.
+          const applicableQty = applicableTickets.reduce((s: number, rt: any) => s + (rt.quantity ?? 0), 0);
+          const remaining = activeCoupon.maxUsage != null
+            ? Math.max(0, activeCoupon.maxUsage - activeCoupon.usageCount)
+            : applicableQty;
+          const effectiveUsage = Math.min(remaining, applicableQty);
+          newDiscount = computePartialCouponDiscount(
+            applicableTickets, activeCoupon.type, activeCoupon.value, effectiveUsage, productsContribution,
+          );
+        } else {
+          // QUANTITY (all-or-nothing): desconto sobre a base inteira; o limite de uso é por
+          // PEDIDO (1 incremento no finalize), não por unidade — não capa por unidade.
+          const applicableSubtotal = applicableTickets.reduce(
+            (s: number, rt: any) => s + rt.unitPrice * rt.quantity,
+            0,
+          );
+          const applicableRatio = ticketsSubtotal > 0 ? applicableSubtotal / ticketsSubtotal : 1;
+          const applicableBase = applicableSubtotal + Math.round(productsContribution * applicableRatio);
+          newDiscount = Math.floor(applicableBase * (activeCoupon.value / 100));
+          newDiscount = Math.min(newDiscount, applicableBase);
+        }
       } else if ((order as any).voucherId && !(order as any).couponId && (order as any).voucher) {
         const v = (order as any).voucher;
         // Voucher com lista de documento: a cobertura fica restrita aos slots dos
@@ -2778,6 +2806,11 @@ export class OrdersService {
         variationId: item.variationId ?? null,
         quantity: item.quantity,
         participantEmail: item.participantEmail,
+        // Índice do slot (participante↔ingresso). Persistido p/ o finalize vincular o
+        // produto à inscrição certa mesmo com e-mail duplicado (mesma pessoa em 2 slots).
+        // null quando o cliente não envia (payload legado) → finalize usa o e-mail.
+        participantIndex:
+          typeof item.participantIndex === 'number' ? item.participantIndex : null,
         unitPrice,
         stockHeld,
       });
@@ -3008,17 +3041,6 @@ export class OrdersService {
       throw new AppConflictException(
         'ORDER_NOT_PENDING',
         'Pedido não está mais pendente ou expirou',
-      );
-    }
-
-    // 6.3b Whitelist de métodos por evento (tela financeira). Array vazio/ausente
-    // (registro pré-migration ou include sem event) = aceita todos — mesmo
-    // comportamento dos eventos legados, que são backfillados com os 3 métodos.
-    const acceptedMethods: string[] = (order as any).event?.acceptedPaymentMethods ?? [];
-    if (acceptedMethods.length > 0 && !acceptedMethods.includes(dto.method)) {
-      throw new AppUnprocessableException(
-        'PAYMENT_METHOD_NOT_ACCEPTED',
-        'Este evento não aceita esta forma de pagamento',
       );
     }
 
@@ -3350,6 +3372,19 @@ export class OrdersService {
     // Cielo rejeita amount=0, então qualquer cobrança aqui falharia. Pulamos o gateway,
     // mantemos o método solicitado apenas para fins de relatório (amount=0).
     const isFreeOrder = finalTotal <= 0;
+
+    // Whitelist de métodos por evento (tela financeira). Só vale quando HÁ cobrança:
+    // pedido grátis pula o gateway, então o `method` é apenas nominal (relatório) e NÃO
+    // deve ser barrado — antes, finalizar R$0 com PIX num evento que não aceita PIX dava
+    // PAYMENT_METHOD_NOT_ACCEPTED indevidamente. Array vazio/ausente = aceita todos
+    // (registro pré-migration / include sem event), igual aos eventos legados backfillados.
+    const acceptedMethods: string[] = (order as any).event?.acceptedPaymentMethods ?? [];
+    if (!isFreeOrder && acceptedMethods.length > 0 && !acceptedMethods.includes(dto.method)) {
+      throw new AppUnprocessableException(
+        'PAYMENT_METHOD_NOT_ACCEPTED',
+        'Este evento não aceita esta forma de pagamento',
+      );
+    }
 
     // 6.8 Prepare payment data
     const user = await r.user.findUnique({

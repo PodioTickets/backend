@@ -131,13 +131,22 @@ describe('UserActivityAdminService.statsAsAdmin — métricas do dashboard', () 
     expect(count.mock.calls[3][0].where.action).toBe('order.paid');
   });
 
-  it('to vira fim do dia (23:59:59.999 UTC) — `to` é inclusivo', async () => {
+  it('to vira fim do dia BRT (23:59:59.999 BRT = 02:59:59.999Z do dia seguinte) — inclusivo', async () => {
     const { service, count } = build();
 
     await service.statsAsAdmin({ to: '2026-06-02' });
 
     const lte: Date = count.mock.calls[0][0].where.occurredAt.lte;
-    expect(lte.toISOString()).toBe('2026-06-02T23:59:59.999Z');
+    expect(lte.toISOString()).toBe('2026-06-03T02:59:59.999Z');
+  });
+
+  it('from vira início do dia BRT (00:00 BRT = 03:00:00Z) — inclusivo', async () => {
+    const { service, count } = build();
+
+    await service.statsAsAdmin({ from: '2026-06-02' });
+
+    const gte: Date = count.mock.calls[0][0].where.occurredAt.gte;
+    expect(gte.toISOString()).toBe('2026-06-02T03:00:00.000Z');
   });
 });
 

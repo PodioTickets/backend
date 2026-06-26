@@ -48,6 +48,7 @@ import { EmailService } from '../../common/services/email.service';
 import { RepasseService, RETENTION_DAYS } from '../repasse/repasse.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { isChargeback, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
+import { brtDayStartUtc, brtDayEndUtc } from '../../common/utils/brt-date.util';
 
 /**
  * Taxas padrão aplicadas na CRIAÇÃO de um evento (escala 0–100, ex.: 4 = 4%).
@@ -3273,7 +3274,14 @@ export class EventsService {
               WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
                 AND p.status::text = 'PAID'
             )::bigint AS paid,
-            COUNT(*) FILTER (WHERE r.status::text = 'CANCELLED')::bigint AS cancelled,
+            -- "Cancelados" = cancelamento REAL, sem estorno/chargeback (esses tem card
+            -- proprio em refunded). Estorno/chargeback rebaixam a inscricao p/ CANCELLED E
+            -- marcam o Payment como REFUNDED; sem este AND, eram contados nos DOIS cards.
+            -- (p.status IS NULL mantem cancelamento de pedido sem pagamento.)
+            COUNT(*) FILTER (
+              WHERE r.status::text = 'CANCELLED'
+                AND (p.status IS NULL OR p.status::text <> 'REFUNDED')
+            )::bigint AS cancelled,
             COUNT(*) FILTER (WHERE p.status::text = 'REFUNDED')::bigint AS refunded,
             COALESCE((SELECT SUM("netCents") FROM paid_orders), 0)::bigint AS collected
           FROM "Registration" r
@@ -3315,7 +3323,14 @@ export class EventsService {
               WHERE r.status::text IN ('CONFIRMED', 'COMPLETED')
                 AND p.status::text = 'PAID'
             )::bigint AS paid,
-            COUNT(*) FILTER (WHERE r.status::text = 'CANCELLED')::bigint AS cancelled,
+            -- "Cancelados" = cancelamento REAL, sem estorno/chargeback (esses tem card
+            -- proprio em refunded). Estorno/chargeback rebaixam a inscricao p/ CANCELLED E
+            -- marcam o Payment como REFUNDED; sem este AND, eram contados nos DOIS cards.
+            -- (p.status IS NULL mantem cancelamento de pedido sem pagamento.)
+            COUNT(*) FILTER (
+              WHERE r.status::text = 'CANCELLED'
+                AND (p.status IS NULL OR p.status::text <> 'REFUNDED')
+            )::bigint AS cancelled,
             COUNT(*) FILTER (WHERE p.status::text = 'REFUNDED')::bigint AS refunded,
             COALESCE((SELECT SUM("netCents") FROM paid_orders), 0)::bigint AS collected
           FROM "Registration" r
@@ -3560,8 +3575,9 @@ export class EventsService {
       if (!where.order.createdAt) {
         where.order.createdAt = {};
       }
-      if (startDate) where.order.createdAt.gte = new Date(startDate);
-      if (endDate) where.order.createdAt.lte = new Date(endDate);
+      // Dia civil escolhido no seletor → fronteiras do DIA BRT (evita o skew de 3h).
+      if (startDate) where.order.createdAt.gte = brtDayStartUtc(startDate);
+      if (endDate) where.order.createdAt.lte = brtDayEndUtc(endDate);
     }
 
     // IMPORTANTE: Se where.order está definido mas vazio (sem filtros), remover para não excluir registrations
@@ -4811,6 +4827,40 @@ export class EventsService {
   }
 
   /**
+   * Aplica o filtro de status (valor vindo do front) ao `where`, com a MESMA semântica da
+   * LISTA (getRegistrations) — reusado no export pra NÃO divergir. Ponto-chave: o front manda
+   * `"COMPLETED"` para "Pago", que NÃO é o status de registro literal — significa PAGO =
+   * `status IN [CONFIRMED, COMPLETED]` + `payment PAID`. Usar o valor cru (`where.status =
+   * 'COMPLETED'`) perdia todas as CONFIRMED (pagas com evento futuro). CHARGEBACK/REFUNDED
+   * filtram por `payment REFUNDED` + metadata (o chamador pós-filtra via `targetRefundType`).
+   * Retorna `targetRefundType` quando o chamador precisa refinar por metadata do pagamento.
+   */
+  private applyRegistrationStatusFilter(
+    where: any,
+    status: string | undefined,
+  ): { targetRefundType: 'CHARGEBACK' | 'REFUND' | null } {
+    if (!status) return { targetRefundType: null };
+    if (status === 'CHARGEBACK' || status === 'REFUNDED') {
+      where.order = { ...where.order, payment: { status: PaymentStatus.REFUNDED } };
+      return { targetRefundType: status === 'CHARGEBACK' ? 'CHARGEBACK' : 'REFUND' };
+    }
+    if (status === 'COMPLETED') {
+      where.status = {
+        in: [RegistrationStatus.CONFIRMED, RegistrationStatus.COMPLETED],
+      } as any;
+      where.order = { ...where.order, payment: { status: PaymentStatus.PAID } };
+    } else if (status === 'CONFIRMED' || status === 'CANCELLED') {
+      where.status = status as RegistrationStatus;
+      if (status === 'CANCELLED') {
+        // Exclui estorno/chargeback da view "Cancelado" (esses têm filtro próprio).
+        if (!where.AND) where.AND = [];
+        where.AND.push({ NOT: { order: { payment: { status: PaymentStatus.REFUNDED } } } });
+      }
+    }
+    return { targetRefundType: null };
+  }
+
+  /**
    * Fetch all registrations for a given event (no pagination) for export purposes.
    * Caller must already have organizer access verified.
    */
@@ -4869,7 +4919,8 @@ export class EventsService {
       },
       questionAnswers: {
         include: {
-          question: { select: { id: true, question: true, type: true } },
+          // `isActive` p/ excluir do export perguntas soft-deletadas (delete = isActive:false).
+          question: { select: { id: true, question: true, type: true, isActive: true } },
         },
       },
       order: {
@@ -4882,6 +4933,8 @@ export class EventsService {
               amount: true,
               paymentDate: true,
               createdAt: true,
+              // `metadata` p/ distinguir estorno (REFUND) de chargeback no status do export.
+              metadata: true,
             },
           },
           user: {
@@ -4891,21 +4944,24 @@ export class EventsService {
       },
     };
 
-    const where: any = {
-      eventId,
-      status: filters?.status && filters.status !== 'all'
-        ? (filters.status as any)
-        : { not: 'PENDING' as any },
-    };
+    // Base = não-PENDING (igual à lista). O filtro de status (quando houver) é mapeado pela
+    // MESMA lógica da lista — "COMPLETED"=Pago vira [CONFIRMED,COMPLETED]+payment PAID, etc.
+    const where: any = { eventId, status: { not: 'PENDING' as any } };
+    const statusFilter =
+      filters?.status && filters.status !== 'all' ? filters.status : undefined;
+    const { targetRefundType } = this.applyRegistrationStatusFilter(where, statusFilter);
 
     if (filters?.ticketIds?.length) {
       where.tickets = { some: { ticketId: { in: filters.ticketIds } } };
     }
 
     if (filters?.startDate || filters?.endDate) {
-      where.order = { createdAt: {} };
-      if (filters.startDate) where.order.createdAt.gte = new Date(filters.startDate);
-      if (filters.endDate) where.order.createdAt.lte = new Date(filters.endDate);
+      // MERGE em where.order (o filtro de status pode já ter setado where.order.payment).
+      if (!where.order) where.order = {};
+      if (!where.order.createdAt) where.order.createdAt = {};
+      // Dia civil do seletor → fronteiras do DIA BRT (mesma regra da lista de inscrições).
+      if (filters.startDate) where.order.createdAt.gte = brtDayStartUtc(filters.startDate);
+      if (filters.endDate) where.order.createdAt.lte = brtDayEndUtc(filters.endDate);
     }
 
     if (filters?.search) {
@@ -4920,11 +4976,21 @@ export class EventsService {
       where.OR = this.buildRegistrationTextSearchOr(searchTerm, uuidMatchIds);
     }
 
-    const registrations = await prismaRead.registration.findMany({
+    let registrations = await prismaRead.registration.findMany({
       where,
       include: includeClause,
       orderBy: [{ order: { createdAt: 'desc' } }, { id: 'asc' }],
     });
+
+    // CHARGEBACK/REFUNDED: separa por `refundType` no metadata. O export pega TUDO (sem
+    // paginação), então refina em memória (a lista usa um raw-SQL paginado p/ o mesmo fim).
+    if (targetRefundType) {
+      registrations = registrations.filter((r: any) =>
+        targetRefundType === 'CHARGEBACK'
+          ? isChargeback(r.order?.payment?.metadata)
+          : !isChargeback(r.order?.payment?.metadata),
+      );
+    }
 
     const mapped = registrations.map((reg: any) => {
       const u = reg.user;
