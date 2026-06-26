@@ -369,6 +369,43 @@ export class ProductsService {
     }
   }
 
+  /**
+   * Sobrescreve `variation.soldCount` (contador DENORMALIZADO — decrementado a cada estorno e
+   * que NUNCA somou vendas do finalize legado, logo fica menor que o real) pela contagem REAL
+   * de `RegistrationProduct` por variação: SUM(quantity) de inscrições VÁLIDAS
+   * (CONFIRMED/COMPLETED) com pagamento PAID. Estorno/chargeback rebaixam a inscrição p/
+   * CANCELLED → saem da conta sozinhos; vendas legadas válidas voltam a contar.
+   * Payment é 1-por-order (upsert por orderId), então o JOIN não duplica.
+   */
+  private async overrideVariationSoldCounts(
+    prismaRead: any,
+    products: { variations?: { id: string; soldCount?: number }[] }[],
+  ): Promise<void> {
+    const variationIds = products.flatMap((p) => (p.variations ?? []).map((v) => v.id));
+    if (variationIds.length === 0) return;
+
+    const rows = (await prismaRead.$queryRaw(Prisma.sql`
+      SELECT rp."variationId" AS "variationId", SUM(rp.quantity)::bigint AS sold
+      FROM "RegistrationProduct" rp
+      INNER JOIN "Registration" r ON r.id = rp."registrationId"
+      INNER JOIN "Order" o ON o.id = r."orderId"
+      INNER JOIN "Payment" p ON p."orderId" = o.id
+      WHERE rp."variationId" = ANY(${variationIds}::uuid[])
+        AND r.status::text IN ('CONFIRMED', 'COMPLETED')
+        AND p.status::text = 'PAID'
+      GROUP BY rp."variationId"
+    `)) as { variationId: string; sold: bigint }[];
+
+    const soldMap = new Map<string, number>(
+      rows.map((row) => [row.variationId, Number(row.sold)]),
+    );
+    for (const p of products) {
+      for (const v of p.variations ?? []) {
+        v.soldCount = soldMap.get(v.id) ?? 0;
+      }
+    }
+  }
+
   async findAll(eventId: string, filterDto: FilterProductsDto = {}, baseUrl?: string) {
     const prismaRead = this.prisma.getReadClient();
 
@@ -403,6 +440,9 @@ export class ProductsService {
     const resolvedProducts = baseUrl
       ? products.map((p) => this.resolveProductImageUrls(p, baseUrl))
       : products;
+
+    // "Total vendidos" = contagem REAL de RegistrationProduct (não o soldCount denormalizado).
+    await this.overrideVariationSoldCounts(prismaRead, resolvedProducts as any);
 
     return {
       message: 'Products fetched successfully',
@@ -442,6 +482,9 @@ export class ProductsService {
     const resolved = baseUrl
       ? this.resolveProductImageUrls(product, baseUrl)
       : product;
+
+    // "Total vendidos" = contagem REAL de RegistrationProduct (não o soldCount denormalizado).
+    await this.overrideVariationSoldCounts(prismaRead, [resolved as any]);
 
     return {
       message: 'Product fetched successfully',

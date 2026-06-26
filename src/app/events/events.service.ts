@@ -4827,6 +4827,40 @@ export class EventsService {
   }
 
   /**
+   * Aplica o filtro de status (valor vindo do front) ao `where`, com a MESMA semântica da
+   * LISTA (getRegistrations) — reusado no export pra NÃO divergir. Ponto-chave: o front manda
+   * `"COMPLETED"` para "Pago", que NÃO é o status de registro literal — significa PAGO =
+   * `status IN [CONFIRMED, COMPLETED]` + `payment PAID`. Usar o valor cru (`where.status =
+   * 'COMPLETED'`) perdia todas as CONFIRMED (pagas com evento futuro). CHARGEBACK/REFUNDED
+   * filtram por `payment REFUNDED` + metadata (o chamador pós-filtra via `targetRefundType`).
+   * Retorna `targetRefundType` quando o chamador precisa refinar por metadata do pagamento.
+   */
+  private applyRegistrationStatusFilter(
+    where: any,
+    status: string | undefined,
+  ): { targetRefundType: 'CHARGEBACK' | 'REFUND' | null } {
+    if (!status) return { targetRefundType: null };
+    if (status === 'CHARGEBACK' || status === 'REFUNDED') {
+      where.order = { ...where.order, payment: { status: PaymentStatus.REFUNDED } };
+      return { targetRefundType: status === 'CHARGEBACK' ? 'CHARGEBACK' : 'REFUND' };
+    }
+    if (status === 'COMPLETED') {
+      where.status = {
+        in: [RegistrationStatus.CONFIRMED, RegistrationStatus.COMPLETED],
+      } as any;
+      where.order = { ...where.order, payment: { status: PaymentStatus.PAID } };
+    } else if (status === 'CONFIRMED' || status === 'CANCELLED') {
+      where.status = status as RegistrationStatus;
+      if (status === 'CANCELLED') {
+        // Exclui estorno/chargeback da view "Cancelado" (esses têm filtro próprio).
+        if (!where.AND) where.AND = [];
+        where.AND.push({ NOT: { order: { payment: { status: PaymentStatus.REFUNDED } } } });
+      }
+    }
+    return { targetRefundType: null };
+  }
+
+  /**
    * Fetch all registrations for a given event (no pagination) for export purposes.
    * Caller must already have organizer access verified.
    */
@@ -4910,19 +4944,21 @@ export class EventsService {
       },
     };
 
-    const where: any = {
-      eventId,
-      status: filters?.status && filters.status !== 'all'
-        ? (filters.status as any)
-        : { not: 'PENDING' as any },
-    };
+    // Base = não-PENDING (igual à lista). O filtro de status (quando houver) é mapeado pela
+    // MESMA lógica da lista — "COMPLETED"=Pago vira [CONFIRMED,COMPLETED]+payment PAID, etc.
+    const where: any = { eventId, status: { not: 'PENDING' as any } };
+    const statusFilter =
+      filters?.status && filters.status !== 'all' ? filters.status : undefined;
+    const { targetRefundType } = this.applyRegistrationStatusFilter(where, statusFilter);
 
     if (filters?.ticketIds?.length) {
       where.tickets = { some: { ticketId: { in: filters.ticketIds } } };
     }
 
     if (filters?.startDate || filters?.endDate) {
-      where.order = { createdAt: {} };
+      // MERGE em where.order (o filtro de status pode já ter setado where.order.payment).
+      if (!where.order) where.order = {};
+      if (!where.order.createdAt) where.order.createdAt = {};
       // Dia civil do seletor → fronteiras do DIA BRT (mesma regra da lista de inscrições).
       if (filters.startDate) where.order.createdAt.gte = brtDayStartUtc(filters.startDate);
       if (filters.endDate) where.order.createdAt.lte = brtDayEndUtc(filters.endDate);
@@ -4940,11 +4976,21 @@ export class EventsService {
       where.OR = this.buildRegistrationTextSearchOr(searchTerm, uuidMatchIds);
     }
 
-    const registrations = await prismaRead.registration.findMany({
+    let registrations = await prismaRead.registration.findMany({
       where,
       include: includeClause,
       orderBy: [{ order: { createdAt: 'desc' } }, { id: 'asc' }],
     });
+
+    // CHARGEBACK/REFUNDED: separa por `refundType` no metadata. O export pega TUDO (sem
+    // paginação), então refina em memória (a lista usa um raw-SQL paginado p/ o mesmo fim).
+    if (targetRefundType) {
+      registrations = registrations.filter((r: any) =>
+        targetRefundType === 'CHARGEBACK'
+          ? isChargeback(r.order?.payment?.metadata)
+          : !isChargeback(r.order?.payment?.metadata),
+      );
+    }
 
     const mapped = registrations.map((reg: any) => {
       const u = reg.user;
