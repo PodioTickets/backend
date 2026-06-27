@@ -3,6 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { CreateRegistrationDto, CreateRegistrationWithInvitedUserDto } from './dto/create-registration.dto';
 import { FilterRegistrationsDto, RegistrationFilterStatus } from './dto/filter-registrations.dto';
 import { DocumentType, Prisma, RegistrationStatus, PaymentStatus } from '@prisma/client';
+import { eventWindowInstant } from '../../common/utils/brt-date.util';
 // QR Code é gerado dinamicamente no frontend/backend usando o payload salvo em qrCode
 import { KitsService } from '../kits/kits.service';
 import { EmailService } from '../../common/services/email.service';
@@ -105,11 +106,12 @@ export class RegistrationsService {
       throw new BadRequestException('Event is not available for registration');
     }
 
-    if (new Date() > new Date(event.registrationEndDate)) {
+    // Janela wall-clock (UTC) → instante real em BRT (+3h), senão fecha 3h cedo.
+    if (new Date() > eventWindowInstant(event.registrationEndDate)) {
       throw new BadRequestException('Registration period has ended');
     }
 
-    if (new Date() > new Date(event.eventDate)) {
+    if (new Date() > eventWindowInstant(event.eventDate)) {
       throw new BadRequestException('Event has already occurred');
     }
 

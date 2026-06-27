@@ -730,6 +730,13 @@ model Order {
   /// consumidores caem no valor vivo do evento (event.organizerFeePercent).
   organizerFeePercent   Float?
   couponId        String?  @db.Uuid // Cupom aplicado no pedido
+  /// Reserva de uso de cupom: nº de unidades (ingressos cobertos) que este pedido
+  /// PENDING reserva do `maxUsage` do cupom. Espelha a reserva de uso único do voucher,
+  /// mas na dimensão de CONTAGEM. A disponibilidade do cupom é `maxUsage − usageCount −
+  /// SUM(couponReservedUnits dos pedidos PENDING não-expirados)`, calculada sob row-lock
+  /// no claim (coupon-reservation.util). Auto-libera ao sair de PENDING (some da SUM) e
+  /// quando `expiresAt` vence — sem release explícito. null = pedido legado/sem cupom.
+  couponReservedUnits Int?  // Unidades de cupom reservadas por este pedido (PENDING)
   voucherId       String?  @db.Uuid // Voucher aplicado no pedido
   idempotencyKey  String?  @unique  // Chave de idempotência para evitar pedidos duplicados
   /// Endereço de cobrança (checkout)
@@ -766,6 +773,7 @@ model Order {
   @@index([eventId, createdAt]) // Janelas por data do pedido (métricas / relatórios)
   @@index([status, expiresAt])
   @@index([eventId, status, createdAt]) // Listagem fiscal (PAID por evento + ordenação por data)
+  @@index([couponId, status]) // SUM das reservas de cupom por pedidos PENDING (claim atômico)
 }
 
 model Payment {

@@ -139,7 +139,9 @@
       "Bash(pnpm remove *)",
       "Read(//c/Users/muril/Projects/PodioTickets/**)",
       "Read(//c/Users/muril/Projects/PodioTickets/frontend/**)",
-      "Bash(npx vitest *)"
+      "Bash(npx vitest *)",
+      "Bash(awk 'NR>=1074 && NR<=1320 && \\(/^  describe\\\\\\(/ || /^  \\\\}\\\\\\);/\\)' src/app/orders/__tests__/orders.service.spec.ts)",
+      "Bash(awk -F: '$1>=985 && $1<=1340')"
     ]
   }
 }
