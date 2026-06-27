@@ -564,7 +564,6 @@ export class EventsService {
       startDate,
       endDate,
       status,
-      includePast = false,
       modalities,
       textMatchIds,
     } = params;
@@ -595,11 +594,10 @@ export class EventsService {
         gte: new Date(startDate),
         lte: new Date(endDate),
       };
-    } else if (!includePast) {
-      where.eventDate = {
-        gte: new Date(),
-      };
     }
+    // Sem o branch `!includePast → eventDate >= now`: o catálogo público mostra
+    // eventos FINALIZADOS por 30 dias (cutoff no AND abaixo), igual à home (findAll).
+    // Esse `gte: now` escondia TODOS os passados no /search — divergia da home.
 
     if (modalities && modalities.trim().length > 0) {
       const codes = modalities
@@ -620,12 +618,15 @@ export class EventsService {
       }
     }
 
-    // Catálogo público: oculta eventos cuja realização passou de 1 mês — mesma
+    // Catálogo público: oculta eventos cuja realização passou de 30 dias — mesma
     // regra de `findAll`. Aplicado via AND para sobrepor qualquer startDate
     // anterior ao cutoff (includePast=true ou janela customizada não devem
     // burlar a regra).
     const eventDateCutoff = new Date();
-    eventDateCutoff.setMonth(eventDateCutoff.getMonth() - 1);
+    // Mostra eventos finalizados por 30 dias após a realização, depois oculta.
+    // `setDate(-30)` é exatamente 30 dias (evita o rollover do `setMonth` em
+    // meses curtos, que dava janela inconsistente).
+    eventDateCutoff.setDate(eventDateCutoff.getDate() - 30);
 
     return {
       AND: [
@@ -804,7 +805,7 @@ export class EventsService {
     }
 
     // Retornar todos os eventos (futuros e passados recentes). Eventos cuja realização
-    // passou de 1 mês são ocultados do catálogo público (sem valor para o usuário e
+    // passou de 30 dias são ocultados do catálogo público (sem valor para o usuário e
     // sem inscrições). A condição é injetada no `whereFinal` (AND de topo) mais abaixo
     // para coexistir de forma segura com filtros opcionais de janela
     // (thisWeek/thisMonth/startDate-endDate) que reescrevem `where.eventDate`/`where.AND`.
@@ -897,9 +898,12 @@ export class EventsService {
       }
     }
 
-    // Cutoff: oculta eventos cuja realização passou de 1 mês (regra do catálogo público).
+    // Cutoff: oculta eventos cuja realização passou de 30 dias (regra do catálogo público).
     const eventDateCutoff = new Date();
-    eventDateCutoff.setMonth(eventDateCutoff.getMonth() - 1);
+    // Mostra eventos finalizados por 30 dias após a realização, depois oculta.
+    // `setDate(-30)` é exatamente 30 dias (evita o rollover do `setMonth` em
+    // meses curtos, que dava janela inconsistente).
+    eventDateCutoff.setDate(eventDateCutoff.getDate() - 30);
 
     const whereFinal: Prisma.EventWhereInput = {
       AND: [

@@ -1,8 +1,9 @@
-import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, UnprocessableEntityException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateRegistrationDto, CreateRegistrationWithInvitedUserDto } from './dto/create-registration.dto';
 import { FilterRegistrationsDto, RegistrationFilterStatus } from './dto/filter-registrations.dto';
 import { DocumentType, Prisma, RegistrationStatus, PaymentStatus } from '@prisma/client';
+import { eventWindowInstant } from '../../common/utils/brt-date.util';
 // QR Code é gerado dinamicamente no frontend/backend usando o payload salvo em qrCode
 import { KitsService } from '../kits/kits.service';
 import { EmailService } from '../../common/services/email.service';
@@ -10,6 +11,13 @@ import { isDocumentInList, resolveDocument } from '../../common/utils/document.u
 import { tryConsumeVoucherUnreserved } from '../../common/utils/voucher-reservation.util';
 import { stripOrganizationContact } from '../../common/utils/organization-sanitizer.util';
 import { formatPdfAnswer } from '../../common/utils/pdf-answer.util';
+import {
+  holdsStock,
+  acquireVariationHold,
+  releaseVariationHold,
+  incrementVariationSold,
+  decrementVariationSold,
+} from '../../common/utils/product-stock.util';
 import {
   TicketPdfService,
   TicketPdfData,
@@ -105,11 +113,12 @@ export class RegistrationsService {
       throw new BadRequestException('Event is not available for registration');
     }
 
-    if (new Date() > new Date(event.registrationEndDate)) {
+    // Janela wall-clock (UTC) → instante real em BRT (+3h), senão fecha 3h cedo.
+    if (new Date() > eventWindowInstant(event.registrationEndDate)) {
       throw new BadRequestException('Registration period has ended');
     }
 
-    if (new Date() > new Date(event.eventDate)) {
+    if (new Date() > eventWindowInstant(event.eventDate)) {
       throw new BadRequestException('Event has already occurred');
     }
 
@@ -1720,6 +1729,7 @@ export class RegistrationsService {
               select: {
                 id: true,
                 isIncludedInTicket: true,
+                isRequired: true,
                 buyerVariationEditAllowed: true,
                 variationEditDeadlineDays: true,
                 variations: { select: { id: true } },
@@ -1752,6 +1762,7 @@ export class RegistrationsService {
       select: {
         id: true,
         isIncludedInTicket: true,
+        isRequired: true,
         buyerVariationEditAllowed: true,
         variationEditDeadlineDays: true,
         variations: { select: { id: true } },
@@ -1812,25 +1823,84 @@ export class RegistrationsService {
     // Captura nome da variacao anterior antes do update pro email.
     const previousVariationId = regProduct?.variationId ?? null;
 
-    if (regProduct) {
-      await prismaWrite.registrationProduct.update({
-        where: { id: regProduct.id },
-        data: { variationId, variationEdited: true },
-      });
-    } else {
-      // Criar RegistrationProduct para produto incluso que ainda não tem registro
-      await prismaWrite.registrationProduct.create({
-        data: {
-          registrationId,
-          productId,
-          variationId,
-          variationEdited: true,
-          quantity: 1,
-          unitPrice: 0,
-          totalPrice: 0,
-        },
-      });
-    }
+    // ── Contabilização de estoque na troca de variação (A → B) ──────────────────
+    // Espelha finalize/estorno (product-stock.util): a unidade vendida saiu do estoque de A
+    // e entrou no soldCount de A; ao trocar para B, devolvemos a A e tiramos de B.
+    //   A (antiga): availableStock += qty (release) e soldCount -= qty
+    //   B (nova):   availableStock -= qty (acquire)  e soldCount += qty
+    // `held` (segurou estoque) vem CONGELADO do productSnapshot — assim o ciclo
+    // venda→troca→estorno fica balanceado (o estorno lê o mesmo stockHeld + o variationId
+    // atual = B). Para um RegistrationProduct NOVO (produto incluso não enviado no checkout),
+    // usamos a política ATUAL (holdsStock) e gravamos o stockHeld no snapshot.
+    const qty = regProduct?.quantity ?? 1;
+    const snap = (regProduct?.productSnapshot as any) ?? null;
+    const held = regProduct
+      ? (typeof snap?.stockHeld === 'boolean'
+          // Fallback p/ snapshots ANTIGOS (pré-feature): regra LEGADA — incluso+obrigatório
+          // NÃO segurava estoque. Evita liberar/adquirir estoque que o pedido nunca reservou.
+          ? snap.stockHeld
+          : !((product as any).isIncludedInTicket === true && (product as any).isRequired === true))
+      : holdsStock(product as any);
+
+    await prismaWrite.$transaction(async (tx: any) => {
+      // soldCount/availableStock só mudam se a variação realmente trocou.
+      if (previousVariationId !== variationId) {
+        if (held) {
+          // B: adquire estoque ANTES de qualquer outra escrita. Só faz sentido p/ B LIMITADO
+          // (stock > 0); ilimitado é no-op no helper, então checamos o limite p/ distinguir
+          // "esgotado" (0 linhas num limitado) de "ilimitado" (0 linhas por ser stock=0).
+          const newVar = await tx.productVariation.findUnique({
+            where: { id: variationId },
+            select: { stock: true },
+          });
+          const bLimited = (newVar?.stock ?? 0) > 0;
+          if (bLimited) {
+            const acquired = await acquireVariationHold(tx, variationId, qty);
+            if (acquired === 0) {
+              // Esgotado → aborta a troca inteira (atômico): nada é alterado.
+              throw new UnprocessableEntityException('A variação escolhida está esgotada');
+            }
+          }
+          // A: devolve o estoque (release tem cap em stock e no-op p/ ilimitado).
+          if (previousVariationId) {
+            await releaseVariationHold(tx, previousVariationId, qty);
+          }
+        }
+        // soldCount move SEMPRE que há variação (espelha o finalize, que incrementa soldCount
+        // para qualquer item com variationId, independente de stockHeld). Vale p/ ilimitado.
+        if (previousVariationId) {
+          await decrementVariationSold(tx, previousVariationId, qty);
+        }
+        await incrementVariationSold(tx, variationId, qty);
+      }
+
+      if (regProduct) {
+        await tx.registrationProduct.update({
+          where: { id: regProduct.id },
+          data: { variationId, variationEdited: true },
+        });
+      } else {
+        // Criar RegistrationProduct para produto incluso que ainda não tem registro.
+        // Grava o productSnapshot.stockHeld para o estorno futuro saber se devolve availableStock.
+        await tx.registrationProduct.create({
+          data: {
+            registrationId,
+            productId,
+            variationId,
+            variationEdited: true,
+            quantity: 1,
+            unitPrice: 0,
+            totalPrice: 0,
+            productSnapshot: {
+              id: (product as any).id,
+              isIncludedInTicket: (product as any).isIncludedInTicket,
+              isRequired: (product as any).isRequired,
+              stockHeld: held,
+            },
+          },
+        });
+      }
+    });
 
     // Email best-effort — log warn em caso de falha, nao aborta a operacao.
     // `userId` é repassado para regenerar o PDF do ingresso (findOne aplica o

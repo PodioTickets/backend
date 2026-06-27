@@ -8,6 +8,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { CreateCouponDto, UpdateCouponDto, FilterCouponsDto, CouponStatus } from './dto/create-coupon.dto';
 import { buildDocumentList } from '../../common/utils/document.util';
 import { computeAgeAt } from '../../common/utils/age.util';
+import { brtDayEndUtc } from '../../common/utils/brt-date.util';
 
 @Injectable()
 export class CouponsService {
@@ -678,11 +679,15 @@ export class CouponsService {
   }
 
   private parseDate(dateString: string): Date {
-    // Se for apenas data (YYYY-MM-DD), adicionar hora para fim do dia
+    // Dia civil (YYYY-MM-DD) escolhido pelo organizador → FIM do dia em BRT
+    // (America/Sao_Paulo, UTC-3 fixo). Usar fim do dia em UTC (T23:59:59Z) fazia
+    // o cupom/voucher expirar às 20:59 BRT — 3h cedo — rejeitando compras feitas
+    // ainda no mesmo dia no Brasil (ex.: 22h BRT). brtDayEndUtc resolve a fronteira
+    // como (dia+1)T02:59:59.999Z, que é 23:59:59.999 BRT do dia escolhido.
     if (/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
-      return new Date(`${dateString}T23:59:59.999Z`);
+      return brtDayEndUtc(dateString);
     }
-    
+
     // Caso contrário, tentar fazer parse direto
     return new Date(dateString);
   }

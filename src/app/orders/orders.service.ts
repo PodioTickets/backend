@@ -37,6 +37,7 @@ import {
   resolveDocument,
 } from '../../common/utils/document.util';
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
+import { eventWindowInstant } from '../../common/utils/brt-date.util';
 import {
   holdsStock,
   acquireVariationHold,
@@ -49,6 +50,7 @@ import {
   computeCouponCoveredUnits,
 } from '../../common/utils/coupon-eligibility.util';
 import { claimVoucher, releaseVoucherByOrder } from '../../common/utils/voucher-reservation.util';
+import { claimCouponUnits, releaseCouponByOrder } from '../../common/utils/coupon-reservation.util';
 import { stripOrganizationContact } from '../../common/utils/organization-sanitizer.util';
 import { formatPdfAnswer } from '../../common/utils/pdf-answer.util';
 
@@ -914,13 +916,15 @@ export class OrdersService {
       );
     }
     const now = new Date();
-    if (event.registrationStartDate && now < new Date(event.registrationStartDate)) {
+    // Janela é wall-clock (UTC); comparar com o tempo real exige o instante em BRT
+    // (+3h via eventWindowInstant), senão abre/fecha 3h cedo no Brasil.
+    if (event.registrationStartDate && now < eventWindowInstant(event.registrationStartDate)) {
       throw new AppConflictException(
         'REGISTRATION_NOT_OPEN',
         'Inscrições ainda não abertas para este evento',
       );
     }
-    if (event.registrationEndDate && now > new Date(event.registrationEndDate)) {
+    if (event.registrationEndDate && now > eventWindowInstant(event.registrationEndDate)) {
       throw new AppConflictException('REGISTRATION_CLOSED', 'Período de inscrição encerrado');
     }
 
@@ -2471,6 +2475,10 @@ export class OrdersService {
     let couponEffectiveUsage: number | undefined;
     let couponFixedPerUnit: number | undefined;
     let couponQualifyingSlots: number[] | undefined;
+    // Unidades de cupom reservadas por este pedido após a aplicação. 0 = sem cupom (libera a
+    // reserva no order.update final). Cupom manual reserva ATOMICAMENTE já aqui (decisão
+    // 2026-06-26): o 1º a aplicar segura a unidade; o 2º vê "esgotado".
+    let couponReservedUnits = 0;
 
     if (dto.couponCode) {
       const normalizedCode = dto.couponCode.toUpperCase().trim();
@@ -2517,7 +2525,8 @@ export class OrdersService {
           const finalAmountV = Math.max(0, order.totalAmount - discount);
           const updatedV = await w.order.update({
             where: { id: orderId },
-            data: { couponId: null, voucherId, discount, finalAmount: finalAmountV, updatedAt: new Date() },
+            // couponId: null → libera também a reserva de cupom anterior (couponReservedUnits: 0).
+            data: { couponId: null, couponReservedUnits: 0, voucherId, discount, finalAmount: finalAmountV, updatedAt: new Date() },
             include: ORDER_INCLUDE,
           });
           return {
@@ -2569,16 +2578,18 @@ export class OrdersService {
       }
 
       const applicableQuantity = applicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
-      // Aplicar desconto apenas nos ingressos mais caros dentro do uso restante
-      const remaining = coupon.maxUsage != null
-        ? Math.max(0, coupon.maxUsage - coupon.usageCount)
+      // RESERVA ATÔMICA do uso já na aplicação manual (decisão 2026-06-26): o claim segura as
+      // unidades para ESTE pedido sob row-lock do cupom, descontando reservas de outros pedidos
+      // ativos. `granted` = min(desejado, disponível). 0 → esgotado → rejeição SUAVE (catch →
+      // couponRejected). Com lista de documento, o desejado é capado pelos participantes
+      // ELEGÍVEIS (qualifyingSlots); sem lista, por todos os ingressos aplicáveis.
+      const desiredUnits = docEligibleSlots
+        ? Math.min(applicableQuantity, docEligibleSlots.length)
         : applicableQuantity;
-      if (remaining <= 0) throw new AppUnprocessableException('COUPON_EXHAUSTED', 'Cupom esgotado');
-      // Com lista de documento, o uso é capado pelo nº de participantes ELEGÍVEIS e o
-      // desconto incide nos slots deles (qualifyingSlots). Sem lista, comportamento original.
-      couponEffectiveUsage = docEligibleSlots
-        ? Math.min(remaining, applicableQuantity, docEligibleSlots.length)
-        : Math.min(remaining, applicableQuantity);
+      const granted = await claimCouponUnits(w, coupon.id, orderId, desiredUnits);
+      if (granted <= 0) throw new AppUnprocessableException('COUPON_EXHAUSTED', 'Cupom esgotado');
+      couponEffectiveUsage = granted;
+      couponReservedUnits = granted;
       couponQualifyingSlots = docEligibleSlots;
       // applyToProducts incide SÓ nos produtos dos participantes cujo ingresso é coberto pelo
       // cupom (appliesTo), não em todos os produtos do pedido. Ex.: cupom no meu ingresso não
@@ -2703,6 +2714,9 @@ export class OrdersService {
       where: { id: orderId },
       data: {
         couponId,
+        // Reserva de uso do cupom: `granted` no caminho manual (já gravado pelo claim, reescrito
+        // aqui por consistência) ou 0 ao remover/trocar (voucher/sem código) — libera a reserva.
+        couponReservedUnits,
         voucherId,
         discount,
         finalAmount,
@@ -3182,20 +3196,26 @@ export class OrdersService {
 
         if (applicableTicketsPay.length > 0) {
           const applicableQty = applicableTicketsPay.reduce((s: number, rt: any) => s + rt.quantity, 0);
-          const remaining = coupon.maxUsage != null
-            ? Math.max(0, coupon.maxUsage - coupon.usageCount)
+          // Unidades que o cupom cobriria ignorando o limite (cap natural por
+          // ingressos aplicáveis e participantes elegíveis pela lista de documento).
+          const desiredUnits = docEligibleCount != null
+            ? Math.min(applicableQty, docEligibleCount)
             : applicableQty;
-          const effectiveUsage = docEligibleCount != null
-            ? Math.min(remaining, applicableQty, docEligibleCount)
-            : Math.min(remaining, applicableQty);
-          // applyToProducts SÓ nos produtos dos participantes cujo ingresso o cupom cobre
-          // (couponApplicableTicketIds), via mapa email→ingresso — não em todos os produtos.
-          const productsExtraPay = coupon.applyToProducts
-            ? computeApplicableProductsSubtotal(pricedPendingProducts, participantTicketMap, couponApplicableTicketIds)
-            : 0;
-          couponDiscount = computePartialCouponDiscount(applicableTicketsPay, coupon.type, coupon.value, effectiveUsage, productsExtraPay);
-          couponId = coupon.id;
-          couponAppliedToProducts = coupon.applyToProducts;
+          // Momento decisivo do dinheiro: RESERVA atômica das unidades sob row-lock do cupom.
+          // `granted` = min(desejado, disponível) já descontando reservas de outros pedidos
+          // ativos — impede ultrapassar o `maxUsage` sob concorrência (PIX/cartão simultâneos).
+          // 0 → cupom esgotado: não aplica (couponId/desconto ficam vazios).
+          const effectiveUsage = await claimCouponUnits(w, coupon.id, orderId, desiredUnits);
+          if (effectiveUsage > 0) {
+            // applyToProducts SÓ nos produtos dos participantes cujo ingresso o cupom cobre
+            // (couponApplicableTicketIds), via mapa email→ingresso — não em todos os produtos.
+            const productsExtraPay = coupon.applyToProducts
+              ? computeApplicableProductsSubtotal(pricedPendingProducts, participantTicketMap, couponApplicableTicketIds)
+              : 0;
+            couponDiscount = computePartialCouponDiscount(applicableTicketsPay, coupon.type, coupon.value, effectiveUsage, productsExtraPay);
+            couponId = coupon.id;
+            couponAppliedToProducts = coupon.applyToProducts;
+          }
         }
       }
     }
@@ -3224,8 +3244,11 @@ export class OrdersService {
 
         if (coupon.couponType === 'QUANTITY') {
           if (totalQuantity < (coupon.minQuantity ?? 0)) continue;
-          // QUANTITY: all-or-nothing — se esgotado, não aplica
-          if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) continue;
+          // QUANTITY: all-or-nothing (1 uso/pedido). RESERVA atômica de 1 unidade sob row-lock
+          // — esgotado (granted = 0) → não aplica. Substitui o check não-atômico
+          // `usageCount >= maxUsage`, que sob concorrência deixava ultrapassar o limite.
+          const granted = await claimCouponUnits(w, coupon.id, orderId, 1);
+          if (granted <= 0) continue;
 
           // Base de cálculo respeita applyToProducts: sem flag = só ingressos; com flag =
           // ingressos + produtos. Cap final é a própria base (não pode descontar mais do
@@ -3256,10 +3279,10 @@ export class OrdersService {
             ageApplicableTickets = reservedTickets.filter((rt: any) => allowed.includes(rt.ticketId));
           }
           const ageApplicableQty = ageApplicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-          const remaining = coupon.maxUsage != null
-            ? Math.max(0, coupon.maxUsage - coupon.usageCount)
-            : ageMatchCount;
-          const effectiveUsage = Math.min(remaining, ageMatchCount, ageApplicableQty);
+          // Cap natural = participantes na faixa × ingressos aplicáveis; RESERVA atômica
+          // capa pelo disponível (descontando reservas concorrentes). 0 → esgotado, não aplica.
+          const desiredUnits = Math.min(ageMatchCount, ageApplicableQty);
+          const effectiveUsage = await claimCouponUnits(w, coupon.id, orderId, desiredUnits);
           if (effectiveUsage <= 0) continue;
           // applyToProducts SÓ nos produtos dos participantes cujo ingresso o cupom AGE cobre.
           const ageApplicableTicketIdSet = new Set<string>(ageApplicableTickets.map((rt: any) => rt.ticketId));

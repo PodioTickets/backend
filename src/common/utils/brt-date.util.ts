@@ -31,3 +31,15 @@ export function brtDayStartUtc(value: string | Date): Date {
 export function brtDayEndUtc(value: string | Date): Date {
   return new Date(brtDayStartUtc(value).getTime() + 24 * 60 * 60 * 1000 - 1);
 }
+
+/**
+ * Janela WALL-CLOCK do evento (abertura/encerramento de inscrição, realização) é
+ * gravada como UTC (server em UTC: `new Date("...09:30:00")` → 09:30Z = 09:30 BRT
+ * pretendido). Para COMPARAR com o tempo real (`new Date()`), o instante real é o
+ * wall-clock interpretado em BRT (UTC-3) → +3h sobre o valor UTC. Sem isso a janela
+ * abre/fecha 3h CEDO no Brasil (ex.: "encerra 09:30" fechava às 06:30 BRT).
+ */
+export function eventWindowInstant(value: string | Date): Date {
+  const d = value instanceof Date ? value : new Date(value);
+  return new Date(d.getTime() + BRT_OFFSET_MS);
+}

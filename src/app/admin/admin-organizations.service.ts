@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 
@@ -132,8 +132,29 @@ export class AdminOrganizationsService {
     });
     if (!existing) throw new NotFoundException('Organization not found');
 
+    // Documento (CPF/CNPJ) é UNIQUE. Ao trocar (ex.: PJ→PF muda CNPJ→CPF do
+    // responsável), o CPF pode já pertencer a OUTRA organização. Validamos ANTES
+    // do update pra retornar um 409 com CÓDIGO tipado (DUPLICATE_DOCUMENT), que o
+    // front roteia direto pro input do documento — em vez do P2002 cru virar toast.
+    const documentClean = dto.document?.replace(/\D/g, '');
+    if (documentClean) {
+      const clash = await this.prisma.getReadClient().organization.findFirst({
+        where: { document: documentClean, id: { not: id } },
+        select: { id: true, name: true },
+      });
+      if (clash) {
+        throw new ConflictException({
+          code: 'DUPLICATE_DOCUMENT',
+          message: `Já existe uma organização cadastrada com este documento (CPF/CNPJ)${clash.name ? `: ${clash.name}` : ''}.`,
+        });
+      }
+    }
+
     // Extrair campos que não pertencem ao model Organization
     const { pixKeyType: _pixKeyType, pix: _pix, pixKeys, ...data } = dto as any;
+    // Persistir o documento só com dígitos (consistente com o unique e com a
+    // inferência PF/PJ por tamanho no front: 11=CPF, 14=CNPJ).
+    if (data.document != null) data.document = documentClean ?? '';
 
     const w = this.prisma.getWriteClient();
 

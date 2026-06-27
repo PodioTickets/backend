@@ -54,6 +54,8 @@ describe('OrdersService', () => {
   const mockCieloService = {
     createPixPayment: jest.fn(),
     createCreditCardPayment: jest.fn(),
+    // Caminho de cobrança real do pay (não-grátis): PIX/cartão chamam createPayment.
+    createPayment: jest.fn(),
   };
 
   const mockRedisService = {
@@ -559,8 +561,18 @@ describe('OrdersService', () => {
           findFirst: jest.fn().mockResolvedValue(coupon),
           findUnique: jest.fn().mockResolvedValue(coupon),
         },
-        // claimVoucher (reserva de uso único) faz UPDATE ... RETURNING id: 1 linha = claim OK.
-        $queryRaw: jest.fn().mockResolvedValue([{ id: voucher?.id ?? 'voucher' }]),
+        // Dois claims passam por $queryRaw:
+        //  - claimCouponUnits (SQL com "couponReservedUnits") → sem escassez no unit: concede o
+        //    desejado (2º valor interpolado do template = `want`), então granted = desired.
+        //  - claimVoucher (UPDATE ... RETURNING id) → 1 linha = claim OK.
+        $queryRaw: jest.fn().mockImplementation((strings: any, ...vals: any[]) => {
+          const sql = Array.isArray(strings) ? strings.join('') : String(strings);
+          if (sql.includes('couponReservedUnits')) {
+            const want = typeof vals[1] === 'number' ? vals[1] : 0;
+            return Promise.resolve([{ granted: want }]);
+          }
+          return Promise.resolve([{ id: voucher?.id ?? 'voucher' }]);
+        }),
         $executeRaw: jest.fn().mockResolvedValue(1),
         $transaction: jest.fn().mockImplementation((fn: any) => fn(client)),
         _captured: captured,
@@ -1010,6 +1022,8 @@ describe('OrdersService', () => {
         coupon: { findFirst: jest.fn().mockResolvedValue(coupon100) },
         voucher: { findUnique: jest.fn().mockResolvedValue(null) },
         event: { findUnique: jest.fn().mockResolvedValue(null) }, // snapshotEvent null → pula e-mail
+        // claimCouponUnits (reserva de uso do cupom) faz UPDATE ... RETURNING granted: 1 unidade concedida.
+        $queryRaw: jest.fn().mockResolvedValue([{ granted: 1 }]),
         $transaction: jest.fn().mockImplementation((fn: any) => fn(tx)),
       };
       mockPrisma.getReadClient.mockReturnValue(client);
@@ -1053,6 +1067,8 @@ describe('OrdersService', () => {
         coupon: { findFirst: jest.fn().mockResolvedValue(coupon100) },
         voucher: { findUnique: jest.fn().mockResolvedValue(null) },
         event: { findUnique: jest.fn().mockResolvedValue(null) },
+        // claimCouponUnits (reserva de uso do cupom) faz UPDATE ... RETURNING granted: 1 unidade concedida.
+        $queryRaw: jest.fn().mockResolvedValue([{ granted: 1 }]),
         $transaction: jest.fn().mockImplementation((fn: any) => fn(tx)),
       };
       mockPrisma.getReadClient.mockReturnValue(client);
@@ -1122,6 +1138,122 @@ describe('OrdersService', () => {
         service.pay(buyerId, orderId, undefined, { method: 'PIX' } as any),
       ).rejects.toThrow(/Preencha os dados de todos/);
       expect(client.$transaction).not.toHaveBeenCalled(); // não chegou a cobrar/finalizar
+    });
+  });
+
+  // ── pay — RESERVA DE USO DE CUPOM (claim atômico no pagamento) ────────────────
+  // Cada ramo do pay (manual DISCOUNT, auto QUANTITY, auto AGE) deve derivar o
+  // `effectiveUsage` do retorno de `claimCouponUnits` (granted), e granted=0 → NÃO aplica.
+  // Aqui claimCouponUnits é o ÚNICO $queryRaw do write client no fluxo PIX não-grátis, então
+  // mockamos `$queryRaw → [{ granted: N }]` para simular a concessão da reserva.
+  describe('pay (reserva de uso de cupom — claim no pagamento)', () => {
+    const buyerId = 'buyer-1';
+    const orderId = 'order-pay-coupon';
+
+    // 2 ingressos de R$100, 2 participantes preenchidos, sem produtos, taxas 0.
+    const baseOrder = (over: Record<string, any> = {}) => ({
+      id: orderId, userId: buyerId, status: 'PENDING', eventId: 'evt-1',
+      expiresAt: null, totalAmount: 20000,
+      billingPostalCode: '11850000', billingStreet: 'Rua X', billingCity: 'Maceió',
+      coupon: null, voucher: null, couponId: null, voucherId: null,
+      event: { participantFeePercent: 0, organizerFeePercent: 0 },
+      reservedTickets: [{ ticketId: 'tk-A', quantity: 2, unitPrice: 10000 }],
+      pendingParticipants: [
+        { email: 'a@a.com', name: 'A', documentType: 'CPF', documentNumber: '11111111111', birthDate: '1990-01-01' },
+        { email: 'b@b.com', name: 'B', documentType: 'CPF', documentNumber: '22222222222', birthDate: '1992-01-01' },
+      ],
+      pendingProducts: null,
+      ...over,
+    });
+
+    // Monta o client mockado e injeta o `granted` que o claim retornará.
+    const buildClient = (order: any, granted: number, couponMocks: Record<string, any>) => {
+      const tx: any = {
+        $queryRaw: jest.fn().mockResolvedValue([{ id: orderId }]),
+        order: { update: jest.fn().mockResolvedValue({}) },
+        payment: { upsert: jest.fn().mockResolvedValue({}) },
+      };
+      const client: any = {
+        order: { findUnique: jest.fn().mockResolvedValue(order) },
+        user: { findUnique: jest.fn().mockResolvedValue({ firstName: 'A', lastName: 'B', email: 'a@a.com' }) },
+        payment: { findUnique: jest.fn().mockResolvedValue(null) }, // sem PIX anterior p/ void
+        voucher: { findUnique: jest.fn().mockResolvedValue(null) },
+        event: { findUnique: jest.fn().mockResolvedValue(null) },
+        // claimCouponUnits: UPDATE ... RETURNING granted.
+        $queryRaw: jest.fn().mockResolvedValue([{ granted }]),
+        $transaction: jest.fn().mockImplementation((fn: any) => fn(tx)),
+        ...couponMocks,
+      };
+      mockPrisma.getReadClient.mockReturnValue(client);
+      mockPrisma.getWriteClient.mockReturnValue(client);
+      mockRedisService.getIdempotencyResult.mockResolvedValue(null);
+      mockCieloService.createPayment.mockResolvedValue({
+        success: true, paymentId: 'pix-1', qrCode: 'qr', pixCode: 'code', expiresAt: null,
+      });
+      return { client, tx };
+    };
+
+    const dataOf = (tx: any) => tx.order.update.mock.calls[0][0].data;
+
+    it('manual DISCOUNT: effectiveUsage vem do claim (granted=1 → desconto PARCIAL de 1 unidade)', async () => {
+      // FIXED R$100/uso em 2 ingressos. Se usasse applicableQty (2) → 20000; com granted=1 → 10000.
+      const coupon = { id: 'cD', code: 'OFF', status: 'ACTIVE', couponType: 'DISCOUNT', type: 'FIXED', value: 10000, appliesTo: 'all', deletedAt: null, maxUsage: 5, usageCount: 0, applyToProducts: false, cpfListStatus: 'DISABLED', documentList: null, cpfList: null, expiryDate: null, minCartValue: null };
+      const { client, tx } = buildClient(baseOrder(), 1, { coupon: { findFirst: jest.fn().mockResolvedValue(coupon) } });
+
+      const res: any = await service.pay(buyerId, orderId, undefined, { method: 'PIX', couponCode: 'OFF' } as any);
+
+      expect(res.status).toBe('PENDING'); // PIX → aguarda webhook
+      expect(client.$queryRaw).toHaveBeenCalled(); // claim disparado
+      const data = dataOf(tx);
+      expect(data.discount).toBe(10000); // 1 unidade (granted), não 2
+      expect(data.couponId).toBe('cD');
+    });
+
+    it('manual DISCOUNT: granted=0 (esgotado) → cupom NÃO aplica (sem desconto, sem vínculo)', async () => {
+      const coupon = { id: 'cD', code: 'OFF', status: 'ACTIVE', couponType: 'DISCOUNT', type: 'FIXED', value: 10000, appliesTo: 'all', deletedAt: null, maxUsage: 3, usageCount: 3, applyToProducts: false, cpfListStatus: 'DISABLED', documentList: null, cpfList: null, expiryDate: null, minCartValue: null };
+      // Cupom esgotado → pay cai no scan de auto-cupons (QUANTITY/AGE) que faz findMany → vazio.
+      const { tx } = buildClient(baseOrder(), 0, { coupon: { findFirst: jest.fn().mockResolvedValue(coupon), findMany: jest.fn().mockResolvedValue([]) } });
+
+      await service.pay(buyerId, orderId, undefined, { method: 'PIX', couponCode: 'OFF' } as any);
+
+      const data = dataOf(tx);
+      expect(data.discount).toBe(0);
+      expect(data.couponId).toBeUndefined(); // não vincula cupom esgotado
+    });
+
+    it('auto QUANTITY: granted=1 → aplica (all-or-nothing por pedido)', async () => {
+      const coupon = { id: 'cQ', code: null, status: 'ACTIVE', couponType: 'QUANTITY', type: 'PERCENTAGE', value: 10, appliesTo: 'all', minQuantity: 1, deletedAt: null, maxUsage: 5, usageCount: 0, applyToProducts: false, cpfListStatus: 'DISABLED', documentList: null, cpfList: null, expiryDate: null, minCartValue: null };
+      const { tx } = buildClient(baseOrder(), 1, { coupon: { findFirst: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([coupon]) } });
+
+      await service.pay(buyerId, orderId, undefined, { method: 'PIX' } as any);
+
+      const data = dataOf(tx);
+      expect(data.discount).toBe(2000); // 10% de 20000
+      expect(data.couponId).toBe('cQ');
+    });
+
+    it('auto QUANTITY: granted=0 (esgotado) → NÃO aplica', async () => {
+      const coupon = { id: 'cQ', code: null, status: 'ACTIVE', couponType: 'QUANTITY', type: 'PERCENTAGE', value: 10, appliesTo: 'all', minQuantity: 1, deletedAt: null, maxUsage: 1, usageCount: 1, applyToProducts: false, cpfListStatus: 'DISABLED', documentList: null, cpfList: null, expiryDate: null, minCartValue: null };
+      const { tx } = buildClient(baseOrder(), 0, { coupon: { findFirst: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([coupon]) } });
+
+      await service.pay(buyerId, orderId, undefined, { method: 'PIX' } as any);
+
+      const data = dataOf(tx);
+      expect(data.discount).toBe(0);
+      expect(data.couponId).toBeUndefined();
+    });
+
+    it('auto AGE: effectiveUsage vem do claim (2 elegíveis mas granted=1 → desconto de 1 unidade)', async () => {
+      // 50% num evento sem restrição de idade efetiva: ambos participantes elegíveis (ageMatch=2),
+      // mas a reserva só concede 1 → desconto = 50% de 1 ingresso (5000), não de 2 (10000).
+      const coupon = { id: 'cAge', code: null, status: 'ACTIVE', couponType: 'AGE', type: 'PERCENTAGE', value: 50, appliesTo: 'all', minAge: 0, maxAge: 120, deletedAt: null, maxUsage: 3, usageCount: 0, applyToProducts: false, cpfListStatus: 'DISABLED', documentList: null, cpfList: null, expiryDate: null, minCartValue: null };
+      const { tx } = buildClient(baseOrder(), 1, { coupon: { findFirst: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([coupon]) } });
+
+      await service.pay(buyerId, orderId, undefined, { method: 'PIX' } as any);
+
+      const data = dataOf(tx);
+      expect(data.discount).toBe(5000); // 1 unidade (granted), não 2
+      expect(data.couponId).toBe('cAge');
     });
   });
 });
