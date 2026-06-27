@@ -23,6 +23,7 @@ import { NoCache } from 'src/common/decorators/cache.decorator';
 class UpdateOrganizationBodyDto implements UpdateOrganizationDto {
   @IsOptional() @IsString() name?: string;
   @IsOptional() @IsString() tradeName?: string;
+  @IsOptional() @IsString() logoUrl?: string;
   @IsOptional() @IsString() document?: string;
   @IsOptional() @IsString() email?: string;
   @IsOptional() @IsString() phone?: string;
