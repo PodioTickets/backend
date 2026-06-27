@@ -564,7 +564,6 @@ export class EventsService {
       startDate,
       endDate,
       status,
-      includePast = false,
       modalities,
       textMatchIds,
     } = params;
@@ -595,11 +594,10 @@ export class EventsService {
         gte: new Date(startDate),
         lte: new Date(endDate),
       };
-    } else if (!includePast) {
-      where.eventDate = {
-        gte: new Date(),
-      };
     }
+    // Sem o branch `!includePast → eventDate >= now`: o catálogo público mostra
+    // eventos FINALIZADOS por 30 dias (cutoff no AND abaixo), igual à home (findAll).
+    // Esse `gte: now` escondia TODOS os passados no /search — divergia da home.
 
     if (modalities && modalities.trim().length > 0) {
       const codes = modalities

@@ -639,5 +639,130 @@ describe('RegistrationsService', () => {
       expect(service.generateTicketPdf).not.toHaveBeenCalled();
     });
   });
+
+  // ── updateProductVariation: contabiliza estoque/vendas na troca de variação (A → B) ──
+  describe('updateProductVariation (estoque na troca de variação)', () => {
+    const userId = 'buyer-1';
+    const regId = 'reg-1';
+    const productId = 'prod-1';
+
+    // Constrói registro confirmado com 1 produto incluso editável (variação A → B).
+    const buildReg = (over: { stockHeld?: boolean | null; variationId?: string | null; quantity?: number } = {}) => ({
+      id: regId,
+      userId,
+      status: 'CONFIRMED',
+      invitedById: null,
+      order: { eventId: 'evt-1' },
+      tickets: [{ ticketId: 'tk-1' }],
+      products: [
+        {
+          id: 'rp-1',
+          variationId: over.variationId === undefined ? 'A' : over.variationId,
+          quantity: over.quantity ?? 1,
+          variationEdited: false,
+          productSnapshot: over.stockHeld === undefined ? { stockHeld: true } : { stockHeld: over.stockHeld },
+          product: {
+            id: productId,
+            isIncludedInTicket: true,
+            isRequired: false,
+            buyerVariationEditAllowed: true,
+            variationEditDeadlineDays: 0,
+            variations: [{ id: 'A' }, { id: 'B' }],
+          },
+        },
+      ],
+    });
+
+    // tx com os helpers de estoque (SQL via $executeRaw) e a leitura do stock de B.
+    const makeTx = (bStock: number, acquireRows = 1) => {
+      const execCalls: { sql: string; vals: any[] }[] = [];
+      const tx: any = {
+        productVariation: { findUnique: jest.fn().mockResolvedValue({ stock: bStock }) },
+        registrationProduct: { update: jest.fn().mockResolvedValue({}), create: jest.fn().mockResolvedValue({}) },
+        $executeRaw: jest.fn().mockImplementation((strings: any, ...vals: any[]) => {
+          const sql = Array.isArray(strings) ? strings.join('§') : String(strings);
+          execCalls.push({ sql, vals });
+          // 1ª chamada é o acquire de B (quando há); permite simular esgotado.
+          if (sql.includes('"availableStock" - ')) return Promise.resolve(acquireRows);
+          return Promise.resolve(1);
+        }),
+      };
+      return { tx, execCalls };
+    };
+
+    const setup = (reg: any, tx: any) => {
+      (mockPrismaService as any).ticketProduct = { findUnique: jest.fn().mockResolvedValue({ id: 'tp-1' }) };
+      (mockPrismaService as any).product = { findUnique: jest.fn().mockResolvedValue(null) };
+      (mockPrismaService as any).productVariation = { findUnique: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([]) };
+      mockPrismaService.registration.findUnique.mockResolvedValue(reg);
+      mockPrismaService.user.findUnique.mockResolvedValue({ email: 'x@y.com' });
+      mockPrismaService.$transaction.mockImplementation((fn: any) => fn(tx));
+    };
+
+    // Helpers de asserção: encontra a chamada de estoque por fragmento de SQL.
+    const find = (calls: any[], frag: string) => calls.filter((c) => c.sql.includes(frag));
+
+    it('A → B (held, B limitado): A estoque+1/vendido−1, B estoque−1/vendido+1', async () => {
+      const reg = buildReg(); // stockHeld:true, variationId:'A'
+      const { tx, execCalls } = makeTx(10); // B com estoque
+      setup(reg, tx);
+
+      const res = await service.updateProductVariation(regId, productId, 'B', userId);
+      expect(res).toEqual({ message: 'Variação atualizada com sucesso' });
+
+      // B: acquire (availableStock −) + soldCount +
+      const acquireB = find(execCalls, '"availableStock" - ');
+      const soldPlus = find(execCalls, '"soldCount" = "soldCount" + ');
+      expect(acquireB).toHaveLength(1);
+      expect(acquireB[0].vals).toContain('B');
+      expect(soldPlus[0].vals).toContain('B');
+      // A: release (availableStock LEAST +) + soldCount −
+      const releaseA = find(execCalls, 'LEAST("availableStock"');
+      const soldMinus = find(execCalls, 'GREATEST("soldCount"');
+      expect(releaseA[0].vals).toContain('A');
+      expect(soldMinus[0].vals).toContain('A');
+
+      expect(tx.registrationProduct.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { variationId: 'B', variationEdited: true } }),
+      );
+    });
+
+    it('B esgotado → 422 e NADA é alterado (abort atômico)', async () => {
+      const reg = buildReg();
+      const { tx } = makeTx(10, 0); // acquire retorna 0 linhas = esgotado
+      setup(reg, tx);
+
+      await expect(service.updateProductVariation(regId, productId, 'B', userId)).rejects.toThrow(
+        /esgotada/i,
+      );
+      expect(tx.registrationProduct.update).not.toHaveBeenCalled();
+    });
+
+    it('B ilimitado (stock=0): NÃO mexe em availableStock de B, mas soldCount move (A−1, B+1)', async () => {
+      const reg = buildReg();
+      const { tx, execCalls } = makeTx(0); // B ilimitado
+      setup(reg, tx);
+
+      await service.updateProductVariation(regId, productId, 'B', userId);
+
+      // sem acquire de availableStock (B ilimitado → não chama)
+      expect(find(execCalls, '"availableStock" - ')).toHaveLength(0);
+      // soldCount move nos dois
+      expect(find(execCalls, '"soldCount" = "soldCount" + ')[0].vals).toContain('B');
+      expect(find(execCalls, 'GREATEST("soldCount"')[0].vals).toContain('A');
+    });
+
+    it('held=false (snapshot legado): só soldCount move, sem tocar availableStock', async () => {
+      const reg = buildReg({ stockHeld: false });
+      const { tx, execCalls } = makeTx(10);
+      setup(reg, tx);
+
+      await service.updateProductVariation(regId, productId, 'B', userId);
+
+      expect(find(execCalls, '"availableStock"')).toHaveLength(0); // nem acquire nem release
+      expect(find(execCalls, '"soldCount" = "soldCount" + ')[0].vals).toContain('B');
+      expect(find(execCalls, 'GREATEST("soldCount"')[0].vals).toContain('A');
+    });
+  });
 });
 
