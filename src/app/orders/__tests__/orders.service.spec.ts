@@ -561,8 +561,18 @@ describe('OrdersService', () => {
           findFirst: jest.fn().mockResolvedValue(coupon),
           findUnique: jest.fn().mockResolvedValue(coupon),
         },
-        // claimVoucher (reserva de uso único) faz UPDATE ... RETURNING id: 1 linha = claim OK.
-        $queryRaw: jest.fn().mockResolvedValue([{ id: voucher?.id ?? 'voucher' }]),
+        // Dois claims passam por $queryRaw:
+        //  - claimCouponUnits (SQL com "couponReservedUnits") → sem escassez no unit: concede o
+        //    desejado (2º valor interpolado do template = `want`), então granted = desired.
+        //  - claimVoucher (UPDATE ... RETURNING id) → 1 linha = claim OK.
+        $queryRaw: jest.fn().mockImplementation((strings: any, ...vals: any[]) => {
+          const sql = Array.isArray(strings) ? strings.join('') : String(strings);
+          if (sql.includes('couponReservedUnits')) {
+            const want = typeof vals[1] === 'number' ? vals[1] : 0;
+            return Promise.resolve([{ granted: want }]);
+          }
+          return Promise.resolve([{ id: voucher?.id ?? 'voucher' }]);
+        }),
         $executeRaw: jest.fn().mockResolvedValue(1),
         $transaction: jest.fn().mockImplementation((fn: any) => fn(client)),
         _captured: captured,

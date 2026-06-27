@@ -2475,6 +2475,10 @@ export class OrdersService {
     let couponEffectiveUsage: number | undefined;
     let couponFixedPerUnit: number | undefined;
     let couponQualifyingSlots: number[] | undefined;
+    // Unidades de cupom reservadas por este pedido após a aplicação. 0 = sem cupom (libera a
+    // reserva no order.update final). Cupom manual reserva ATOMICAMENTE já aqui (decisão
+    // 2026-06-26): o 1º a aplicar segura a unidade; o 2º vê "esgotado".
+    let couponReservedUnits = 0;
 
     if (dto.couponCode) {
       const normalizedCode = dto.couponCode.toUpperCase().trim();
@@ -2521,7 +2525,8 @@ export class OrdersService {
           const finalAmountV = Math.max(0, order.totalAmount - discount);
           const updatedV = await w.order.update({
             where: { id: orderId },
-            data: { couponId: null, voucherId, discount, finalAmount: finalAmountV, updatedAt: new Date() },
+            // couponId: null → libera também a reserva de cupom anterior (couponReservedUnits: 0).
+            data: { couponId: null, couponReservedUnits: 0, voucherId, discount, finalAmount: finalAmountV, updatedAt: new Date() },
             include: ORDER_INCLUDE,
           });
           return {
@@ -2573,16 +2578,18 @@ export class OrdersService {
       }
 
       const applicableQuantity = applicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
-      // Aplicar desconto apenas nos ingressos mais caros dentro do uso DISPONÍVEL — já
-      // descontando reservas de pedidos concorrentes (availableCouponUnits), para o resumo
-      // não prometer mais do que o pay entregará. A reserva autoritativa ocorre no pay.
-      const remaining = await this.availableCouponUnits(coupon, orderId);
-      if (remaining <= 0) throw new AppUnprocessableException('COUPON_EXHAUSTED', 'Cupom esgotado');
-      // Com lista de documento, o uso é capado pelo nº de participantes ELEGÍVEIS e o
-      // desconto incide nos slots deles (qualifyingSlots). Sem lista, comportamento original.
-      couponEffectiveUsage = docEligibleSlots
-        ? Math.min(remaining, applicableQuantity, docEligibleSlots.length)
-        : Math.min(remaining, applicableQuantity);
+      // RESERVA ATÔMICA do uso já na aplicação manual (decisão 2026-06-26): o claim segura as
+      // unidades para ESTE pedido sob row-lock do cupom, descontando reservas de outros pedidos
+      // ativos. `granted` = min(desejado, disponível). 0 → esgotado → rejeição SUAVE (catch →
+      // couponRejected). Com lista de documento, o desejado é capado pelos participantes
+      // ELEGÍVEIS (qualifyingSlots); sem lista, por todos os ingressos aplicáveis.
+      const desiredUnits = docEligibleSlots
+        ? Math.min(applicableQuantity, docEligibleSlots.length)
+        : applicableQuantity;
+      const granted = await claimCouponUnits(w, coupon.id, orderId, desiredUnits);
+      if (granted <= 0) throw new AppUnprocessableException('COUPON_EXHAUSTED', 'Cupom esgotado');
+      couponEffectiveUsage = granted;
+      couponReservedUnits = granted;
       couponQualifyingSlots = docEligibleSlots;
       // applyToProducts incide SÓ nos produtos dos participantes cujo ingresso é coberto pelo
       // cupom (appliesTo), não em todos os produtos do pedido. Ex.: cupom no meu ingresso não
@@ -2707,6 +2714,9 @@ export class OrdersService {
       where: { id: orderId },
       data: {
         couponId,
+        // Reserva de uso do cupom: `granted` no caminho manual (já gravado pelo claim, reescrito
+        // aqui por consistência) ou 0 ao remover/trocar (voucher/sem código) — libera a reserva.
+        couponReservedUnits,
         voucherId,
         discount,
         finalAmount,
@@ -4449,33 +4459,6 @@ export class OrdersService {
    * `newVoucherId` null = sem voucher (só assegura a liberação da reserva anterior → retorna true).
    * `reservedUntil` = `order.expiresAt` (rede de segurança: reserva vencida é tratada como livre).
    */
-  /**
-   * Unidades de cupom AINDA disponíveis para ESTE pedido, considerando reservas concorrentes:
-   *   maxUsage − usageCount − SUM(couponReservedUnits de OUTROS pedidos PENDING não-expirados)
-   *
-   * Read-only (NÃO reserva) — usada no cálculo PROVISÓRIO de exibição (manual em patchCoupon),
-   * para o resumo do carrinho não prometer mais desconto do que o pay (reserva autoritativa via
-   * claimCouponUnits) entregará. Cupom sem `maxUsage` → ilimitado (Number.MAX_SAFE_INTEGER; o
-   * caller clampa pelo nº de ingressos aplicáveis). A reserva de verdade só ocorre no pay.
-   */
-  private async availableCouponUnits(
-    coupon: { id?: string; maxUsage?: number | null; usageCount?: number | null } | null | undefined,
-    orderId: string,
-  ): Promise<number> {
-    if (!coupon?.id || coupon.maxUsage == null) return Number.MAX_SAFE_INTEGER;
-    const r: any = this.prisma.getReadClient();
-    const rows: any[] = await r.$queryRaw`
-      SELECT COALESCE(SUM("couponReservedUnits"), 0)::int AS reserved
-      FROM "Order"
-      WHERE "couponId" = ${coupon.id}::uuid
-        AND "status" = 'PENDING'
-        AND "expiresAt" > NOW()
-        AND id <> ${orderId}::uuid
-    `;
-    const reserved = Number(rows[0]?.reserved ?? 0);
-    return Math.max(0, coupon.maxUsage - (coupon.usageCount ?? 0) - reserved);
-  }
-
   private async reserveVoucherForOrder(
     client: any,
     order: any,
