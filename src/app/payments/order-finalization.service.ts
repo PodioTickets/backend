@@ -145,6 +145,7 @@ export class OrderFinalizationService {
       select: {
         userId: true,
         couponId: true,
+        couponReservedUnits: true,
         voucherId: true,
         reservedTickets: true,
         pendingParticipants: true,
@@ -166,26 +167,32 @@ export class OrderFinalizationService {
     if (!order) return;
 
     if (order.couponId) {
-      // Decrementa o MESMO que o finalize incrementou — via a fonte única
-      // computeCouponCoveredUnits (QUANTITY: 1; DISCOUNT/AGE: nº de ingressos cobertos).
-      // pendingParticipants/reservedTickets ficam congelados pós-pay → recomputa idêntico.
-      // GREATEST(0,...) protege o raro caso de cupom capado por maxUsage na compra.
+      // Decrementa EXATAMENTE o que o finalize incrementou. Autoridade = as unidades
+      // RESERVADAS no pay (couponReservedUnits) — o mesmo valor que o finalize somou ao
+      // usageCount. Fallback p/ pedidos LEGADOS (sem reserva, couponReservedUnits null):
+      // recomputa via fonte única computeCouponCoveredUnits (QUANTITY: 1; DISCOUNT/AGE: nº de
+      // ingressos cobertos), com piso 1. GREATEST(0,...) no SQL protege contra under/over-flow.
+      const reserved = (order as any).couponReservedUnits as number | null;
       const ageRefDate = order.event?.eventDate ? new Date(order.event.eventDate) : new Date();
-      const decrement = Math.max(
-        1,
-        computeCouponCoveredUnits(
-          order.coupon,
-          (order.reservedTickets as any[]) ?? [],
-          (order.pendingParticipants as any[]) ?? [],
-          ageRefDate,
-        ),
-      );
-      await tx.$executeRaw`
-        UPDATE "Coupon"
-        SET "usageCount" = GREATEST(0, "usageCount" - ${decrement}),
-            "updatedAt" = NOW()
-        WHERE id = ${order.couponId}::uuid
-      `;
+      const decrement = reserved != null
+        ? reserved
+        : Math.max(
+            1,
+            computeCouponCoveredUnits(
+              order.coupon,
+              (order.reservedTickets as any[]) ?? [],
+              (order.pendingParticipants as any[]) ?? [],
+              ageRefDate,
+            ),
+          );
+      if (decrement > 0) {
+        await tx.$executeRaw`
+          UPDATE "Coupon"
+          SET "usageCount" = GREATEST(0, "usageCount" - ${decrement}),
+              "updatedAt" = NOW()
+          WHERE id = ${order.couponId}::uuid
+        `;
+      }
     }
 
     if (order.voucherId) {
@@ -320,7 +327,22 @@ export class OrderFinalizationService {
         select: { couponType: true, maxUsage: true, usageCount: true },
       });
 
-      if (couponForUsage?.couponType === 'QUANTITY') {
+      // CAMINHO RESERVADO (pedidos novos): o pay já RESERVOU `couponReservedUnits` sob row-lock,
+      // garantindo sala dentro do maxUsage. Aqui apenas convertemos reserva → uso: incrementa
+      // o usageCount no MESMO valor reservado. Ao virar PAID nesta tx, o pedido sai da SUM de
+      // reservas e o usageCount sobe o equivalente → invariante (committed + reservado ≤ maxUsage)
+      // preservado, SEM risco de ultrapassar. Não precisa de cap LEAST: a sala já está garantida.
+      const reservedUnits = (order as any).couponReservedUnits as number | null;
+      if (reservedUnits != null) {
+        if (reservedUnits > 0) {
+          await tx.$executeRaw`
+            UPDATE "Coupon"
+            SET "usageCount" = "usageCount" + ${reservedUnits}, "updatedAt" = NOW()
+            WHERE id = ${order.couponId}::uuid
+          `;
+        }
+        // reservedUnits === 0 → cupom não concedeu unidades (esgotado no pay); nada a contabilizar.
+      } else if (couponForUsage?.couponType === 'QUANTITY') {
         // QUANTITY: all-or-nothing — check-and-increment atômico
         const rows: any[] = await tx.$queryRaw`
           UPDATE "Coupon"
