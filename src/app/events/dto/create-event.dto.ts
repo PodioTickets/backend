@@ -345,9 +345,10 @@ export class SearchEventsDto {
   @IsString()
   modalities?: string; // CSV de códigos de modalidade (ex: "corrida,natacao")
 
-  /** Piso do FILTRO de preço, em REAIS (slider 0–1000). O evento entra se tiver
-   *  ALGUM ingresso/lote com preço dentro de [minPrice, maxPrice]. Convertido p/
-   *  centavos no service. */
+  /** Piso do FILTRO de preço, em REAIS (slider 0–1000). O evento entra quando
+   *  possui ALGUM ingresso ativo com preço dentro de [minPrice, maxPrice];
+   *  some quando nenhum ingresso cai no intervalo. Lotes futuros (ainda não à
+   *  venda) não contam. Convertido p/ centavos no service. */
   @IsOptional()
   @IsInt()
   @Min(0)
@@ -388,4 +389,19 @@ export class SearchEventLocationsDto {
   @IsBoolean()
   @Type(() => Boolean)
   includePast?: boolean;
+
+  /** Piso do filtro de preço em REAIS — ver {@link SearchEventsDto.minPrice}.
+   *  Mantido nas facetas p/ que cidades/estados reflitam o mesmo recorte. */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Type(() => Number)
+  minPrice?: number;
+
+  /** Teto do filtro de preço em REAIS — ver {@link SearchEventsDto.maxPrice}. */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Type(() => Number)
+  maxPrice?: number;
 }

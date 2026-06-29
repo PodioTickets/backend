@@ -50,10 +50,15 @@ function formatStatus(reg: any): string {
       ? 'Chargeback'
       : 'Estornado';
   }
+  // Estado TERMINAL da inscrição tem precedência sobre o status do pagamento:
+  // pedido GRATUITO cancelado mantém Payment.status=PAID (não há CANCELLED no
+  // enum de pagamento), então sem este check o export mostrava "Pago" para uma
+  // inscrição cancelada. Espelha a precedência da lista (RegistrationRow).
+  if (reg.status === 'CANCELLED') return 'Cancelado';
   if (reg.status === 'CONFIRMED' || reg.status === 'COMPLETED' || pStatus === 'PAID') {
     return 'Pago';
   }
-  if (reg.status === 'CANCELLED' || pStatus === 'FAILED') return 'Cancelado';
+  if (pStatus === 'FAILED') return 'Cancelado';
   return 'Pendente';
 }
 
@@ -187,6 +192,10 @@ function extractField(reg: any, field: ExportField): string {
     case 'status':
       return formatStatus(reg);
     case 'formaPagamento':
+      // Pedido gratuito (total cobrado = 0) não tem forma de pagamento real: o
+      // gateway pode ter registrado PIX/cartão no fluxo, mas nada foi cobrado.
+      // Exibe "Gratuito" (espelha o modal, que esconde o método em pedido grátis).
+      if (order.finalAmount === 0) return 'Gratuito';
       return formatPaymentMethod(payment.method);
     case 'valorPago':
       return formatCurrency(order.finalAmount);
