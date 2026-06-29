@@ -344,6 +344,22 @@ export class SearchEventsDto {
   @IsOptional()
   @IsString()
   modalities?: string; // CSV de códigos de modalidade (ex: "corrida,natacao")
+
+  /** Piso do FILTRO de preço, em REAIS (slider 0–1000). O evento entra se tiver
+   *  ALGUM ingresso/lote com preço dentro de [minPrice, maxPrice]. Convertido p/
+   *  centavos no service. */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Type(() => Number)
+  minPrice?: number;
+
+  /** Teto do FILTRO de preço, em REAIS (slider 0–1000). Ver `minPrice`. */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Type(() => Number)
+  maxPrice?: number;
 }
 
 /** Mesmos filtros opcionais de {@link SearchEventsDto}, exceto paginação e filtro por estado/cidade (facetas cobrem todos os pares). */

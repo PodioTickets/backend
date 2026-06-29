@@ -79,4 +79,52 @@ describe('ExportRegistrationsService — coluna fixa de ID da inscrição', () =
     expect(lines).toHaveLength(3);
     expect(lines[2]).toContain('linha1 linha2');
   });
+
+  // ── Campo "Ingresso": lê de tickets[] (plural) e AGREGA ──────────────────────
+  // Regressão: o código lia `reg.ticket` (singular), que o include nunca traz →
+  // a coluna saía vazia. Agora lê `reg.tickets[].ticket` e junta múltiplos.
+  it('ingresso: "Categoria - Ingresso" a partir de tickets[]', () => {
+    const r = { id: 'x', user: {}, tickets: [{ ticket: { name: 'Lote 1', category: { name: '5km' } } }] };
+    expect(txtLines([r], ['ingresso'])[2].split(',').pop()).toBe('5km - Lote 1');
+  });
+
+  it('ingresso: sem categoria → só o nome do ingresso', () => {
+    const r = { id: 'x', user: {}, tickets: [{ ticket: { name: 'Lote 1' } }] };
+    expect(txtLines([r], ['ingresso'])[2].split(',').pop()).toBe('Lote 1');
+  });
+
+  it('ingresso: múltiplos ingressos da inscrição → agregados com "; "', () => {
+    const r = {
+      id: 'x', user: {},
+      tickets: [
+        { ticket: { name: 'Lote 1', category: { name: '5km' } } },
+        { ticket: { name: 'Lote 2', category: { name: '10km' } } },
+      ],
+    };
+    expect(txtLines([r], ['ingresso'])[2].split(',').pop()).toBe('5km - Lote 1; 10km - Lote 2');
+  });
+
+  it('ingresso: sem tickets → célula vazia', () => {
+    expect(txtLines([{ id: 'x', user: {} }], ['ingresso'])[2].split(',').pop()).toBe('');
+  });
+
+  it('ingresso: shape antigo `reg.ticket` (singular) NÃO é mais lido → vazio', () => {
+    expect(txtLines([{ id: 'x', user: {}, ticket: { name: 'Antigo' } }], ['ingresso'])[2].split(',').pop()).toBe('');
+  });
+
+  it('ingresso: PREFERE o snapshot sobre a relação viva (ingresso renomeado)', () => {
+    const r = {
+      id: 'x', user: {},
+      tickets: [{
+        ticketSnapshot: { name: 'Comprado', category: { name: '5km' } },
+        ticket: { name: 'Renomeado', category: { name: '10km' } },
+      }],
+    };
+    expect(txtLines([r], ['ingresso'])[2].split(',').pop()).toBe('5km - Comprado');
+  });
+
+  it('ingresso: snapshot SEM relação viva (ingresso deletado) ainda exporta', () => {
+    const r = { id: 'x', user: {}, tickets: [{ ticketSnapshot: { name: 'Lote 1', category: { name: '5km' } }, ticket: null }] };
+    expect(txtLines([r], ['ingresso'])[2].split(',').pop()).toBe('5km - Lote 1');
+  });
 });

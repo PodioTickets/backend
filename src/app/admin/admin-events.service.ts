@@ -2,6 +2,7 @@ import { Injectable, NotFoundException, BadRequestException, Logger } from '@nes
 import { PrismaService } from '../../prisma/prisma.service';
 import { EventStatus, Prisma } from '@prisma/client';
 import { EmailService } from '../../common/services/email.service';
+import { withPastEventsAsCompleted as markPastEventsCompleted } from '../../common/utils/event-status.util';
 
 export interface AdminEventsQuery {
   page: number;
@@ -173,11 +174,16 @@ export class AdminEventsService {
       confirmedRows.map((r) => [r.eventId, Number(r.confirmed)]),
     );
 
-    const data = events.map((event) => ({
-      ...event,
-      revenue: revenueByEvent.get(event.id) ?? 0,
-      confirmedRegistrations: confirmedByEvent.get(event.id) ?? 0,
-    }));
+    // MESMA regra da lista do organizador: evento cuja DATA já passou (fim do dia
+    // BRT) é exibido como COMPLETED. Antes o admin devolvia o status cru do banco,
+    // divergindo do organizador. Fonte única em `event-status.util`.
+    const data = markPastEventsCompleted(
+      events.map((event) => ({
+        ...event,
+        revenue: revenueByEvent.get(event.id) ?? 0,
+        confirmedRegistrations: confirmedByEvent.get(event.id) ?? 0,
+      })),
+    );
 
     // Ordenação em memória para campos de agregado (registrations/revenue) após enriquecimento
     if (sortBy === 'registrations') {

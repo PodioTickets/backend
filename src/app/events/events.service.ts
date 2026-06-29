@@ -49,6 +49,7 @@ import { RepasseService, RETENTION_DAYS } from '../repasse/repasse.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { isChargeback, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 import { brtDayStartUtc, brtDayEndUtc } from '../../common/utils/brt-date.util';
+import { withPastEventsAsCompleted as markPastEventsCompleted } from '../../common/utils/event-status.util';
 
 /**
  * Taxas padrão aplicadas na CRIAÇÃO de um evento (escala 0–100, ex.: 4 = 4%).
@@ -235,15 +236,16 @@ export class EventsService {
   }
 
   /**
-   * Para listagens GET: eventos cuja data já passou são retornados com status COMPLETED (Finalized).
+   * Para listagens GET: eventos cuja DATA já passou (fim do dia em BRT) são
+   * retornados com status COMPLETED. Delega à fonte única `event-status.util`
+   * — MESMA regra usada na lista do admin. Antes comparava `eventDate < now` cru
+   * (wall-clock como UTC), o que adiantava ~3h e marcava evento do próprio dia
+   * como concluído.
    */
   private withPastEventsAsCompleted<T extends { eventDate: Date; status: EventStatus }>(
     events: T[],
   ): T[] {
-    const now = new Date();
-    return events.map((e) =>
-      e.eventDate < now ? { ...e, status: EventStatus.COMPLETED } : e,
-    ) as T[];
+    return markPastEventsCompleted(events);
   }
 
   /**
@@ -554,6 +556,8 @@ export class EventsService {
     status?: EventStatus;
     includePast?: boolean;
     modalities?: string;
+    minPrice?: number;
+    maxPrice?: number;
     textMatchIds?: string[];
   }): Prisma.EventWhereInput {
     const {
@@ -565,6 +569,8 @@ export class EventsService {
       endDate,
       status,
       modalities,
+      minPrice,
+      maxPrice,
       textMatchIds,
     } = params;
 
@@ -628,12 +634,26 @@ export class EventsService {
     // meses curtos, que dava janela inconsistente).
     eventDateCutoff.setDate(eventDateCutoff.getDate() - 30);
 
-    return {
-      AND: [
-        { eventDate: { gte: eventDateCutoff } },
-        where,
-      ],
-    };
+    const andConditions: Prisma.EventWhereInput[] = [
+      { eventDate: { gte: eventDateCutoff } },
+      where,
+    ];
+
+    // Filtro de preço (slider em REAIS → centavos do TicketBatch). O evento entra
+    // se tiver ALGUM lote com preço dentro de [minPrice, maxPrice]. Condição
+    // SEPARADA no AND p/ não colidir com o `where.tickets` da modalidade (cada
+    // `tickets.some` é independente). minPrice undefined = sem piso; maxPrice
+    // undefined = sem teto.
+    if (minPrice != null || maxPrice != null) {
+      const priceCents: Prisma.IntFilter = {};
+      if (minPrice != null) priceCents.gte = Math.round(minPrice * 100);
+      if (maxPrice != null) priceCents.lte = Math.round(maxPrice * 100);
+      andConditions.push({
+        tickets: { some: { isActive: true, batches: { some: { price: priceCents } } } },
+      });
+    }
+
+    return { AND: andConditions };
   }
 
   async searchLocationFacets(dto: SearchEventLocationsDto) {
