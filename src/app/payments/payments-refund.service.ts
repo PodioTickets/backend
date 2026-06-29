@@ -389,6 +389,171 @@ export class PaymentsRefundService {
   }
 
   /**
+   * Cancela um pedido GRATUITO (finalAmount <= 0) — SEM estorno. Como nada foi
+   * pago, NÃO chama a Cielo e NÃO cobra a taxa de 2% (diferença central vs
+   * `refundOrder`). Marca o pedido CANCELLED, cancela as inscrições, reverte
+   * cupom/voucher (libera o estoque de forma indireta, igual ao estorno) e grava
+   * audit log `ORDER_CANCEL`.
+   *
+   * Guard de escopo: REJEITA pedido com valor pago (`finalAmount > 0`) com
+   * `ORDER_HAS_PAYMENT` — esse caso é estorno (void na Cielo + taxa).
+   * Idempotência: `updateMany` com guard de status (PAID) — 2ª chamada vira no-op.
+   */
+  async cancelFreeOrder(params: {
+    orderId: string;
+    actorUserId: string;
+    reason: string;
+    ip?: string;
+  }) {
+    const { orderId, actorUserId, reason, ip } = params;
+
+    const order = await this.prisma.getWriteClient().order.findUnique({
+      where: { id: orderId },
+      include: {
+        payment: true,
+        event: { select: { id: true, name: true, organizationId: true } },
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException({ code: 'ORDER_NOT_FOUND', message: 'Pedido não encontrado' });
+    }
+
+    // Só pedidos GRATUITOS. Free order é gravado como PAID com finalAmount 0 e sem
+    // referência Cielo; pedido com valor real deve ir pelo estorno (void + taxa).
+    if (order.finalAmount > 0) {
+      throw new ConflictException({
+        code: 'ORDER_HAS_PAYMENT',
+        message: 'Pedido possui valor pago — use o estorno (refund), não o cancelamento.',
+      });
+    }
+
+    if (order.status === OrderStatus.CANCELLED) {
+      throw new ConflictException({
+        code: 'ORDER_ALREADY_CANCELLED',
+        message: 'Pedido já está cancelado.',
+      });
+    }
+
+    // Free order confirmado é PAID. PENDING (reserva) expira sozinho — fora do escopo.
+    if (order.status !== OrderStatus.PAID) {
+      throw new ConflictException({
+        code: 'ORDER_NOT_CANCELLABLE',
+        message: `Pedido não pode ser cancelado (status atual: ${order.status}).`,
+      });
+    }
+
+    const cancelledAt = new Date();
+    const cancelledReason = `Cancelamento pelo organizador: ${reason}`;
+    const payment = order.payment;
+
+    const applied = await this.prisma
+      .getWriteClient()
+      .$transaction(async (tx: any): Promise<boolean> => {
+        // Order → CANCELLED (guard de status garante idempotência).
+        const orderUpdate = await tx.order.updateMany({
+          where: { id: order.id, status: OrderStatus.PAID },
+          data: {
+            status: OrderStatus.CANCELLED,
+            cancelledAt,
+            cancelledReason,
+            updatedAt: cancelledAt,
+          },
+        });
+        if (orderUpdate.count === 0) {
+          this.logger.warn(`[CANCEL] order ${order.id} já não está PAID — no-op (corrida).`);
+          return false;
+        }
+
+        // Inscrições confirmadas → CANCELLED (libera a vaga, igual ao estorno).
+        await tx.registration.updateMany({
+          where: {
+            orderId: order.id,
+            status: { in: [RegistrationStatus.CONFIRMED, RegistrationStatus.COMPLETED] },
+          },
+          data: { status: RegistrationStatus.CANCELLED, updatedAt: cancelledAt },
+        });
+
+        // Reverte efeitos de venda (cupom/voucher) — mesma fonte única do estorno.
+        await this.orderFinalization.reverseSaleSideEffects(tx, order.id);
+
+        // Carimba o pagamento (free, R$0): mantém o status — PaymentStatus NÃO tem
+        // CANCELLED e NÃO houve estorno de valor (não marcar REFUNDED). A verdade do
+        // cancelamento é o `order.status`; a metadata registra a ação para auditoria.
+        if (payment) {
+          const meta = (payment.metadata as Record<string, unknown> | null) ?? {};
+          await tx.payment.update({
+            where: { id: payment.id },
+            data: {
+              metadata: {
+                ...(meta as object),
+                cancelType: 'FREE_ORDER_CANCEL',
+                cancelReason: reason,
+                cancelledByUserId: actorUserId,
+                cancelledAt: cancelledAt.toISOString(),
+              } as any,
+              updatedAt: cancelledAt,
+            },
+          });
+        }
+
+        await tx.organizationAuditLog.create({
+          data: {
+            organizationId: order.event.organizationId,
+            actorUserId,
+            ip: ip ?? null,
+            action: 'ORDER_CANCEL',
+            metadata: {
+              orderId: order.id,
+              paymentId: payment?.id ?? null,
+              eventId: order.event.id,
+              eventName: order.event.name,
+              amount: order.finalAmount,
+              reason,
+            },
+          },
+        });
+
+        return true;
+      });
+
+    // Telemetria (não bloqueante) na jornada do comprador.
+    if (applied) {
+      try {
+        this.activity.record({
+          userId: order.userId,
+          source: UserActivitySource.BACKEND,
+          category: UserActivityCategory.COMPLIANCE,
+          action: 'order.cancelled',
+          metadata: {
+            orderId: order.id,
+            eventId: order.event.id,
+            paymentId: payment?.id ?? null,
+            amount: order.finalAmount,
+            cancelType: 'FREE_ORDER_CANCEL',
+          },
+        });
+      } catch {
+        // Telemetria nunca quebra o cancelamento.
+      }
+    }
+
+    this.logger.warn(
+      `[CANCEL] order=${order.id} payment=${payment?.id ?? '—'} amount=${order.finalAmount} ` +
+        `actor=${actorUserId} applied=${applied}`,
+    );
+
+    return {
+      message: 'Pedido cancelado com sucesso',
+      data: {
+        orderId: order.id,
+        paymentId: payment?.id ?? null,
+        cancelledAt: cancelledAt.toISOString(),
+      },
+    };
+  }
+
+  /**
    * Replica a fórmula do `calcBreakdown` do RepasseService para uma única order:
    *   orgNet = round((finalAmount - serviceFee) * (1 - organizerFeePercent/100))
    *

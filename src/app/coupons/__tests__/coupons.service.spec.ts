@@ -17,25 +17,31 @@ describe('CouponsService.previewByCode', () => {
   let client: any;
   const mockPrisma = { getReadClient: jest.fn(), getWriteClient: jest.fn() };
 
-  const setup = ({ event = { id: 'evt-1' }, coupon = null, voucher = null }: any) => {
+  const setup = ({ event = { id: 'evt-1' }, coupon = null, voucher = null, reserved = 0 }: any) => {
     client = {
       event: { findUnique: jest.fn().mockResolvedValue(event) },
       coupon: { findUnique: jest.fn().mockResolvedValue(coupon) },
       voucher: { findUnique: jest.fn().mockResolvedValue(voucher) },
     };
     mockPrisma.getReadClient.mockReturnValue(client);
+    // getWriteClient é usado SÓ para somar as reservas ATIVAS do cupom (pedidos
+    // PENDING não-expirados). `reserved` controla o total reservado no cenário.
+    mockPrisma.getWriteClient.mockReturnValue({
+      $queryRaw: jest.fn().mockResolvedValue([{ reserved }]),
+    });
   };
 
   const future = new Date('2099-01-01');
   const past = new Date('2000-01-01');
   const baseCoupon = (over: any = {}) => ({
-    code: 'OFF50', value: 50, type: 'PERCENTAGE', couponType: 'DISCOUNT',
+    id: 'cpn-1', code: 'OFF50', value: 50, type: 'PERCENTAGE', couponType: 'DISCOUNT',
     applyToProducts: false, appliesTo: 'all', minCartValue: null, minQuantity: null,
     status: 'ACTIVE', expiryDate: null, deletedAt: null, ...over,
   });
   const baseVoucher = (over: any = {}) => ({
     code: 'CORTESIA', appliesTo: '["t1","t2"]', status: 'ACTIVE',
-    expiryDate: null, usedAt: null, deletedAt: null, ...over,
+    expiryDate: null, usedAt: null, deletedAt: null,
+    reservedByOrderId: null, reservedUntil: null, ...over,
   });
 
   beforeEach(async () => {
@@ -186,5 +192,169 @@ describe('CouponsService.previewByCode', () => {
   it('evento inexistente → null', async () => {
     setup({ event: null, coupon: baseCoupon() });
     expect((await service.previewByCode('evt-1', 'OFF50')).data).toBeNull();
+  });
+
+  // ── Reservas ATIVAS contam no limite (vendas + reservas) ──────────────────
+  describe('limite considerando reservas ativas', () => {
+    it('limite 10, 9 vendidos + 1 RESERVADO → 10/10 esgotado → null', async () => {
+      setup({ coupon: baseCoupon({ maxUsage: 10, usageCount: 9 }), reserved: 1 });
+      expect((await service.previewByCode('evt-1', 'OFF50')).data).toBeNull();
+    });
+
+    it('limite 10, 9 vendidos + 0 reservados (reserva liberada/expirou) → exibe, remaining 1', async () => {
+      setup({ coupon: baseCoupon({ couponType: 'DISCOUNT', maxUsage: 10, usageCount: 9 }), reserved: 0 });
+      const res: any = await service.previewByCode('evt-1', 'OFF50');
+      expect(res.data).not.toBeNull();
+      expect(res.data.remaining).toBe(1);
+    });
+
+    it('remaining desconta as reservas: max 10, 5 vendidos, 2 reservados → remaining 3', async () => {
+      setup({ coupon: baseCoupon({ couponType: 'DISCOUNT', maxUsage: 10, usageCount: 5 }), reserved: 2 });
+      const res: any = await service.previewByCode('evt-1', 'OFF50');
+      expect(res.data.remaining).toBe(3);
+    });
+
+    it('sem maxUsage → não consulta reservas e exibe (sem limite)', async () => {
+      setup({ coupon: baseCoupon({ maxUsage: null, usageCount: 999 }), reserved: 5 });
+      expect((await service.previewByCode('evt-1', 'OFF50')).data).not.toBeNull();
+      expect(mockPrisma.getWriteClient().$queryRaw).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Voucher reservado por pedido ativo some do preview ────────────────────
+  describe('voucher reservado', () => {
+    it('reservado por pedido ATIVO (reservedUntil futuro) → null', async () => {
+      setup({ voucher: baseVoucher({ reservedByOrderId: 'ord-1', reservedUntil: future }) });
+      expect((await service.previewByCode('evt-1', 'CORTESIA')).data).toBeNull();
+    });
+
+    it('reserva EXPIRADA (reservedUntil passado) → exibe (carrinho abandonado liberado)', async () => {
+      setup({ voucher: baseVoucher({ reservedByOrderId: 'ord-1', reservedUntil: past }) });
+      expect((await service.previewByCode('evt-1', 'CORTESIA')).data).not.toBeNull();
+    });
+
+    it('sem reserva (reservedByOrderId null) → exibe', async () => {
+      setup({ voucher: baseVoucher() });
+      expect((await service.previewByCode('evt-1', 'CORTESIA')).data).not.toBeNull();
+    });
+  });
+
+  // ── AGE eligibility: esgotamento também conta reservas ativas ─────────────
+  describe('getApplicableAgeCoupons (limite com reservas)', () => {
+    // Nascido em 2009-06-15 → 20 anos na data do evento (2030-01-01).
+    const dob20 = new Date('2009-06-15');
+    const ageCoupon = (over: any = {}) => ({
+      id: 'age-1', code: 'JOVEM', couponType: 'AGE', type: 'PERCENTAGE', value: 20,
+      ageRule: null, ageValue: null, minAge: 18, maxAge: 25, appliesTo: 'all',
+      applyToProducts: false, minCartValue: null, note: null,
+      usageCount: 9, maxUsage: 10, ...over,
+    });
+    const setupAge = ({ coupons = [] as any[], reserved = 0 }: any) => {
+      mockPrisma.getReadClient.mockReturnValue({
+        event: { findUnique: jest.fn().mockResolvedValue({ id: 'evt-1', eventDate: new Date('2030-01-01') }) },
+        coupon: { findMany: jest.fn().mockResolvedValue(coupons) },
+      });
+      mockPrisma.getWriteClient.mockReturnValue({
+        $queryRaw: jest.fn().mockResolvedValue([{ reserved }]),
+      });
+    };
+
+    it('9 vendidos + 1 RESERVADO → 10/10 esgotado → NÃO aplicável', async () => {
+      setupAge({ coupons: [ageCoupon({ usageCount: 9, maxUsage: 10 })], reserved: 1 });
+      const res: any = await service.getApplicableAgeCoupons('evt-1', { dateOfBirth: dob20 });
+      expect(res.data.applicable).toBe(false);
+    });
+
+    it('9 vendidos + 0 reservados (reserva liberada) → aplicável', async () => {
+      setupAge({ coupons: [ageCoupon({ usageCount: 9, maxUsage: 10 })], reserved: 0 });
+      const res: any = await service.getApplicableAgeCoupons('evt-1', { dateOfBirth: dob20 });
+      expect(res.data.applicable).toBe(true);
+    });
+
+    it('sem maxUsage → aplicável sem consultar reservas', async () => {
+      setupAge({ coupons: [ageCoupon({ maxUsage: null, usageCount: 999 })], reserved: 7 });
+      const res: any = await service.getApplicableAgeCoupons('evt-1', { dateOfBirth: dob20 });
+      expect(res.data.applicable).toBe(true);
+      expect(mockPrisma.getWriteClient().$queryRaw).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── findAll: status EFETIVO por validade (lista organizador/admin) ─────────
+  describe('findAll (status efetivo por validade)', () => {
+    const setupList = (coupons: any[]) => {
+      mockPrisma.getReadClient.mockReturnValue({
+        coupon: {
+          findMany: jest.fn().mockResolvedValue(coupons),
+          count: jest.fn().mockResolvedValue(coupons.length),
+        },
+      });
+    };
+    const listCoupon = (over: any = {}) => ({
+      id: 'c1', code: 'X', status: 'ACTIVE', expiryDate: null, appliesTo: 'all', ...over,
+    });
+
+    it('ATIVO com validade VENCIDA → EXPIRED', async () => {
+      setupList([listCoupon({ status: 'ACTIVE', expiryDate: past })]);
+      const res: any = await service.findAll('evt-1');
+      expect(res.data.coupons[0].status).toBe('EXPIRED');
+    });
+
+    it('ATIVO com validade FUTURA → ATIVO', async () => {
+      setupList([listCoupon({ status: 'ACTIVE', expiryDate: future })]);
+      const res: any = await service.findAll('evt-1');
+      expect(res.data.coupons[0].status).toBe('ACTIVE');
+    });
+
+    it('ATIVO sem validade → ATIVO', async () => {
+      setupList([listCoupon({ status: 'ACTIVE', expiryDate: null })]);
+      const res: any = await service.findAll('evt-1');
+      expect(res.data.coupons[0].status).toBe('ACTIVE');
+    });
+
+    it('INACTIVE vencido → preserva INACTIVE (desligado manual, não vira EXPIRED)', async () => {
+      setupList([listCoupon({ status: 'INACTIVE', expiryDate: past })]);
+      const res: any = await service.findAll('evt-1');
+      expect(res.data.coupons[0].status).toBe('INACTIVE');
+    });
+
+    it('já EXPIRED → permanece EXPIRED', async () => {
+      setupList([listCoupon({ status: 'EXPIRED', expiryDate: past })]);
+      const res: any = await service.findAll('evt-1');
+      expect(res.data.coupons[0].status).toBe('EXPIRED');
+    });
+
+    // ── Filtro ?status= considera a validade EFETIVA (where consistente) ──────
+    const captureWhere = async (status: string) => {
+      const findMany = jest.fn().mockResolvedValue([]);
+      mockPrisma.getReadClient.mockReturnValue({
+        coupon: { findMany, count: jest.fn().mockResolvedValue(0) },
+      });
+      await service.findAll('evt-1', { status } as any);
+      return findMany.mock.calls[0][0].where;
+    };
+
+    it('filtro ACTIVE → status ACTIVE E não vencido (exclui ATIVO vencido)', async () => {
+      const where = await captureWhere('ACTIVE');
+      expect(where.status).toBe('ACTIVE');
+      expect(where.OR).toEqual([
+        { expiryDate: null },
+        { expiryDate: { gte: expect.any(Date) } },
+      ]);
+    });
+
+    it('filtro EXPIRED → EXPIRED no banco OU ATIVO vencido (inclui ATIVO vencido)', async () => {
+      const where = await captureWhere('EXPIRED');
+      expect(where.status).toBeUndefined();
+      expect(where.OR).toEqual([
+        { status: 'EXPIRED' },
+        { status: 'ACTIVE', expiryDate: { lt: expect.any(Date) } },
+      ]);
+    });
+
+    it('filtro INACTIVE → status cru (sem condição de data)', async () => {
+      const where = await captureWhere('INACTIVE');
+      expect(where.status).toBe('INACTIVE');
+      expect(where.OR).toBeUndefined();
+    });
   });
 });

@@ -137,14 +137,31 @@ function extractField(reg: any, field: ExportField): string {
     case 'ingresso': {
       const removerCorrida = (s: string) =>
         s.replace(/\bcorrida\b/gi, '').replace(/\s{2,}/g, ' ').trim();
-      const ticket = reg.ticket ?? null;
-      if (!ticket) return '';
-      const categoryName = removerCorrida(ticket.category?.name ?? ticket.modality ?? '');
-      const ticketName = removerCorrida(ticket.name ?? '');
-      if (categoryName && ticketName && categoryName !== ticketName) {
-        return `${categoryName} - ${ticketName}`;
-      }
-      return ticketName || categoryName;
+      // Prefere o SNAPSHOT do ingresso (gravado na compra — preserva nome/categoria
+      // mesmo após rename/exclusão do ingresso) e cai na relação VIVA como fallback
+      // (legados sem snapshot). Mesma precedência da lista de inscrições.
+      const labelFor = (rt: any): string => {
+        const snap = rt?.ticketSnapshot ?? null;
+        const live = rt?.ticket ?? null;
+        if (!snap && !live) return '';
+        const name = removerCorrida(snap?.name ?? live?.name ?? '');
+        const categoryName = removerCorrida(
+          snap?.category?.name ?? live?.category?.name ?? snap?.modality ?? live?.modality ?? '',
+        );
+        if (categoryName && name && categoryName !== name) {
+          return `${categoryName} - ${name}`;
+        }
+        return name || categoryName;
+      };
+      // A inscrição tem os ingressos em `tickets` (RegistrationTicket[]). O código
+      // lia `reg.ticket` (singular), que NÃO existe no include → coluna vazia.
+      // Agora AGREGA os ingressos da inscrição (1 por participante no caso comum;
+      // junta com "; " se houver mais de um).
+      const regTickets = Array.isArray(reg.tickets) ? reg.tickets : [];
+      const labels = regTickets
+        .map((rt: any) => labelFor(rt))
+        .filter((s: string) => s.length > 0);
+      return labels.join('; ');
     }
     case 'produtosEscolhidos': {
       const products: any[] = reg.products ?? [];

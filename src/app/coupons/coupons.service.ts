@@ -9,6 +9,7 @@ import { CreateCouponDto, UpdateCouponDto, FilterCouponsDto, CouponStatus } from
 import { buildDocumentList } from '../../common/utils/document.util';
 import { computeAgeAt } from '../../common/utils/age.util';
 import { brtDayEndUtc } from '../../common/utils/brt-date.util';
+import { sumActiveCouponReservations } from '../../common/utils/coupon-reservation.util';
 
 @Injectable()
 export class CouponsService {
@@ -108,8 +109,26 @@ export class CouponsService {
     const limit = filterDto.limit || 10;
     const skip = (page - 1) * limit;
 
+    // `now` é fonte única para o filtro E para o status efetivo exibido — ambos
+    // precisam concordar (cupom ATIVO vencido = EXPIRED nos dois lados).
+    const now = new Date();
+
     const where: any = { eventId, deletedAt: null };
-    if (filterDto.status) {
+    // Filtro por status EFETIVO (não o cru do banco): como não há cron que vire
+    // ACTIVE→EXPIRED, traduzimos o status pedido em condições de validade — assim
+    // a lista, a contagem e a paginação ficam consistentes com a badge exibida.
+    if (filterDto.status === CouponStatus.ACTIVE) {
+      // Efetivamente ativo = ATIVO no banco E ainda não vencido.
+      where.status = CouponStatus.ACTIVE;
+      where.OR = [{ expiryDate: null }, { expiryDate: { gte: now } }];
+    } else if (filterDto.status === CouponStatus.EXPIRED) {
+      // Efetivamente expirado = EXPIRED no banco OU ATIVO com validade vencida.
+      where.OR = [
+        { status: CouponStatus.EXPIRED },
+        { status: CouponStatus.ACTIVE, expiryDate: { lt: now } },
+      ];
+    } else if (filterDto.status) {
+      // INACTIVE (ou outro) → status cru; INACTIVE é preservado (desligado manual).
       where.status = filterDto.status;
     }
 
@@ -123,10 +142,19 @@ export class CouponsService {
       prismaRead.coupon.count({ where }),
     ]);
 
-    // Converter appliesTo de JSON string para array quando necessário
+    // Converter appliesTo de JSON string para array quando necessário + status EFETIVO.
+    // Espelha o filtro acima: cupom ATIVO com validade vencida → EXPIRED na badge
+    // (não há cron que vire o status). INACTIVE (desligado manual) é preservado.
+    // Mesma lista serve organizador e admin.
     const transformedCoupons = coupons.map((coupon) => ({
       ...coupon,
       appliesTo: this.parseAppliesTo(coupon.appliesTo),
+      status:
+        coupon.status === CouponStatus.ACTIVE &&
+        coupon.expiryDate &&
+        coupon.expiryDate < now
+          ? CouponStatus.EXPIRED
+          : coupon.status,
     }));
 
     const totalPages = Math.ceil(total / limit);
@@ -226,6 +254,7 @@ export class CouponsService {
       prismaRead.coupon.findUnique({
         where: { eventId_code: { eventId, code } },
         select: {
+          id: true, // p/ somar as reservas ativas (pedidos PENDING) no esgotamento
           code: true,
           value: true,
           type: true,
@@ -250,6 +279,10 @@ export class CouponsService {
           expiryDate: true,
           usedAt: true,
           deletedAt: true,
+          // Reserva por pedido ATIVO: enquanto um carrinho PENDING detém o voucher,
+          // ele fica indisponível para outros compradores → some do preview.
+          reservedByOrderId: true,
+          reservedUntil: true,
         },
       }),
     ]);
@@ -261,11 +294,19 @@ export class CouponsService {
 
     // 1) Voucher usável → prioridade sobre cupom (espelha o checkout). Usado/expirado/
     //    inativo/soft-deleted → ignora (cai pro cupom ou null).
+    // Reservado por um pedido ATIVO (outro carrinho PENDING o detém): indisponível
+    // até a reserva expirar/ser liberada. `reservedUntil < now` = reserva vencida
+    // (carrinho abandonado) → tratado como livre. Voucher = 1 unidade: reservado por
+    // QUALQUER pedido já esgota para os demais.
+    const voucherReserved =
+      !!voucher?.reservedByOrderId &&
+      (!voucher.reservedUntil || voucher.reservedUntil >= now);
     const voucherUsable =
       !!voucher &&
       !voucher.deletedAt &&
       voucher.status === 'ACTIVE' &&
       !voucher.usedAt &&
+      !voucherReserved &&
       (!voucher.expiryDate || voucher.expiryDate >= now);
     if (voucherUsable) {
       return {
@@ -284,8 +325,18 @@ export class CouponsService {
     //    poderia aplicar: inexistente, soft-deleted, expirado (data/status), inativo OU ESGOTADO
     //    (usageCount >= maxUsage). Esgotamento espelha o `COUPON_EXHAUSTED` do patchCoupon/pay e
     //    o filtro do cupom AGE — sem isso o link mostrava "10% OFF" num cupom que o apply rejeita.
+    // Esgotamento considera VENDAS (usageCount) + RESERVAS ATIVAS (couponReservedUnits
+    // dos pedidos PENDING não-expirados). Ex.: limite 10, 9 vendidos e 1 reservado por
+    // um carrinho ativo → 10/10 → esgotado p/ os demais. Lê do PRIMÁRIO p/ refletir a
+    // reserva recém-feita sem lag de réplica. Só consulta quando há limite (maxUsage).
+    const couponActiveReserved =
+      coupon && coupon.maxUsage != null
+        ? await sumActiveCouponReservations(this.prisma.getWriteClient(), coupon.id)
+        : 0;
     const couponExhausted =
-      !!coupon && coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage;
+      !!coupon &&
+      coupon.maxUsage != null &&
+      coupon.usageCount + couponActiveReserved >= coupon.maxUsage;
     const couponDisplayable =
       !!coupon &&
       !coupon.deletedAt &&
@@ -317,7 +368,7 @@ export class CouponsService {
           // Sem maxUsage → null (sem limite). Esgotado já foi filtrado em couponDisplayable.
           remaining:
             coupon!.couponType === 'DISCOUNT' && coupon!.maxUsage != null
-              ? Math.max(0, coupon!.maxUsage - coupon!.usageCount)
+              ? Math.max(0, coupon!.maxUsage - coupon!.usageCount - couponActiveReserved)
               : null,
         },
       };
@@ -346,7 +397,7 @@ export class CouponsService {
    *   - evento existe;
    *   - cupom ACTIVE, não soft-deletado, não expirado;
    *   - idade ∈ [minAge ?? 0, maxAge ?? ∞];
-   *   - cupom não esgotado (usageCount < maxUsage).
+   *   - cupom não esgotado: usageCount + reservas ATIVAS (pedidos PENDING) < maxUsage.
    *
    * `minCartValue` e `appliesTo` são RETORNADOS no cupom (para a UX exibir as
    * CONDIÇÕES da aplicação final), mas NÃO filtram aqui — não há carrinho nesta
@@ -424,15 +475,34 @@ export class CouponsService {
       orderBy: { minAge: 'asc' },
     });
 
-    // No máximo um casa (invariante de não-sobreposição); pegamos o primeiro.
-    const winner = ageCoupons.find((c) => {
+    // Candidatos pela FAIXA ETÁRIA (invariante de não-sobreposição → normalmente
+    // 0 ou 1; ordenados por minAge asc p/ desempate determinístico em dado legado).
+    const ageMatches = ageCoupons.filter((c) => {
       const min = c.minAge ?? 0;
       const max = c.maxAge ?? Number.POSITIVE_INFINITY;
-      if (age < min || age > max) return false;
-      // Cupom esgotado não se aplica (espelha o checkout).
-      if (c.maxUsage != null && c.usageCount >= c.maxUsage) return false;
-      return true;
+      return age >= min && age <= max;
     });
+
+    // Esgotamento considera VENDAS (usageCount) + RESERVAS ATIVAS (pedidos PENDING) —
+    // mesma regra do preview de link. AGE auto-aplicado reserva 1 unidade no PENDING,
+    // então um carrinho ativo que segurou o último uso esconde o preview p/ os demais.
+    // Pula esgotados e pega o 1º disponível (preserva o caso legado de sobreposição);
+    // só consulta reservas para candidatos COM limite (poucos/zero candidatos).
+    let winner: (typeof ageCoupons)[number] | undefined;
+    for (const c of ageMatches) {
+      if (c.maxUsage == null) {
+        winner = c; // sem limite → sempre disponível
+        break;
+      }
+      const reserved = await sumActiveCouponReservations(
+        this.prisma.getWriteClient(),
+        c.id,
+      );
+      if (c.usageCount + reserved < c.maxUsage) {
+        winner = c;
+        break;
+      }
+    }
 
     return {
       message: 'Age coupon eligibility evaluated',

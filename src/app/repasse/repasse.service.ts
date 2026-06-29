@@ -210,6 +210,37 @@ export class RepasseService {
     });
   }
 
+  /**
+   * Cancela um pedido GRATUITO (sem estorno) disparado pelo ORGANIZADOR com
+   * permissão `financial`. Mesma checagem de IDOR do estorno (o pedido precisa
+   * pertencer ao evento da rota). Delega ao engine — que rejeita pedido com valor
+   * pago (`ORDER_HAS_PAYMENT`), garantindo que cancelamento ≠ estorno.
+   */
+  async cancelFreeOrder(
+    userId: string,
+    eventId: string,
+    orderId: string,
+    dto: { reason: string },
+    ip?: string,
+  ) {
+    await this.assertAccess(userId, eventId);
+
+    const order = await this.prisma.getReadClient().order.findUnique({
+      where: { id: orderId },
+      select: { eventId: true },
+    });
+    if (!order || order.eventId !== eventId) {
+      throw new NotFoundException('Pedido não encontrado neste evento');
+    }
+
+    return this.refundService.cancelFreeOrder({
+      orderId,
+      actorUserId: userId,
+      reason: dto.reason,
+      ip,
+    });
+  }
+
   // ─── Dados base ──────────────────────────────────────────────────────────
 
   private async loadEventConfig(eventId: string, prisma: any) {
