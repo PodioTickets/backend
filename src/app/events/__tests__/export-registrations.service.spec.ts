@@ -97,6 +97,37 @@ describe('ExportRegistrationsService — coluna fixa de ID da inscrição', () =
     expect(lines[2]).toContain('linha1 linha2');
   });
 
+  // ── Resposta em array JSON é formatada (não sai crua com colchetes/aspas) ────
+  it('resposta única em array JSON → valor limpo (sem colchetes/aspas)', () => {
+    const r = {
+      id: 'x', user: {},
+      questionAnswers: [{ answer: '["Teste aqui"]', question: { id: 'q1', question: 'Obs?', isActive: true } }],
+    };
+    const lines = txtLines([r], ['perguntasRespostas']);
+    expect(lines[2]).toContain('Teste aqui');
+    expect(lines[2]).not.toContain('[');
+    expect(lines[2]).not.toContain('"Teste');
+  });
+
+  it('resposta de múltipla escolha (array JSON) → valores separados por vírgula', () => {
+    const r = {
+      id: 'x', user: {},
+      questionAnswers: [{ answer: '["Sim","Talvez"]', question: { id: 'q1', question: 'Quais?', isActive: true } }],
+    };
+    const lines = txtLines([r], ['perguntasRespostas']);
+    expect(lines[2]).toContain('Sim, Talvez');
+    expect(lines[2]).not.toContain('[');
+  });
+
+  it('resposta de texto cru (não-JSON) passa direto', () => {
+    const r = {
+      id: 'x', user: {},
+      questionAnswers: [{ answer: 'AZUL', question: { id: 'q1', question: 'Cor?', isActive: true } }],
+    };
+    const lines = txtLines([r], ['perguntasRespostas']);
+    expect(lines[2]).toContain('AZUL');
+  });
+
   // ── Campo "Ingresso": lê de tickets[] (plural) e AGREGA ──────────────────────
   // Regressão: o código lia `reg.ticket` (singular), que o include nunca traz →
   // a coluna saía vazia. Agora lê `reg.tickets[].ticket` e junta múltiplos.

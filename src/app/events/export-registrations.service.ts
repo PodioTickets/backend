@@ -73,6 +73,29 @@ function formatPaymentMethod(method: string | null | undefined): string {
   return map[method ?? ''] ?? (method ?? '');
 }
 
+/**
+ * Formata a resposta de uma pergunta para o export. Múltipla escolha/seleção é
+ * persistida como array JSON serializado (ex.: `["Teste aqui"]`, `["A","B"]`);
+ * juntamos os valores escolhidos com vírgula. Texto cru passa direto. Espelha
+ * `frontend/src/utils/questionAnswer.ts` (mas célula vazia = '' em vez de "—").
+ */
+function formatAnswer(answer: unknown): string {
+  if (answer == null) return '';
+  if (Array.isArray(answer)) return answer.join(', ');
+  if (typeof answer === 'string') {
+    const s = answer.trim();
+    if (!s) return '';
+    try {
+      const parsed: unknown = JSON.parse(s);
+      if (Array.isArray(parsed)) return parsed.join(', ');
+    } catch {
+      /* não é JSON — usa a string crua */
+    }
+    return s;
+  }
+  return String(answer);
+}
+
 /** Extract a single field value from a formatted registration row */
 function extractField(reg: any, field: ExportField): string {
   const user = reg.user ?? {};
@@ -183,7 +206,7 @@ function extractField(reg: any, field: ExportField): string {
       const qas: any[] = reg.questionAnswers ?? [];
       return qas
         .filter((qa: any) => qa.question?.isActive !== false) // exclui perguntas soft-deletadas
-        .map((qa: any) => `${qa.question?.question ?? ''}: ${qa.answer ?? ''}`)
+        .map((qa: any) => `${qa.question?.question ?? ''}: ${formatAnswer(qa.answer)}`)
         .join(' | ');
     }
     case 'dataPagamento':
@@ -275,7 +298,7 @@ function buildExpandedRows(
           for (const qa of (reg.questionAnswers ?? [])) {
             if (qa.question?.isActive === false) continue; // ignora resposta de pergunta deletada
             const q: string = qa.question?.question ?? '';
-            if (q) answerMap.set(q, qa.answer ?? '');
+            if (q) answerMap.set(q, formatAnswer(qa.answer));
           }
           for (const q of allQuestions) {
             row.push(oneLine(answerMap.get(q) ?? ''));
