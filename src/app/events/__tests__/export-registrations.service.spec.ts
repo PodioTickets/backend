@@ -52,6 +52,23 @@ describe('ExportRegistrationsService — coluna fixa de ID da inscrição', () =
     expect(statusCell({ id: 'x', status: 'CANCELLED', order: { payment: { status: 'FAILED' } } })).toBe('Cancelado');
   });
 
+  it('pedido GRATUITO cancelado (CANCELLED + pagamento PAID) → "Cancelado", não "Pago"', () => {
+    // Cancelar pedido grátis mantém Payment.status=PAID; o estado terminal da
+    // inscrição deve prevalecer sobre o pagamento.
+    expect(statusCell({ id: 'x', status: 'CANCELLED', order: { payment: { status: 'PAID' } } })).toBe('Cancelado');
+  });
+
+  // ── Forma de pagamento (pedido gratuito não exibe o método do gateway) ───────
+  const metodoCell = (r: any) => txtLines([r], ['formaPagamento'])[2].split(',').pop();
+
+  it('forma de pagamento: PIX em pedido pago → "Pix"', () => {
+    expect(metodoCell({ id: 'x', order: { finalAmount: 5000, payment: { method: 'PIX' } } })).toBe('Pix');
+  });
+
+  it('forma de pagamento: pedido GRATUITO (finalAmount 0) → "Gratuito" mesmo com method PIX', () => {
+    expect(metodoCell({ id: 'x', order: { finalAmount: 0, payment: { method: 'PIX' } } })).toBe('Gratuito');
+  });
+
   // ── Perguntas soft-deletadas NÃO entram no export ────────────────────────────
   it('pergunta com deletedAt não vira coluna; a viva sim', () => {
     const r = {

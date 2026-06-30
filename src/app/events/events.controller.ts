@@ -132,7 +132,7 @@ export class EventsController {
   @ApiQuery({ name: 'status', required: false, enum: ['DRAFT', 'PUBLISHED', 'SUSPENDED', 'CANCELLED', 'COMPLETED'], description: 'Filter by event status' })
   @ApiQuery({ name: 'includePast', required: false, type: Boolean, description: 'Include past events (default: false)' })
   @ApiQuery({ name: 'modalities', required: false, description: 'CSV de códigos de modalidade (ex.: "corrida,natacao")' })
-  @ApiQuery({ name: 'minPrice', required: false, type: Number, description: 'Piso do filtro de preço em REAIS (evento com algum lote no intervalo)' })
+  @ApiQuery({ name: 'minPrice', required: false, type: Number, description: 'Piso do filtro de preço em REAIS (evento entra se tiver ALGUM ingresso ativo com preço no intervalo; lotes futuros não contam)' })
   @ApiQuery({ name: 'maxPrice', required: false, type: Number, description: 'Teto do filtro de preço em REAIS' })
   @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20, max: 100)' })
