@@ -35,6 +35,7 @@ describe('EventsService', () => {
     },
     registration: {
       count: jest.fn().mockResolvedValue(0),
+      findMany: jest.fn().mockResolvedValue([]),
     },
     user: {
       findUnique: jest.fn(),
@@ -639,6 +640,43 @@ describe('EventsService', () => {
       expect(p.lastName).toBe('');
       expect(p.email).toBeNull();
       expect(p.documentNumber).toBeNull();
+    });
+  });
+
+  // O extractField do export lê `reg.tickets[]`; o map DEVE produzir esse array
+  // (antes produzia `ticket` singular → coluna "Ingresso" saía vazia no arquivo).
+  describe('getRegistrationsForExport - ingressos no map', () => {
+    it('produz `tickets[]` (não `ticket` singular) com snapshot + relação viva', async () => {
+      const eventId = 'a1111111-1111-1111-1111-111111111111';
+      mockPrismaService.event.findUnique.mockResolvedValue({ name: 'Evento X' });
+      mockPrismaService.registration.findMany.mockResolvedValue([
+        {
+          id: 'r1',
+          status: 'CONFIRMED',
+          // user setado → buildParticipantUserByDocMap não precisa de user.findMany
+          user: { id: 'u1', firstName: 'Ana', lastName: 'Maria', email: 'a@x.com' },
+          order: { createdAt: new Date('2026-06-01T00:00:00Z'), finalAmount: 5000, payment: { status: 'PAID', method: 'PIX' } },
+          products: [],
+          questionAnswers: [],
+          tickets: [
+            {
+              ticketSnapshot: { name: 'Lote 1', category: { name: '5km' } },
+              ticket: { name: 'Lote vivo', modality: 'corrida', category: { name: '5km' } },
+            },
+          ],
+        },
+      ]);
+
+      const res = await service.getRegistrationsForExport('user-1', eventId);
+      const row: any = res.registrations[0];
+
+      expect(Array.isArray(row.tickets)).toBe(true);
+      expect(row.tickets).toHaveLength(1);
+      expect(row.tickets[0].ticketSnapshot?.name).toBe('Lote 1');
+      expect(row.tickets[0].ticket?.name).toBe('Lote vivo');
+      expect(row.tickets[0].ticket?.category?.name).toBe('5km');
+      // não deve mais existir o `ticket` singular (que o extractField ignora)
+      expect(row.ticket).toBeUndefined();
     });
   });
 });

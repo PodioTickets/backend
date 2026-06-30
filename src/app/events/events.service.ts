@@ -5207,20 +5207,20 @@ export class EventsService {
           name: reg.emergencyContactName ?? null,
           phone: reg.emergencyContactPhone ?? null,
         },
-        ticket: reg.tickets?.[0]
-          ? (() => {
-            const rt = reg.tickets[0];
-            const snap = rt.ticketSnapshot as Record<string, any> | null;
-            const t = rt.ticket;
-            return {
-              name: snap?.name ?? t?.name ?? '',
-              modality: snap?.modality ?? t?.modality ?? '',
-              distance: snap?.distance ?? t?.distance ?? null,
-              distanceUnit: snap?.distanceUnit ?? t?.distanceUnit ?? null,
-              category: snap?.category ?? (t?.category ? t.category : null),
-            };
-          })()
-          : null,
+        // O export (campo "ingresso") agrega `reg.tickets[]` (RegistrationTicket[]),
+        // preferindo o ticketSnapshot sobre a relação viva. Mantém a estrutura que
+        // `extractField` espera: cada item com `ticketSnapshot` + `ticket{name,modality,category}`.
+        // (Antes mapeava `ticket` singular, que o extractField não lê → coluna vazia.)
+        tickets: (reg.tickets ?? []).map((rt: any) => ({
+          ticketSnapshot: rt.ticketSnapshot ?? null,
+          ticket: rt.ticket
+            ? {
+              name: rt.ticket.name ?? null,
+              modality: rt.ticket.modality ?? null,
+              category: rt.ticket.category ? { name: rt.ticket.category.name } : null,
+            }
+            : null,
+        })),
         products: (reg.products ?? []).map((rp: any) => {
           const snap = rp.productSnapshot as Record<string, any> | null;
           return {
