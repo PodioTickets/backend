@@ -52,6 +52,23 @@ describe('ExportRegistrationsService — coluna fixa de ID da inscrição', () =
     expect(statusCell({ id: 'x', status: 'CANCELLED', order: { payment: { status: 'FAILED' } } })).toBe('Cancelado');
   });
 
+  it('pedido GRATUITO cancelado (CANCELLED + pagamento PAID) → "Cancelado", não "Pago"', () => {
+    // Cancelar pedido grátis mantém Payment.status=PAID; o estado terminal da
+    // inscrição deve prevalecer sobre o pagamento.
+    expect(statusCell({ id: 'x', status: 'CANCELLED', order: { payment: { status: 'PAID' } } })).toBe('Cancelado');
+  });
+
+  // ── Forma de pagamento (pedido gratuito não exibe o método do gateway) ───────
+  const metodoCell = (r: any) => txtLines([r], ['formaPagamento'])[2].split(',').pop();
+
+  it('forma de pagamento: PIX em pedido pago → "Pix"', () => {
+    expect(metodoCell({ id: 'x', order: { finalAmount: 5000, payment: { method: 'PIX' } } })).toBe('Pix');
+  });
+
+  it('forma de pagamento: pedido GRATUITO (finalAmount 0) → "Gratuito" mesmo com method PIX', () => {
+    expect(metodoCell({ id: 'x', order: { finalAmount: 0, payment: { method: 'PIX' } } })).toBe('Gratuito');
+  });
+
   // ── Perguntas soft-deletadas NÃO entram no export ────────────────────────────
   it('pergunta com deletedAt não vira coluna; a viva sim', () => {
     const r = {
@@ -78,5 +95,84 @@ describe('ExportRegistrationsService — coluna fixa de ID da inscrição', () =
     // 4 linhas no total (meta, header, dados) — sem linha extra do \n na resposta.
     expect(lines).toHaveLength(3);
     expect(lines[2]).toContain('linha1 linha2');
+  });
+
+  // ── Resposta em array JSON é formatada (não sai crua com colchetes/aspas) ────
+  it('resposta única em array JSON → valor limpo (sem colchetes/aspas)', () => {
+    const r = {
+      id: 'x', user: {},
+      questionAnswers: [{ answer: '["Teste aqui"]', question: { id: 'q1', question: 'Obs?', isActive: true } }],
+    };
+    const lines = txtLines([r], ['perguntasRespostas']);
+    expect(lines[2]).toContain('Teste aqui');
+    expect(lines[2]).not.toContain('[');
+    expect(lines[2]).not.toContain('"Teste');
+  });
+
+  it('resposta de múltipla escolha (array JSON) → valores separados por vírgula', () => {
+    const r = {
+      id: 'x', user: {},
+      questionAnswers: [{ answer: '["Sim","Talvez"]', question: { id: 'q1', question: 'Quais?', isActive: true } }],
+    };
+    const lines = txtLines([r], ['perguntasRespostas']);
+    expect(lines[2]).toContain('Sim, Talvez');
+    expect(lines[2]).not.toContain('[');
+  });
+
+  it('resposta de texto cru (não-JSON) passa direto', () => {
+    const r = {
+      id: 'x', user: {},
+      questionAnswers: [{ answer: 'AZUL', question: { id: 'q1', question: 'Cor?', isActive: true } }],
+    };
+    const lines = txtLines([r], ['perguntasRespostas']);
+    expect(lines[2]).toContain('AZUL');
+  });
+
+  // ── Campo "Ingresso": lê de tickets[] (plural) e AGREGA ──────────────────────
+  // Regressão: o código lia `reg.ticket` (singular), que o include nunca traz →
+  // a coluna saía vazia. Agora lê `reg.tickets[].ticket` e junta múltiplos.
+  it('ingresso: "Categoria - Ingresso" a partir de tickets[]', () => {
+    const r = { id: 'x', user: {}, tickets: [{ ticket: { name: 'Lote 1', category: { name: '5km' } } }] };
+    expect(txtLines([r], ['ingresso'])[2].split(',').pop()).toBe('5km - Lote 1');
+  });
+
+  it('ingresso: sem categoria → só o nome do ingresso', () => {
+    const r = { id: 'x', user: {}, tickets: [{ ticket: { name: 'Lote 1' } }] };
+    expect(txtLines([r], ['ingresso'])[2].split(',').pop()).toBe('Lote 1');
+  });
+
+  it('ingresso: múltiplos ingressos da inscrição → agregados com "; "', () => {
+    const r = {
+      id: 'x', user: {},
+      tickets: [
+        { ticket: { name: 'Lote 1', category: { name: '5km' } } },
+        { ticket: { name: 'Lote 2', category: { name: '10km' } } },
+      ],
+    };
+    expect(txtLines([r], ['ingresso'])[2].split(',').pop()).toBe('5km - Lote 1; 10km - Lote 2');
+  });
+
+  it('ingresso: sem tickets → célula vazia', () => {
+    expect(txtLines([{ id: 'x', user: {} }], ['ingresso'])[2].split(',').pop()).toBe('');
+  });
+
+  it('ingresso: shape antigo `reg.ticket` (singular) NÃO é mais lido → vazio', () => {
+    expect(txtLines([{ id: 'x', user: {}, ticket: { name: 'Antigo' } }], ['ingresso'])[2].split(',').pop()).toBe('');
+  });
+
+  it('ingresso: PREFERE o snapshot sobre a relação viva (ingresso renomeado)', () => {
+    const r = {
+      id: 'x', user: {},
+      tickets: [{
+        ticketSnapshot: { name: 'Comprado', category: { name: '5km' } },
+        ticket: { name: 'Renomeado', category: { name: '10km' } },
+      }],
+    };
+    expect(txtLines([r], ['ingresso'])[2].split(',').pop()).toBe('5km - Comprado');
+  });
+
+  it('ingresso: snapshot SEM relação viva (ingresso deletado) ainda exporta', () => {
+    const r = { id: 'x', user: {}, tickets: [{ ticketSnapshot: { name: 'Lote 1', category: { name: '5km' } }, ticket: null }] };
+    expect(txtLines([r], ['ingresso'])[2].split(',').pop()).toBe('5km - Lote 1');
   });
 });

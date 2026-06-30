@@ -49,6 +49,7 @@ import { RepasseService, RETENTION_DAYS } from '../repasse/repasse.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { isChargeback, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 import { brtDayStartUtc, brtDayEndUtc } from '../../common/utils/brt-date.util';
+import { withPastEventsAsCompleted as markPastEventsCompleted } from '../../common/utils/event-status.util';
 
 /**
  * Taxas padrão aplicadas na CRIAÇÃO de um evento (escala 0–100, ex.: 4 = 4%).
@@ -235,15 +236,16 @@ export class EventsService {
   }
 
   /**
-   * Para listagens GET: eventos cuja data já passou são retornados com status COMPLETED (Finalized).
+   * Para listagens GET: eventos cuja DATA já passou (fim do dia em BRT) são
+   * retornados com status COMPLETED. Delega à fonte única `event-status.util`
+   * — MESMA regra usada na lista do admin. Antes comparava `eventDate < now` cru
+   * (wall-clock como UTC), o que adiantava ~3h e marcava evento do próprio dia
+   * como concluído.
    */
   private withPastEventsAsCompleted<T extends { eventDate: Date; status: EventStatus }>(
     events: T[],
   ): T[] {
-    const now = new Date();
-    return events.map((e) =>
-      e.eventDate < now ? { ...e, status: EventStatus.COMPLETED } : e,
-    ) as T[];
+    return markPastEventsCompleted(events);
   }
 
   /**
@@ -544,6 +546,63 @@ export class EventsService {
     return rows.map((r) => r.id);
   }
 
+  /**
+   * IDs de eventos que possuem ALGUM ingresso ativo com preço dentro de
+   * [minCents, maxCents]. O evento entra se QUALQUER lote no intervalo existir;
+   * some quando nenhum lote cai no intervalo.
+   *
+   * Decisões (alinhadas ao comportamento esperado pelo usuário):
+   *   - `Ticket.isActive = true`: ingressos desativados pelo organizador não
+   *     contam.
+   *   - Exclui LOTES FUTUROS (`startDate > now`): um 2º lote ainda não à venda,
+   *     normalmente mais caro, não deve "puxar" o evento pra dentro do filtro
+   *     (era o sintoma do relato original). Lotes sem `startDate` ou já iniciados
+   *     contam — inclusive de eventos com inscrição encerrada, que continuam no
+   *     catálogo e devem casar pelo preço ofertado (NÃO filtramos por `endDate`
+   *     nem por estoque de propósito).
+   *
+   * Existência simples (`DISTINCT eventId`), sem agregação. Query única no read
+   * replica (índices em Ticket(eventId,isActive) e TicketBatch(ticketId)).
+   * `minCents`/`maxCents` null = sem piso/teto.
+   */
+  private async findEventIdsMatchingPriceRange(
+    minCents: number | null,
+    maxCents: number | null,
+  ): Promise<string[]> {
+    const prismaRead = this.prisma.getReadClient();
+    const floor = minCents ?? 0;
+    const ceil = maxCents ?? 2147483647; // máx. int4 (price é Int em centavos)
+    const rows = await prismaRead.$queryRaw<{ id: string }[]>`
+      SELECT DISTINCT t."eventId" AS id
+      FROM "Ticket" t
+      JOIN "TicketBatch" b ON b."ticketId" = t.id
+      WHERE t."isActive" = true
+        AND (b."startDate" IS NULL OR b."startDate" <= now())
+        AND b."price" >= ${floor}
+        AND b."price" <= ${ceil}
+    `;
+    return rows.map((r) => r.id);
+  }
+
+  /**
+   * Resolve `priceMatchIds` para o where da busca a partir do slider em REAIS.
+   * Retorna `undefined` quando nenhum dos limites foi enviado (filtro inativo)
+   * — só então evita a query agregada. Caso contrário converte p/ centavos e
+   * delega a {@link findEventIdsMatchingPriceRange}.
+   */
+  private async resolvePriceMatchIds(
+    minPrice?: number,
+    maxPrice?: number,
+  ): Promise<string[] | undefined> {
+    if (minPrice == null && maxPrice == null) {
+      return undefined;
+    }
+    return this.findEventIdsMatchingPriceRange(
+      minPrice != null ? Math.round(minPrice * 100) : null,
+      maxPrice != null ? Math.round(maxPrice * 100) : null,
+    );
+  }
+
   private buildPublicEventSearchWhere(params: {
     q?: string;
     country?: string;
@@ -554,7 +613,10 @@ export class EventsService {
     status?: EventStatus;
     includePast?: boolean;
     modalities?: string;
+    minPrice?: number;
+    maxPrice?: number;
     textMatchIds?: string[];
+    priceMatchIds?: string[];
   }): Prisma.EventWhereInput {
     const {
       q,
@@ -566,6 +628,7 @@ export class EventsService {
       status,
       modalities,
       textMatchIds,
+      priceMatchIds,
     } = params;
 
     const where: Prisma.EventWhereInput = {
@@ -628,20 +691,36 @@ export class EventsService {
     // meses curtos, que dava janela inconsistente).
     eventDateCutoff.setDate(eventDateCutoff.getDate() - 30);
 
-    return {
-      AND: [
-        { eventDate: { gte: eventDateCutoff } },
-        where,
-      ],
-    };
+    const andConditions: Prisma.EventWhereInput[] = [
+      { eventDate: { gte: eventDateCutoff } },
+      where,
+    ];
+
+    // Filtro de preço: pré-resolvido em `findEventIdsMatchingPriceRange` (MENOR
+    // preço comprável / "a partir de" dentro do intervalo). `priceMatchIds`
+    // undefined = filtro inativo; array (mesmo vazio) = aplicar. Condição
+    // SEPARADA no AND — combina com `where.id` do filtro de texto (q) por
+    // interseção, sem colidir com o `where.tickets` da modalidade.
+    if (priceMatchIds !== undefined) {
+      andConditions.push({ id: { in: priceMatchIds } });
+    }
+
+    return { AND: andConditions };
   }
 
   async searchLocationFacets(dto: SearchEventLocationsDto) {
-    const textMatchIds = dto.q?.trim().length
-      ? await this.findEventIdsMatchingText(dto.q)
-      : undefined;
+    const [textMatchIds, priceMatchIds] = await Promise.all([
+      dto.q?.trim().length
+        ? this.findEventIdsMatchingText(dto.q)
+        : Promise.resolve(undefined),
+      this.resolvePriceMatchIds(dto.minPrice, dto.maxPrice),
+    ]);
 
-    const where = this.buildPublicEventSearchWhere({ ...dto, textMatchIds });
+    const where = this.buildPublicEventSearchWhere({
+      ...dto,
+      textMatchIds,
+      priceMatchIds,
+    });
 
     const prismaRead = this.prisma.getReadClient();
     const rows = await prismaRead.event.groupBy({
@@ -688,11 +767,20 @@ export class EventsService {
   async search(searchDto: SearchEventsDto) {
     const { page = 1, limit = 20, ...searchFilters } = searchDto;
 
-    const textMatchIds = searchFilters.q?.trim().length
-      ? await this.findEventIdsMatchingText(searchFilters.q)
-      : undefined;
+    // Pré-filtros por ID (texto via unaccent, preço via MIN comprável) rodam em
+    // paralelo — independentes; o where combina ambos por interseção de `id`.
+    const [textMatchIds, priceMatchIds] = await Promise.all([
+      searchFilters.q?.trim().length
+        ? this.findEventIdsMatchingText(searchFilters.q)
+        : Promise.resolve(undefined),
+      this.resolvePriceMatchIds(searchFilters.minPrice, searchFilters.maxPrice),
+    ]);
 
-    const where = this.buildPublicEventSearchWhere({ ...searchFilters, textMatchIds });
+    const where = this.buildPublicEventSearchWhere({
+      ...searchFilters,
+      textMatchIds,
+      priceMatchIds,
+    });
 
     // Usar read replica para performance
     const prismaRead = this.prisma.getReadClient();
@@ -3833,20 +3921,17 @@ export class EventsService {
 
     const { totalChange, paidChange, cancelledChange, refundedChange, totalCollectedChange } = wowChanges;
 
+    // Lookup em lote dos convidados resolvíveis por documento (PRIORITY 2 do modal).
+    const userByDoc = await this.buildParticipantUserByDocMap(prismaRead, registrations);
+
     // Formatar registrations
     // Cada registration representa um participante do pedido
     // O pedido (order) agrupa múltiplas inscrições e tem o pagamento
     const formattedRegistrations = registrations.map((reg: any) => {
-      const u = reg.user;
-      const participantData = u ? u : {
-        id: null,
-        firstName: (reg.participantName ?? '').split(' ')[0] ?? '',
-        lastName: (reg.participantName ?? '').split(' ').slice(1).join(' ') ?? '',
-        email: reg.participantEmail ?? null,
-        phone: reg.participantPhone ?? null,
-        documentNumber: reg.participantCpf ?? null,
-        avatarUrl: null,
-      };
+      // Mesma resolução do modal de detalhe: snapshot → user → doc → colunas.
+      // Antes lia só `reg.user`/colunas e saía vazio p/ convidados cujo dado
+      // só existe no receiptSnapshot.
+      const participantData = this.resolveOrganizerParticipant(reg, userByDoc);
       return ({
         id: reg.id,
         userId: reg.userId,
@@ -4865,6 +4950,114 @@ export class EventsService {
   }
 
   /**
+   * Resolve os dados do PARTICIPANTE de uma inscrição para as telas do
+   * organizador (lista + export), na MESMA ordem de prioridade do modal de
+   * detalhe (`registrationsService.findOne`/`resolveParticipant`):
+   *   1. `receiptSnapshot.participant` — congelado na compra; é o que o modal
+   *      exibe (e a única fonte quando as colunas `participant*` ficaram vazias);
+   *   2. `reg.user` — participante com conta vinculada;
+   *   3. usuário real achado pelo documento (convidado por CPF que tem cadastro);
+   *   4. colunas `participant*` da inscrição (legado).
+   *
+   * O fallback é campo a campo (não bloco): cobre o caso em que o snapshot tem
+   * nome mas a coluna não — e o inverso. Era a causa de o export sair em branco
+   * para convidados enquanto o modal mostrava tudo.
+   *
+   * `userByDoc` é o mapa pré-resolvido por {@link buildParticipantUserByDocMap}
+   * (lookup em lote — evita N+1).
+   */
+  private resolveOrganizerParticipant(reg: any, userByDoc: Map<string, any>) {
+    const snap = (reg.receiptSnapshot as any)?.participant ?? null;
+    const linked = reg.user ?? null;
+    const cleanDoc = !linked
+      ? reg.participantDocumentNumberClean || reg.participantCpfClean || null
+      : null;
+    const looked = cleanDoc ? userByDoc.get(cleanDoc) ?? null : null;
+    // Cadastro real (vinculado direto ou achado pelo documento).
+    const acct = linked ?? looked;
+
+    const nz = (v: any) => (v != null && String(v).trim() !== '' ? v : null);
+    const pick = (...vals: any[]) => {
+      for (const v of vals) {
+        const c = nz(v);
+        if (c != null) return c;
+      }
+      return null;
+    };
+    const iso = (d: any) =>
+      d == null ? null : d instanceof Date ? d.toISOString() : String(d);
+
+    const fullName = pick(
+      snap?.name,
+      acct ? `${acct.firstName ?? ''} ${acct.lastName ?? ''}`.trim() : null,
+      reg.participantName,
+    );
+    const parts = fullName ? String(fullName).trim().split(/\s+/) : [];
+
+    return {
+      id: acct?.id ?? null,
+      firstName: parts[0] ?? '',
+      lastName: parts.slice(1).join(' '),
+      email: pick(snap?.email, acct?.email, reg.participantEmail),
+      phone: pick(snap?.phone, acct?.phone, reg.participantPhone),
+      documentNumber: pick(
+        snap?.documentNumber,
+        snap?.cpf,
+        acct?.documentNumber,
+        reg.participantDocumentNumber,
+        reg.participantCpf,
+      ),
+      documentType: pick(snap?.documentType, acct?.documentType, reg.participantDocumentType),
+      country: pick(snap?.country, acct?.country),
+      dateOfBirth: pick(snap?.birthDate, iso(acct?.dateOfBirth), iso(reg.participantDateOfBirth)),
+      gender: pick(snap?.gender, acct?.gender, reg.participantGender),
+      avatarUrl: acct?.avatarUrl ?? null,
+    };
+  }
+
+  /**
+   * Resolve em UMA query os usuários reais dos participantes convidados por
+   * documento (sem `user` vinculado e sem participante no `receiptSnapshot`),
+   * indexados por `documentNumberClean`. Espelha o PRIORITY 2 do
+   * `resolveParticipant`, em lote — evita N+1 no export (sem paginação).
+   */
+  private async buildParticipantUserByDocMap(
+    prismaRead: any,
+    registrations: any[],
+  ): Promise<Map<string, any>> {
+    const docs = new Set<string>();
+    for (const reg of registrations) {
+      if (reg.user) continue;
+      const snap = (reg.receiptSnapshot as any)?.participant;
+      const snapHasData =
+        snap && (snap.name?.trim() || snap.email?.trim() || snap.documentNumber?.trim());
+      if (snapHasData) continue; // snapshot já resolve — não precisa de lookup
+      const clean = reg.participantDocumentNumberClean || reg.participantCpfClean;
+      if (clean) docs.add(clean);
+    }
+    if (docs.size === 0) return new Map();
+
+    const users = await prismaRead.user.findMany({
+      where: { documentNumberClean: { in: [...docs] }, accountType: 'USER' },
+      select: {
+        id: true,
+        documentNumberClean: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phone: true,
+        documentNumber: true,
+        documentType: true,
+        country: true,
+        dateOfBirth: true,
+        gender: true,
+        avatarUrl: true,
+      },
+    });
+    return new Map(users.map((u: any) => [u.documentNumberClean, u]));
+  }
+
+  /**
    * Fetch all registrations for a given event (no pagination) for export purposes.
    * Caller must already have organizer access verified.
    */
@@ -4996,19 +5189,12 @@ export class EventsService {
       );
     }
 
+    // Lookup em lote dos convidados resolvíveis por documento (PRIORITY 2 do modal).
+    const userByDoc = await this.buildParticipantUserByDocMap(prismaRead, registrations);
+
     const mapped = registrations.map((reg: any) => {
-      const u = reg.user;
-      const participant = u ?? {
-        id: null,
-        firstName: (reg.participantName ?? '').split(' ')[0] ?? '',
-        lastName: (reg.participantName ?? '').split(' ').slice(1).join(' ') ?? '',
-        email: reg.participantEmail ?? null,
-        phone: reg.participantPhone ?? null,
-        documentNumber: reg.participantCpf ?? null,
-        dateOfBirth: null,
-        gender: null,
-        avatarUrl: null,
-      };
+      // Mesma resolução do modal de detalhe: snapshot → user → doc → colunas.
+      const participant = this.resolveOrganizerParticipant(reg, userByDoc);
 
       const order = reg.order ?? {};
       const billingAddress = this.resolveOrderBillingAddress(order, order.payment);
@@ -5021,20 +5207,20 @@ export class EventsService {
           name: reg.emergencyContactName ?? null,
           phone: reg.emergencyContactPhone ?? null,
         },
-        ticket: reg.tickets?.[0]
-          ? (() => {
-            const rt = reg.tickets[0];
-            const snap = rt.ticketSnapshot as Record<string, any> | null;
-            const t = rt.ticket;
-            return {
-              name: snap?.name ?? t?.name ?? '',
-              modality: snap?.modality ?? t?.modality ?? '',
-              distance: snap?.distance ?? t?.distance ?? null,
-              distanceUnit: snap?.distanceUnit ?? t?.distanceUnit ?? null,
-              category: snap?.category ?? (t?.category ? t.category : null),
-            };
-          })()
-          : null,
+        // O export (campo "ingresso") agrega `reg.tickets[]` (RegistrationTicket[]),
+        // preferindo o ticketSnapshot sobre a relação viva. Mantém a estrutura que
+        // `extractField` espera: cada item com `ticketSnapshot` + `ticket{name,modality,category}`.
+        // (Antes mapeava `ticket` singular, que o extractField não lê → coluna vazia.)
+        tickets: (reg.tickets ?? []).map((rt: any) => ({
+          ticketSnapshot: rt.ticketSnapshot ?? null,
+          ticket: rt.ticket
+            ? {
+              name: rt.ticket.name ?? null,
+              modality: rt.ticket.modality ?? null,
+              category: rt.ticket.category ? { name: rt.ticket.category.name } : null,
+            }
+            : null,
+        })),
         products: (reg.products ?? []).map((rp: any) => {
           const snap = rp.productSnapshot as Record<string, any> | null;
           return {
@@ -5050,7 +5236,9 @@ export class EventsService {
           };
         }),
         order: {
-          finalAmount: order.finalAmount ? this.normalizeToCents(order.finalAmount) : null,
+          // Preserva 0 (pedido gratuito) em vez de virar null — o export usa isto
+          // p/ exibir "R$ 0,00" e "Gratuito" como forma de pagamento.
+          finalAmount: order.finalAmount != null ? this.normalizeToCents(order.finalAmount) : null,
           purchaseDate: order.createdAt ?? null,
           billingAddress,
           payment: order.payment

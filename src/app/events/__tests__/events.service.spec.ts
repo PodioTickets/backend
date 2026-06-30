@@ -35,6 +35,7 @@ describe('EventsService', () => {
     },
     registration: {
       count: jest.fn().mockResolvedValue(0),
+      findMany: jest.fn().mockResolvedValue([]),
     },
     user: {
       findUnique: jest.fn(),
@@ -455,6 +456,227 @@ describe('EventsService', () => {
 
       expect(result.message).toBe('Topic created successfully');
       expect(result.data.topic).toEqual(mockTopic);
+    });
+  });
+
+  // Filtro de preço do /search: o evento entra quando possui ALGUM ingresso
+  // ativo com preço dentro de [minPrice, maxPrice] (REAIS); some quando nenhum
+  // ingresso cai no intervalo. A resolução acontece numa $queryRaw (DISTINCT
+  // eventId) que devolve os IDs elegíveis; o where faz a interseção via `id in`.
+  describe('search - filtro de preço (algum ingresso no intervalo)', () => {
+    beforeEach(() => {
+      mockPrismaService.event.findMany.mockResolvedValue([]);
+      mockPrismaService.event.count.mockResolvedValue(0);
+    });
+
+    it('SEM minPrice/maxPrice: não roda a query de preço nem adiciona condição de id', async () => {
+      await service.search({ page: 1, limit: 20 });
+
+      // Sem q e sem preço → nenhuma $queryRaw é disparada.
+      expect(mockPrismaService.$queryRaw).not.toHaveBeenCalled();
+
+      const where = mockPrismaService.event.findMany.mock.calls[0][0].where;
+      const hasIdCond = where.AND.some(
+        (c: any) => c && typeof c === 'object' && 'id' in c,
+      );
+      expect(hasIdCond).toBe(false);
+    });
+
+    it('COM minPrice/maxPrice: converte REAIS→centavos e injeta os IDs elegíveis no where', async () => {
+      // O evento "event-1" tem entrada (MIN comprável) dentro de [50,100].
+      mockPrismaService.$queryRaw.mockResolvedValueOnce([{ id: 'event-1' }]);
+
+      await service.search({ page: 1, limit: 20, minPrice: 50, maxPrice: 100 });
+
+      // A query de faixa de preço foi disparada exatamente uma vez.
+      expect(mockPrismaService.$queryRaw).toHaveBeenCalledTimes(1);
+      // Os limites chegam em CENTAVOS como parâmetros da tagged template
+      // (5000 e 10000). O 1º arg é o array de strings; os demais, os valores.
+      const params = mockPrismaService.$queryRaw.mock.calls[0].slice(1);
+      expect(params).toEqual(expect.arrayContaining([5000, 10000]));
+
+      const where = mockPrismaService.event.findMany.mock.calls[0][0].where;
+      expect(where.AND).toEqual(
+        expect.arrayContaining([{ id: { in: ['event-1'] } }]),
+      );
+    });
+
+    it('nenhum evento na faixa → injeta `id in []` (resultado vazio, evento some)', async () => {
+      // A entrada do único evento é R$40 — fora de [50,100] → query não retorna.
+      mockPrismaService.$queryRaw.mockResolvedValueOnce([]);
+
+      await service.search({ page: 1, limit: 20, minPrice: 50, maxPrice: 100 });
+
+      const where = mockPrismaService.event.findMany.mock.calls[0][0].where;
+      expect(where.AND).toEqual(
+        expect.arrayContaining([{ id: { in: [] } }]),
+      );
+    });
+
+    it('só minPrice (sem teto): aplica o filtro mesmo sem maxPrice', async () => {
+      mockPrismaService.$queryRaw.mockResolvedValueOnce([{ id: 'event-1' }]);
+
+      await service.search({ page: 1, limit: 20, minPrice: 45 });
+
+      expect(mockPrismaService.$queryRaw).toHaveBeenCalledTimes(1);
+      const params = mockPrismaService.$queryRaw.mock.calls[0].slice(1);
+      // Piso 45 → 4500 centavos presente nos parâmetros.
+      expect(params).toEqual(expect.arrayContaining([4500]));
+
+      const where = mockPrismaService.event.findMany.mock.calls[0][0].where;
+      expect(where.AND).toEqual(
+        expect.arrayContaining([{ id: { in: ['event-1'] } }]),
+      );
+    });
+  });
+
+  // Resolução do participante para lista + export do organizador. Espelha o modal
+  // de detalhe: receiptSnapshot.participant → reg.user → lookup por documento →
+  // colunas participant*, com fallback CAMPO A CAMPO. Era a causa de o export
+  // sair em branco para convidados cujo dado só vivia no receiptSnapshot.
+  describe('resolveOrganizerParticipant', () => {
+    const resolve = (reg: any, map = new Map<string, any>()) =>
+      (service as any).resolveOrganizerParticipant(reg, map);
+
+    it('convidado sem user e SEM colunas: resolve pelo receiptSnapshot.participant', () => {
+      const reg = {
+        user: null,
+        participantName: null,
+        participantEmail: null,
+        participantCpf: null,
+        receiptSnapshot: {
+          participant: {
+            name: 'teste t',
+            email: 'teste@gmail.com',
+            documentNumber: '50379850800',
+            documentType: 'CPF',
+            phone: '13997961652',
+            birthDate: '2000-05-16',
+            gender: 'MALE',
+            country: 'Brasil',
+          },
+        },
+      };
+      const p = resolve(reg);
+      expect(p.firstName).toBe('teste');
+      expect(p.lastName).toBe('t');
+      expect(p.email).toBe('teste@gmail.com');
+      expect(p.documentNumber).toBe('50379850800');
+      expect(p.phone).toBe('13997961652');
+      expect(p.gender).toBe('MALE');
+      expect(p.dateOfBirth).toBe('2000-05-16');
+    });
+
+    it('legado sem snapshot: resolve pelas colunas participant*', () => {
+      const reg = {
+        user: null,
+        receiptSnapshot: null,
+        participantName: 'test 7',
+        participantEmail: 'teste7@gmail.com',
+        participantCpf: '91313724068',
+      };
+      const p = resolve(reg);
+      expect(p.firstName).toBe('test');
+      expect(p.lastName).toBe('7');
+      expect(p.email).toBe('teste7@gmail.com');
+      expect(p.documentNumber).toBe('91313724068');
+    });
+
+    it('user vinculado tem prioridade quando não há snapshot', () => {
+      const reg = {
+        user: {
+          id: 'u1',
+          firstName: 'Murillo',
+          lastName: 'A.',
+          email: 'm@x.com',
+          phone: '11999',
+          documentNumber: '503',
+          avatarUrl: 'a.png',
+        },
+        receiptSnapshot: null,
+      };
+      const p = resolve(reg);
+      expect(p.id).toBe('u1');
+      expect(p.firstName).toBe('Murillo');
+      expect(p.email).toBe('m@x.com');
+      expect(p.avatarUrl).toBe('a.png');
+    });
+
+    it('convidado por documento (sem user, sem snapshot): usa o usuário do mapa', () => {
+      const reg = {
+        user: null,
+        receiptSnapshot: null,
+        participantName: null,
+        participantCpfClean: '78048325080',
+      };
+      const map = new Map<string, any>([
+        ['78048325080', { id: 'real', firstName: 'clarice', lastName: 'cortereal', email: 'c@x.com', documentNumber: '78048325080' }],
+      ]);
+      const p = resolve(reg, map);
+      expect(p.id).toBe('real');
+      expect(p.firstName).toBe('clarice');
+      expect(p.email).toBe('c@x.com');
+    });
+
+    it('fallback CAMPO A CAMPO: nome do snapshot, telefone da coluna', () => {
+      const reg = {
+        user: null,
+        receiptSnapshot: { participant: { name: 'Ana Maria', email: 'ana@x.com' } },
+        participantPhone: '1133334444',
+        participantCpf: '12345678909',
+      };
+      const p = resolve(reg);
+      expect(p.firstName).toBe('Ana');
+      expect(p.lastName).toBe('Maria');
+      expect(p.email).toBe('ana@x.com');
+      // snapshot não tinha telefone/doc → cai na coluna
+      expect(p.phone).toBe('1133334444');
+      expect(p.documentNumber).toBe('12345678909');
+    });
+
+    it('sem nenhum dado: retorna vazio sem quebrar', () => {
+      const p = resolve({ user: null, receiptSnapshot: null });
+      expect(p.firstName).toBe('');
+      expect(p.lastName).toBe('');
+      expect(p.email).toBeNull();
+      expect(p.documentNumber).toBeNull();
+    });
+  });
+
+  // O extractField do export lê `reg.tickets[]`; o map DEVE produzir esse array
+  // (antes produzia `ticket` singular → coluna "Ingresso" saía vazia no arquivo).
+  describe('getRegistrationsForExport - ingressos no map', () => {
+    it('produz `tickets[]` (não `ticket` singular) com snapshot + relação viva', async () => {
+      const eventId = 'a1111111-1111-1111-1111-111111111111';
+      mockPrismaService.event.findUnique.mockResolvedValue({ name: 'Evento X' });
+      mockPrismaService.registration.findMany.mockResolvedValue([
+        {
+          id: 'r1',
+          status: 'CONFIRMED',
+          // user setado → buildParticipantUserByDocMap não precisa de user.findMany
+          user: { id: 'u1', firstName: 'Ana', lastName: 'Maria', email: 'a@x.com' },
+          order: { createdAt: new Date('2026-06-01T00:00:00Z'), finalAmount: 5000, payment: { status: 'PAID', method: 'PIX' } },
+          products: [],
+          questionAnswers: [],
+          tickets: [
+            {
+              ticketSnapshot: { name: 'Lote 1', category: { name: '5km' } },
+              ticket: { name: 'Lote vivo', modality: 'corrida', category: { name: '5km' } },
+            },
+          ],
+        },
+      ]);
+
+      const res = await service.getRegistrationsForExport('user-1', eventId);
+      const row: any = res.registrations[0];
+
+      expect(Array.isArray(row.tickets)).toBe(true);
+      expect(row.tickets).toHaveLength(1);
+      expect(row.tickets[0].ticketSnapshot?.name).toBe('Lote 1');
+      expect(row.tickets[0].ticket?.name).toBe('Lote vivo');
+      expect(row.tickets[0].ticket?.category?.name).toBe('5km');
+      // não deve mais existir o `ticket` singular (que o extractField ignora)
+      expect(row.ticket).toBeUndefined();
     });
   });
 });

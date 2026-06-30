@@ -3,6 +3,7 @@ import {
   UseGuards, Request, DefaultValuePipe, ParseIntPipe, ParseUUIDPipe,
 } from '@nestjs/common';
 import { RefundOrderDto } from '../payments/dto/refund-order.dto';
+import { CancelOrderDto } from '../payments/dto/cancel-order.dto';
 import {
   ApiTags, ApiOperation, ApiBearerAuth, ApiParam,
   ApiQuery, ApiResponse,
@@ -171,6 +172,30 @@ export class RepasseController {
     @Body() dto: RefundOrderDto,
   ) {
     return this.repasseService.refundOrder(req.user.id, eventId, orderId, dto, req.ip);
+  }
+
+  @Post('orders/:orderId/cancel')
+  @ApiOperation({
+    summary: 'Cancelar pedido GRATUITO (organizador c/ permissão financeira)',
+    description:
+      'Cancela um pedido SEM valor pago (free order, finalAmount 0). Não chama a Cielo nem ' +
+      'cobra taxa — marca o pedido CANCELLED, cancela as inscrições, reverte cupom/voucher e ' +
+      'grava audit log. Requer permissão `financial` sobre o evento. Pedido com valor pago é ' +
+      'rejeitado (409 ORDER_HAS_PAYMENT) — esse caso é estorno.',
+  })
+  @ApiParam({ name: 'eventId', type: String })
+  @ApiParam({ name: 'orderId', type: String, description: 'UUID do pedido a cancelar' })
+  @ApiResponse({ status: 201, description: 'Pedido cancelado com sucesso' })
+  @ApiResponse({ status: 403, description: 'Sem permissão financeira sobre o evento' })
+  @ApiResponse({ status: 404, description: 'Pedido não encontrado neste evento' })
+  @ApiResponse({ status: 409, description: 'Pedido possui valor pago, já cancelado ou não cancelável' })
+  cancelOrder(
+    @Request() req,
+    @Param('eventId', new ParseUUIDPipe()) eventId: string,
+    @Param('orderId', new ParseUUIDPipe()) orderId: string,
+    @Body() dto: CancelOrderDto,
+  ) {
+    return this.repasseService.cancelFreeOrder(req.user.id, eventId, orderId, dto, req.ip);
   }
 
   @Get('audit')

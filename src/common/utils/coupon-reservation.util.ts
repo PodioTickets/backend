@@ -93,6 +93,31 @@ export async function claimCouponUnits(
 }
 
 /**
+ * Soma (read-only) as unidades de cupom RESERVADAS por pedidos PENDING não-expirados
+ * — TODOS os pedidos (sem excluir nenhum), porque o preview do link é anônimo/sem
+ * pedido próprio. Usado para esconder o cupom no preview quando o limite já foi
+ * atingido considerando vendas (`usageCount`) + reservas ativas. Espelha a SUM do
+ * `claimCouponUnits`. Usa o índice `@@index([couponId, status])`.
+ *
+ * Prefira o client de ESCRITA (primário) para refletir uma reserva recém-feita sem
+ * lag de réplica — o cenário (Comprador 2 logo após o Comprador 1 reservar) é
+ * sensível ao tempo. A imposição real continua no `patchCoupon` (row-lock).
+ */
+export async function sumActiveCouponReservations(
+  client: any,
+  couponId: string,
+): Promise<number> {
+  const rows: any[] = await client.$queryRaw`
+    SELECT COALESCE(SUM(o."couponReservedUnits")::int, 0) AS reserved
+    FROM "Order" o
+    WHERE o."couponId" = ${couponId}::uuid
+      AND o."status" = 'PENDING'
+      AND o."expiresAt" > NOW()
+  `;
+  return rows.length > 0 ? Number(rows[0].reserved) : 0;
+}
+
+/**
  * Libera a reserva de cupom que `orderId` detém (grava 0). Não toca `couponId` — o caller
  * decide se também desvincula. Idempotente. Usado ao remover/trocar cupom no PENDING; o
  * release por término de pedido (PAID/CANCELLED/expirado) é automático (sai da SUM).

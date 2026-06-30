@@ -89,7 +89,8 @@ export function buildReceiptPdfData(
   const serviceFee = computeOrderServiceFee(order);
 
   return {
-    orderNumber: String(order.id).toUpperCase(),
+    // Número curto do pedido (1º segmento do UUID) — visual, igual aos painéis.
+    orderNumber: String(order.id).slice(0, 8),
     issuedAt: new Date(),
     organization: {
       name: org.tradeName || org.name || '',

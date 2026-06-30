@@ -50,10 +50,15 @@ function formatStatus(reg: any): string {
       ? 'Chargeback'
       : 'Estornado';
   }
+  // Estado TERMINAL da inscrição tem precedência sobre o status do pagamento:
+  // pedido GRATUITO cancelado mantém Payment.status=PAID (não há CANCELLED no
+  // enum de pagamento), então sem este check o export mostrava "Pago" para uma
+  // inscrição cancelada. Espelha a precedência da lista (RegistrationRow).
+  if (reg.status === 'CANCELLED') return 'Cancelado';
   if (reg.status === 'CONFIRMED' || reg.status === 'COMPLETED' || pStatus === 'PAID') {
     return 'Pago';
   }
-  if (reg.status === 'CANCELLED' || pStatus === 'FAILED') return 'Cancelado';
+  if (pStatus === 'FAILED') return 'Cancelado';
   return 'Pendente';
 }
 
@@ -66,6 +71,29 @@ function formatPaymentMethod(method: string | null | undefined): string {
     FREE: 'Gratuito',
   };
   return map[method ?? ''] ?? (method ?? '');
+}
+
+/**
+ * Formata a resposta de uma pergunta para o export. Múltipla escolha/seleção é
+ * persistida como array JSON serializado (ex.: `["Teste aqui"]`, `["A","B"]`);
+ * juntamos os valores escolhidos com vírgula. Texto cru passa direto. Espelha
+ * `frontend/src/utils/questionAnswer.ts` (mas célula vazia = '' em vez de "—").
+ */
+function formatAnswer(answer: unknown): string {
+  if (answer == null) return '';
+  if (Array.isArray(answer)) return answer.join(', ');
+  if (typeof answer === 'string') {
+    const s = answer.trim();
+    if (!s) return '';
+    try {
+      const parsed: unknown = JSON.parse(s);
+      if (Array.isArray(parsed)) return parsed.join(', ');
+    } catch {
+      /* não é JSON — usa a string crua */
+    }
+    return s;
+  }
+  return String(answer);
 }
 
 /** Extract a single field value from a formatted registration row */
@@ -137,14 +165,31 @@ function extractField(reg: any, field: ExportField): string {
     case 'ingresso': {
       const removerCorrida = (s: string) =>
         s.replace(/\bcorrida\b/gi, '').replace(/\s{2,}/g, ' ').trim();
-      const ticket = reg.ticket ?? null;
-      if (!ticket) return '';
-      const categoryName = removerCorrida(ticket.category?.name ?? ticket.modality ?? '');
-      const ticketName = removerCorrida(ticket.name ?? '');
-      if (categoryName && ticketName && categoryName !== ticketName) {
-        return `${categoryName} - ${ticketName}`;
-      }
-      return ticketName || categoryName;
+      // Prefere o SNAPSHOT do ingresso (gravado na compra — preserva nome/categoria
+      // mesmo após rename/exclusão do ingresso) e cai na relação VIVA como fallback
+      // (legados sem snapshot). Mesma precedência da lista de inscrições.
+      const labelFor = (rt: any): string => {
+        const snap = rt?.ticketSnapshot ?? null;
+        const live = rt?.ticket ?? null;
+        if (!snap && !live) return '';
+        const name = removerCorrida(snap?.name ?? live?.name ?? '');
+        const categoryName = removerCorrida(
+          snap?.category?.name ?? live?.category?.name ?? snap?.modality ?? live?.modality ?? '',
+        );
+        if (categoryName && name && categoryName !== name) {
+          return `${categoryName} - ${name}`;
+        }
+        return name || categoryName;
+      };
+      // A inscrição tem os ingressos em `tickets` (RegistrationTicket[]). O código
+      // lia `reg.ticket` (singular), que NÃO existe no include → coluna vazia.
+      // Agora AGREGA os ingressos da inscrição (1 por participante no caso comum;
+      // junta com "; " se houver mais de um).
+      const regTickets = Array.isArray(reg.tickets) ? reg.tickets : [];
+      const labels = regTickets
+        .map((rt: any) => labelFor(rt))
+        .filter((s: string) => s.length > 0);
+      return labels.join('; ');
     }
     case 'produtosEscolhidos': {
       const products: any[] = reg.products ?? [];
@@ -161,7 +206,7 @@ function extractField(reg: any, field: ExportField): string {
       const qas: any[] = reg.questionAnswers ?? [];
       return qas
         .filter((qa: any) => qa.question?.isActive !== false) // exclui perguntas soft-deletadas
-        .map((qa: any) => `${qa.question?.question ?? ''}: ${qa.answer ?? ''}`)
+        .map((qa: any) => `${qa.question?.question ?? ''}: ${formatAnswer(qa.answer)}`)
         .join(' | ');
     }
     case 'dataPagamento':
@@ -170,6 +215,10 @@ function extractField(reg: any, field: ExportField): string {
     case 'status':
       return formatStatus(reg);
     case 'formaPagamento':
+      // Pedido gratuito (total cobrado = 0) não tem forma de pagamento real: o
+      // gateway pode ter registrado PIX/cartão no fluxo, mas nada foi cobrado.
+      // Exibe "Gratuito" (espelha o modal, que esconde o método em pedido grátis).
+      if (order.finalAmount === 0) return 'Gratuito';
       return formatPaymentMethod(payment.method);
     case 'valorPago':
       return formatCurrency(order.finalAmount);
@@ -249,7 +298,7 @@ function buildExpandedRows(
           for (const qa of (reg.questionAnswers ?? [])) {
             if (qa.question?.isActive === false) continue; // ignora resposta de pergunta deletada
             const q: string = qa.question?.question ?? '';
-            if (q) answerMap.set(q, qa.answer ?? '');
+            if (q) answerMap.set(q, formatAnswer(qa.answer));
           }
           for (const q of allQuestions) {
             row.push(oneLine(answerMap.get(q) ?? ''));
