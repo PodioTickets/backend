@@ -755,7 +755,8 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) => 
             React.createElement(
               Text,
               { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 600, color: C.gray12 } },
-              `#${data.registrations[0]?.registrationId}`,
+              // Só o 1º segmento do UUID (visual), igual aos painéis/e-mails.
+              `#${String(data.registrations[0]?.registrationId ?? '').slice(0, 8)}`,
             ),
           ),
           React.createElement(
