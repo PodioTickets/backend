@@ -585,10 +585,10 @@ export class EventsService {
   }
 
   /**
-   * Resolve `priceMatchIds` para o where da busca a partir do slider em REAIS.
-   * Retorna `undefined` quando nenhum dos limites foi enviado (filtro inativo)
-   * — só então evita a query agregada. Caso contrário converte p/ centavos e
-   * delega a {@link findEventIdsMatchingPriceRange}.
+   * Resolve `priceMatchIds` para o where da busca. `minPrice`/`maxPrice` JÁ vêm em
+   * CENTAVOS (o front converte reais→centavos), mesma unidade de `TicketBatch.price`.
+   * Retorna `undefined` quando nenhum dos limites foi enviado (filtro inativo) — só
+   * então evita a query agregada.
    */
   private async resolvePriceMatchIds(
     minPrice?: number,
@@ -598,8 +598,8 @@ export class EventsService {
       return undefined;
     }
     return this.findEventIdsMatchingPriceRange(
-      minPrice != null ? Math.round(minPrice * 100) : null,
-      maxPrice != null ? Math.round(maxPrice * 100) : null,
+      minPrice ?? null,
+      maxPrice ?? null,
     );
   }
 
@@ -5239,7 +5239,11 @@ export class EventsService {
           const snap = rp.productSnapshot as Record<string, any> | null;
           return {
             product: { name: snap?.name ?? rp.product?.name ?? '' },
-            variationName: snap?.selectedVariation?.name ?? rp.variation?.name ?? null,
+            // Variação: prefere a relação VIVA (rp.variation) — reflete a troca de
+            // variação feita pelo cliente (o snapshot fica congelado na compra e
+            // mostraria a variação ANTIGA). Igual ao que o organizador vê em
+            // getRegistrations. Snapshot só como fallback (variação deletada). [[project_registration_snapshots]]
+            variationName: rp.variation?.name ?? snap?.selectedVariation?.name ?? null,
           };
         }),
         questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => {
