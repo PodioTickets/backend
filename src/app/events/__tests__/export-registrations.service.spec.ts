@@ -93,6 +93,18 @@ describe('ExportRegistrationsService — coluna fixa de ID da inscrição', () =
       .toBe('Camiseta (G)');
   });
 
+  it('produtos: opt-out "Sem interesse" NÃO aparece no export', () => {
+    const r = {
+      id: 'x',
+      products: [
+        { product: { name: 'Kit Corrida' }, variationName: 'Sem interesse' },
+        { product: { name: 'Camiseta' }, variationName: 'G' },
+      ],
+    };
+    // Só a Camiseta entra; o opt-out é omitido.
+    expect(produtosCell(r)).toBe('Camiseta (G)');
+  });
+
   // ── Perguntas soft-deletadas NÃO entram no export ────────────────────────────
   it('pergunta com deletedAt não vira coluna; a viva sim', () => {
     const r = {

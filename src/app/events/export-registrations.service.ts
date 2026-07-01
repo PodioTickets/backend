@@ -4,6 +4,7 @@ import PDFDocument from 'pdfkit';
 import { ExportField, EXPORT_FIELDS } from './dto/export-registrations.dto';
 import { formatCpfByCountry } from '../../common/utils/locale.util';
 import { isChargeback } from '../../common/utils/refund.util';
+import { DEFAULT_NO_INTEREST_VARIATION_NAME } from '../products/product.constants';
 
 /** Maps ExportField → human-readable column label */
 const FIELD_LABELS: Record<ExportField, string> = {
@@ -225,6 +226,9 @@ function extractField(reg: any, field: ExportField): string {
         .map((p: any) => {
           const name = p.product?.name ?? '';
           const variation = p.variationName ?? p.variation?.name ?? '';
+          // "Sem interesse" = opt-out de produto opcional → NÃO listar (mesma
+          // convenção do PDF do comprovante/ingresso e do orders.service).
+          if (variation === DEFAULT_NO_INTEREST_VARIATION_NAME) return '';
           return variation ? `${name} (${variation})` : name;
         })
         .filter(Boolean)
