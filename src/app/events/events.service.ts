@@ -585,10 +585,10 @@ export class EventsService {
   }
 
   /**
-   * Resolve `priceMatchIds` para o where da busca a partir do slider em REAIS.
-   * Retorna `undefined` quando nenhum dos limites foi enviado (filtro inativo)
-   * — só então evita a query agregada. Caso contrário converte p/ centavos e
-   * delega a {@link findEventIdsMatchingPriceRange}.
+   * Resolve `priceMatchIds` para o where da busca. `minPrice`/`maxPrice` JÁ vêm em
+   * CENTAVOS (o front converte reais→centavos), mesma unidade de `TicketBatch.price`.
+   * Retorna `undefined` quando nenhum dos limites foi enviado (filtro inativo) — só
+   * então evita a query agregada.
    */
   private async resolvePriceMatchIds(
     minPrice?: number,
@@ -598,8 +598,8 @@ export class EventsService {
       return undefined;
     }
     return this.findEventIdsMatchingPriceRange(
-      minPrice != null ? Math.round(minPrice * 100) : null,
-      maxPrice != null ? Math.round(maxPrice * 100) : null,
+      minPrice ?? null,
+      maxPrice ?? null,
     );
   }
 
@@ -3257,7 +3257,7 @@ export class EventsService {
           ? Prisma.sql` OR p.method::text IN (${Prisma.join(methods.map((m) => Prisma.sql`${m}`))})`
           : Prisma.empty;
       parts.push(
-        Prisma.sql`(r.id::text ILIKE ${pat} ESCAPE '\\' OR EXISTS (SELECT 1 FROM "User" u WHERE u.id = r."userId" AND (u."firstName" ILIKE ${pat} ESCAPE '\\' OR u."lastName" ILIKE ${pat} ESCAPE '\\' OR u.email ILIKE ${pat} ESCAPE '\\' OR COALESCE(u."documentNumber", '') ILIKE ${pat} ESCAPE '\\')) OR EXISTS (SELECT 1 FROM "Coupon" c WHERE c.id = o."couponId" AND COALESCE(c.code, '') ILIKE ${pat} ESCAPE '\\') OR EXISTS (SELECT 1 FROM "Voucher" v WHERE v.id = o."voucherId" AND COALESCE(v.code, '') ILIKE ${pat} ESCAPE '\\')${methodSql})`,
+        Prisma.sql`(r.id::text ILIKE ${pat} ESCAPE '\\' OR COALESCE(r."participantName", '') ILIKE ${pat} ESCAPE '\\' OR EXISTS (SELECT 1 FROM "User" u WHERE u.id = r."userId" AND (u."firstName" ILIKE ${pat} ESCAPE '\\' OR u."lastName" ILIKE ${pat} ESCAPE '\\' OR (COALESCE(u."firstName", '') || ' ' || COALESCE(u."lastName", '')) ILIKE ${pat} ESCAPE '\\' OR u.email ILIKE ${pat} ESCAPE '\\' OR COALESCE(u."documentNumber", '') ILIKE ${pat} ESCAPE '\\')) OR EXISTS (SELECT 1 FROM "Coupon" c WHERE c.id = o."couponId" AND COALESCE(c.code, '') ILIKE ${pat} ESCAPE '\\') OR EXISTS (SELECT 1 FROM "Voucher" v WHERE v.id = o."voucherId" AND COALESCE(v.code, '') ILIKE ${pat} ESCAPE '\\')${methodSql})`,
       );
     }
 
@@ -3712,7 +3712,21 @@ export class EventsService {
       if (isIdSearch) {
         where.OR = uuidMatchIds.length > 0 ? [{ id: { in: uuidMatchIds } }] : [{ id: 'no-match' }];
       } else {
-        where.OR = this.buildRegistrationTextSearchOr(searchTerm, uuidMatchIds);
+        // Nome COMPLETO: "João Silva" não casa firstName nem lastName isolados. O Prisma
+        // não concatena colunas no `where`, então pré-buscamos os IDs cujo
+        // `firstName || ' ' || lastName` casa o termo (mesma tática do uuidMatches) e os
+        // unimos ao OR de busca textual.
+        const namePat = `%${this.escapeIlikePattern(searchTerm)}%`;
+        const fullNameMatches = await prismaRead.$queryRaw<{ id: string }[]>`
+          SELECT r.id FROM "Registration" r
+          JOIN "User" u ON u.id = r."userId"
+          WHERE r."eventId" = ${eventId}::uuid
+            AND (COALESCE(u."firstName", '') || ' ' || COALESCE(u."lastName", '')) ILIKE ${namePat} ESCAPE '\\'
+        `;
+        const mergedIds = Array.from(
+          new Set([...uuidMatchIds, ...fullNameMatches.map((row) => row.id)]),
+        );
+        where.OR = this.buildRegistrationTextSearchOr(searchTerm, mergedIds);
       }
     }
 
@@ -5225,7 +5239,11 @@ export class EventsService {
           const snap = rp.productSnapshot as Record<string, any> | null;
           return {
             product: { name: snap?.name ?? rp.product?.name ?? '' },
-            variationName: snap?.selectedVariation?.name ?? rp.variation?.name ?? null,
+            // Variação: prefere a relação VIVA (rp.variation) — reflete a troca de
+            // variação feita pelo cliente (o snapshot fica congelado na compra e
+            // mostraria a variação ANTIGA). Igual ao que o organizador vê em
+            // getRegistrations. Snapshot só como fallback (variação deletada). [[project_registration_snapshots]]
+            variationName: rp.variation?.name ?? snap?.selectedVariation?.name ?? null,
           };
         }),
         questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => {

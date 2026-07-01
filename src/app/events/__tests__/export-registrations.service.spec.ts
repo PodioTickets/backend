@@ -17,9 +17,9 @@ describe('ExportRegistrationsService — coluna fixa de ID da inscrição', () =
     expect(lines[1]).toBe('ID inscrição,Nome,E-mail');
   });
 
-  it('linha de dados traz o ID curto #xxxxxx...xxxx (6 primeiros + ... + 4 últimos), igual à lista', () => {
+  it('linha de dados traz o ID curto #<1º segmento do UUID>, igual aos painéis/telas', () => {
     const lines = txtLines([reg], ['nome']);
-    expect(lines[2].startsWith('#2ebd8d...2ba0,')).toBe(true);
+    expect(lines[2].startsWith('#2ebd8d00,')).toBe(true);
   });
 
   it('ID ausente → célula vazia (sem #)', () => {
@@ -67,6 +67,42 @@ describe('ExportRegistrationsService — coluna fixa de ID da inscrição', () =
 
   it('forma de pagamento: pedido GRATUITO (finalAmount 0) → "Gratuito" mesmo com method PIX', () => {
     expect(metodoCell({ id: 'x', order: { finalAmount: 0, payment: { method: 'PIX' } } })).toBe('Gratuito');
+  });
+
+  // ── Data da compra: BRT (America/Sao_Paulo) COM hora, igual ao modal ─────────
+  const dataCompraCell = (r: any) => txtLines([r], ['dataPagamento'])[2].split(',').pop();
+
+  it('data da compra: instante em BRT com hora, igual ao organizador (não UTC/servidor)', () => {
+    // 2026-06-15T01:00:00Z = 14/06 às 22:00 em Brasília (UTC-3). O dia BRT (14) difere
+    // do dia UTC (15) — prova que formatamos no fuso certo, com horário.
+    expect(dataCompraCell({ id: 'x', order: { purchaseDate: '2026-06-15T01:00:00.000Z' } }))
+      .toBe('14/06/2026 - 22:00');
+  });
+
+  it('data da compra: ausente → célula vazia', () => {
+    expect(dataCompraCell({ id: 'x', order: {} })).toBe('');
+  });
+
+  // ── Produto/variação: usa a variação ESCOLHIDA (variationName mapeado) ───────
+  const produtosCell = (r: any) => txtLines([r], ['produtosEscolhidos'])[2].split(',').pop();
+
+  it('produtos: renderiza "Produto (Variação)" a partir do variationName mapeado', () => {
+    // O map de getRegistrationsForExport resolve variationName com a relação VIVA
+    // (variação atual, pós-troca); aqui validamos o render do valor já resolvido.
+    expect(produtosCell({ id: 'x', products: [{ product: { name: 'Camiseta' }, variationName: 'G' }] }))
+      .toBe('Camiseta (G)');
+  });
+
+  it('produtos: opt-out "Sem interesse" NÃO aparece no export', () => {
+    const r = {
+      id: 'x',
+      products: [
+        { product: { name: 'Kit Corrida' }, variationName: 'Sem interesse' },
+        { product: { name: 'Camiseta' }, variationName: 'G' },
+      ],
+    };
+    // Só a Camiseta entra; o opt-out é omitido.
+    expect(produtosCell(r)).toBe('Camiseta (G)');
   });
 
   // ── Perguntas soft-deletadas NÃO entram no export ────────────────────────────

@@ -4,6 +4,7 @@ import PDFDocument from 'pdfkit';
 import { ExportField, EXPORT_FIELDS } from './dto/export-registrations.dto';
 import { formatCpfByCountry } from '../../common/utils/locale.util';
 import { isChargeback } from '../../common/utils/refund.util';
+import { DEFAULT_NO_INTEREST_VARIATION_NAME } from '../products/product.constants';
 
 /** Maps ExportField → human-readable column label */
 const FIELD_LABELS: Record<ExportField, string> = {
@@ -29,6 +30,34 @@ function formatDate(iso: string | Date | null | undefined): string {
   const d = new Date(iso as string);
   if (isNaN(d.getTime())) return '';
   return d.toLocaleDateString('pt-BR');
+}
+
+/**
+ * Data + hora de um INSTANTE REAL (data da compra = criação do pedido) no fuso de
+ * BRASÍLIA (America/Sao_Paulo). ESPELHA o que o organizador vê no modal
+ * (`formatDateBRT - formatTimeBRT`), ex.: "15/06/2026 - 22:03".
+ *
+ * `toLocaleDateString` sem `timeZone` usava o fuso do servidor (UTC em prod) e
+ * ainda omitia a hora → data de dia errado perto da meia-noite e sem horário.
+ * `Intl` com `timeZone` fixo resolve o instante corretamente em BRT.
+ */
+function formatPurchaseInstantBRT(iso: string | Date | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso as string);
+  if (isNaN(d.getTime())) return '';
+  const date = new Intl.DateTimeFormat('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    timeZone: 'America/Sao_Paulo',
+  }).format(d);
+  const time = new Intl.DateTimeFormat('pt-BR', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZone: 'America/Sao_Paulo',
+  }).format(d);
+  return `${date} - ${time}`;
 }
 
 function formatCurrency(cents: number | null | undefined): string {
@@ -197,6 +226,9 @@ function extractField(reg: any, field: ExportField): string {
         .map((p: any) => {
           const name = p.product?.name ?? '';
           const variation = p.variationName ?? p.variation?.name ?? '';
+          // "Sem interesse" = opt-out de produto opcional → NÃO listar (mesma
+          // convenção do PDF do comprovante/ingresso e do orders.service).
+          if (variation === DEFAULT_NO_INTEREST_VARIATION_NAME) return '';
           return variation ? `${name} (${variation})` : name;
         })
         .filter(Boolean)
@@ -210,8 +242,8 @@ function extractField(reg: any, field: ExportField): string {
         .join(' | ');
     }
     case 'dataPagamento':
-      // Data da compra = order creation date
-      return formatDate(order.purchaseDate);
+      // Data da compra = criação do pedido, em BRT com hora (igual ao modal do organizador).
+      return formatPurchaseInstantBRT(order.purchaseDate);
     case 'status':
       return formatStatus(reg);
     case 'formaPagamento':
@@ -249,12 +281,14 @@ function collectAllQuestions(registrations: any[]): string[] {
  * por pergunta única, preenchendo a resposta correspondente em cada linha.
  */
 /**
- * ID curto da inscrição no MESMO formato da lista/modal (`#xxxxxx...xxxx`): `#` +
- * 6 primeiros + `...` + 4 últimos. IDs curtos (≤10) saem inteiros com `#`.
+ * ID curto no MESMO formato dos painéis/telas (`utils/shortId.formatShortId`):
+ * `#` + PRIMEIRO segmento do UUID (os 8 chars hex antes do primeiro "-").
+ * Ex.: "41d2aba8-...." -> "#41d2aba8". Sem "-" (id curto/legado) → o id inteiro.
  */
 function formatShortRegistrationId(id: string | null | undefined): string {
   if (!id) return '';
-  return id.length > 10 ? `#${id.slice(0, 6)}...${id.slice(-4)}` : `#${id}`;
+  const first = String(id).split('-')[0] || String(id);
+  return `#${first}`;
 }
 
 /**

@@ -35,13 +35,19 @@ describe('calculateDateRange', () => {
     expect(calculateDateRange(DashboardPeriod.GERAL)).toEqual({ start: null, end: null });
   });
 
-  it('últimas 24h: intervalo de ~24 horas terminando agora', () => {
+  it('"Hoje" (24h): começa na meia-noite BRT (00:00 BRT = 03:00Z) e termina agora', () => {
     const { start, end } = calculateDateRange(DashboardPeriod.LAST_24H);
     expect(start).not.toBeNull();
     expect(end).not.toBeNull();
+    // 00:00 BRT = 03:00:00.000 UTC (BRT é UTC-3 fixo).
+    expect(start!.getUTCHours()).toBe(3);
+    expect(start!.getUTCMinutes()).toBe(0);
+    expect(start!.getUTCSeconds()).toBe(0);
+    expect(start!.getUTCMilliseconds()).toBe(0);
+    // Dia parcial: do início do dia BRT até agora (0–24h), nunca no futuro.
     const horas = (end!.getTime() - start!.getTime()) / (1000 * 60 * 60);
-    expect(horas).toBeGreaterThan(23.9);
-    expect(horas).toBeLessThan(24.1);
+    expect(horas).toBeGreaterThanOrEqual(0);
+    expect(horas).toBeLessThan(24);
   });
 
   it('começa antes e termina depois nos períodos relativos', () => {
@@ -60,6 +66,14 @@ describe('getComparisonBounds', () => {
     const bounds = getComparisonBounds({ start: new Date(), end: new Date() }, now, DashboardPeriod.LAST_1M);
     expect(bounds!.prevStart).toEqual(new Date(2026, 4, 1)); // 1º de maio
     expect(bounds!.prevEndExclusive).toEqual(new Date(2026, 5, 1)); // 1º de junho (exclusivo)
+  });
+
+  it('"Hoje" (24h): compara com ONTEM até o mesmo horário (janela deslocada −24h)', () => {
+    const start = new Date('2026-06-30T03:00:00.000Z'); // 00:00 BRT de hoje
+    const end = new Date('2026-06-30T15:00:00.000Z'); // 12:00 BRT (agora)
+    const bounds = getComparisonBounds({ start, end }, end, DashboardPeriod.LAST_24H);
+    expect(bounds!.prevStart).toEqual(new Date('2026-06-29T03:00:00.000Z')); // 00:00 BRT de ontem
+    expect(bounds!.prevEndExclusive).toEqual(new Date('2026-06-29T15:00:00.000Z')); // 12:00 BRT de ontem
   });
 
   it('demais períodos: janela de mesma duração imediatamente antes', () => {

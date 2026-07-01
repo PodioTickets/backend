@@ -482,16 +482,17 @@ describe('EventsService', () => {
       expect(hasIdCond).toBe(false);
     });
 
-    it('COM minPrice/maxPrice: converte REAIS→centavos e injeta os IDs elegíveis no where', async () => {
-      // O evento "event-1" tem entrada (MIN comprável) dentro de [50,100].
+    it('COM minPrice/maxPrice (CENTAVOS): usa os limites recebidos e injeta os IDs elegíveis no where', async () => {
+      // O evento "event-1" tem entrada (MIN comprável) dentro de [5000,10000] centavos.
       mockPrismaService.$queryRaw.mockResolvedValueOnce([{ id: 'event-1' }]);
 
-      await service.search({ page: 1, limit: 20, minPrice: 50, maxPrice: 100 });
+      // minPrice/maxPrice JÁ vêm em CENTAVOS do front (o service não converte mais).
+      await service.search({ page: 1, limit: 20, minPrice: 5000, maxPrice: 10000 });
 
       // A query de faixa de preço foi disparada exatamente uma vez.
       expect(mockPrismaService.$queryRaw).toHaveBeenCalledTimes(1);
-      // Os limites chegam em CENTAVOS como parâmetros da tagged template
-      // (5000 e 10000). O 1º arg é o array de strings; os demais, os valores.
+      // Os limites (centavos) chegam DIRETO como parâmetros da tagged template.
+      // O 1º arg é o array de strings; os demais, os valores.
       const params = mockPrismaService.$queryRaw.mock.calls[0].slice(1);
       expect(params).toEqual(expect.arrayContaining([5000, 10000]));
 
@@ -502,10 +503,10 @@ describe('EventsService', () => {
     });
 
     it('nenhum evento na faixa → injeta `id in []` (resultado vazio, evento some)', async () => {
-      // A entrada do único evento é R$40 — fora de [50,100] → query não retorna.
+      // A entrada do único evento é R$40 (4000¢) — fora de [5000,10000] → query não retorna.
       mockPrismaService.$queryRaw.mockResolvedValueOnce([]);
 
-      await service.search({ page: 1, limit: 20, minPrice: 50, maxPrice: 100 });
+      await service.search({ page: 1, limit: 20, minPrice: 5000, maxPrice: 10000 });
 
       const where = mockPrismaService.event.findMany.mock.calls[0][0].where;
       expect(where.AND).toEqual(
@@ -516,11 +517,11 @@ describe('EventsService', () => {
     it('só minPrice (sem teto): aplica o filtro mesmo sem maxPrice', async () => {
       mockPrismaService.$queryRaw.mockResolvedValueOnce([{ id: 'event-1' }]);
 
-      await service.search({ page: 1, limit: 20, minPrice: 45 });
+      await service.search({ page: 1, limit: 20, minPrice: 4500 });
 
       expect(mockPrismaService.$queryRaw).toHaveBeenCalledTimes(1);
       const params = mockPrismaService.$queryRaw.mock.calls[0].slice(1);
-      // Piso 45 → 4500 centavos presente nos parâmetros.
+      // Piso 4500 centavos presente nos parâmetros (sem conversão).
       expect(params).toEqual(expect.arrayContaining([4500]));
 
       const where = mockPrismaService.event.findMany.mock.calls[0][0].where;
