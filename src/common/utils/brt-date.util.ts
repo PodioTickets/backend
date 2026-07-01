@@ -33,6 +33,18 @@ export function brtDayEndUtc(value: string | Date): Date {
 }
 
 /**
+ * Início (00:00 BRT, como instante UTC) do DIA BRT que CONTÉM o instante real dado.
+ *
+ * Diferente de `brtDayStartUtc(new Date())`: aquele lê a parte da data em UTC, então
+ * entre 21:00–23:59 BRT (= 00:00–02:59Z do dia SEGUINTE) usaria o dia UTC errado —
+ * "hoje" pularia pro amanhã. Aqui convertemos o instante pro wall-clock BRT (−3h)
+ * ANTES de extrair o dia, então o "hoje" é sempre o dia civil de Brasília.
+ */
+export function brtDayStartUtcOfInstant(instant: Date = new Date()): Date {
+  return brtDayStartUtc(new Date(instant.getTime() - BRT_OFFSET_MS));
+}
+
+/**
  * Janela WALL-CLOCK do evento (abertura/encerramento de inscrição, realização) é
  * gravada como UTC (server em UTC: `new Date("...09:30:00")` → 09:30Z = 09:30 BRT
  * pretendido). Para COMPARAR com o tempo real (`new Date()`), o instante real é o

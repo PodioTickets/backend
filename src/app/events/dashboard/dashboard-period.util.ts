@@ -1,3 +1,5 @@
+import { brtDayStartUtcOfInstant } from '../../../common/utils/brt-date.util';
+
 /**
  * Períodos suportados pelo dashboard (mesmo enum legacy mantido pra não quebrar
  * o front que já manda `?period=...`).
@@ -24,6 +26,8 @@ export interface ComparisonBounds {
 /**
  * Range absoluto do período atual.
  * - GERAL: { start: null, end: null } — sem filtro temporal.
+ * - LAST_24H ("Hoje"): DIA CIVIL de hoje em BRT (00:00 BRT → agora), NÃO as últimas
+ *   24h rolantes — senão apareciam inscrições de ontem (janela cruzava a meia-noite).
  * - Demais: janela relativa ao agora.
  */
 export function calculateDateRange(period: DashboardPeriod): DateRange {
@@ -32,8 +36,8 @@ export function calculateDateRange(period: DashboardPeriod): DateRange {
 
   switch (period) {
     case DashboardPeriod.LAST_24H:
-      start.setHours(now.getHours() - 24);
-      return { start, end: now };
+      // "Hoje" = a partir do início do dia em Brasília (não now-24h).
+      return { start: brtDayStartUtcOfInstant(now), end: now };
     case DashboardPeriod.LAST_7D:
       start.setDate(now.getDate() - 7);
       return { start, end: now };
@@ -69,6 +73,17 @@ export function getComparisonBounds(
     const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const prevEndExclusive = new Date(now.getFullYear(), now.getMonth(), 1);
     return { prevStart, prevEndExclusive };
+  }
+
+  // "Hoje": compara com ONTEM até o MESMO horário (desloca a janela do dia em −24h,
+  // que em BRT é determinístico — sem horário de verão). Evita comparar o dia parcial
+  // de hoje contra o dia inteiro de ontem.
+  if (period === DashboardPeriod.LAST_24H && dateRange.start && dateRange.end) {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    return {
+      prevStart: new Date(dateRange.start.getTime() - DAY_MS),
+      prevEndExclusive: new Date(dateRange.end.getTime() - DAY_MS),
+    };
   }
 
   if (dateRange.start && dateRange.end) {
