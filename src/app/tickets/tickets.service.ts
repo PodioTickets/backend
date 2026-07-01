@@ -15,54 +15,12 @@ import {
 } from './ticket-audit.helpers';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { stripDeletedTicketFromKitSelectionDisplay } from '../events/kit-selection-display.prune';
+import { resolveActiveBatch, type BatchWithSold } from './batch-active.util';
 
 function resolveImageUrl(url: string | null | undefined, baseUrl: string): string | null | undefined {
   if (!url) return url;
   if (url.startsWith('http://') || url.startsWith('https://')) return url;
   return `${baseUrl}${url.startsWith('/') ? '' : '/'}${url}`;
-}
-
-type BatchWithSold = {
-  id: string;
-  quantity: number;
-  availableQuantity: number;
-  price: number;
-  startDate: Date | null;
-  endDate: Date | null;
-  sortOrder: number;
-  triggerType: string;
-  quantitySold: number;
-};
-
-function resolveActiveBatch(
-  batches: BatchWithSold[],
-  now: Date,
-): { batch: BatchWithSold; batchNumber: number; status: 'AVAILABLE' | 'SOLD_OUT' } {
-  const sorted = [...batches].sort((a, b) => a.sortOrder - b.sortOrder);
-
-  let activeIdx = 0;
-
-  for (let i = 1; i < sorted.length; i++) {
-    const prev = sorted[activeIdx];
-    const curr = sorted[i];
-
-    if (curr.triggerType === 'AFTER_PREVIOUS_SOLD_OUT') {
-      // Abre somente quando todas as vagas do lote anterior foram VENDIDAS (pagamento confirmado)
-      // Reservas pendentes não contam — quando expirarem, availableQuantity sobe e o lote anterior reaparece disponível
-      if (prev.quantitySold >= prev.quantity) {
-        activeIdx = i;
-      }
-    } else {
-      // BY_TIME: abre SOMENTE quando startDate for definida e já tiver chegado
-      if (curr.startDate && now >= curr.startDate) {
-        activeIdx = i;
-      }
-    }
-  }
-
-  const batch = sorted[activeIdx];
-  const status = batch.availableQuantity > 0 ? 'AVAILABLE' : 'SOLD_OUT';
-  return { batch, batchNumber: activeIdx + 1, status };
 }
 
 function batchOrdinalLabel(n: number, total: number): string | null {

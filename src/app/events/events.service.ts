@@ -43,6 +43,7 @@ import {
 } from './dto/kit-selection-display.dto';
 import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
 import { TicketsService } from '../tickets/tickets.service';
+import { resolveActiveBatch, type BatchWithSold } from '../tickets/batch-active.util';
 import { TicketCategoriesService } from '../ticket-categories/ticket-categories.service';
 import { EmailService } from '../../common/services/email.service';
 import { RepasseService, RETENTION_DAYS } from '../repasse/repasse.service';
@@ -572,16 +573,74 @@ export class EventsService {
     const prismaRead = this.prisma.getReadClient();
     const floor = minCents ?? 0;
     const ceil = maxCents ?? 2147483647; // máx. int4 (price é Int em centavos)
-    const rows = await prismaRead.$queryRaw<{ id: string }[]>`
-      SELECT DISTINCT t."eventId" AS id
-      FROM "Ticket" t
-      JOIN "TicketBatch" b ON b."ticketId" = t.id
-      WHERE t."isActive" = true
-        AND (b."startDate" IS NULL OR b."startDate" <= now())
-        AND b."price" >= ${floor}
-        AND b."price" <= ${ceil}
-    `;
-    return rows.map((r) => r.id);
+
+    // O filtro deve casar pelo PREÇO DO LOTE ATIVO (o "a partir de" comprável), não
+    // por qualquer lote com `startDate <= now`: lotes já superados por um posterior
+    // (inativos) continuavam casando e faziam o evento aparecer num intervalo de
+    // preço que não é mais vendido. Usamos a MESMA regra do checkout/cards
+    // (`resolveActiveBatch`): lote ativo por sortOrder + trigger (BY_TIME /
+    // AFTER_PREVIOUS_SOLD_OUT). Escopo limitado ao catálogo público (PUBLISHED
+    // dentro da janela de 30 dias) pra manter o conjunto pequeno.
+    const eventDateCutoff = new Date();
+    eventDateCutoff.setDate(eventDateCutoff.getDate() - 30);
+
+    const tickets = await prismaRead.ticket.findMany({
+      where: {
+        isActive: true,
+        event: { status: EventStatus.PUBLISHED, eventDate: { gte: eventDateCutoff } },
+      },
+      select: {
+        eventId: true,
+        batches: {
+          select: {
+            id: true,
+            quantity: true,
+            availableQuantity: true,
+            price: true,
+            startDate: true,
+            endDate: true,
+            sortOrder: true,
+            triggerType: true,
+          },
+          orderBy: { sortOrder: 'asc' },
+        },
+      },
+    });
+
+    // Vagas VENDIDAS por lote (pagamento confirmado; canceladas não contam) —
+    // necessário para o trigger AFTER_PREVIOUS_SOLD_OUT do resolveActiveBatch.
+    const batchIds = tickets.flatMap((t) => t.batches.map((b) => b.id));
+    const soldByBatch =
+      batchIds.length > 0
+        ? await prismaRead.registrationTicket.groupBy({
+            by: ['batchId'],
+            where: {
+              batchId: { in: batchIds },
+              registration: { status: { not: 'CANCELLED' } },
+            },
+            _count: { id: true },
+          })
+        : [];
+    const soldByBatchMap = new Map(
+      soldByBatch.map((s) => [s.batchId, s._count.id]),
+    );
+
+    const now = new Date();
+    const matched = new Set<string>();
+    for (const ticket of tickets) {
+      if (ticket.batches.length === 0) {
+        continue;
+      }
+      const batches: BatchWithSold[] = ticket.batches.map((b) => ({
+        ...b,
+        quantitySold: soldByBatchMap.get(b.id) ?? 0,
+      }));
+      const { batch: activeBatch } = resolveActiveBatch(batches, now);
+      if (activeBatch.price >= floor && activeBatch.price <= ceil) {
+        matched.add(ticket.eventId);
+      }
+    }
+    return [...matched];
   }
 
   /**

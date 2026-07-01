@@ -119,6 +119,10 @@ export class AuthService {
             role: true,
             accountType: true,
             mfaEnabled: true,
+            // Necessário no payload de login: o organizador usa o `user` da
+            // resposta de login como fonte (o /auth/profile é do participante).
+            // Sem isto, a foto de perfil "reseta" a cada login/troca de conta.
+            avatarUrl: true,
           },
         });
       } else {
@@ -142,6 +146,10 @@ export class AuthService {
             role: true,
             accountType: true,
             mfaEnabled: true,
+            // Necessário no payload de login: o organizador usa o `user` da
+            // resposta de login como fonte (o /auth/profile é do participante).
+            // Sem isto, a foto de perfil "reseta" a cada login/troca de conta.
+            avatarUrl: true,
           },
         });
       }
