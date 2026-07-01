@@ -21,6 +21,7 @@ import {
   FiscalPeriod,
   FiscalValueRange,
 } from './dto/fiscal-export.dto';
+import { DEFAULT_NO_INTEREST_VARIATION_NAME } from '../products/product.constants';
 
 /**
  * Quantas linhas (sem contar header) a exportação aceita antes de retornar 413.
@@ -60,16 +61,15 @@ const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
 };
 
 /**
- * `displayId` é derivado do UUID — determinístico, sem migration nem sequence.
- * 5 dígitos numéricos a partir dos primeiros 8 hex chars (32 bits → mod 100000).
- * Probabilidade de colisão dentro de um evento é muito baixa; se precisar zero
- * colisão no futuro, basta substituir aqui sem mexer no contrato.
+ * `displayId` de exibição do pedido — o PRIMEIRO segmento do UUID (8 hex chars antes
+ * do primeiro "-"), IGUAL ao `utils/shortId` do front e ao export de inscrições
+ * (`#41d2aba8`). Determinístico, sem migration/sequence. Antes eram 5 dígitos numéricos
+ * (`#04837`), fora do padrão das demais telas/exports — alinhado aqui. É só display: a
+ * busca por pedido usa o UUID completo (ver adiante), então trocar o formato é seguro.
  */
 export function buildFiscalDisplayId(orderId: string): string {
-  const hex = orderId.replace(/-/g, '').slice(0, 8);
-  const num = Number.parseInt(hex, 16);
-  if (!Number.isFinite(num)) return '00000';
-  return String(num % 100_000).padStart(5, '0');
+  const first = String(orderId).split('-')[0];
+  return first || String(orderId);
 }
 
 @Injectable()
@@ -340,18 +340,40 @@ export class FiscalExportService {
     if (search && search.trim().length > 0) {
       const term = search.trim();
       const cpfDigits = term.replace(/\D/g, '');
-      const or: Prisma.OrderWhereInput[] = [
-        // Nome do comprador — match em first/last/concatenação.
-        { user: { firstName: { contains: term, mode: 'insensitive' } } },
-        { user: { lastName: { contains: term, mode: 'insensitive' } } },
-      ];
+      // Nome do comprador: "João Silva" (nome completo) não casa firstName nem lastName
+      // isolados. Prisma não concatena colunas no `where`, então quebramos em tokens e
+      // exigimos que CADA token apareça em firstName OU lastName (AND de tokens) — casa
+      // nome completo em qualquer ordem. Um token só → comportamento antigo. Paridade
+      // com o fix de busca do export de inscrições.
+      const nameTokens = term.split(/\s+/).filter(Boolean);
+      const nameCondition: Prisma.OrderWhereInput =
+        nameTokens.length > 1
+          ? {
+              AND: nameTokens.map((tok) => ({
+                user: {
+                  OR: [
+                    { firstName: { contains: tok, mode: 'insensitive' as const } },
+                    { lastName: { contains: tok, mode: 'insensitive' as const } },
+                  ],
+                },
+              })),
+            }
+          : {
+              user: {
+                OR: [
+                  { firstName: { contains: term, mode: 'insensitive' as const } },
+                  { lastName: { contains: term, mode: 'insensitive' as const } },
+                ],
+              },
+            };
+      const or: Prisma.OrderWhereInput[] = [nameCondition];
       if (cpfDigits.length >= 3) {
         or.push({ user: { documentNumberClean: { contains: cpfDigits } } });
       }
       // Busca por UUID completo (o front pode oferecer copy do `id` interno em
       // "Detalhes do pedido"). `id` é coluna UUID — Prisma não suporta
       // startsWith/contains nesse tipo, então aceitamos só match exato.
-      // Busca por `displayId` (5 dígitos derivados) ficaria de fora; se virar
+      // Busca por `displayId` (1º segmento do UUID) ficaria de fora; se virar
       // necessidade, exige coluna materializada + índice.
       const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       if (uuidRe.test(term)) {
@@ -480,6 +502,10 @@ export class FiscalExportService {
         case 'paymentDate':
           return this.formatDateTimeBR(order.payment?.paymentDate ?? order.createdAt);
         case 'paymentMethod':
+          // Pedido gratuito (total 0) não tem forma de pagamento real: o gateway
+          // pode registrar PIX/cartão no fluxo, mas nada foi cobrado → "Gratuito"
+          // (espelha o export de inscrições e o modal).
+          if (grossCents === 0) return 'Gratuito';
           return order.payment?.method
             ? PAYMENT_METHOD_LABELS[order.payment.method as PaymentMethod] ?? String(order.payment.method)
             : '';
@@ -595,8 +621,14 @@ export class FiscalExportService {
       for (const p of reg.products ?? []) {
         const snapshot = p.productSnapshot as any;
         const productName = snapshot?.name ?? p.product?.name ?? '';
-        const variationName = snapshot?.variationName ?? p.variation?.name ?? null;
+        // Variação: relação VIVA primeiro — reflete a troca de variação feita pelo
+        // cliente (o snapshot fica congelado na compra → mostraria a ANTIGA). Igual
+        // ao fix do export de inscrições. Snapshot só como fallback (variação deletada).
+        const variationName = p.variation?.name ?? snapshot?.variationName ?? null;
         if (!productName) continue;
+        // "Sem interesse" = opt-out de produto opcional → NÃO listar (mesma convenção
+        // do PDF do comprovante/ingresso e do orders.service).
+        if (variationName === DEFAULT_NO_INTEREST_VARIATION_NAME) continue;
         const base = variationName ? `${productName} (${variationName})` : productName;
         items.push(p.quantity && p.quantity > 1 ? `${p.quantity}x ${base}` : base);
       }
