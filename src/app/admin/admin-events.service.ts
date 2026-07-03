@@ -103,7 +103,6 @@ export class AdminEventsService {
           id: true,
           name: true,
           slug: true,
-          logoUrl: true,
           bannerUrl: true,
           status: true,
           city: true,
@@ -239,7 +238,6 @@ export class AdminEventsService {
           id: true,
           name: true,
           slug: true,
-          logoUrl: true,
           bannerUrl: true,
           status: true,
           city: true,
@@ -350,8 +348,8 @@ export class AdminEventsService {
           recipientEmail: organizerEmail,
           organizerName,
           eventName: event.name,
-          // Template usa imagem 308x308 = imagem do CARD (logoUrl), não o banner.
-          eventBannerUrl: (event as any).logoUrl ?? event.bannerUrl ?? '',
+          // Imagem do e-mail = BANNER do evento (logoUrl descontinuado).
+          eventBannerUrl: event.bannerUrl ?? '',
           eventDate: eventDateFormatted,
           eventLocation,
           submittedAt: submittedAtFormatted,

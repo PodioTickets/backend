@@ -35,15 +35,6 @@ export class CreateEventDto {
   @IsString()
   bannerUrl?: string;
 
-  @IsOptional()
-  @IsString()
-  logoUrl?: string;
-
-  /** Alias do painel para `logoUrl` (imagem do card / marca do evento). */
-  @IsOptional()
-  @IsString()
-  cardImageUrl?: string;
-
   @IsString()
   location: string;
 
@@ -140,15 +131,6 @@ export class UpdateEventDto {
   @IsOptional()
   @IsString()
   bannerUrl?: string;
-
-  @IsOptional()
-  @IsString()
-  logoUrl?: string;
-
-  /** Alias do painel para `logoUrl` (imagem do card / marca do evento). */
-  @IsOptional()
-  @IsString()
-  cardImageUrl?: string;
 
   @IsOptional()
   @IsString()

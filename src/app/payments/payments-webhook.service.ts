@@ -320,7 +320,7 @@ export class PaymentsWebhookService {
         const eventLocation = event?.location ?? '';
         const eventDate = formatEventDate(event?.eventDate);
         const eventAddress = formatEventAddress(event);
-        const eventBannerUrl = event?.logoUrl ?? event?.bannerUrl ?? 'https://placehold.co/308x232';
+        const eventBannerUrl = event?.bannerUrl ?? 'https://placehold.co/308x232';
 
         // Comprador = primeira inscrição com conta vinculada
         // Comprador = dono do pedido. Pode nao ser participante (comprou so pra
@@ -623,7 +623,7 @@ export class PaymentsWebhookService {
         const eventLocation = event?.location ?? '';
         const eventDate = formatEventDate(event?.eventDate);
         const eventAddress = formatEventAddress(event);
-        const eventBannerUrl = event?.logoUrl ?? event?.bannerUrl ?? 'https://placehold.co/308x232';
+        const eventBannerUrl = event?.bannerUrl ?? 'https://placehold.co/308x232';
 
         // Comprador = dono do pedido. Pode nao ser participante (comprou so pra
         // terceiros) — busca o user direto nesse caso.

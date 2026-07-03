@@ -644,7 +644,6 @@ export class OrderFinalizationService {
             registrationStartDate: snapshotEvent.registrationStartDate ?? null,
             registrationEndDate: snapshotEvent.registrationEndDate ?? null,
             bannerUrl: snapshotEvent.bannerUrl ?? null,
-            logoUrl: snapshotEvent.logoUrl ?? null,
             // Contato (email/phone) NÃO entra mais no snapshot (2026-06-04): o recibo é
             // devolvido em rotas de USUÁRIO e o contato do organizador está fora desse
             // contrato. Snapshots antigos que já têm os campos são limpos no READ

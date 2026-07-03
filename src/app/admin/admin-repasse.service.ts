@@ -46,7 +46,7 @@ export class AdminRepasseService {
               id: true,
               name: true,
               slug: true,
-              logoUrl: true,
+              bannerUrl: true,
               organizationId: true,
               organization: {
                 select: {
@@ -103,7 +103,7 @@ export class AdminRepasseService {
     id: true,
     name: true,
     slug: true,
-    logoUrl: true,
+    bannerUrl: true,
     organizationId: true,
     organization: {
       select: {
@@ -119,7 +119,7 @@ export class AdminRepasseService {
     id: true,
     name: true,
     slug: true,
-    logoUrl: true,
+    bannerUrl: true,
     organizationId: true,
     organization: {
       select: {

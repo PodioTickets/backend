@@ -1190,7 +1190,7 @@ export class PaymentsService {
     const eventLocation = event?.location ?? '';
     const eventDate = formatEventDate(event?.eventDate);
     const eventAddress = formatEventAddress(event);
-    const eventBannerUrl = event?.logoUrl ?? event?.bannerUrl ?? 'https://placehold.co/308x232';
+    const eventBannerUrl = event?.bannerUrl ?? 'https://placehold.co/308x232';
 
     // Comprador = dono do pedido. Pode nao ser participante (comprou so pra
     // terceiros) — nesse caso busca o user direto.

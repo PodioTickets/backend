@@ -1,12 +1,16 @@
 import {
   Controller,
   Get,
+  Param,
   Query,
+  Res,
+  StreamableFile,
   UseGuards,
   DefaultValuePipe,
   ParseIntPipe,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
+import type { Response } from 'express';
 import { AdminUsersService } from './admin-users.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AdminGuard } from '../auth/guards/admin.guard';
@@ -50,5 +54,44 @@ export class AdminUsersController {
       search,
       isActive: isActiveParsed,
     });
+  }
+
+  @Get(':id')
+  @NoCache()
+  @ApiOperation({ summary: '[Admin] Get a single user (participant) profile' })
+  getUser(@Param('id') id: string) {
+    return this.adminUsersService.getUser(id);
+  }
+
+  @Get(':id/registrations')
+  @NoCache()
+  @ApiOperation({ summary: "[Admin] List a user's purchased tickets (registrations)" })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
+  getUserRegistrations(
+    @Param('id') id: string,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit: number,
+  ) {
+    return this.adminUsersService.getUserRegistrations(id, {
+      page,
+      limit: Math.min(limit, 100),
+    });
+  }
+
+  @Get(':id/registrations/export')
+  @NoCache()
+  @ApiOperation({ summary: "[Admin] Export a user's tickets (registrations) as CSV" })
+  async exportUserRegistrations(
+    @Param('id') id: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const { buffer, filename } =
+      await this.adminUsersService.exportUserRegistrationsCsv(id);
+    res.set({
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    });
+    return new StreamableFile(buffer);
   }
 }
