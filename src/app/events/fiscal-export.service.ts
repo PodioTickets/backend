@@ -96,7 +96,7 @@ export class FiscalExportService {
     const period = queryDto.period ?? FiscalPeriod.LAST_30D;
     const valueRange = queryDto.valueRange ?? FiscalValueRange.ALL;
 
-    const where = this.buildOrderWhere({
+    const where = await this.buildOrderWhere({
       eventId,
       period,
       valueRange,
@@ -211,7 +211,7 @@ export class FiscalExportService {
 
     const where = queryDto.orderIds && queryDto.orderIds.length > 0
       ? { id: { in: queryDto.orderIds }, eventId, status: OrderStatus.PAID }
-      : this.buildOrderWhere({
+      : await this.buildOrderWhere({
         eventId,
         period: queryDto.period ?? FiscalPeriod.LAST_30D,
         valueRange: queryDto.valueRange ?? FiscalValueRange.ALL,
@@ -296,12 +296,12 @@ export class FiscalExportService {
 
   // ─── Filtros ──────────────────────────────────────────────────────────────
 
-  private buildOrderWhere(params: {
+  private async buildOrderWhere(params: {
     eventId: string;
     period: FiscalPeriod;
     valueRange: FiscalValueRange;
     search?: string;
-  }): Prisma.OrderWhereInput {
+  }): Promise<Prisma.OrderWhereInput> {
     const { eventId, period, valueRange, search } = params;
 
     const where: Prisma.OrderWhereInput = {
@@ -370,14 +370,30 @@ export class FiscalExportService {
       if (cpfDigits.length >= 3) {
         or.push({ user: { documentNumberClean: { contains: cpfDigits } } });
       }
-      // Busca por UUID completo (o front pode oferecer copy do `id` interno em
-      // "Detalhes do pedido"). `id` é coluna UUID — Prisma não suporta
-      // startsWith/contains nesse tipo, então aceitamos só match exato.
-      // Busca por `displayId` (1º segmento do UUID) ficaria de fora; se virar
-      // necessidade, exige coluna materializada + índice.
-      const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      if (uuidRe.test(term)) {
-        or.push({ id: term.toLowerCase() });
+      // Busca por ID do PEDIDO: aceita o ID EXIBIDO (`#` + 1º segmento do UUID),
+      // além de UUID parcial/completo. `id` é coluna UUID — Prisma não suporta
+      // contains/startsWith nesse tipo, então pré-buscamos via SQL raw
+      // `id::text ILIKE`, escopado ao evento (mesma tática do export de
+      // inscrições). Só dispara quando o termo parece um ID (hex/hífen), pra
+      // buscas por nome não pagarem a query extra.
+      const hadHash = term.startsWith('#');
+      const idTerm = term.replace(/^#/, '').trim();
+      // Evita ruído: termos só-dígitos curtos (ex.: início de CPF) não devem casar
+      // por substring do UUID. Só busca ID quando há intenção clara: `#`, presença
+      // de hex a–f/hífen, ou comprimento de um segmento (≥ 8).
+      const looksLikeId =
+        hadHash || /[a-f-]/i.test(idTerm) || idTerm.length >= 8;
+      if (looksLikeId && /^[0-9a-fA-F-]{2,}$/.test(idTerm)) {
+        const prismaRead = this.prisma.getReadClient();
+        const idMatches = await prismaRead.$queryRaw<{ id: string }[]>`
+          SELECT id FROM "Order"
+          WHERE "eventId" = ${eventId}::uuid
+            AND id::text ILIKE ${'%' + idTerm + '%'}
+          LIMIT 500
+        `;
+        if (idMatches.length > 0) {
+          or.push({ id: { in: idMatches.map((r) => r.id) } });
+        }
       }
       where.AND = [{ OR: or }];
     }

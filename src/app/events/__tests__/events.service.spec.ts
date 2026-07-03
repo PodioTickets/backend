@@ -459,21 +459,38 @@ describe('EventsService', () => {
     });
   });
 
-  // Filtro de preço do /search: o evento entra quando possui ALGUM ingresso
-  // ativo com preço dentro de [minPrice, maxPrice] (REAIS); some quando nenhum
-  // ingresso cai no intervalo. A resolução acontece numa $queryRaw (DISTINCT
-  // eventId) que devolve os IDs elegíveis; o where faz a interseção via `id in`.
-  describe('search - filtro de preço (algum ingresso no intervalo)', () => {
+  // Filtro de preço do /search: o evento entra quando o PREÇO DO LOTE ATIVO de
+  // algum ingresso cai em [minPrice, maxPrice] (CENTAVOS). O lote ativo segue a
+  // regra canônica (resolveActiveBatch): lotes já superados por um posterior
+  // (inativos) NÃO contam — antes casavam por `startDate <= now` (bug). A
+  // resolução busca os ingressos (ticket.findMany) + vendas por lote
+  // (registrationTicket.groupBy) e devolve os eventIds; o where faz `id in`.
+  const PAST = new Date('2020-01-01T00:00:00Z');
+  const makeBatch = (over: any) => ({
+    id: 'b',
+    quantity: 100,
+    availableQuantity: 100,
+    price: 7000,
+    startDate: PAST,
+    endDate: null,
+    sortOrder: 0,
+    triggerType: 'BY_TIME',
+    ...over,
+  });
+
+  describe('search - filtro de preço (lote ATIVO no intervalo)', () => {
     beforeEach(() => {
       mockPrismaService.event.findMany.mockResolvedValue([]);
       mockPrismaService.event.count.mockResolvedValue(0);
+      mockPrismaService.ticket.findMany.mockResolvedValue([]);
+      mockPrismaService.registrationTicket.groupBy.mockResolvedValue([]);
     });
 
     it('SEM minPrice/maxPrice: não roda a query de preço nem adiciona condição de id', async () => {
       await service.search({ page: 1, limit: 20 });
 
-      // Sem q e sem preço → nenhuma $queryRaw é disparada.
-      expect(mockPrismaService.$queryRaw).not.toHaveBeenCalled();
+      // Sem q e sem preço → o resolvedor de preço nem busca ingressos.
+      expect(mockPrismaService.ticket.findMany).not.toHaveBeenCalled();
 
       const where = mockPrismaService.event.findMany.mock.calls[0][0].where;
       const hasIdCond = where.AND.some(
@@ -482,29 +499,36 @@ describe('EventsService', () => {
       expect(hasIdCond).toBe(false);
     });
 
-    it('COM minPrice/maxPrice (CENTAVOS): usa os limites recebidos e injeta os IDs elegíveis no where', async () => {
-      // O evento "event-1" tem entrada (MIN comprável) dentro de [5000,10000] centavos.
-      mockPrismaService.$queryRaw.mockResolvedValueOnce([{ id: 'event-1' }]);
+    it('casa pelo LOTE ATIVO e IGNORA lote antigo/inativo mais barato', async () => {
+      // event-1: 1 lote a 7000¢ (ativo) → dentro de [5000,10000] → casa.
+      // event-2: lote0=7000¢ (dentro do range, mas SUPERADO) + lote1=15000¢ (ativo,
+      // startDate passada) → preço ativo 15000¢ FORA do range → NÃO casa. Antes,
+      // o lote0 (7000¢) fazia o event-2 aparecer indevidamente.
+      mockPrismaService.ticket.findMany.mockResolvedValueOnce([
+        { eventId: 'event-1', batches: [makeBatch({ id: 'a0', price: 7000 })] },
+        {
+          eventId: 'event-2',
+          batches: [
+            makeBatch({ id: 'c0', price: 7000, sortOrder: 0 }),
+            makeBatch({ id: 'c1', price: 15000, sortOrder: 1 }),
+          ],
+        },
+      ]);
 
-      // minPrice/maxPrice JÁ vêm em CENTAVOS do front (o service não converte mais).
       await service.search({ page: 1, limit: 20, minPrice: 5000, maxPrice: 10000 });
 
-      // A query de faixa de preço foi disparada exatamente uma vez.
-      expect(mockPrismaService.$queryRaw).toHaveBeenCalledTimes(1);
-      // Os limites (centavos) chegam DIRETO como parâmetros da tagged template.
-      // O 1º arg é o array de strings; os demais, os valores.
-      const params = mockPrismaService.$queryRaw.mock.calls[0].slice(1);
-      expect(params).toEqual(expect.arrayContaining([5000, 10000]));
-
+      expect(mockPrismaService.ticket.findMany).toHaveBeenCalledTimes(1);
       const where = mockPrismaService.event.findMany.mock.calls[0][0].where;
       expect(where.AND).toEqual(
         expect.arrayContaining([{ id: { in: ['event-1'] } }]),
       );
     });
 
-    it('nenhum evento na faixa → injeta `id in []` (resultado vazio, evento some)', async () => {
-      // A entrada do único evento é R$40 (4000¢) — fora de [5000,10000] → query não retorna.
-      mockPrismaService.$queryRaw.mockResolvedValueOnce([]);
+    it('nenhum lote ativo na faixa → injeta `id in []` (resultado vazio, evento some)', async () => {
+      // Único evento com lote ativo a 4000¢ — fora de [5000,10000].
+      mockPrismaService.ticket.findMany.mockResolvedValueOnce([
+        { eventId: 'event-1', batches: [makeBatch({ id: 'a0', price: 4000 })] },
+      ]);
 
       await service.search({ page: 1, limit: 20, minPrice: 5000, maxPrice: 10000 });
 
@@ -515,15 +539,13 @@ describe('EventsService', () => {
     });
 
     it('só minPrice (sem teto): aplica o filtro mesmo sem maxPrice', async () => {
-      mockPrismaService.$queryRaw.mockResolvedValueOnce([{ id: 'event-1' }]);
+      mockPrismaService.ticket.findMany.mockResolvedValueOnce([
+        { eventId: 'event-1', batches: [makeBatch({ id: 'a0', price: 7000 })] },
+      ]);
 
       await service.search({ page: 1, limit: 20, minPrice: 4500 });
 
-      expect(mockPrismaService.$queryRaw).toHaveBeenCalledTimes(1);
-      const params = mockPrismaService.$queryRaw.mock.calls[0].slice(1);
-      // Piso 4500 centavos presente nos parâmetros (sem conversão).
-      expect(params).toEqual(expect.arrayContaining([4500]));
-
+      expect(mockPrismaService.ticket.findMany).toHaveBeenCalledTimes(1);
       const where = mockPrismaService.event.findMany.mock.calls[0][0].where;
       expect(where.AND).toEqual(
         expect.arrayContaining([{ id: { in: ['event-1'] } }]),
