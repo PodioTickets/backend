@@ -1143,7 +1143,9 @@ export class OrdersService {
       // já commitadas, então a checagem não pode ser furada por corrida.
       if (event.maxParticipants != null) {
         const capLockKey = `event_cap:${dto.eventId}`;
-        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${capLockKey}, 0))`;
+        // pg_advisory_xact_lock retorna void; usar $executeRaw (não desserializa
+        // colunas) — $queryRaw quebraria com "Failed to deserialize column of type 'void'".
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${capLockKey}, 0))`;
         const requestedUnits = batchInfos.reduce((sum, info) => sum + info.quantity, 0);
         const capRows: Array<{ count: number }> = await tx.$queryRaw`
           SELECT COUNT(*)::int AS count
