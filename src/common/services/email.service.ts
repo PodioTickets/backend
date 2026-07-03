@@ -357,7 +357,7 @@ export class EmailService {
       eventLocation: this.escapeHtml(data.eventLocation),
       eventDate: this.escapeHtml(data.eventDate ?? ''),
       eventAddress: this.escapeHtml(data.eventAddress ?? data.eventLocation),
-      eventBannerUrl: this.escapeHtml(data.eventBannerUrl),
+      eventBannerUrl: this.escapeHtml(this.resolveEmailImageUrl(data.eventBannerUrl)),
       invitedByName: this.escapeHtml(data.invitedByName ?? ''),
       // Liga o trecho condicional "ingresso e o recibo" só quando há comprovante.
       hasReceipt: data.receiptPdf ? 'x' : '',
@@ -772,7 +772,7 @@ export class EmailService {
     const html = this.loadTemplate('evento-em-analise.html', {
       eventName: this.escapeHtml(data.eventName),
       /* safeUrl valida esquema https:// — previne javascript: em atributo src da imagem */
-      eventBannerUrl: this.escapeHtml(this.safeUrl(data.eventBannerUrl)),
+      eventBannerUrl: this.escapeHtml(this.safeUrl(this.resolveEmailImageUrl(data.eventBannerUrl))),
       eventDate: this.escapeHtml(data.eventDate),
       eventLocation: this.escapeHtml(data.eventLocation),
       submittedAt: this.escapeHtml(data.submittedAt),
@@ -813,7 +813,7 @@ export class EmailService {
       organizerName: this.escapeHtml(data.organizerName ?? ''),
       eventName: this.escapeHtml(data.eventName),
       /* safeUrl valida esquema https:// — previne javascript: em atributo src da imagem */
-      eventBannerUrl: this.escapeHtml(this.safeUrl(data.eventBannerUrl)),
+      eventBannerUrl: this.escapeHtml(this.safeUrl(this.resolveEmailImageUrl(data.eventBannerUrl))),
       eventDate: this.escapeHtml(data.eventDate),
       eventLocation: this.escapeHtml(data.eventLocation),
       submittedAt: this.escapeHtml(data.submittedAt),
@@ -889,6 +889,27 @@ export class EmailService {
     if (!url) return '';
     const trimmed = url.trim();
     if (!/^https:\/\//i.test(trimmed)) return '';
+    return trimmed;
+  }
+
+  /**
+   * Resolve a URL de imagem para o e-mail. Clientes externos (Gmail etc.) NÃO
+   * alcançam `localhost`/caminhos relativos — quando o upload foi feito em um
+   * ambiente que "carimbou" o host local, reescreve para o host PÚBLICO
+   * (`SERVER_URL`). URLs já públicas (GCS/CDN https) passam intactas.
+   */
+  private resolveEmailImageUrl(url: string | undefined | null): string {
+    if (!url) return '';
+    const trimmed = url.trim();
+    if (!trimmed) return '';
+    const base = (process.env.SERVER_URL ?? '').replace(/\/+$/, '');
+    // Caminho relativo (ex.: /uploads/images/x.webp).
+    if (trimmed.startsWith('/')) return base ? `${base}${trimmed}` : trimmed;
+    // http(s)://localhost[:porta]/... ou 127.0.0.1 → troca só o host pelo público.
+    const local = trimmed.match(
+      /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(\/.*)?$/i,
+    );
+    if (local && base) return `${base}${local[1] ?? ''}`;
     return trimmed;
   }
 

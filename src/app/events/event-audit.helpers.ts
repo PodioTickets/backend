@@ -13,7 +13,6 @@ export const EVENT_UPDATE_FIELD_LABELS: Record<string, string> = {
   slug: 'slug',
   description: 'descrição',
   bannerUrl: 'banner',
-  logoUrl: 'logo',
   location: 'local',
   city: 'cidade',
   state: 'estado',

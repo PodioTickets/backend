@@ -1316,7 +1316,6 @@ export class OrdersService {
               slug: true,
               eventDate: true,
               bannerUrl: true,
-              logoUrl: true,
               location: true,
               city: true,
               state: true,
@@ -1609,7 +1608,6 @@ export class OrdersService {
               registrationStartDate: primaryReceipt.event.registrationStartDate ?? null,
               registrationEndDate: primaryReceipt.event.registrationEndDate ?? null,
               bannerUrl: primaryReceipt.event.bannerUrl ?? null,
-              logoUrl: primaryReceipt.event.logoUrl ?? null,
               location: primaryReceipt.event.location?.name ?? null,
               city: primaryReceipt.event.location?.city ?? null,
               state: primaryReceipt.event.location?.state ?? null,
@@ -3929,7 +3927,7 @@ export class OrdersService {
         id: true, name: true, slug: true, description: true,
         eventDate: true, registrationStartDate: true, registrationEndDate: true,
         location: true, city: true, state: true, country: true, zipCode: true, neighborhood: true,
-        googleMapsLink: true, bannerUrl: true, logoUrl: true,
+        googleMapsLink: true, bannerUrl: true,
         // Só o necessário pro e-mail de confirmação (nome/logo) — sem contato.
         organization: { select: { id: true, name: true, logoUrl: true } },
       },
@@ -4211,7 +4209,7 @@ export class OrdersService {
 
         const eventName = snapshotEvent.name;
         const eventDate = formatEventDate(snapshotEvent.eventDate ?? (event as any).eventDate);
-        const eventBannerUrl = (snapshotEvent as any).logoUrl || (snapshotEvent as any).bannerUrl || '';
+        const eventBannerUrl = (snapshotEvent as any).bannerUrl || '';
 
         // Comprador = dono do pedido. Pode nao ser participante (comprou so pra
         // terceiros) — nesse caso busca o user direto, ja que nao ha inscricao

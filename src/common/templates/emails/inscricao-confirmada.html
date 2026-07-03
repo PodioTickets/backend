@@ -119,7 +119,7 @@
                     {{/invitedByName}}
                     {{^invitedByName}}
                     <!-- Sem banner — imagem ocupa o card todo. Img invisivel serve so pra fallback de clientes sem suporte a background-image. -->
-                    <img src="{{eventBannerUrl}}" alt="{{eventName}}" width="308" height="308" style="display:block;width:308px;height:308px;object-fit:cover;border-radius:8px 8px 0 0;">
+                    {{#eventBannerUrl}}<img src="{{eventBannerUrl}}" alt="{{eventName}}" width="308" height="308" style="display:block;width:308px;height:308px;object-fit:cover;border-radius:8px 8px 0 0;">{{/eventBannerUrl}}
                     {{/invitedByName}}
                   </div>
                   <!--[if gte mso 9]>

@@ -334,14 +334,15 @@ export class EventsService {
       );
     }
 
-    const { cardImageUrl, ...createEventRest } = createEventDto;
+    // Imagem do evento = BANNER apenas. A antiga "imagem do card" (logoUrl) foi
+    // descontinuada — todo o app exibe o banner. Não coletamos/gravamos mais logoUrl.
+    const createEventRest = createEventDto;
 
     // Criar evento primeiro para ter o ID
     const event = await prismaWrite.event.create({
       data: {
         ...createEventRest,
         state: EventsService.normalizeState(createEventRest.state),
-        logoUrl: createEventDto.logoUrl ?? cardImageUrl,
         slug: null, // Será gerado depois com o ID
         organizationId: member.organizationId,
         // Taxas padrão: organizador 4% (sobrescrevível) e participante 2% (interno).
@@ -465,7 +466,6 @@ export class EventsService {
               registrationStartDate: updatedEvent.registrationStartDate,
               registrationEndDate: updatedEvent.registrationEndDate,
               bannerUrl: updatedEvent.bannerUrl,
-              logoUrl: updatedEvent.logoUrl,
             },
           },
         ],
@@ -855,7 +855,6 @@ export class EventsService {
           name: true,
           description: true,
           bannerUrl: true,
-          logoUrl: true,
           slug: true,
           location: true,
           city: true,
@@ -1075,7 +1074,6 @@ export class EventsService {
           slug: true,
           description: true,
           bannerUrl: true,
-          logoUrl: true,
           location: true,
           city: true,
           state: true,
@@ -1239,7 +1237,6 @@ export class EventsService {
           name: true,
           description: true,
           bannerUrl: true,
-          logoUrl: true,
           slug: true,
           location: true,
           city: true,
@@ -1339,7 +1336,6 @@ export class EventsService {
     name: true,
     slug: true,
     bannerUrl: true,
-    logoUrl: true,
     location: true,
     city: true,
     state: true,
@@ -2026,7 +2022,6 @@ export class EventsService {
 
     const {
       clientPage,
-      cardImageUrl,
       kitSelectionDisplay: kitSelDto,
       ...patchFields
     } = updateEventDto;
@@ -2041,12 +2036,7 @@ export class EventsService {
     if (updateData.state !== undefined) {
       updateData.state = EventsService.normalizeState(updateData.state as string);
     }
-    if (
-      cardImageUrl !== undefined &&
-      updateEventDto.logoUrl === undefined
-    ) {
-      updateData.logoUrl = cardImageUrl;
-    }
+    // "Imagem do card" (logoUrl/cardImageUrl) descontinuada — só banner. Nada a gravar.
 
     // Gerar slug se o nome ou slug foi alterado
     if (updateEventDto.name || updateEventDto.slug) {
@@ -2727,8 +2717,8 @@ export class EventsService {
         .sendEventUnderReview({
           recipientEmail: organizer.email,
           eventName: event.name,
-          // Template usa imagem 308x308 = imagem do CARD (logoUrl), não o banner.
-          eventBannerUrl: (event as any).logoUrl ?? event.bannerUrl ?? '',
+          // Imagem do e-mail = BANNER do evento (logoUrl descontinuado).
+          eventBannerUrl: event.bannerUrl ?? '',
           eventDate: eventDateFormatted,
           eventLocation,
           submittedAt: submittedAtFormatted,
@@ -5409,6 +5399,146 @@ export class EventsService {
           // Preserva 0 (pedido gratuito) em vez de virar null — o export usa isto
           // p/ exibir "R$ 0,00" e "Gratuito" como forma de pagamento.
           finalAmount: order.finalAmount != null ? this.normalizeToCents(order.finalAmount) : null,
+          purchaseDate: order.createdAt ?? null,
+          billingAddress,
+          payment: order.payment
+            ? {
+              status: order.payment.status,
+              method: order.payment.method,
+              paymentDate: order.payment.paymentDate,
+              createdAt: order.payment.createdAt,
+            }
+            : null,
+        },
+      };
+    });
+
+    return { registrations: mapped, eventName };
+  }
+
+  /**
+   * Igual ao `getRegistrationsForExport`, porém filtrado por USUÁRIO (todos os
+   * eventos) em vez de por evento — usado no export CSV do drawer de detalhes do
+   * usuário (admin). Reusa o MESMO include + mapeamento → MESMAS colunas do export
+   * de inscrições. Sem filtros/refino de status: exporta tudo que não é PENDING.
+   */
+  async getUserRegistrationsForExport(
+    userId: string,
+  ): Promise<{ registrations: any[]; eventName: string }> {
+    const prismaRead = this.prisma.getReadClient();
+
+    const user = await prismaRead.user.findUnique({
+      where: { id: userId },
+      select: { firstName: true, lastName: true },
+    });
+    const eventName =
+      `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim() || 'Ingressos';
+
+    const includeClause = {
+      user: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          phone: true,
+          documentNumber: true,
+          documentType: true,
+          country: true,
+          dateOfBirth: true,
+          gender: true,
+          avatarUrl: true,
+        },
+      },
+      tickets: {
+        include: {
+          ticket: {
+            include: {
+              category: { select: { id: true, name: true } },
+            },
+          },
+          batch: { select: { id: true, price: true } },
+        },
+      },
+      products: {
+        include: {
+          product: { select: { id: true, name: true } },
+          variation: { select: { id: true, name: true } },
+        },
+      },
+      questionAnswers: {
+        include: {
+          question: { select: { id: true, question: true, type: true, isActive: true } },
+        },
+      },
+      order: {
+        include: {
+          payment: {
+            select: {
+              id: true,
+              status: true,
+              method: true,
+              amount: true,
+              paymentDate: true,
+              createdAt: true,
+              metadata: true,
+            },
+          },
+          user: {
+            select: { id: true, firstName: true, lastName: true, email: true },
+          },
+        },
+      },
+    };
+
+    const registrations = await prismaRead.registration.findMany({
+      where: { userId, status: { not: 'PENDING' as any } },
+      include: includeClause,
+      orderBy: [{ order: { createdAt: 'desc' } }, { id: 'asc' }],
+    });
+
+    const userByDoc = await this.buildParticipantUserByDocMap(prismaRead, registrations);
+
+    const mapped = registrations.map((reg: any) => {
+      const participant = this.resolveOrganizerParticipant(reg, userByDoc);
+      const order = reg.order ?? {};
+      const billingAddress = this.resolveOrderBillingAddress(order, order.payment);
+
+      return {
+        id: reg.id,
+        status: reg.status,
+        user: participant,
+        emergencyContact: {
+          name: reg.emergencyContactName ?? null,
+          phone: reg.emergencyContactPhone ?? null,
+        },
+        tickets: (reg.tickets ?? []).map((rt: any) => ({
+          ticketSnapshot: rt.ticketSnapshot ?? null,
+          ticket: rt.ticket
+            ? {
+              name: rt.ticket.name ?? null,
+              modality: rt.ticket.modality ?? null,
+              category: rt.ticket.category ? { name: rt.ticket.category.name } : null,
+            }
+            : null,
+        })),
+        products: (reg.products ?? []).map((rp: any) => {
+          const snap = rp.productSnapshot as Record<string, any> | null;
+          return {
+            product: { name: snap?.name ?? rp.product?.name ?? '' },
+            variationName: rp.variation?.name ?? snap?.selectedVariation?.name ?? null,
+          };
+        }),
+        questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => {
+          const qSnap = qa.questionSnapshot as Record<string, any> | null;
+          return {
+            question: { question: qSnap?.question ?? qa.question?.question ?? '' },
+            answer: qa.answer ?? '',
+          };
+        }),
+        order: {
+          finalAmount:
+            order.finalAmount != null ? this.normalizeToCents(order.finalAmount) : null,
           purchaseDate: order.createdAt ?? null,
           billingAddress,
           payment: order.payment

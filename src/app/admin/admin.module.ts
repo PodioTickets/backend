@@ -6,6 +6,8 @@ import { AdminEventsService } from './admin-events.service';
 import { AdminEventsController } from './admin-events.controller';
 import { AdminOrganizationsService } from './admin-organizations.service';
 import { AdminOrganizationsController } from './admin-organizations.controller';
+import { AdminUsersService } from './admin-users.service';
+import { AdminUsersController } from './admin-users.controller';
 import { AdminNotificationsController } from './admin-notifications.controller';
 import { AdminOrdersController } from './admin-orders.controller';
 import { AdminGuard } from '../auth/guards/admin.guard';
@@ -33,9 +35,10 @@ import { CommonModule } from '../../common/common.module';
     AdminAuthController,
     AdminEventsController,
     AdminOrganizationsController,
+    AdminUsersController,
     AdminNotificationsController,
     AdminOrdersController,
   ],
-  providers: [AdminRepasseService, AdminEventsService, AdminOrganizationsService, AdminGuard, EmailService],
+  providers: [AdminRepasseService, AdminEventsService, AdminOrganizationsService, AdminUsersService, AdminGuard, EmailService],
 })
 export class AdminModule {}
