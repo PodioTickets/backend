@@ -379,6 +379,11 @@ model Event {
   eventDate             DateTime
   registrationStartDate DateTime
   registrationEndDate   DateTime
+  /// Vagas do evento: número MÁXIMO de participantes (inscrições) no evento inteiro.
+  /// `null` = ilimitado (comportamento histórico — só os lotes limitam). Quando setado,
+  /// é o teto absoluto: mesmo que a soma dos lotes seja maior, o evento esgota aqui primeiro.
+  /// Enforcement transacional no reserve (advisory lock por evento). Conta Registration != CANCELLED.
+  maxParticipants       Int?
   status                EventStatus @default(DRAFT)
   /// Opções avançadas de exibição de imagens do kit na escolha de ingressos (camelCase no JSON).
   kitSelectionDisplay   Json?       @map("kit_selection_display")

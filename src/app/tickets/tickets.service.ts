@@ -287,6 +287,23 @@ export class TicketsService {
 
     const now = new Date();
 
+    // Teto de vagas do EVENTO: quando atingido, TODOS os ingressos ficam esgotados
+    // (mesmo que lotes individuais ainda tenham saldo — o teto é o limite absoluto).
+    // Fonte de verdade = Registration != CANCELLED (inclui reservas ativas), o mesmo
+    // predicado do enforcement no reserve — assim a lista nunca diverge do que a
+    // reserva permite. Só consulta quando o evento TEM teto (2 queries baratas).
+    const eventCap = await db.event.findUnique({
+      where: { id: eventId },
+      select: { maxParticipants: true },
+    });
+    let eventCapReached = false;
+    if (eventCap?.maxParticipants != null) {
+      const totalRegistrations = await db.registration.count({
+        where: { eventId, status: { not: 'CANCELLED' } },
+      });
+      eventCapReached = totalRegistrations >= eventCap.maxParticipants;
+    }
+
     // Transformar para o formato esperado
     const transformedTickets = tickets.map((ticket) => {
       const batches: BatchWithSold[] = ticket.batches.map((batch) => ({
@@ -302,17 +319,23 @@ export class TicketsService {
 
       const label = batchOrdinalLabel(batchNumber, batches.length);
 
+      // Teto do evento atingido força esgotado neste ingresso: availableQuantity 0
+      // (trava o stepper via isAtMax no front), isSoldOut e status SOLD_OUT (label
+      // "esgotado"). Sem isso, um lote com saldo ainda deixaria selecionar acima do teto.
+      const effectiveStatus = eventCapReached ? 'SOLD_OUT' : activeBatchStatus;
+      const effectiveAvailable = eventCapReached ? 0 : activeBatch.availableQuantity;
+
       return {
         ...ticket,
         price: activeBatch.price,
         totalQuantity,
-        availableQuantity: activeBatch.availableQuantity,
+        availableQuantity: effectiveAvailable,
         quantitySold: totalSold,
-        isSoldOut: activeBatch.availableQuantity === 0,
+        isSoldOut: effectiveAvailable === 0,
         activeBatch,
         activeBatchNumber: batchNumber,
-        activeBatchLabel: activeBatchStatus === 'SOLD_OUT' && label ? `${label} esgotado` : label,
-        activeBatchStatus,
+        activeBatchLabel: effectiveStatus === 'SOLD_OUT' && label ? `${label} esgotado` : label,
+        activeBatchStatus: effectiveStatus,
         batches,
         ageLimit: {
           min: ticket.ageLimitMin,

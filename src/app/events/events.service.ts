@@ -1093,6 +1093,7 @@ export class EventsService {
           eventDate: true,
           registrationStartDate: true,
           registrationEndDate: true,
+          maxParticipants: true,
           status: true,
           createdAt: true,
           updatedAt: true,
@@ -1118,10 +1119,18 @@ export class EventsService {
 
     let eventsPayload = eventsCompleted;
     if (shouldIncludeSlots && eventsCompleted.length > 0) {
+      const eventIds = eventsCompleted.map((e) => e.id);
       const slotMaps = await this.loadRegistrationSlotCountMapsForTickets(
         prismaRead,
-        eventsCompleted.map((e) => e.id),
+        eventIds,
       );
+      // Teto de vagas do evento (cards da home/busca): 1 groupBy por página só
+      // para eventos que TÊM teto — o "esgotado" precisa bater com a tela do evento.
+      const cappedEventIds = eventsCompleted
+        .filter((e) => e.maxParticipants != null)
+        .map((e) => e.id);
+      const regCountByEvent =
+        await this.countNonCancelledRegistrationsByEvents(prismaRead, cappedEventIds);
       eventsPayload = eventsCompleted.map((e) => ({
         ...e,
         hasRegistrationSlotsAvailable: this.computeSlotsFromCounts(
@@ -1131,6 +1140,8 @@ export class EventsService {
           slotMaps.totalByTicket,
           slotMaps.soldWithBatchByTicket,
           slotMaps.soldByBatch,
+          e.maxParticipants != null &&
+            (regCountByEvent.get(e.id) ?? 0) >= e.maxParticipants,
         ),
       }));
     }
@@ -1344,6 +1355,9 @@ export class EventsService {
     eventDate: true,
     registrationStartDate: true,
     registrationEndDate: true,
+    // Vagas do evento (teto). Público lê pra o front refletir o campo no editor;
+    // o "esgotado" em si é derivado server-side em hasRegistrationSlotsAvailable.
+    maxParticipants: true,
     status: true,
     participantFeePercent: true,
     maxInstallments: true,
@@ -1590,6 +1604,8 @@ export class EventsService {
         status,
         eventDate,
         ticketsForSlots,
+        event.id,
+        event.maxParticipants ?? null,
       );
 
     return {
@@ -1671,6 +1687,8 @@ export class EventsService {
         eventToReturn.status,
         eventDate,
         eventToReturn.tickets,
+        eventToReturn.id,
+        (eventToReturn as { maxParticipants?: number | null }).maxParticipants ?? null,
       );
 
     const tracking = this.eventToAdsTrackingPayload(eventToReturn as any);
@@ -1807,11 +1825,18 @@ export class EventsService {
     totalByTicket: Map<string, number>,
     soldWithBatchByTicket: Map<string, number>,
     soldByBatch: Map<string, number>,
+    /** Teto de vagas do evento atingido → esgotado, independentemente dos lotes. */
+    eventCapReached = false,
   ): boolean {
     if (
       eventStatus !== EventStatus.PUBLISHED &&
       eventStatus !== EventStatus.SUSPENDED
     ) {
+      return false;
+    }
+    // Teto do evento vem PRIMEIRO: mesmo que algum lote tenha saldo, o evento esgota
+    // aqui (regra de produto — o teto é o limite absoluto sobre a soma dos lotes).
+    if (eventCapReached) {
       return false;
     }
     if (eventDate < new Date()) {
@@ -1879,6 +1904,9 @@ export class EventsService {
         endDate: Date | null;
       }>;
     }>,
+    /** ID + teto do evento — quando o teto é atingido, esgota antes dos lotes. */
+    eventId: string,
+    maxParticipants: number | null,
   ): Promise<boolean> {
     if (
       eventStatus !== EventStatus.PUBLISHED &&
@@ -1887,6 +1915,15 @@ export class EventsService {
       return false;
     }
     if (eventDate < new Date()) {
+      return false;
+    }
+    // Teto do evento: se atingido, esgotado — nem precisa contar os lotes.
+    const eventCapReached = await this.isEventCapReached(
+      prismaRead,
+      eventId,
+      maxParticipants,
+    );
+    if (eventCapReached) {
       return false;
     }
     if (!tickets?.length) {
@@ -1904,7 +1941,42 @@ export class EventsService {
       counts.totalByTicket,
       counts.soldWithBatchByTicket,
       counts.soldByBatch,
+      eventCapReached,
     );
+  }
+
+  /**
+   * Teto de vagas do evento atingido? Conta `Registration != CANCELLED` (inclui
+   * reservas PENDING ativas) — MESMO predicado do enforcement no reserve, pra o
+   * "esgotado" exibido nunca divergir do que a reserva realmente permite. `null`
+   * de teto = ilimitado → nunca esgota por aqui. Índice [eventId, status] → barato.
+   */
+  private async isEventCapReached(
+    prismaRead: ReturnType<PrismaService['getReadClient']>,
+    eventId: string,
+    maxParticipants: number | null | undefined,
+  ): Promise<boolean> {
+    if (maxParticipants == null) return false;
+    const count = await prismaRead.registration.count({
+      where: { eventId, status: { not: RegistrationStatus.CANCELLED } },
+    });
+    return count >= maxParticipants;
+  }
+
+  /** Contagem de inscrições não-canceladas por evento (batelada; só p/ eventos com teto). */
+  private async countNonCancelledRegistrationsByEvents(
+    prismaRead: ReturnType<PrismaService['getReadClient']>,
+    eventIds: string[],
+  ): Promise<Map<string, number>> {
+    const map = new Map<string, number>();
+    if (eventIds.length === 0) return map;
+    const rows = await prismaRead.registration.groupBy({
+      by: ['eventId'],
+      where: { eventId: { in: eventIds }, status: { not: RegistrationStatus.CANCELLED } },
+      _count: { id: true },
+    });
+    for (const r of rows) map.set(r.eventId, r._count.id);
+    return map;
   }
 
   async update(
@@ -1930,6 +2002,27 @@ export class EventsService {
       id,
       'edit_event',
     );
+
+    // Vagas do evento: o teto NÃO pode ser menor que o total já inscrito
+    // (não-cancelado). Salvar abaixo "esgotaria" o evento retroativamente e
+    // deixaria vagas negativas — bloqueamos com erro de CAMPO (mapeado inline no
+    // input pelo front). `null` (limpar teto) e `undefined` (não mexeu) passam.
+    // Conta no write client pra refletir reservas/inscrições recém-criadas.
+    if (
+      updateEventDto.maxParticipants !== undefined &&
+      updateEventDto.maxParticipants !== null
+    ) {
+      const currentRegistrations = await prismaWrite.registration.count({
+        where: { eventId: id, status: { not: RegistrationStatus.CANCELLED } },
+      });
+      if (updateEventDto.maxParticipants < currentRegistrations) {
+        throw new BadRequestException({
+          message: `As vagas do evento (${updateEventDto.maxParticipants}) não podem ser menores que o número de inscritos atuais (${currentRegistrations}).`,
+          code: 'MAX_PARTICIPANTS_BELOW_CURRENT',
+          field: 'maxParticipants',
+        });
+      }
+    }
 
     const {
       clientPage,

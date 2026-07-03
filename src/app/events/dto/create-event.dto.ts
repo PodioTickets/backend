@@ -115,6 +115,13 @@ export class CreateEventDto {
   @IsInt()
   @IsIn([1, 2, 3])
   maxInstallments?: number;
+
+  /** Vagas do evento: teto máximo de participantes. Omitido/null = ilimitado. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(10_000_000)
+  maxParticipants?: number | null;
 }
 
 export class UpdateEventDto {
@@ -210,6 +217,17 @@ export class UpdateEventDto {
   @IsOptional()
   @IsDateString()
   registrationEndDate?: string;
+
+  /**
+   * Vagas do evento: teto máximo de participantes. `null` LIMPA o teto (volta a
+   * ilimitado); omitido = mantém o valor atual. `@IsOptional` pula a validação
+   * quando `null`, então o null flui e zera a coluna no service.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(10_000_000)
+  maxParticipants?: number | null;
 
   /** Rota/página do painel (opcional) para o audit log, ex.: `event-edit`, `events/abc/general` */
   @IsOptional()

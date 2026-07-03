@@ -906,6 +906,8 @@ export class OrdersService {
         registrationStartDate: true,
         registrationEndDate: true,
         eventDate: true,
+        // Teto de vagas do evento (null = ilimitado). Enforcement no passo 1.8.
+        maxParticipants: true,
       },
     });
     if (!event) throw new NotFoundException('Evento não encontrado');
@@ -1073,6 +1075,23 @@ export class OrdersService {
       });
     }
 
+    // 1.7c Pré-check do TETO de vagas do evento (best-effort, UX: falha cedo). A
+    // proteção REAL contra oversell é o guard transacional em 1.8 (advisory lock +
+    // contagem sob lock). Conta no write client (sem lag de réplica) — mesmo
+    // predicado do enforcement: Registration != CANCELLED (inclui reservas ativas).
+    if (event.maxParticipants != null) {
+      const requestedUnits = dto.tickets.reduce((sum, t) => sum + t.quantity, 0);
+      const currentRegistrations = await w.registration.count({
+        where: { eventId: dto.eventId, status: { not: 'CANCELLED' } },
+      });
+      if (currentRegistrations + requestedUnits > event.maxParticipants) {
+        throw new AppConflictException(
+          'EVENT_SOLD_OUT',
+          'Evento esgotado. Não há vagas suficientes para concluir a reserva.',
+        );
+      }
+    }
+
     // 1.7b Auto-cupom AGE no reserve — aplica PROVISORIAMENTE em TODOS os ingressos reservados.
     // Como ainda não há participantes, tratamos cada unidade como um slot VAZIO (sem birthDate):
     // o modo lenient do `computeAgeEligibleSlots` conta slot vazio como elegível, então o AGE
@@ -1114,6 +1133,33 @@ export class OrdersService {
 
     // 1.8 Atomic stock decrement + order creation inside a single transaction
     const order = await w.$transaction(async (tx: any) => {
+      // 1.8a TETO DE VAGAS DO EVENTO (só quando setado). Diferente dos lotes, não
+      // há uma linha-contador para guardar com UPDATE condicional — a "vaga" do
+      // evento é derivada da contagem de Registration != CANCELLED. Para tornar o
+      // "conta → decide → insere" atômico sob concorrência, adquirimos um ADVISORY
+      // LOCK por evento (auto-liberado no fim da transação): serializa APENAS as
+      // reservas deste evento COM teto (eventos sem teto nem entram aqui → zero
+      // impacto de performance). Sob o lock, a contagem enxerga todas as reservas
+      // já commitadas, então a checagem não pode ser furada por corrida.
+      if (event.maxParticipants != null) {
+        const capLockKey = `event_cap:${dto.eventId}`;
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${capLockKey}, 0))`;
+        const requestedUnits = batchInfos.reduce((sum, info) => sum + info.quantity, 0);
+        const capRows: Array<{ count: number }> = await tx.$queryRaw`
+          SELECT COUNT(*)::int AS count
+          FROM "Registration"
+          WHERE "eventId" = ${dto.eventId}::uuid
+            AND status != 'CANCELLED'
+        `;
+        const currentRegistrations = capRows?.[0]?.count ?? 0;
+        if (currentRegistrations + requestedUnits > event.maxParticipants) {
+          throw new AppConflictException(
+            'EVENT_SOLD_OUT',
+            'Evento esgotado. Não há vagas suficientes para concluir a reserva.',
+          );
+        }
+      }
+
       // Decrement availableQuantity atomically; 0 rows → sold out → rollback
       // A condição dupla garante consistência mesmo se availableQuantity estiver
       // fora de sincronia com o banco (ex: após update do lote pelo organizador):
