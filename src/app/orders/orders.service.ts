@@ -857,7 +857,24 @@ export class OrdersService {
       );
     }
 
-    // 1.2 Cap: max 3 PENDING orders per user (ignora pedidos já expirados)
+    // 1.1b Um checkout ativo por vez. Ao INICIAR uma reserva, cancela os pedidos
+    // PENDING do usuário em OUTROS eventos (abandonados) e devolve o estoque/voucher
+    // deles. Sem isso: (a) pedidos acumulados de eventos anteriores disparavam
+    // TOO_MANY_PENDING_ORDERS ("já possui pedido em aberto") ao tentar comprar em um
+    // novo evento; (b) o cupom preso do evento anterior contaminava o novo checkout.
+    // O pedido do MESMO evento NÃO é tocado aqui — segue pela idempotência (1.6),
+    // que reusa (tickets iguais) ou substitui (tickets diferentes). `dto.eventId`
+    // já vem validado como UUID pelo DTO; a existência do evento é checada em 1.5.
+    const otherEventPending = await w.order.findMany({
+      where: { userId, status: 'PENDING', eventId: { not: dto.eventId } },
+      select: { id: true },
+    });
+    for (const stale of otherEventPending) {
+      await this.cancelOrderAndRestoreStock(stale.id, 'SWITCHED_EVENT', w);
+    }
+
+    // 1.2 Cap: max 3 PENDING orders per user (ignora pedidos já expirados). Após o
+    // 1.1b só restam pendências do PRÓPRIO evento — a trava vira rede anti-abuso.
     const pendingCount = await r.order.count({
       where: {
         userId,
