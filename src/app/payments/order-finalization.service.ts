@@ -210,6 +210,29 @@ export class OrderFinalizationService {
       });
     }
 
+    // ── Devolve o estoque do LOTE (TicketBatch.availableQuantity) ────────────────
+    // availableQuantity é um contador PERSISTIDO, decrementado atomicamente na reserva
+    // (OrdersService.pay). O estorno/chargeback/cancelamento marca as inscrições como
+    // CANCELLED — o que já libera o TETO do evento (contagem derivada Registration !=
+    // CANCELLED) e o "vendido" derivado — mas NÃO tocava neste contador, então o lote
+    // ficava esgotado e o ingresso não voltava à venda.
+    //
+    // Fonte de verdade: `order.reservedTickets` (batchId + quantity), preservado após o
+    // finalize. LEAST(...,"quantity") impede over-restore acima da capacidade do lote
+    // (rede de segurança de idempotência, além do guard de status no caller). Mesmo
+    // padrão dos caminhos de expiração/compensação de pedido PENDING.
+    const reservedTickets = ((order as any).reservedTickets as any[] | null) ?? [];
+    for (const rt of reservedTickets) {
+      const qty = rt.quantity ?? 0;
+      if (!rt.batchId || qty <= 0) continue;
+      await tx.$executeRaw`
+        UPDATE "TicketBatch"
+        SET "availableQuantity" = LEAST("availableQuantity" + ${qty}, "quantity"),
+            "updatedAt" = NOW()
+        WHERE id = ${rt.batchId}::uuid
+      `;
+    }
+
     // Reverte estoque/venda das variações de produto (estorno + chargeback usam este ponto).
     // soldCount-- SEMPRE; availableStock++ só para itens que seguraram estoque (verdade
     // congelada em productSnapshot.stockHeld; fallback p/ regra LEGADA em pedidos antigos).

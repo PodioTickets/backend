@@ -272,6 +272,14 @@ describe('PaymentsChargebackService (integração, banco real)', () => {
     expect(regs).toHaveLength(1);
     expect(regs[0].status).toBe('CANCELLED');
 
+    // Estoque do lote devolvido: availableQuantity semeado em 90 + 1 reserva = 91
+    // (ingresso volta à venda). LEAST evita ultrapassar quantity (100).
+    const batchAfter = await prisma.getWriteClient().ticketBatch.findUnique({
+      where: { id: batchId },
+      select: { availableQuantity: true },
+    });
+    expect(batchAfter?.availableQuantity).toBe(91);
+
     // Cupom revertido: usageCount 1 → 0
     const coupon = await prisma.getWriteClient().coupon.findUnique({ where: { id: couponId } });
     expect(coupon?.usageCount).toBe(0);
