@@ -1118,11 +1118,11 @@ export class EventsService {
     let eventsPayload = eventsCompleted;
     if (shouldIncludeSlots && eventsCompleted.length > 0) {
       const eventIds = eventsCompleted.map((e) => e.id);
-      const slotMaps = await this.loadRegistrationSlotCountMapsForTickets(
+      const ticketsByEvent = await this.loadTicketsWithBatchesForEvents(
         prismaRead,
         eventIds,
       );
-      // Teto de vagas do evento (cards da home/busca): 1 groupBy por página só
+      // Teto de vagas do evento (cards da home/busca): 1 count por página só
       // para eventos que TÊM teto — o "esgotado" precisa bater com a tela do evento.
       const cappedEventIds = eventsCompleted
         .filter((e) => e.maxParticipants != null)
@@ -1131,13 +1131,10 @@ export class EventsService {
         await this.countNonCancelledRegistrationsByEvents(prismaRead, cappedEventIds);
       eventsPayload = eventsCompleted.map((e) => ({
         ...e,
-        hasRegistrationSlotsAvailable: this.computeSlotsFromCounts(
+        hasRegistrationSlotsAvailable: this.computeSlotsFromTickets(
           e.status,
           e.eventDate instanceof Date ? e.eventDate : new Date(e.eventDate),
-          slotMaps.ticketsByEvent.get(e.id) ?? [],
-          slotMaps.totalByTicket,
-          slotMaps.soldWithBatchByTicket,
-          slotMaps.soldByBatch,
+          ticketsByEvent.get(e.id) ?? [],
           e.maxParticipants != null &&
             (regCountByEvent.get(e.id) ?? 0) >= e.maxParticipants,
         ),
@@ -1590,7 +1587,7 @@ export class EventsService {
       where: { eventId: event.id, isActive: true },
       select: {
         id: true,
-        batches: { select: { id: true, quantity: true, startDate: true, endDate: true } },
+        batches: { select: { id: true, availableQuantity: true, startDate: true, endDate: true } },
       },
     });
 
@@ -1699,85 +1696,40 @@ export class EventsService {
   }
 
   /**
-   * Contagens agregadas de RegistrationTicket confirmados (uma query groupBy por conjunto de ingressos).
+   * Ingressos ativos + lotes (com `availableQuantity`) por evento, para o cálculo de
+   * vagas dos cards de listagem. 1 query. A disponibilidade sai do `availableQuantity`
+   * do lote (mesmo gate do checkout) — não precisa mais agregar RegistrationTicket.
    */
-  private async buildConfirmedRegistrationCounts(
-    prismaRead: ReturnType<PrismaService['getReadClient']>,
-    ticketIds: string[],
-  ): Promise<{
-    totalByTicket: Map<string, number>;
-    soldWithBatchByTicket: Map<string, number>;
-    soldByBatch: Map<string, number>;
-  }> {
-    const totalByTicket = new Map<string, number>();
-    const soldWithBatchByTicket = new Map<string, number>();
-    const soldByBatch = new Map<string, number>();
-
-    if (ticketIds.length === 0) {
-      return { totalByTicket, soldWithBatchByTicket, soldByBatch };
-    }
-
-    const groupRows = await prismaRead.registrationTicket.groupBy({
-      by: ['ticketId', 'batchId'],
-      where: {
-        ticketId: { in: ticketIds },
-        registration: { status: RegistrationStatus.CONFIRMED },
-      },
-      _count: { id: true },
-    });
-
-    for (const row of groupRows) {
-      const c = row._count.id;
-      const tid = row.ticketId;
-      const bid = row.batchId;
-      totalByTicket.set(tid, (totalByTicket.get(tid) ?? 0) + c);
-      if (bid != null) {
-        soldWithBatchByTicket.set(
-          tid,
-          (soldWithBatchByTicket.get(tid) ?? 0) + c,
-        );
-        soldByBatch.set(bid, (soldByBatch.get(bid) ?? 0) + c);
-      }
-    }
-
-    return { totalByTicket, soldWithBatchByTicket, soldByBatch };
-  }
-
-  /**
-   * Ingressos ativos + lotes + mapas de venda para uma página de eventos (2 queries no total).
-   */
-  private async loadRegistrationSlotCountMapsForTickets(
+  private async loadTicketsWithBatchesForEvents(
     prismaRead: ReturnType<PrismaService['getReadClient']>,
     eventIds: string[],
-  ): Promise<{
-    ticketsByEvent: Map<
+  ): Promise<
+    Map<
       string,
       Array<{
-        id: string;
         batches: Array<{
-          id: string;
-          quantity: number;
+          availableQuantity: number;
           startDate: Date | null;
           endDate: Date | null;
         }>;
       }>
-    >;
-    totalByTicket: Map<string, number>;
-    soldWithBatchByTicket: Map<string, number>;
-    soldByBatch: Map<string, number>;
-  }> {
+    >
+  > {
     const tickets = await prismaRead.ticket.findMany({
       where: { eventId: { in: eventIds }, isActive: true },
-      include: { batches: true },
+      select: {
+        eventId: true,
+        batches: {
+          select: { availableQuantity: true, startDate: true, endDate: true },
+        },
+      },
     });
 
     const ticketsByEvent = new Map<
       string,
       Array<{
-        id: string;
         batches: Array<{
-          id: string;
-          quantity: number;
+          availableQuantity: number;
           startDate: Date | null;
           endDate: Date | null;
         }>;
@@ -1785,42 +1737,32 @@ export class EventsService {
     >();
     for (const t of tickets) {
       const arr = ticketsByEvent.get(t.eventId) ?? [];
-      arr.push(t);
+      arr.push({ batches: t.batches });
       ticketsByEvent.set(t.eventId, arr);
     }
-
-    const ticketIds = tickets.map((t) => t.id);
-    const counts = await this.buildConfirmedRegistrationCounts(
-      prismaRead,
-      ticketIds,
-    );
-
-    return {
-      ticketsByEvent,
-      totalByTicket: counts.totalByTicket,
-      soldWithBatchByTicket: counts.soldWithBatchByTicket,
-      soldByBatch: counts.soldByBatch,
-    };
+    return ticketsByEvent;
   }
 
   /**
-   * Mesma regra do endpoint por slug, sem I/O (usa mapas pré-carregados).
+   * Há vaga em algum ingresso? Decide pela MESMA fonte de verdade que o checkout usa
+   * (`TicketBatch.availableQuantity`), não por contagem derivada de inscrições. Antes,
+   * contava inscrições CONFIRMED vs `batch.quantity` — o que DIVERGIA do gate real de
+   * venda: `availableQuantity` é decrementado na reserva (inclui PENDING) e restaurado
+   * na expiração/estorno, então o "esgotado" da tela do evento passa a bater exatamente
+   * com o do checkout (ex.: lote com availableQuantity=0 mas poucos confirmados NÃO
+   * reabre o botão "Inscreva-se"). Bônus de performance: dispensa o groupBy de
+   * RegistrationTicket que rodava por página/evento. Sem I/O.
    */
-  private computeSlotsFromCounts(
+  private computeSlotsFromTickets(
     eventStatus: EventStatus,
     eventDate: Date,
     tickets: Array<{
-      id: string;
       batches: Array<{
-        id: string;
-        quantity: number;
+        availableQuantity: number;
         startDate: Date | null;
         endDate: Date | null;
       }>;
     }>,
-    totalByTicket: Map<string, number>,
-    soldWithBatchByTicket: Map<string, number>,
-    soldByBatch: Map<string, number>,
     /** Teto de vagas do evento atingido → esgotado, independentemente dos lotes. */
     eventCapReached = false,
   ): boolean {
@@ -1844,58 +1786,31 @@ export class EventsService {
     const now = new Date();
     for (const ticket of tickets) {
       if (!ticket.batches?.length) continue;
-      const activeBatches = ticket.batches.filter(
+      // Vaga = existe um lote VIGENTE (dentro da janela start/end) com saldo real (>0).
+      const hasActiveRoom = ticket.batches.some(
         (b) =>
           (!b.startDate || new Date(b.startDate) <= now) &&
-          (!b.endDate || new Date(b.endDate) >= now),
+          (!b.endDate || new Date(b.endDate) >= now) &&
+          b.availableQuantity > 0,
       );
-      if (activeBatches.length === 0) continue;
-
-      const capSum = activeBatches.reduce((sum, b) => sum + b.quantity, 0);
-
-      const totalConfirmed = totalByTicket.get(ticket.id) ?? 0;
-
-      if (totalConfirmed >= capSum) {
-        continue;
-      }
-
-      const soldWithBatchId = soldWithBatchByTicket.get(ticket.id) ?? 0;
-
-      if (soldWithBatchId === 0) {
-        if (totalConfirmed < capSum) {
-          return true;
-        }
-        continue;
-      }
-
-      for (const batch of activeBatches) {
-        const soldBatch = soldByBatch.get(batch.id) ?? 0;
-        if (batch.quantity > soldBatch) {
-          return true;
-        }
-      }
-
-      if (totalConfirmed < capSum) {
-        return true;
-      }
+      if (hasActiveRoom) return true;
     }
     return false;
   }
 
   /**
-   * Indica se ainda há capacidade (vaga) em algum ingresso ativo com lote no período vigente.
-   * Inclui eventos SUSPENDED: reflete estoque real; a UI pode bloquear inscrição pelo status.
-   * Usa uma única agregação groupBy em vez de N counts.
+   * Indica se ainda há vaga em algum ingresso ativo com lote vigente. Fonte de verdade =
+   * `TicketBatch.availableQuantity` (mesmo gate do checkout). Inclui eventos SUSPENDED:
+   * reflete estoque real; a UI pode bloquear inscrição pelo status. Só 1 query barata
+   * (isEventCapReached) — não agrega mais RegistrationTicket.
    */
   private async computeHasRegistrationSlotsAvailable(
     prismaRead: ReturnType<PrismaService['getReadClient']>,
     eventStatus: EventStatus,
     eventDate: Date,
     tickets: Array<{
-      id: string;
       batches: Array<{
-        id: string;
-        quantity: number;
+        availableQuantity: number;
         startDate: Date | null;
         endDate: Date | null;
       }>;
@@ -1913,7 +1828,7 @@ export class EventsService {
     if (eventDate < new Date()) {
       return false;
     }
-    // Teto do evento: se atingido, esgotado — nem precisa contar os lotes.
+    // Teto do evento: se atingido, esgotado — nem precisa olhar os lotes.
     const eventCapReached = await this.isEventCapReached(
       prismaRead,
       eventId,
@@ -1922,21 +1837,10 @@ export class EventsService {
     if (eventCapReached) {
       return false;
     }
-    if (!tickets?.length) {
-      return false;
-    }
-    const ticketIds = tickets.map((t) => t.id);
-    const counts = await this.buildConfirmedRegistrationCounts(
-      prismaRead,
-      ticketIds,
-    );
-    return this.computeSlotsFromCounts(
+    return this.computeSlotsFromTickets(
       eventStatus,
       eventDate,
       tickets,
-      counts.totalByTicket,
-      counts.soldWithBatchByTicket,
-      counts.soldByBatch,
       eventCapReached,
     );
   }

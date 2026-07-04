@@ -135,6 +135,10 @@ async function bootstrap() {
       // toda request; sem o allow-header o preflight cross-origin bloquearia tudo.
       'x-pt-surface',
     ],
+    // Sem isso, o JS do front NÃO consegue ler Content-Disposition em respostas
+    // cross-origin → todo download por blob (CSV/XLSX/PDF de export) cai no
+    // filename de fallback e baixa com extensão errada (ex.: CSV virava .txt).
+    exposedHeaders: ['Content-Disposition'],
     credentials: true,
     preflightContinue: false,
     optionsSuccessStatus: 204,
