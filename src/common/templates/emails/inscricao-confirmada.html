@@ -89,9 +89,9 @@
             <!-- Event Card -->
             <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 40px auto;max-width:308px;width:100%;background-color:#F9F9F9;border-radius:8px;border-collapse:separate;border-spacing:0;box-shadow:0px 2px 6px rgba(17,17,17,0.25);overflow:hidden;">
               <tr>
-                <td width="308" align="center" valign="top" style="width:308px;height:308px;padding:0;background-color:#F9F9F9;background-image:url('{{eventBannerUrl}}');background-size:cover;background-position:center center;background-repeat:no-repeat;border-radius:8px 8px 0 0;overflow:hidden;text-align:center;vertical-align:top;">
+                <td width="308" align="center" valign="top" style="width:308px;height:140px;padding:0;background-color:#F9F9F9;background-image:url('{{eventBannerUrl}}');background-size:cover;background-position:center center;background-repeat:no-repeat;border-radius:8px 8px 0 0;overflow:hidden;text-align:center;vertical-align:top;">
                   <!--[if gte mso 9]>
-                  <v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:308px;height:308px;">
+                  <v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:308px;height:140px;">
                     <v:fill type="frame" src="{{eventBannerUrl}}" color="#F9F9F9" />
                     <v:textbox inset="0,0,0,0">
                   <![endif]-->
@@ -119,7 +119,7 @@
                     {{/invitedByName}}
                     {{^invitedByName}}
                     <!-- Sem banner — imagem ocupa o card todo. Img invisivel serve so pra fallback de clientes sem suporte a background-image. -->
-                    {{#eventBannerUrl}}<img src="{{eventBannerUrl}}" alt="{{eventName}}" width="308" height="308" style="display:block;width:308px;height:308px;object-fit:cover;border-radius:8px 8px 0 0;">{{/eventBannerUrl}}
+                    {{#eventBannerUrl}}<img src="{{eventBannerUrl}}" alt="{{eventName}}" width="308" height="140" style="display:block;width:308px;height:140px;object-fit:cover;border-radius:8px 8px 0 0;">{{/eventBannerUrl}}
                     {{/invitedByName}}
                   </div>
                   <!--[if gte mso 9]>
