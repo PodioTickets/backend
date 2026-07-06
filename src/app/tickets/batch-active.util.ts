@@ -10,7 +10,13 @@
  * Sempre use isto para saber o preço "a partir de" comprável — NUNCA considere um
  * lote isolado por `startDate <= now`, pois lotes já superados por um posterior
  * continuariam casando (bug do filtro de preço da busca).
+ *
+ * ⚠️ FUSO: `startDate`/`endDate` são WALL-CLOCK gravados como UTC (ex.: "09:30Z" =
+ * 09:30 BRT pretendido). Para comparar com o tempo real (`now`), o boundary passa por
+ * `eventWindowInstant` (+3h). Sem isso o lote abriria/fecharia 3h CEDO no Brasil — a
+ * mesma regra da janela de inscrição (orders.reserve/registrations).
  */
+import { eventWindowInstant } from '../../common/utils/brt-date.util';
 export type BatchWithSold = {
   id: string;
   quantity: number;
@@ -42,8 +48,9 @@ export function resolveActiveBatch(
         activeIdx = i;
       }
     } else {
-      // BY_TIME: abre SOMENTE quando startDate for definida e já tiver chegado
-      if (curr.startDate && now >= curr.startDate) {
+      // BY_TIME: abre SOMENTE quando startDate for definida e o INSTANTE REAL em BRT
+      // (wall-clock +3h) já tiver chegado.
+      if (curr.startDate && now >= eventWindowInstant(curr.startDate)) {
         activeIdx = i;
       }
     }
