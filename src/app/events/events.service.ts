@@ -49,8 +49,8 @@ import { EmailService } from '../../common/services/email.service';
 import { RepasseService, RETENTION_DAYS } from '../repasse/repasse.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { isChargeback, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
-import { brtDayStartUtc, brtDayEndUtc } from '../../common/utils/brt-date.util';
-import { withPastEventsAsCompleted as markPastEventsCompleted } from '../../common/utils/event-status.util';
+import { brtDayStartUtc, brtDayEndUtc, eventWindowInstant } from '../../common/utils/brt-date.util';
+import { withPastEventsAsCompleted as markPastEventsCompleted, isEventDatePast } from '../../common/utils/event-status.util';
 
 /**
  * Taxas padrão aplicadas na CRIAÇÃO de um evento (escala 0–100, ex.: 4 = 4%).
@@ -1580,7 +1580,12 @@ export class EventsService {
 
     const now = new Date();
     const eventDate = new Date(event.eventDate);
-    const status = eventDate < now ? EventStatus.COMPLETED : event.status;
+    // COMPLETED só após o FIM DO DIA civil em BRT (fonte única `isEventDatePast`),
+    // não no wall-clock cru — senão o evento "conclui" ~3h antes e fecha as inscrições
+    // cedo. Mesma regra das listagens de admin/organizador.
+    const status = isEventDatePast(eventDate, now)
+      ? EventStatus.COMPLETED
+      : event.status;
 
     // Ingressos enxutos SÓ para o cálculo de vagas (não retornados ao cliente).
     const ticketsForSlots = await prismaRead.ticket.findMany({
@@ -1672,7 +1677,11 @@ export class EventsService {
 
     const now = new Date();
     const eventDate = event.eventDate instanceof Date ? event.eventDate : new Date(event.eventDate);
-    const eventToReturn = eventDate < now ? { ...event, status: EventStatus.COMPLETED } : event;
+    // COMPLETED só após o FIM DO DIA civil em BRT (`isEventDatePast`), não no wall-clock
+    // cru — senão fecha as inscrições ~3h cedo. Mesma regra das listagens.
+    const eventToReturn = isEventDatePast(eventDate, now)
+      ? { ...event, status: EventStatus.COMPLETED }
+      : event;
 
     const hasRegistrationSlotsAvailable =
       await this.computeHasRegistrationSlotsAvailable(
@@ -1777,7 +1786,9 @@ export class EventsService {
     if (eventCapReached) {
       return false;
     }
-    if (eventDate < new Date()) {
+    // Evento já realizado = após o FIM DO DIA civil em BRT (`isEventDatePast`), não no
+    // wall-clock cru — senão zeraria as vagas ~3h antes do fim do dia do evento.
+    if (isEventDatePast(eventDate)) {
       return false;
     }
     if (!tickets?.length) {
@@ -1787,10 +1798,13 @@ export class EventsService {
     for (const ticket of tickets) {
       if (!ticket.batches?.length) continue;
       // Vaga = existe um lote VIGENTE (dentro da janela start/end) com saldo real (>0).
+      // start/end são WALL-CLOCK (UTC) → instante real em BRT via `eventWindowInstant`
+      // (+3h); senão a janela do lote fechava 3h CEDO e o evento aparecia "Esgotado"
+      // ainda dentro do horário (mesma convenção da janela de inscrição).
       const hasActiveRoom = ticket.batches.some(
         (b) =>
-          (!b.startDate || new Date(b.startDate) <= now) &&
-          (!b.endDate || new Date(b.endDate) >= now) &&
+          (!b.startDate || eventWindowInstant(b.startDate) <= now) &&
+          (!b.endDate || eventWindowInstant(b.endDate) >= now) &&
           b.availableQuantity > 0,
       );
       if (hasActiveRoom) return true;
@@ -1825,7 +1839,8 @@ export class EventsService {
     ) {
       return false;
     }
-    if (eventDate < new Date()) {
+    // Evento realizado = após o FIM DO DIA civil em BRT (`isEventDatePast`), não wall-clock cru.
+    if (isEventDatePast(eventDate)) {
       return false;
     }
     // Teto do evento: se atingido, esgotado — nem precisa olhar os lotes.
