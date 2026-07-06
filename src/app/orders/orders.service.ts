@@ -130,8 +130,10 @@ function resolveActiveBatchForReserve(
     if (curr.triggerType === 'AFTER_PREVIOUS_SOLD_OUT') {
       if (prev.quantitySold >= prev.quantity) activeIdx = i;
     } else {
-      const prevExpired = prev.endDate && now > new Date(prev.endDate);
-      const currStarted = !curr.startDate || now >= new Date(curr.startDate);
+      // start/end são WALL-CLOCK (UTC) → instante real em BRT via `eventWindowInstant`
+      // (+3h), igual à janela de inscrição; senão o lote virava 3h cedo.
+      const prevExpired = prev.endDate && now > eventWindowInstant(prev.endDate);
+      const currStarted = !curr.startDate || now >= eventWindowInstant(curr.startDate);
       if (prevExpired || (currStarted && curr.startDate != null)) activeIdx = i;
     }
   }
@@ -1039,13 +1041,16 @@ export class OrdersService {
 
       const batch = activeBatch;
 
-      if (batch.startDate && now < new Date(batch.startDate)) {
+      // start/end são WALL-CLOCK (UTC) → instante real em BRT via `eventWindowInstant`
+      // (+3h), igual ao resolveActiveBatch e à janela de inscrição; senão rejeitaria a
+      // reserva 3h cedo (BATCH_NOT_STARTED / BATCH_EXPIRED) ainda dentro do horário.
+      if (batch.startDate && now < eventWindowInstant(batch.startDate)) {
         throw new AppConflictException(
           'BATCH_NOT_STARTED',
           `Lote ainda não iniciado para o ingresso "${ticket.name}"`,
         );
       }
-      if (batch.endDate && now > new Date(batch.endDate)) {
+      if (batch.endDate && now > eventWindowInstant(batch.endDate)) {
         throw new AppConflictException(
           'BATCH_EXPIRED',
           `Lote encerrado para o ingresso "${ticket.name}"`,
