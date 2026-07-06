@@ -8,7 +8,7 @@ import {
   VoucherStatus,
 } from './dto/create-voucher.dto';
 import { buildDocumentList } from '../../common/utils/document.util';
-import { brtDayEndUtc } from '../../common/utils/brt-date.util';
+import { brtDayEndUtc, eventWindowInstant } from '../../common/utils/brt-date.util';
 
 @Injectable()
 export class VouchersService {
@@ -680,7 +680,9 @@ export class VouchersService {
       if (curr.triggerType === 'AFTER_PREVIOUS_SOLD_OUT') {
         if (prev.quantitySold >= prev.quantity) activeIdx = i;
       } else {
-        if (curr.startDate && now >= curr.startDate) activeIdx = i;
+        // start é WALL-CLOCK (UTC) → instante real em BRT via `eventWindowInstant`
+        // (+3h), igual ao checkout/tela do evento; senão o lote virava 3h cedo.
+        if (curr.startDate && now >= eventWindowInstant(curr.startDate)) activeIdx = i;
       }
     }
     return sorted[activeIdx].price;
