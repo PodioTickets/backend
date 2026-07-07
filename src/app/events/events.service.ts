@@ -44,6 +44,7 @@ import {
 import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
 import { TicketsService } from '../tickets/tickets.service';
 import { resolveActiveBatch, type BatchWithSold } from '../tickets/batch-active.util';
+import { computeRegistrationPaidValues } from './export-paid-value.util';
 import { TicketCategoriesService } from '../ticket-categories/ticket-categories.service';
 import { EmailService } from '../../common/services/email.service';
 import { RepasseService, RETENTION_DAYS } from '../repasse/repasse.service';
@@ -5220,6 +5221,12 @@ export class EventsService {
           user: {
             select: { id: true, firstName: true, lastName: true, email: true },
           },
+          // Unidades e cupom do pedido: base p/ reproduzir a distribuição do desconto
+          // por ingresso (valor pago por ingresso no export — computeRegistrationPaidValues).
+          reservedTickets: {
+            select: { ticketId: true, unitPrice: true, quantity: true },
+          },
+          coupon: { select: { type: true, value: true, appliesTo: true } },
         },
       },
     };
@@ -5275,6 +5282,11 @@ export class EventsService {
     // Lookup em lote dos convidados resolvíveis por documento (PRIORITY 2 do modal).
     const userByDoc = await this.buildParticipantUserByDocMap(prismaRead, registrations);
 
+    // Valor pago POR INGRESSO (ingresso + produtos − cupom/voucher, sem taxa) —
+    // reproduz a distribuição do recibo. Calculado sobre as inscrições CRUAS (têm
+    // reservedTickets/coupon/products/batch price) antes do map de saída.
+    const paidByRegId = computeRegistrationPaidValues(registrations);
+
     const mapped = registrations.map((reg: any) => {
       // Mesma resolução do modal de detalhe: snapshot → user → doc → colunas.
       const participant = this.resolveOrganizerParticipant(reg, userByDoc);
@@ -5326,6 +5338,9 @@ export class EventsService {
           // Preserva 0 (pedido gratuito) em vez de virar null — o export usa isto
           // p/ exibir "R$ 0,00" e "Gratuito" como forma de pagamento.
           finalAmount: order.finalAmount != null ? this.normalizeToCents(order.finalAmount) : null,
+          // Valor pago POR INGRESSO desta inscrição (ingresso + produtos − desconto,
+          // sem taxa de serviço). Centavos; 0 preservado (pedido grátis).
+          paidPerTicket: paidByRegId.get(reg.id) ?? null,
           purchaseDate: order.createdAt ?? null,
           billingAddress,
           payment: order.payment
@@ -5414,6 +5429,10 @@ export class EventsService {
           user: {
             select: { id: true, firstName: true, lastName: true, email: true },
           },
+          reservedTickets: {
+            select: { ticketId: true, unitPrice: true, quantity: true },
+          },
+          coupon: { select: { type: true, value: true, appliesTo: true } },
         },
       },
     };
@@ -5425,6 +5444,7 @@ export class EventsService {
     });
 
     const userByDoc = await this.buildParticipantUserByDocMap(prismaRead, registrations);
+    const paidByRegId = computeRegistrationPaidValues(registrations);
 
     const mapped = registrations.map((reg: any) => {
       const participant = this.resolveOrganizerParticipant(reg, userByDoc);
@@ -5466,6 +5486,7 @@ export class EventsService {
         order: {
           finalAmount:
             order.finalAmount != null ? this.normalizeToCents(order.finalAmount) : null,
+          paidPerTicket: paidByRegId.get(reg.id) ?? null,
           purchaseDate: order.createdAt ?? null,
           billingAddress,
           payment: order.payment

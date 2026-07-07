@@ -319,11 +319,14 @@ export class TicketsService {
 
       const label = batchOrdinalLabel(batchNumber, batches.length);
 
-      // Teto do evento atingido força esgotado neste ingresso: availableQuantity 0
-      // (trava o stepper via isAtMax no front), isSoldOut e status SOLD_OUT (label
-      // "esgotado"). Sem isso, um lote com saldo ainda deixaria selecionar acima do teto.
-      const effectiveStatus = eventCapReached ? 'SOLD_OUT' : activeBatchStatus;
-      const effectiveAvailable = eventCapReached ? 0 : activeBatch.availableQuantity;
+      // Esgotado quando: teto do evento atingido OU a regra canônica devolveu
+      // SOLD_OUT (ex.: lote por tempo ENCERRADO sem fallback — tem saldo mas a
+      // janela fechou). Nesse caso zeramos availableQuantity pra travar o stepper
+      // (isAtMax no front) e casar isSoldOut/label com o status; senão o front veria
+      // saldo > 0 e deixaria comprar um lote encerrado (bug do "não iniciado").
+      const soldOut = eventCapReached || activeBatchStatus === 'SOLD_OUT';
+      const effectiveStatus = soldOut ? 'SOLD_OUT' : activeBatchStatus;
+      const effectiveAvailable = soldOut ? 0 : activeBatch.availableQuantity;
 
       return {
         ...ticket,
@@ -443,13 +446,19 @@ export class TicketsService {
 
     const label = batchOrdinalLabel(batchNumber, batches.length);
 
+    // SOLD_OUT canônico (inclui lote por tempo encerrado sem fallback) zera o saldo
+    // exposto pra casar isSoldOut/label com o status — senão exibiria saldo > 0 num
+    // lote encerrado e deixaria comprar.
+    const effectiveAvailable =
+      activeBatchStatus === 'SOLD_OUT' ? 0 : activeBatch.availableQuantity;
+
     const transformed = {
       ...ticket,
       price: activeBatch.price,
       totalQuantity,
-      availableQuantity: activeBatch.availableQuantity,
+      availableQuantity: effectiveAvailable,
       quantitySold: totalSold,
-      isSoldOut: activeBatch.availableQuantity === 0,
+      isSoldOut: effectiveAvailable === 0,
       activeBatch,
       activeBatchNumber: batchNumber,
       activeBatchLabel: activeBatchStatus === 'SOLD_OUT' && label ? `${label} esgotado` : label,

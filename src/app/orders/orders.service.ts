@@ -38,6 +38,7 @@ import {
 } from '../../common/utils/document.util';
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
 import { eventWindowInstant } from '../../common/utils/brt-date.util';
+import { resolveActiveBatch } from '../tickets/batch-active.util';
 import {
   holdsStock,
   acquireVariationHold,
@@ -103,42 +104,6 @@ class AppUnprocessableException extends UnprocessableEntityException {
   constructor(code: string, message: string) {
     super({ code, message });
   }
-}
-
-// ─── batch resolver (mesma lógica do tickets service) ────────────────────────
-
-function resolveActiveBatchForReserve(
-  batches: Array<{
-    id: string;
-    quantity: number;
-    availableQuantity: number;
-    price: number;
-    startDate: Date | null;
-    endDate: Date | null;
-    sortOrder: number;
-    triggerType: string;
-    quantitySold: number;
-  }>,
-  now: Date,
-) {
-  const sorted = [...batches].sort((a, b) => a.sortOrder - b.sortOrder);
-  let activeIdx = 0;
-
-  for (let i = 1; i < sorted.length; i++) {
-    const prev = sorted[activeIdx];
-    const curr = sorted[i];
-    if (curr.triggerType === 'AFTER_PREVIOUS_SOLD_OUT') {
-      if (prev.quantitySold >= prev.quantity) activeIdx = i;
-    } else {
-      // start/end são WALL-CLOCK (UTC) → instante real em BRT via `eventWindowInstant`
-      // (+3h), igual à janela de inscrição; senão o lote virava 3h cedo.
-      const prevExpired = prev.endDate && now > eventWindowInstant(prev.endDate);
-      const currStarted = !curr.startDate || now >= eventWindowInstant(curr.startDate);
-      if (prevExpired || (currStarted && curr.startDate != null)) activeIdx = i;
-    }
-  }
-
-  return sorted[activeIdx];
 }
 
 // ─── constants ───────────────────────────────────────────────────────────────
@@ -220,91 +185,12 @@ function computeFinalAmount(order: any, serviceFee: number): number {
 
 // ─── shape helpers ───────────────────────────────────────────────────────────
 
-/**
- * Expande reservedTickets em entradas individuais (quantity: 1 cada) e distribui
- * o desconto do cupom apenas nas unidades cobertas pelo effectiveUsage.
- * Sempre retorna uma entrada por ingresso, permitindo ao frontend identificar
- * exatamente quais receberam desconto.
- */
-export function distributeDiscount(
-  reservedTickets: any[],
-  totalDiscount: number,
-  effectiveUsage?: number,
-  fixedPerUnit?: number,
-  qualifyingSlots?: number[],
-): any[] {
-  // Expand all tickets into individual unit slots
-  const units: { rt: any; discount: number }[] = [];
-  for (const rt of reservedTickets) {
-    for (let i = 0; i < rt.quantity; i++) {
-      units.push({ rt, discount: 0 });
-    }
-  }
-
-  if (!units.length) return [];
-
-  const totalQuantity = units.length;
-  const coveredQty = Math.min(effectiveUsage ?? totalQuantity, totalQuantity);
-
-  if (totalDiscount > 0 && coveredQty > 0) {
-    let sorted: number[];
-    if (qualifyingSlots && qualifyingSlots.length > 0) {
-      // Apply discount to specific participant positions first, then fill by price if needed
-      const validSlots = qualifyingSlots.filter(i => i >= 0 && i < totalQuantity);
-      if (validSlots.length >= coveredQty) {
-        sorted = validSlots.slice(0, coveredQty);
-      } else {
-        const byPrice = [...units.keys()]
-          .filter(i => !validSlots.includes(i))
-          .sort((a, b) => units[b].rt.unitPrice - units[a].rt.unitPrice);
-        sorted = [...validSlots, ...byPrice].slice(0, coveredQty);
-      }
-    } else {
-      sorted = [...units.keys()].sort((a, b) => units[b].rt.unitPrice - units[a].rt.unitPrice);
-    }
-
-    if (fixedPerUnit !== undefined && fixedPerUnit > 0) {
-      // FIXED: clampa o desconto por slot em unitPrice (evita finalUnitPrice negativo
-      // quando o cupom é maior que o preço do ingresso — ex.: cupom FIXED grande com
-      // applyToProducts=true cobrindo também produtos adicionais).
-      for (let i = 0; i < coveredQty; i++) {
-        const slotIdx = sorted[i];
-        units[slotIdx].discount = Math.min(fixedPerUnit, units[slotIdx].rt.unitPrice);
-      }
-    } else {
-      // PERCENTAGE: distribui totalDiscount proporcional ao unitPrice entre os slots cobertos.
-      // Quando totalDiscount > subtotal dos ingressos cobertos (cupom com applyToProducts=true),
-      // só a porção que cabe nos ingressos é distribuída por slot — o excedente fica implícito
-      // em order.discount (finalAmount segue correto via order.discount agregado).
-      const coveredSubtotal = sorted.slice(0, coveredQty).reduce((s, i) => s + units[i].rt.unitPrice, 0);
-      const ticketsPortion = Math.min(totalDiscount, coveredSubtotal);
-      let distrib = 0;
-      for (let i = 0; i < coveredQty; i++) {
-        const isLast = i === coveredQty - 1;
-        const slotIdx = sorted[i];
-        const unitPrice = units[slotIdx].rt.unitPrice;
-        let allocated = isLast
-          ? ticketsPortion - distrib
-          : coveredSubtotal > 0
-            ? Math.round(ticketsPortion * (unitPrice / coveredSubtotal))
-            : 0;
-        allocated = Math.min(allocated, unitPrice);
-        units[slotIdx].discount = allocated;
-        distrib += allocated;
-      }
-    }
-  }
-
-  return units.map(({ rt, discount }) => ({
-    ...rt,
-    quantity: 1,
-    unitDiscount: discount,
-    totalDiscount: discount,
-    couponApplied: discount > 0,
-    finalUnitPrice: rt.unitPrice - discount,
-    finalTotalPrice: rt.unitPrice - discount,
-  }));
-}
+// `distributeDiscount` / `inferEffectiveUsage` foram extraídos para
+// `./order-discount.util` (funções puras reusadas pelo export de inscrições sem
+// puxar este módulo inteiro). Importados p/ uso interno (orderShape) e re-exportados
+// p/ manter os imports/tests que os pegavam daqui.
+import { distributeDiscount, inferEffectiveUsage } from './order-discount.util';
+export { distributeDiscount, inferEffectiveUsage };
 
 /**
  * Desconto total do cupom (em centavos), considerando os N melhores slots de ingresso
@@ -445,43 +331,6 @@ export function computeSlotParticipantProductsSubtotal(
  * (Implementação movida para `common/utils/product-price.util.ts` — fonte única
  *  compartilhada com o finalize do PIX/3DS via OrderFinalizationService.)
  */
-
-export function inferEffectiveUsage(
-  reservedTickets: any[],
-  coupon: { type: string; value: number; appliesTo?: string | null } | null | undefined,
-  totalDiscount: number,
-): number | undefined {
-  if (!coupon || !totalDiscount || totalDiscount <= 0) return undefined;
-
-  let applicable = reservedTickets;
-  if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-    const allowed = parseAppliesToArray(coupon.appliesTo);
-    applicable = reservedTickets.filter((rt) => allowed.includes(rt.ticketId));
-  }
-
-  const totalQty = applicable.reduce((s, rt) => s + rt.quantity, 0);
-  if (totalQty === 0) return undefined;
-
-  const units = applicable
-    .flatMap((rt) => Array(rt.quantity).fill(rt.unitPrice))
-    .sort((a: number, b: number) => b - a);
-
-  if (coupon.type === 'PERCENTAGE') {
-    for (let n = 1; n <= totalQty; n++) {
-      const base = units.slice(0, n).reduce((s: number, p: number) => s + p, 0);
-      const computed = Math.floor(base * (coupon.value / 100));
-      if (computed === totalDiscount) return n;
-      if (computed > totalDiscount) break;
-    }
-    return undefined;
-  } else {
-    if (coupon.value > 0 && totalDiscount % coupon.value === 0) {
-      const n = totalDiscount / coupon.value;
-      return n <= totalQty ? n : undefined;
-    }
-    return undefined;
-  }
-}
 
 /**
  * Cobertura de um voucher sobre os ingressos do pedido.
@@ -1045,8 +894,14 @@ export class OrdersService {
         quantitySold: soldMap.get(b.id) ?? 0,
       }));
 
-      // Resolve o lote ativo com a mesma lógica do endpoint de tickets
-      const activeBatch = resolveActiveBatchForReserve(batchesWithSold, now);
+      // Lote ativo pela regra CANÔNICA (mesma da leitura de ingressos/busca) —
+      // inclui fechamento de janela BY_TIME e fallback pro lote por esgotamento
+      // anterior. Ter a MESMA fonte que o checkout evita o mismatch em que a tela
+      // mostra o lote comprável e a reserva o rejeita.
+      const { batch: activeBatch, status: activeStatus } = resolveActiveBatch(
+        batchesWithSold,
+        now,
+      );
 
       // Se batchId foi enviado, valida que é o lote ativo
       if (item.batchId && item.batchId !== activeBatch.id) {
@@ -1058,19 +913,25 @@ export class OrdersService {
 
       const batch = activeBatch;
 
-      // start/end são WALL-CLOCK (UTC) → instante real em BRT via `eventWindowInstant`
-      // (+3h), igual ao resolveActiveBatch e à janela de inscrição; senão rejeitaria a
-      // reserva 3h cedo (BATCH_NOT_STARTED / BATCH_EXPIRED) ainda dentro do horário.
-      if (batch.startDate && now < eventWindowInstant(batch.startDate)) {
+      // "Não iniciado" só é legítimo pro 1º lote POR TEMPO cuja janela ainda não
+      // abriu — a regra canônica nunca devolve um lote FUTURO como ativo (lote
+      // encerrado cai em fallback/esgotado). `eventWindowInstant` (+3h) evita
+      // rejeitar 3h cedo no Brasil.
+      if (
+        batch.triggerType !== 'AFTER_PREVIOUS_SOLD_OUT' &&
+        batch.startDate &&
+        now < eventWindowInstant(batch.startDate)
+      ) {
         throw new AppConflictException(
           'BATCH_NOT_STARTED',
           `Lote ainda não iniciado para o ingresso "${ticket.name}"`,
         );
       }
-      if (batch.endDate && now > eventWindowInstant(batch.endDate)) {
+      // Lote encerrado (janela BY_TIME fechada) e sem fallback elegível → esgotado.
+      if (activeStatus === 'SOLD_OUT') {
         throw new AppConflictException(
-          'BATCH_EXPIRED',
-          `Lote encerrado para o ingresso "${ticket.name}"`,
+          'BATCH_SOLD_OUT',
+          `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
         );
       }
 
