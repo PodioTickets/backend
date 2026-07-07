@@ -10,11 +10,12 @@
  * - AFTER_PREVIOUS_SOLD_OUT: abre quando o lote imediatamente anterior VENDE tudo
  *   (pagamento confirmado; reservas pendentes não contam).
  *
- * FALLBACK (lote por tempo encerrou e o fluxo natural travou): anda PARA TRÁS a
- * partir do lote encerrado e, se achar um lote POR ESGOTAMENTO que já havia aberto
- * e ainda tem vaga, esse volta a ser o ativo até esgotar. Só depois dele esgotar é
- * que o próximo por esgotamento é liberado. Sem candidato elegível → ingresso
- * ESGOTADO (não há transição válida).
+ * FALLBACK (lote ativo ESGOTADO ou com a janela ENCERRADA): anda PARA TRÁS a partir
+ * do lote ativo e reabre o lote ANTERIOR mais recente que ainda é ELEGÍVEL e tem
+ * vaga — por esgotamento se já havia aberto; por tempo se ainda está dentro da
+ * janela. Cobre o estorno/cancelamento que devolve o assento ao lote de origem (o
+ * ingresso volta à venda naquele lote) e o lote por tempo encerrado que retorna a
+ * um lote por esgotamento anterior. Sem candidato elegível → ingresso ESGOTADO.
  *
  * Sempre use isto para saber o preço "a partir de" comprável — NUNCA considere um
  * lote isolado por `startDate <= now`, pois lotes já superados por um posterior
@@ -56,48 +57,54 @@ export function resolveActiveBatch(
 ): { batch: BatchWithSold; batchNumber: number; status: 'AVAILABLE' | 'SOLD_OUT' } {
   const sorted = [...batches].sort((a, b) => a.sortOrder - b.sortOrder);
 
-  // 1) Progressão natural pela ordem: acha o lote mais avançado que já "abriu".
-  //    Marca em `opened` cada lote que chegou a ser ativo — usado no fallback pra
-  //    só reativar um lote por esgotamento que REALMENTE abriu (predecessor esgotou),
-  //    nunca um que jamais foi liberado.
+  // 1) Progressão SEQUENCIAL pela ordem: o lote `i` só abre se o lote IMEDIATAMENTE
+  //    anterior (`i-1`) já abriu. Por isso PARAMOS (break) no primeiro lote que não
+  //    pode abrir — nada depois dele pode estar ativo. Sem isso, um lote por
+  //    esgotamento pulava um lote por tempo ainda não iniciado (checava a condição
+  //    contra o lote ATIVO, não contra o anterior real) e abria fora de ordem.
   let activeIdx = 0;
-  const opened = new Set<number>([0]);
-
   for (let i = 1; i < sorted.length; i++) {
-    const prev = sorted[activeIdx];
+    const prev = sorted[i - 1]; // lote IMEDIATAMENTE anterior (sortOrder)
     const curr = sorted[i];
 
-    if (curr.triggerType === EXHAUST) {
-      // Abre só quando o lote ativo anterior VENDEU tudo (pagamento confirmado).
-      // Reservas pendentes não contam: ao expirarem, availableQuantity sobe e o
-      // lote anterior reaparece disponível.
-      if (prev.quantitySold >= prev.quantity) {
-        activeIdx = i;
-        opened.add(i);
-      }
-    } else if (isStartReached(curr, now)) {
-      // BY_TIME: abre no instante real em BRT (wall-clock +3h) da startDate.
-      activeIdx = i;
-      opened.add(i);
-    }
+    const canOpen =
+      curr.triggerType === EXHAUST
+        ? // Por esgotamento: só quando o anterior VENDEU tudo (pagamento confirmado;
+          // reservas pendentes contam via availableQuantity, mas aqui é a contagem).
+          prev.quantitySold >= prev.quantity
+        : // Por tempo: quando a janela do próprio lote já abriu (instante real BRT +3h).
+          isStartReached(curr, now);
+
+    if (!canOpen) break; // sequência travada aqui
+    activeIdx = i;
   }
 
   const active = sorted[activeIdx];
 
-  // 2) Se o lote ativo é POR TEMPO e a janela ENCERROU, ele não vale mais mesmo
-  //    com estoque. Tenta o fallback: lote por esgotamento anterior, já aberto e
-  //    com vaga, começando pelo mais recente.
-  if (isTimeWindowEnded(active, now)) {
-    for (let j = activeIdx - 1; j >= 0; j--) {
-      const b = sorted[j];
-      if (opened.has(j) && b.triggerType === EXHAUST && b.availableQuantity > 0) {
-        return { batch: b, batchNumber: j + 1, status: 'AVAILABLE' };
-      }
-    }
-    // Nenhuma transição válida → encerrado/esgotado.
-    return { batch: active, batchNumber: activeIdx + 1, status: 'SOLD_OUT' };
+  // 2) Lote ativo VENDÁVEL (dentro da janela E com vaga) → segue ele.
+  const activeSellable =
+    !isTimeWindowEnded(active, now) && active.availableQuantity > 0;
+  if (activeSellable) {
+    return { batch: active, batchNumber: activeIdx + 1, status: 'AVAILABLE' };
   }
 
-  const status = active.availableQuantity > 0 ? 'AVAILABLE' : 'SOLD_OUT';
-  return { batch: active, batchNumber: activeIdx + 1, status };
+  // 3) Lote ativo NÃO vendável (ESGOTADO ou janela ENCERRADA) → reabre o lote
+  //    ANTERIOR mais recente que TEM vaga (o assento foi DEVOLVIDO a ele por um
+  //    estorno/cancelamento). Como a progressão é sequencial com break, os lotes
+  //    `0..activeIdx-1` já ABRIRAM — então basta ter vaga, INDEPENDENTE do tipo ou de
+  //    a janela por tempo já ter encerrado. É o caso do "limbo": lote por tempo passou
+  //    sem esgotar e o próximo é por esgotamento (não abre) → um cancelamento do lote
+  //    anterior faz o ingresso voltar à venda NAQUELE lote (decisão do usuário
+  //    2026-07-07). Em fluxo normal os anteriores estão sem vaga → nada reabre.
+  //    OBS: o próprio lote ATIVO com janela encerrada e estoque sobrando NÃO volta a
+  //    vender (respeita "por tempo só durante a janela") — só um lote anterior que
+  //    recebeu um assento de volta é reaberto.
+  for (let j = activeIdx - 1; j >= 0; j--) {
+    if (sorted[j].availableQuantity > 0) {
+      return { batch: sorted[j], batchNumber: j + 1, status: 'AVAILABLE' };
+    }
+  }
+
+  // Nenhuma transição válida → esgotado/encerrado.
+  return { batch: active, batchNumber: activeIdx + 1, status: 'SOLD_OUT' };
 }
