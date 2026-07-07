@@ -59,6 +59,24 @@ export class CreateEventDto {
   @IsUrl({ require_protocol: true }, { message: 'googleMapsLink must be a valid URL' })
   googleMapsLink?: string;
 
+  // Local do evento por coordenadas (seleção no mapa). `null` limpa (update);
+  // omitido mantém. O front deriva o `googleMapsLink` destas.
+  @IsOptional()
+  @IsNumber()
+  @Min(-90)
+  @Max(90)
+  latitude?: number | null;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(-180)
+  @Max(180)
+  longitude?: number | null;
+
+  @IsOptional()
+  @IsString()
+  locationName?: string;
+
   @IsOptional()
   @IsEmail()
   contactEmail?: string;
@@ -159,6 +177,24 @@ export class UpdateEventDto {
   @IsOptional()
   @IsUrl({ require_protocol: true }, { message: 'googleMapsLink must be a valid URL' })
   googleMapsLink?: string;
+
+  // Local do evento por coordenadas (seleção no mapa). `null` limpa (update);
+  // omitido mantém. O front deriva o `googleMapsLink` destas.
+  @IsOptional()
+  @IsNumber()
+  @Min(-90)
+  @Max(90)
+  latitude?: number | null;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(-180)
+  @Max(180)
+  longitude?: number | null;
+
+  @IsOptional()
+  @IsString()
+  locationName?: string;
 
   @IsOptional()
   @IsEmail()

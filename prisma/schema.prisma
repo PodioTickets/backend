@@ -369,6 +369,12 @@ model Event {
   zipCode               String? // CEP
   neighborhood          String? // Bairro
   googleMapsLink        String?
+  /// Local do evento por coordenadas (seleção no mapa). `googleMapsLink` é
+  /// derivado destas no front (query=lat,lng) para compat com o embed público.
+  latitude              Float?
+  longitude             Float?
+  /// Rótulo amigável do local escolhido no mapa (nome do POI / endereço formatado).
+  locationName          String?
   contactEmail          String?  @map("contact_email")
   instagram             String?
   facebook              String?
