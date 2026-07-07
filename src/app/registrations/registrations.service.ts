@@ -692,6 +692,11 @@ export class RegistrationsService {
         event,
         modalities: Array.from(modalitySet),
         invitedBy,
+        // Nº de participantes do pedido (linha "X pessoas" no card de "Meus ingressos").
+        // Uma inscrição = um participante; todas as registrations do pedido vêm no select.
+        participantsCount: Array.isArray(order.registrations)
+          ? order.registrations.length
+          : 0,
       };
     });
 
