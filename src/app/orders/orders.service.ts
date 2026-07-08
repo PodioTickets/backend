@@ -39,6 +39,7 @@ import {
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
 import { eventWindowInstant } from '../../common/utils/brt-date.util';
 import { resolveActiveBatch } from '../tickets/batch-active.util';
+import { formatEventHappensDate, formatEventCardAddress } from '../../common/utils/event-email-format.util';
 import {
   holdsStock,
   acquireVariationHold,
@@ -67,30 +68,6 @@ export {
   computeAgeEligibleSlots,
   computeCouponCoveredUnits,
 };
-
-// ─── helpers de formatação ────────────────────────────────────────────────────
-
-function formatEventDate(date: Date | string | null | undefined): string {
-  if (!date) return '';
-  const d = new Date(date as string);
-  if (isNaN(d.getTime())) return '';
-  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-}
-
-function formatEventAddress(event: any): string {
-  const parts: string[] = [];
-  const cityState: string[] = [];
-  if (event.city) cityState.push(event.city);
-  if (event.state) cityState.push(event.state);
-  if (cityState.length) parts.push(cityState.join(' - '));
-  if (event.neighborhood) parts.push(event.neighborhood);
-  if (event.location) parts.push(event.location);
-  if (event.zipCode) {
-    const cep = String(event.zipCode).replace(/\D/g, '');
-    parts.push(cep.length === 8 ? `${cep.slice(0, 5)}-${cep.slice(5)}` : cep);
-  }
-  return parts.join(', ');
-}
 
 // ─── typed error helpers ─────────────────────────────────────────────────────
 
@@ -4011,7 +3988,7 @@ export class OrdersService {
         const org = event?.organization ?? {};
         const orgName = org.tradeName || org.name || '';
         const regs: any[] = order.registrations ?? [];
-        const location = formatEventAddress(event) || '—';
+        const location = formatEventCardAddress(event) || '—';
 
         const issuedAt = new Date();
         const orderNumber = orderId.slice(0, 8).toUpperCase();
@@ -4093,7 +4070,7 @@ export class OrdersService {
         };
 
         const eventName = snapshotEvent.name;
-        const eventDate = formatEventDate(snapshotEvent.eventDate ?? (event as any).eventDate);
+        const eventDate = formatEventHappensDate(snapshotEvent.eventDate ?? (event as any).eventDate);
         const eventBannerUrl = (snapshotEvent as any).bannerUrl || '';
 
         // Comprador = dono do pedido. Pode nao ser participante (comprou so pra
