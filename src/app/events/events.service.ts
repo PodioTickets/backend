@@ -45,6 +45,7 @@ import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
 import { TicketsService } from '../tickets/tickets.service';
 import { resolveActiveBatch, type BatchWithSold } from '../tickets/batch-active.util';
 import { computeRegistrationPaidValues } from './export-paid-value.util';
+import { formatEventCardAddress } from '../../common/utils/event-email-format.util';
 import { TicketCategoriesService } from '../ticket-categories/ticket-categories.service';
 import { EmailService } from '../../common/services/email.service';
 import { RepasseService, RETENTION_DAYS } from '../repasse/repasse.service';
@@ -2638,8 +2639,8 @@ export class EventsService {
       const submittedHH = String(submittedAt.getHours()).padStart(2, '0');
       const submittedMM = String(submittedAt.getMinutes()).padStart(2, '0');
       const submittedAtFormatted = `${submittedAt.toLocaleDateString('pt-BR')} · ${submittedHH}h${submittedMM}`;
-      // Card do e-mail exibe apenas Estado, Cidade (sem endereço completo)
-      const eventLocation = [event.state, event.city].filter(Boolean).join(', ');
+      // Endereço do card = Local, Cidade, Estado (igual ao card da home).
+      const eventLocation = formatEventCardAddress(event);
 
       this.emailService
         .sendEventUnderReview({
