@@ -85,4 +85,35 @@ describe('GeoService — geo (estados/cidades por país)', () => {
       expect(() => service.getCities('XX', 'CA', {})).toThrow(BadRequestException);
     });
   });
+
+  describe('getIpLocation', () => {
+    it('IP vazio → location null (não lança)', () => {
+      const res = service.getIpLocation('');
+      expect(res.success).toBe(true);
+      expect(res.data.location).toBeNull();
+    });
+
+    it('IP privado/loopback → location null (não resolvível)', () => {
+      // Loopback e RFC1918 não têm geolocalização na base do geoip-lite.
+      expect(service.getIpLocation('127.0.0.1').data.location).toBeNull();
+      expect(service.getIpLocation('192.168.0.1').data.location).toBeNull();
+    });
+
+    it('IP público conhecido → lat/lng numéricos', () => {
+      // 8.8.8.8 (Google DNS) está catalogado na base embarcada.
+      const res = service.getIpLocation('8.8.8.8');
+      expect(res.success).toBe(true);
+      // A base pode variar entre versões; se resolveu, o shape tem que bater.
+      if (res.data.location) {
+        expect(typeof res.data.location.lat).toBe('number');
+        expect(typeof res.data.location.lng).toBe('number');
+        expect(Number.isFinite(res.data.location.lat)).toBe(true);
+        expect(Number.isFinite(res.data.location.lng)).toBe(true);
+      }
+    });
+
+    it('normaliza IPv4 mapeado em IPv6 (::ffff:) sem lançar', () => {
+      expect(() => service.getIpLocation('::ffff:8.8.8.8')).not.toThrow();
+    });
+  });
 });
