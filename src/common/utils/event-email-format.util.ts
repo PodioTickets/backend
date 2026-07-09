@@ -12,10 +12,10 @@ const HAPPENS_OPTS: Intl.DateTimeFormatOptions = {
 };
 
 /**
- * Data por extenso do card: "na sexta-feira, 31 de julho" (preposição + dia da
- * semana + dia + mês). A preposição concorda com o gênero do dia (domingo/sábado
- * → "no"; segunda a sexta …-feira → "na"), igual ao card da home. O prefixo
- * "Acontece" fica no template. Retorna "" para data ausente/ inválida.
+ * Data por extenso do card: "Sábado, 25 de julho" (dia da semana + dia + mês,
+ * 1ª letra maiúscula), IDÊNTICA ao card do app (frontend `formatEventHappensLabel`).
+ * `Intl` pt-BR devolve o dia da semana em minúsculo → capitalizamos. UTC (eventDate
+ * é wall-clock). Retorna "" para data ausente/ inválida.
  */
 export function formatEventHappensDate(
   date: Date | string | null | undefined,
@@ -23,9 +23,8 @@ export function formatEventHappensDate(
   if (!date) return '';
   const d = new Date(date as string);
   if (isNaN(d.getTime())) return '';
-  const weekday = d.getUTCDay(); // 0=domingo … 6=sábado
-  const prep = weekday === 0 || weekday === 6 ? 'no' : 'na';
-  return `${prep} ${new Intl.DateTimeFormat('pt-BR', HAPPENS_OPTS).format(d)}`;
+  const label = new Intl.DateTimeFormat('pt-BR', HAPPENS_OPTS).format(d);
+  return label ? label.charAt(0).toUpperCase() + label.slice(1) : '';
 }
 
 /**
