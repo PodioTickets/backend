@@ -3,6 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { EventStatus, Prisma } from '@prisma/client';
 import { EmailService } from '../../common/services/email.service';
 import { withPastEventsAsCompleted as markPastEventsCompleted } from '../../common/utils/event-status.util';
+import { formatEventCardAddress } from '../../common/utils/event-email-format.util';
 
 export interface AdminEventsQuery {
   page: number;
@@ -103,7 +104,6 @@ export class AdminEventsService {
           id: true,
           name: true,
           slug: true,
-          logoUrl: true,
           bannerUrl: true,
           status: true,
           city: true,
@@ -239,7 +239,6 @@ export class AdminEventsService {
           id: true,
           name: true,
           slug: true,
-          logoUrl: true,
           bannerUrl: true,
           status: true,
           city: true,
@@ -336,8 +335,8 @@ export class AdminEventsService {
       const weekdays = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
       const eventDt = new Date(event.eventDate);
       const eventDateFormatted = `${eventDt.toLocaleDateString('pt-BR')} · ${weekdays[eventDt.getDay()]}`;
-      // Card do e-mail exibe apenas Estado, Cidade (sem endereço completo)
-      const eventLocation = [event.state, event.city].filter(Boolean).join(', ');
+      // Endereço do card = Local, Cidade, Estado (igual ao card da home).
+      const eventLocation = formatEventCardAddress(event);
 
       const submittedHH = String(now.getHours()).padStart(2, '0');
       const submittedMM = String(now.getMinutes()).padStart(2, '0');
@@ -350,8 +349,8 @@ export class AdminEventsService {
           recipientEmail: organizerEmail,
           organizerName,
           eventName: event.name,
-          // Template usa imagem 308x308 = imagem do CARD (logoUrl), não o banner.
-          eventBannerUrl: (event as any).logoUrl ?? event.bannerUrl ?? '',
+          // Imagem do e-mail = BANNER do evento (logoUrl descontinuado).
+          eventBannerUrl: event.bannerUrl ?? '',
           eventDate: eventDateFormatted,
           eventLocation,
           submittedAt: submittedAtFormatted,

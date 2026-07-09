@@ -203,6 +203,7 @@ model User {
   orders                    Order[]
   eventNotificationsCreated EventNotification[]        @relation("EventNotificationCreator")
   withdrawals               EventWithdrawal[]
+  anticipations             EventAnticipation[]
   eventAudits               EventAudit[]
   activityLogs              UserActivityLog[]
 
@@ -369,6 +370,12 @@ model Event {
   zipCode               String? // CEP
   neighborhood          String? // Bairro
   googleMapsLink        String?
+  /// Local do evento por coordenadas (seleção no mapa). `googleMapsLink` é
+  /// derivado destas no front (query=lat,lng) para compat com o embed público.
+  latitude              Float?
+  longitude             Float?
+  /// Rótulo amigável do local escolhido no mapa (nome do POI / endereço formatado).
+  locationName          String?
   contactEmail          String?  @map("contact_email")
   instagram             String?
   facebook              String?
@@ -434,6 +441,7 @@ model Event {
   memberAccessGrants OrganizationMemberEventAccess[]
   eventNotifications EventNotification[]
   withdrawals        EventWithdrawal[]
+  anticipations      EventAnticipation[]
   audit              EventAudit?
 
   @@index([status, eventDate]) // Para buscar eventos publicados futuros
@@ -1183,6 +1191,43 @@ model EventWithdrawal {
   @@index([eventId, status])
   @@index([eventId, createdAt])
   @@index([pixKeyId])
+}
+
+/// Pedido de ANTECIPAÇÃO de recebíveis (adiantar o "aguardando liberação" à vista).
+/// Espelha EventWithdrawal (mesmo fluxo de solicitação PENDING → admin conclui/cancela),
+/// mas em vez de sacar saldo disponível, adianta receb.íveis futuros cobrando um custo.
+/// Custo = Σ por pedido (consumido × taxaMensal × diasAntecipados/30), consumindo os
+/// pedidos MAIS ANTIGOS em aguardando liberação primeiro (menos dias = mais barato).
+model EventAnticipation {
+  id            String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId       String           @db.Uuid
+  requestedById String           @db.Uuid
+  /// Valor bruto a antecipar (centavos)
+  amount        Int
+  /// Snapshot da taxa mensal de antecipação aplicada (ex.: 0.02 = 2% a.m.)
+  monthlyRate   Float
+  /// Custo total da antecipação (centavos)
+  costAmount    Int
+  /// Valor líquido recebido hoje (centavos) = amount − costAmount
+  netAmount     Int
+  status        WithdrawalStatus @default(PENDING)
+  notes         String?
+  /// URL do comprovante vinculado pelo admin
+  receiptUrl    String?
+  /// Breakdown por pedido antecipado (oldest-first): [{ orderId, amount, days, cost }].
+  /// Snapshot do cálculo no momento da solicitação — fonte de verdade para auditoria.
+  breakdown     Json?
+  completedAt   DateTime?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  event       Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  /// Restrict: preserva o histórico de antecipações ao remover o membro (mesma regra do saque).
+  requestedBy User  @relation(fields: [requestedById], references: [id], onDelete: Restrict)
+
+  @@index([eventId])
+  @@index([eventId, status])
+  @@index([eventId, createdAt])
 }
 
 model EventAudit {

@@ -14,28 +14,7 @@ import {
   PAYMENT_DETAILS_STANDARD_INCLUDE,
   TICKET_CATEGORY_DETAIL_INCLUDE,
 } from './payment-details-standard.include';
-
-function formatEventDate(date: Date | string | null | undefined): string {
-  if (!date) return '';
-  const d = new Date(date as string);
-  if (isNaN(d.getTime())) return '';
-  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-}
-
-function formatEventAddress(event: any): string {
-  const parts: string[] = [];
-  const cityState: string[] = [];
-  if (event.city) cityState.push(event.city);
-  if (event.state) cityState.push(event.state);
-  if (cityState.length) parts.push(cityState.join(' - '));
-  if (event.neighborhood) parts.push(event.neighborhood);
-  if (event.location) parts.push(event.location);
-  if (event.zipCode) {
-    const cep = String(event.zipCode).replace(/\D/g, '');
-    parts.push(cep.length === 8 ? `${cep.slice(0, 5)}-${cep.slice(5)}` : cep);
-  }
-  return parts.join(', ');
-}
+import { formatEventHappensDate, formatEventCardAddress } from '../../common/utils/event-email-format.util';
 
 @Injectable()
 export class PaymentsService {
@@ -1130,7 +1109,7 @@ export class PaymentsService {
         name: event?.name ?? '',
         date: event?.eventDate ?? new Date(),
         organization: orgName,
-        location: formatEventAddress(event),
+        location: formatEventCardAddress(event),
         participantCount: regs.length,
       },
       registrations: regs.map((reg: any, idx: number) => {
@@ -1188,9 +1167,9 @@ export class PaymentsService {
 
     const eventName = event?.name ?? '';
     const eventLocation = event?.location ?? '';
-    const eventDate = formatEventDate(event?.eventDate);
-    const eventAddress = formatEventAddress(event);
-    const eventBannerUrl = event?.logoUrl ?? event?.bannerUrl ?? 'https://placehold.co/308x232';
+    const eventDate = formatEventHappensDate(event?.eventDate);
+    const eventAddress = formatEventCardAddress(event);
+    const eventBannerUrl = event?.bannerUrl ?? 'https://placehold.co/308x232';
 
     // Comprador = dono do pedido. Pode nao ser participante (comprou so pra
     // terceiros) — nesse caso busca o user direto.

@@ -1,4 +1,5 @@
-import { Controller, Get, Header, Param, Query } from '@nestjs/common';
+import { Controller, Get, Header, Param, Query, Req } from '@nestjs/common';
+import type { Request as ExpressRequest } from 'express';
 import {
   ApiOperation,
   ApiParam,
@@ -8,6 +9,7 @@ import {
 } from '@nestjs/swagger';
 import { GeoService } from './geo.service';
 import { ListCitiesDto } from './dto/list-cities.dto';
+import { getClientIp } from '../../common/utils/client-ip.util';
 
 /**
  * Geo é dado de referência imutável e público → cache agressivo de CDN/browser.
@@ -46,5 +48,21 @@ export class GeoController {
     @Query() query: ListCitiesDto,
   ) {
     return this.geoService.getCities(countryCode, stateCode, query);
+  }
+
+  /**
+   * Localização aproximada (cidade) pelo IP do cliente — só para centralizar o mapa
+   * ao criar um evento. Resposta VARIA por IP → NUNCA cacheável em CDN compartilhada
+   * (`private, no-store`), ao contrário dos estados/cidades (dado estático).
+   */
+  @Get('ip-location')
+  @Header('Cache-Control', 'private, no-store')
+  @ApiOperation({ summary: 'Localização aproximada (cidade) pelo IP do cliente' })
+  @ApiResponse({
+    status: 200,
+    description: 'Localização por IP; `location: null` quando não resolvível',
+  })
+  getIpLocation(@Req() req: ExpressRequest) {
+    return this.geoService.getIpLocation(getClientIp(req));
   }
 }

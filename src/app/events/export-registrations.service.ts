@@ -22,7 +22,7 @@ const FIELD_LABELS: Record<ExportField, string> = {
   dataPagamento: 'Data da compra',
   status: 'Status da compra',
   formaPagamento: 'Forma de pagamento',
-  valorPago: 'Valor pago',
+  valorPago: 'Valor pago por ingresso',
 };
 
 function formatDate(iso: string | Date | null | undefined): string {
@@ -253,7 +253,13 @@ function extractField(reg: any, field: ExportField): string {
       if (order.finalAmount === 0) return 'Gratuito';
       return formatPaymentMethod(payment.method);
     case 'valorPago':
-      return formatCurrency(order.finalAmount);
+      // Valor pago POR INGRESSO desta inscrição: ingresso + produtos adicionais −
+      // cupom/voucher rateado, SEM taxa de serviço (reproduz o recibo). Calculado
+      // no service (computeRegistrationPaidValues); fallback ao total do pedido só
+      // se ausente (dado legado). 0 (grátis) é preservado.
+      return formatCurrency(
+        order.paidPerTicket != null ? order.paidPerTicket : order.finalAmount,
+      );
     default:
       return '';
   }
