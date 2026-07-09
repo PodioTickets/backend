@@ -11,6 +11,7 @@ import { isDocumentInList, resolveDocument } from '../../common/utils/document.u
 import { tryConsumeVoucherUnreserved } from '../../common/utils/voucher-reservation.util';
 import { stripOrganizationContact } from '../../common/utils/organization-sanitizer.util';
 import { formatPdfAnswer } from '../../common/utils/pdf-answer.util';
+import { formatEventHappensDate, formatEventCardAddress } from '../../common/utils/event-email-format.util';
 import {
   holdsStock,
   acquireVariationHold,
@@ -26,35 +27,6 @@ import {
 } from '../../common/services/ticket-pdf.service';
 import { PaymentsService } from '../payments/payments.service';
 
-/**
- * Formata a data do evento (pt-BR, dia/mês/ano) para o envelope do e-mail.
- * Espelha o helper homônimo de `payments.service` (mesma saída no template).
- */
-function formatEventDate(date: Date | string | null | undefined): string {
-  if (!date) return '';
-  const d = new Date(date as string);
-  if (isNaN(d.getTime())) return '';
-  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-}
-
-/**
- * Compõe o endereço do evento a partir das colunas estruturadas (cidade/estado/
- * bairro/local/CEP). Espelha o helper homônimo de `payments.service`.
- */
-function formatEventAddress(event: any): string {
-  const parts: string[] = [];
-  const cityState: string[] = [];
-  if (event?.city) cityState.push(event.city);
-  if (event?.state) cityState.push(event.state);
-  if (cityState.length) parts.push(cityState.join(' - '));
-  if (event?.neighborhood) parts.push(event.neighborhood);
-  if (event?.location) parts.push(event.location);
-  if (event?.zipCode) {
-    const cep = String(event.zipCode).replace(/\D/g, '');
-    parts.push(cep.length === 8 ? `${cep.slice(0, 5)}-${cep.slice(5)}` : cep);
-  }
-  return parts.join(', ');
-}
 
 /**
  * Compõe a localização do evento para o PDF a partir do snapshot. `location`
@@ -606,7 +578,7 @@ export class RegistrationsService {
               name: true,
               slug: true,
               eventDate: true,
-              logoUrl: true,
+              bannerUrl: true,
               location: true,
               city: true,
               state: true,
@@ -678,7 +650,7 @@ export class RegistrationsService {
             name: snapshotEvent.name,
             slug: snapshotEvent.slug,
             eventDate: snapshotEvent.eventDate,
-            logoUrl: snapshotEvent.logoUrl ?? null,
+            bannerUrl: snapshotEvent.bannerUrl ?? null,
             location: snapshotEvent.location?.name ?? null,
             city: snapshotEvent.location?.city ?? null,
             state: snapshotEvent.location?.state ?? null,
@@ -692,6 +664,11 @@ export class RegistrationsService {
         event,
         modalities: Array.from(modalitySet),
         invitedBy,
+        // Nº de participantes do pedido (linha "X pessoas" no card de "Meus ingressos").
+        // Uma inscrição = um participante; todas as registrations do pedido vêm no select.
+        participantsCount: Array.isArray(order.registrations)
+          ? order.registrations.length
+          : 0,
       };
     });
 
@@ -906,11 +883,11 @@ export class RegistrationsService {
             name: true,
             eventDate: true,
             location: true,
+            locationName: true,
             neighborhood: true,
             city: true,
             state: true,
             zipCode: true,
-            logoUrl: true,
             bannerUrl: true,
           },
         },
@@ -1001,9 +978,9 @@ export class RegistrationsService {
       firstName: order.user?.firstName || 'Participante',
       eventName: event.name ?? '',
       eventLocation: event.location ?? '',
-      eventDate: formatEventDate(event.eventDate),
-      eventAddress: formatEventAddress(event),
-      eventBannerUrl: event.logoUrl ?? event.bannerUrl ?? '',
+      eventDate: formatEventHappensDate(event.eventDate),
+      eventAddress: formatEventCardAddress(event),
+      eventBannerUrl: event.bannerUrl ?? '',
       ticketPdfs,
       receiptPdf,
     });
@@ -1584,7 +1561,6 @@ export class RegistrationsService {
         endDate: reg.event.endDate,
         imageUrl: reg.event.imageUrl,
         bannerUrl: reg.event.bannerUrl,
-        logoUrl: reg.event.logoUrl,
         status: reg.event.status,
         location: reg.event.location,
         locations: reg.event.locations ?? [],

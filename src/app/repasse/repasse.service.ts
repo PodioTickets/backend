@@ -59,6 +59,58 @@ function isInstallment(metadata: any): boolean {
   return !!(metadata?.creditCard?.installments && metadata.creditCard.installments > 1);
 }
 
+// Taxa mensal de antecipação de recebíveis (2% a.m.).
+// Custo por pedido = valor consumido × taxaMensal × (diasAntecipados ÷ 30).
+export const ANTICIPATION_MONTHLY_RATE = 0.02;
+
+export interface AnticipatableOrder {
+  orderId: string;
+  /** Valor líquido do organizador ainda disponível p/ antecipar deste pedido (centavos). */
+  netAmount: number;
+  /** Dias até a liberação natural (= dias "antecipados" se anteciparmos agora). */
+  daysUntilRelease: number;
+  /** Data do pagamento — usada p/ ordenar do pedido MAIS ANTIGO pro mais novo. */
+  paymentDate: Date;
+}
+
+export interface AnticipationBreakdownItem {
+  orderId: string;
+  amount: number; // consumido deste pedido (centavos)
+  days: number; // dias antecipados
+  cost: number; // custo desta parcela (centavos)
+}
+
+/**
+ * Custo da antecipação consumindo os pedidos MAIS ANTIGOS primeiro (menos dias
+ * até liberar = mais barato). Puro/determinístico — mesma conta no backend
+ * (autoritativa) e na prévia do front.
+ *
+ *   custo_i = round(consumido_i × taxaMensal × dias_i / 30)
+ *   custo   = Σ custo_i          líquido = valor − custo
+ */
+export function computeAnticipationCost(
+  orders: AnticipatableOrder[],
+  amount: number,
+  monthlyRate: number,
+): { costAmount: number; netAmount: number; breakdown: AnticipationBreakdownItem[] } {
+  const sorted = [...orders].sort(
+    (a, b) => new Date(a.paymentDate).getTime() - new Date(b.paymentDate).getTime(),
+  );
+  let remaining = amount;
+  let costAmount = 0;
+  const breakdown: AnticipationBreakdownItem[] = [];
+  for (const o of sorted) {
+    if (remaining <= 0) break;
+    const consumed = Math.min(remaining, o.netAmount);
+    if (consumed <= 0) continue;
+    const cost = Math.round(consumed * monthlyRate * (o.daysUntilRelease / 30));
+    costAmount += cost;
+    breakdown.push({ orderId: o.orderId, amount: consumed, days: o.daysUntilRelease, cost });
+    remaining -= consumed;
+  }
+  return { costAmount, netAmount: amount - costAmount, breakdown };
+}
+
 function buildRetentionWhere(search?: string, status?: 'pending' | 'released'): any {
   const where: any = {
     orders: { some: { payment: { status: 'PAID' } } },
@@ -676,6 +728,195 @@ export class RepasseService {
     };
   }
 
+  // ─── Antecipação de recebíveis ──────────────────────────────────────────
+
+  /**
+   * Pedidos "aguardando liberação" (à vista, em janela) disponíveis p/ antecipar,
+   * já descontando o que foi consumido por antecipações PENDING/COMPLETED anteriores
+   * (evita antecipar o mesmo recebível duas vezes). Retorna por pedido o líquido do
+   * organizador ainda disponível + dias até a liberação + data do pagamento.
+   */
+  private async loadAnticipatableOrders(
+    eventId: string,
+    prisma: any,
+  ): Promise<AnticipatableOrder[]> {
+    const [event, orders, priorAnticipations] = await Promise.all([
+      this.loadEventConfig(eventId, prisma),
+      this.loadPaidOrders(eventId, prisma),
+      prisma.eventAnticipation.findMany({
+        where: {
+          eventId,
+          status: { in: [WithdrawalStatus.PENDING, WithdrawalStatus.COMPLETED] },
+        },
+        select: { breakdown: true },
+      }),
+    ]);
+
+    // Já antecipado por pedido (soma dos breakdowns anteriores).
+    const consumedByOrder = new Map<string, number>();
+    for (const a of priorAnticipations) {
+      const bd = (a.breakdown as unknown as AnticipationBreakdownItem[]) ?? [];
+      for (const item of bd) {
+        consumedByOrder.set(
+          item.orderId,
+          (consumedByOrder.get(item.orderId) ?? 0) + item.amount,
+        );
+      }
+    }
+
+    const now = getNow();
+    const items: AnticipatableOrder[] = [];
+    for (const order of orders) {
+      const payment = order.payment;
+      if (!payment?.paymentDate) continue;
+      // Parcelado vive em getInstallments; antecipação é só à vista aguardando liberação.
+      if (isInstallment(payment.metadata as any)) continue;
+
+      const paymentDate = new Date(payment.paymentDate);
+      const releaseDate = getReleaseDate(paymentDate, payment.method);
+      if (releaseDate <= now) continue; // já liberado → não é antecipável
+
+      const organizerBase = Math.max(
+        0,
+        (order.finalAmount ?? 0) - (order.serviceFee ?? 0),
+      );
+      const netAmount = Math.round(
+        organizerBase *
+          (1 - resolveOrderOrganizerFeePercent(order, event.organizerFeePercent) / 100),
+      );
+      const available = netAmount - (consumedByOrder.get(order.id) ?? 0);
+      if (available <= 0) continue;
+
+      items.push({
+        orderId: order.id,
+        netAmount: available,
+        daysUntilRelease: Math.ceil((releaseDate.getTime() - now.getTime()) / 86400000),
+        paymentDate,
+      });
+    }
+    return items;
+  }
+
+  /**
+   * Cotação da antecipação: total disponível + taxa mensal + a lista de pedidos
+   * (oldest-first) para o front calcular a prévia LOCAL com a mesma fórmula.
+   */
+  async getAnticipationQuote(userId: string, eventId: string) {
+    await this.assertAccess(userId, eventId);
+    const prisma = this.prisma.getWriteClient();
+    const orders = await this.loadAnticipatableOrders(eventId, prisma);
+    const anticipatableTotal = orders.reduce((s, o) => s + o.netAmount, 0);
+    const sorted = [...orders].sort(
+      (a, b) => new Date(a.paymentDate).getTime() - new Date(b.paymentDate).getTime(),
+    );
+    return {
+      message: 'Anticipation quote fetched successfully',
+      data: {
+        anticipatableTotal,
+        monthlyRate: ANTICIPATION_MONTHLY_RATE,
+        orders: sorted.map((o) => ({
+          orderId: o.orderId,
+          netAmount: o.netAmount,
+          daysUntilRelease: o.daysUntilRelease,
+        })),
+      },
+    };
+  }
+
+  /**
+   * Solicita a antecipação (persiste PENDING, igual ao saque). Recalcula o custo
+   * de forma AUTORITATIVA no servidor (a prévia do front é só ilustrativa) e trava
+   * o evento com advisory lock pra serializar pedidos concorrentes.
+   */
+  async requestAnticipation(userId: string, eventId: string, amount: number) {
+    await this.assertAccess(userId, eventId);
+    if (!amount || amount <= 0) {
+      throw new BadRequestException('O valor deve ser maior que zero');
+    }
+
+    const prismaWrite = this.prisma.getWriteClient();
+    const anticipation = await prismaWrite.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${eventId}))`;
+
+      const orders = await this.loadAnticipatableOrders(eventId, tx);
+      const anticipatableTotal = orders.reduce((s, o) => s + o.netAmount, 0);
+      if (amount > anticipatableTotal) {
+        throw new BadRequestException(
+          `Valor acima do disponível para antecipação. Disponível: ${anticipatableTotal} centavos, solicitado: ${amount} centavos`,
+        );
+      }
+
+      const { costAmount, netAmount, breakdown } = computeAnticipationCost(
+        orders,
+        amount,
+        ANTICIPATION_MONTHLY_RATE,
+      );
+
+      return tx.eventAnticipation.create({
+        data: {
+          eventId,
+          requestedById: userId,
+          amount,
+          monthlyRate: ANTICIPATION_MONTHLY_RATE,
+          costAmount,
+          netAmount,
+          breakdown: breakdown as any,
+          status: WithdrawalStatus.PENDING,
+        },
+      });
+    });
+
+    return { message: 'Anticipation requested successfully', data: { anticipation } };
+  }
+
+  /** Histórico de antecipações do evento. */
+  async getAnticipations(userId: string, eventId: string, page: number, limit: number) {
+    await this.assertAccess(userId, eventId);
+    const prisma = this.prisma.getReadClient();
+    const [anticipations, total] = await Promise.all([
+      prisma.eventAnticipation.findMany({
+        where: { eventId },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.eventAnticipation.count({ where: { eventId } }),
+    ]);
+    return {
+      message: 'Anticipations fetched successfully',
+      data: {
+        anticipations,
+        pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+      },
+    };
+  }
+
+  /** [Admin] Conclui a antecipação (transição atômica só se ainda PENDING). */
+  async completeAnticipation(adminUserId: string, eventId: string, anticipationId: string) {
+    await this.assertAdminOrOwner(adminUserId, eventId);
+    const res = await this.prisma.getWriteClient().eventAnticipation.updateMany({
+      where: { id: anticipationId, eventId, status: WithdrawalStatus.PENDING },
+      data: { status: WithdrawalStatus.COMPLETED, completedAt: new Date() },
+    });
+    if (res.count === 0) {
+      throw new NotFoundException('Antecipação não encontrada ou já processada');
+    }
+    return { message: 'Anticipation completed successfully' };
+  }
+
+  /** [Admin] Cancela a antecipação (transição atômica só se ainda PENDING). */
+  async cancelAnticipation(adminUserId: string, eventId: string, anticipationId: string) {
+    await this.assertAdminOrOwner(adminUserId, eventId);
+    const res = await this.prisma.getWriteClient().eventAnticipation.updateMany({
+      where: { id: anticipationId, eventId, status: WithdrawalStatus.PENDING },
+      data: { status: WithdrawalStatus.CANCELLED },
+    });
+    if (res.count === 0) {
+      throw new NotFoundException('Antecipação não encontrada ou já processada');
+    }
+    return { message: 'Anticipation cancelled successfully' };
+  }
+
   async getInstallments(userId: string, eventId: string, page: number, limit: number) {
     await this.assertAccess(userId, eventId);
 
@@ -1184,7 +1425,7 @@ export class RepasseService {
           id: true,
           name: true,
           slug: true,
-          logoUrl: true,
+          bannerUrl: true,
           eventDate: true,
           organizerFeePercent: true,
           retentionRate: true,
@@ -1217,7 +1458,7 @@ export class RepasseService {
           id: event.id,
           name: event.name,
           slug: event.slug,
-          logoUrl: event.logoUrl,
+          bannerUrl: event.bannerUrl,
           eventDate: event.eventDate,
           retentionRate: event.retentionRate,
           organization: event.organization,
@@ -1255,7 +1496,7 @@ export class RepasseService {
             id: event.id,
             name: event.name,
             slug: event.slug,
-            logoUrl: event.logoUrl,
+            bannerUrl: event.bannerUrl,
             eventDate: event.eventDate,
             retentionRate: event.retentionRate,
             organization: event.organization,

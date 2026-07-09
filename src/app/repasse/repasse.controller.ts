@@ -32,6 +32,13 @@ class RequestWithdrawalDto {
   notes?: string;
 }
 
+class RequestAnticipationDto {
+  @IsInt()
+  @Min(1)
+  @Type(() => Number)
+  amount: number; // centavos
+}
+
 class AuditEventDto {
   @IsOptional()
   @IsString()
@@ -133,6 +140,64 @@ export class RepasseController {
     @Param('withdrawalId') withdrawalId: string,
   ) {
     return this.repasseService.cancelWithdrawal(req.user.id, eventId, withdrawalId);
+  }
+
+  // ─── Antecipação de recebíveis ──────────────────────────────────────────
+
+  @Get('anticipations/quote')
+  @ApiOperation({ summary: 'Cotação de antecipação (disponível + taxa + pedidos)' })
+  @ApiParam({ name: 'eventId', type: String })
+  getAnticipationQuote(@Request() req, @Param('eventId') eventId: string) {
+    return this.repasseService.getAnticipationQuote(req.user.id, eventId);
+  }
+
+  @Get('anticipations')
+  @ApiOperation({ summary: 'Histórico de antecipações' })
+  @ApiParam({ name: 'eventId', type: String })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  getAnticipations(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit: number,
+  ) {
+    return this.repasseService.getAnticipations(req.user.id, eventId, page, Math.min(limit, 100));
+  }
+
+  @Post('anticipations')
+  @ApiOperation({ summary: 'Solicitar antecipação de recebíveis' })
+  @ApiParam({ name: 'eventId', type: String })
+  requestAnticipation(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Body() dto: RequestAnticipationDto,
+  ) {
+    return this.repasseService.requestAnticipation(req.user.id, eventId, dto.amount);
+  }
+
+  @Patch('anticipations/:anticipationId/complete')
+  @ApiOperation({ summary: '[Admin] Marcar antecipação como concluída' })
+  @ApiParam({ name: 'eventId', type: String })
+  @ApiParam({ name: 'anticipationId', type: String })
+  completeAnticipation(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Param('anticipationId') anticipationId: string,
+  ) {
+    return this.repasseService.completeAnticipation(req.user.id, eventId, anticipationId);
+  }
+
+  @Patch('anticipations/:anticipationId/cancel')
+  @ApiOperation({ summary: '[Admin] Cancelar antecipação' })
+  @ApiParam({ name: 'eventId', type: String })
+  @ApiParam({ name: 'anticipationId', type: String })
+  cancelAnticipation(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Param('anticipationId') anticipationId: string,
+  ) {
+    return this.repasseService.cancelAnticipation(req.user.id, eventId, anticipationId);
   }
 
   @Get('refunded')

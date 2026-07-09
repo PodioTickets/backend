@@ -35,7 +35,6 @@ export const PAYMENT_DETAILS_STANDARD_INCLUDE = {
           state: true,
           country: true,
           bannerUrl: true,
-          logoUrl: true,
           organizationId: true,
           organization: {
             select: {

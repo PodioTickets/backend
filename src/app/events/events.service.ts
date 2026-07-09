@@ -44,6 +44,8 @@ import {
 import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
 import { TicketsService } from '../tickets/tickets.service';
 import { resolveActiveBatch, type BatchWithSold } from '../tickets/batch-active.util';
+import { computeRegistrationPaidValues } from './export-paid-value.util';
+import { formatEventCardAddress } from '../../common/utils/event-email-format.util';
 import { TicketCategoriesService } from '../ticket-categories/ticket-categories.service';
 import { EmailService } from '../../common/services/email.service';
 import { RepasseService, RETENTION_DAYS } from '../repasse/repasse.service';
@@ -334,14 +336,15 @@ export class EventsService {
       );
     }
 
-    const { cardImageUrl, ...createEventRest } = createEventDto;
+    // Imagem do evento = BANNER apenas. A antiga "imagem do card" (logoUrl) foi
+    // descontinuada — todo o app exibe o banner. Não coletamos/gravamos mais logoUrl.
+    const createEventRest = createEventDto;
 
     // Criar evento primeiro para ter o ID
     const event = await prismaWrite.event.create({
       data: {
         ...createEventRest,
         state: EventsService.normalizeState(createEventRest.state),
-        logoUrl: createEventDto.logoUrl ?? cardImageUrl,
         slug: null, // Será gerado depois com o ID
         organizationId: member.organizationId,
         // Taxas padrão: organizador 4% (sobrescrevível) e participante 2% (interno).
@@ -465,7 +468,6 @@ export class EventsService {
               registrationStartDate: updatedEvent.registrationStartDate,
               registrationEndDate: updatedEvent.registrationEndDate,
               bannerUrl: updatedEvent.bannerUrl,
-              logoUrl: updatedEvent.logoUrl,
             },
           },
         ],
@@ -855,12 +857,12 @@ export class EventsService {
           name: true,
           description: true,
           bannerUrl: true,
-          logoUrl: true,
           slug: true,
           location: true,
           city: true,
           state: true,
           country: true,
+          locationName: true,
           eventDate: true,
           registrationStartDate: true,
           registrationEndDate: true,
@@ -1075,7 +1077,6 @@ export class EventsService {
           slug: true,
           description: true,
           bannerUrl: true,
-          logoUrl: true,
           location: true,
           city: true,
           state: true,
@@ -1083,6 +1084,9 @@ export class EventsService {
           zipCode: true,
           neighborhood: true,
           googleMapsLink: true,
+          latitude: true,
+          longitude: true,
+          locationName: true,
           contactEmail: true,
           instagram: true,
           facebook: true,
@@ -1120,11 +1124,11 @@ export class EventsService {
     let eventsPayload = eventsCompleted;
     if (shouldIncludeSlots && eventsCompleted.length > 0) {
       const eventIds = eventsCompleted.map((e) => e.id);
-      const slotMaps = await this.loadRegistrationSlotCountMapsForTickets(
+      const ticketsByEvent = await this.loadTicketsWithBatchesForEvents(
         prismaRead,
         eventIds,
       );
-      // Teto de vagas do evento (cards da home/busca): 1 groupBy por página só
+      // Teto de vagas do evento (cards da home/busca): 1 count por página só
       // para eventos que TÊM teto — o "esgotado" precisa bater com a tela do evento.
       const cappedEventIds = eventsCompleted
         .filter((e) => e.maxParticipants != null)
@@ -1133,13 +1137,10 @@ export class EventsService {
         await this.countNonCancelledRegistrationsByEvents(prismaRead, cappedEventIds);
       eventsPayload = eventsCompleted.map((e) => ({
         ...e,
-        hasRegistrationSlotsAvailable: this.computeSlotsFromCounts(
+        hasRegistrationSlotsAvailable: this.computeSlotsFromTickets(
           e.status,
           e.eventDate instanceof Date ? e.eventDate : new Date(e.eventDate),
-          slotMaps.ticketsByEvent.get(e.id) ?? [],
-          slotMaps.totalByTicket,
-          slotMaps.soldWithBatchByTicket,
-          slotMaps.soldByBatch,
+          ticketsByEvent.get(e.id) ?? [],
           e.maxParticipants != null &&
             (regCountByEvent.get(e.id) ?? 0) >= e.maxParticipants,
         ),
@@ -1239,12 +1240,12 @@ export class EventsService {
           name: true,
           description: true,
           bannerUrl: true,
-          logoUrl: true,
           slug: true,
           location: true,
           city: true,
           state: true,
           country: true,
+          locationName: true,
           eventDate: true,
           registrationEndDate: true,
           status: true,
@@ -1339,13 +1340,15 @@ export class EventsService {
     name: true,
     slug: true,
     bannerUrl: true,
-    logoUrl: true,
     location: true,
     city: true,
     state: true,
     neighborhood: true,
     zipCode: true,
     googleMapsLink: true,
+    latitude: true,
+    longitude: true,
+    locationName: true,
     instagram: true,
     facebook: true,
     youtube: true,
@@ -1587,8 +1590,9 @@ export class EventsService {
 
     const now = new Date();
     const eventDate = new Date(event.eventDate);
-    // COMPLETED só após o FIM DO DIA civil em BRT (`isEventDatePast`), não no wall-clock
-    // cru — senão o evento "conclui" ~3h antes e fecha as inscrições cedo.
+    // COMPLETED só após o FIM DO DIA civil em BRT (fonte única `isEventDatePast`),
+    // não no wall-clock cru — senão o evento "conclui" ~3h antes e fecha as inscrições
+    // cedo. Mesma regra das listagens de admin/organizador.
     const status = isEventDatePast(eventDate, now)
       ? EventStatus.COMPLETED
       : event.status;
@@ -1598,7 +1602,7 @@ export class EventsService {
       where: { eventId: event.id, isActive: true },
       select: {
         id: true,
-        batches: { select: { id: true, quantity: true, startDate: true, endDate: true } },
+        batches: { select: { id: true, availableQuantity: true, startDate: true, endDate: true } },
       },
     });
 
@@ -1683,7 +1687,8 @@ export class EventsService {
 
     const now = new Date();
     const eventDate = event.eventDate instanceof Date ? event.eventDate : new Date(event.eventDate);
-    // COMPLETED só após o FIM DO DIA civil em BRT (`isEventDatePast`), não wall-clock cru.
+    // COMPLETED só após o FIM DO DIA civil em BRT (`isEventDatePast`), não no wall-clock
+    // cru — senão fecha as inscrições ~3h cedo. Mesma regra das listagens.
     const eventToReturn = isEventDatePast(eventDate, now)
       ? { ...event, status: EventStatus.COMPLETED }
       : event;
@@ -1710,85 +1715,40 @@ export class EventsService {
   }
 
   /**
-   * Contagens agregadas de RegistrationTicket confirmados (uma query groupBy por conjunto de ingressos).
+   * Ingressos ativos + lotes (com `availableQuantity`) por evento, para o cálculo de
+   * vagas dos cards de listagem. 1 query. A disponibilidade sai do `availableQuantity`
+   * do lote (mesmo gate do checkout) — não precisa mais agregar RegistrationTicket.
    */
-  private async buildConfirmedRegistrationCounts(
-    prismaRead: ReturnType<PrismaService['getReadClient']>,
-    ticketIds: string[],
-  ): Promise<{
-    totalByTicket: Map<string, number>;
-    soldWithBatchByTicket: Map<string, number>;
-    soldByBatch: Map<string, number>;
-  }> {
-    const totalByTicket = new Map<string, number>();
-    const soldWithBatchByTicket = new Map<string, number>();
-    const soldByBatch = new Map<string, number>();
-
-    if (ticketIds.length === 0) {
-      return { totalByTicket, soldWithBatchByTicket, soldByBatch };
-    }
-
-    const groupRows = await prismaRead.registrationTicket.groupBy({
-      by: ['ticketId', 'batchId'],
-      where: {
-        ticketId: { in: ticketIds },
-        registration: { status: RegistrationStatus.CONFIRMED },
-      },
-      _count: { id: true },
-    });
-
-    for (const row of groupRows) {
-      const c = row._count.id;
-      const tid = row.ticketId;
-      const bid = row.batchId;
-      totalByTicket.set(tid, (totalByTicket.get(tid) ?? 0) + c);
-      if (bid != null) {
-        soldWithBatchByTicket.set(
-          tid,
-          (soldWithBatchByTicket.get(tid) ?? 0) + c,
-        );
-        soldByBatch.set(bid, (soldByBatch.get(bid) ?? 0) + c);
-      }
-    }
-
-    return { totalByTicket, soldWithBatchByTicket, soldByBatch };
-  }
-
-  /**
-   * Ingressos ativos + lotes + mapas de venda para uma página de eventos (2 queries no total).
-   */
-  private async loadRegistrationSlotCountMapsForTickets(
+  private async loadTicketsWithBatchesForEvents(
     prismaRead: ReturnType<PrismaService['getReadClient']>,
     eventIds: string[],
-  ): Promise<{
-    ticketsByEvent: Map<
+  ): Promise<
+    Map<
       string,
       Array<{
-        id: string;
         batches: Array<{
-          id: string;
-          quantity: number;
+          availableQuantity: number;
           startDate: Date | null;
           endDate: Date | null;
         }>;
       }>
-    >;
-    totalByTicket: Map<string, number>;
-    soldWithBatchByTicket: Map<string, number>;
-    soldByBatch: Map<string, number>;
-  }> {
+    >
+  > {
     const tickets = await prismaRead.ticket.findMany({
       where: { eventId: { in: eventIds }, isActive: true },
-      include: { batches: true },
+      select: {
+        eventId: true,
+        batches: {
+          select: { availableQuantity: true, startDate: true, endDate: true },
+        },
+      },
     });
 
     const ticketsByEvent = new Map<
       string,
       Array<{
-        id: string;
         batches: Array<{
-          id: string;
-          quantity: number;
+          availableQuantity: number;
           startDate: Date | null;
           endDate: Date | null;
         }>;
@@ -1796,42 +1756,32 @@ export class EventsService {
     >();
     for (const t of tickets) {
       const arr = ticketsByEvent.get(t.eventId) ?? [];
-      arr.push(t);
+      arr.push({ batches: t.batches });
       ticketsByEvent.set(t.eventId, arr);
     }
-
-    const ticketIds = tickets.map((t) => t.id);
-    const counts = await this.buildConfirmedRegistrationCounts(
-      prismaRead,
-      ticketIds,
-    );
-
-    return {
-      ticketsByEvent,
-      totalByTicket: counts.totalByTicket,
-      soldWithBatchByTicket: counts.soldWithBatchByTicket,
-      soldByBatch: counts.soldByBatch,
-    };
+    return ticketsByEvent;
   }
 
   /**
-   * Mesma regra do endpoint por slug, sem I/O (usa mapas pré-carregados).
+   * Há vaga em algum ingresso? Decide pela MESMA fonte de verdade que o checkout usa
+   * (`TicketBatch.availableQuantity`), não por contagem derivada de inscrições. Antes,
+   * contava inscrições CONFIRMED vs `batch.quantity` — o que DIVERGIA do gate real de
+   * venda: `availableQuantity` é decrementado na reserva (inclui PENDING) e restaurado
+   * na expiração/estorno, então o "esgotado" da tela do evento passa a bater exatamente
+   * com o do checkout (ex.: lote com availableQuantity=0 mas poucos confirmados NÃO
+   * reabre o botão "Inscreva-se"). Bônus de performance: dispensa o groupBy de
+   * RegistrationTicket que rodava por página/evento. Sem I/O.
    */
-  private computeSlotsFromCounts(
+  private computeSlotsFromTickets(
     eventStatus: EventStatus,
     eventDate: Date,
     tickets: Array<{
-      id: string;
       batches: Array<{
-        id: string;
-        quantity: number;
+        availableQuantity: number;
         startDate: Date | null;
         endDate: Date | null;
       }>;
     }>,
-    totalByTicket: Map<string, number>,
-    soldWithBatchByTicket: Map<string, number>,
-    soldByBatch: Map<string, number>,
     /** Teto de vagas do evento atingido → esgotado, independentemente dos lotes. */
     eventCapReached = false,
   ): boolean {
@@ -1846,7 +1796,8 @@ export class EventsService {
     if (eventCapReached) {
       return false;
     }
-    // Evento realizado = após o FIM DO DIA civil em BRT (`isEventDatePast`), não wall-clock cru.
+    // Evento já realizado = após o FIM DO DIA civil em BRT (`isEventDatePast`), não no
+    // wall-clock cru — senão zeraria as vagas ~3h antes do fim do dia do evento.
     if (isEventDatePast(eventDate)) {
       return false;
     }
@@ -1856,61 +1807,34 @@ export class EventsService {
     const now = new Date();
     for (const ticket of tickets) {
       if (!ticket.batches?.length) continue;
+      // Vaga = existe um lote VIGENTE (dentro da janela start/end) com saldo real (>0).
       // start/end são WALL-CLOCK (UTC) → instante real em BRT via `eventWindowInstant`
-      // (+3h); senão a janela do lote fecha 3h CEDO e o evento aparece "Esgotado" ainda
-      // dentro do horário (mesma convenção da janela de inscrição).
-      const activeBatches = ticket.batches.filter(
+      // (+3h); senão a janela do lote fechava 3h CEDO e o evento aparecia "Esgotado"
+      // ainda dentro do horário (mesma convenção da janela de inscrição).
+      const hasActiveRoom = ticket.batches.some(
         (b) =>
           (!b.startDate || eventWindowInstant(b.startDate) <= now) &&
-          (!b.endDate || eventWindowInstant(b.endDate) >= now),
+          (!b.endDate || eventWindowInstant(b.endDate) >= now) &&
+          b.availableQuantity > 0,
       );
-      if (activeBatches.length === 0) continue;
-
-      const capSum = activeBatches.reduce((sum, b) => sum + b.quantity, 0);
-
-      const totalConfirmed = totalByTicket.get(ticket.id) ?? 0;
-
-      if (totalConfirmed >= capSum) {
-        continue;
-      }
-
-      const soldWithBatchId = soldWithBatchByTicket.get(ticket.id) ?? 0;
-
-      if (soldWithBatchId === 0) {
-        if (totalConfirmed < capSum) {
-          return true;
-        }
-        continue;
-      }
-
-      for (const batch of activeBatches) {
-        const soldBatch = soldByBatch.get(batch.id) ?? 0;
-        if (batch.quantity > soldBatch) {
-          return true;
-        }
-      }
-
-      if (totalConfirmed < capSum) {
-        return true;
-      }
+      if (hasActiveRoom) return true;
     }
     return false;
   }
 
   /**
-   * Indica se ainda há capacidade (vaga) em algum ingresso ativo com lote no período vigente.
-   * Inclui eventos SUSPENDED: reflete estoque real; a UI pode bloquear inscrição pelo status.
-   * Usa uma única agregação groupBy em vez de N counts.
+   * Indica se ainda há vaga em algum ingresso ativo com lote vigente. Fonte de verdade =
+   * `TicketBatch.availableQuantity` (mesmo gate do checkout). Inclui eventos SUSPENDED:
+   * reflete estoque real; a UI pode bloquear inscrição pelo status. Só 1 query barata
+   * (isEventCapReached) — não agrega mais RegistrationTicket.
    */
   private async computeHasRegistrationSlotsAvailable(
     prismaRead: ReturnType<PrismaService['getReadClient']>,
     eventStatus: EventStatus,
     eventDate: Date,
     tickets: Array<{
-      id: string;
       batches: Array<{
-        id: string;
-        quantity: number;
+        availableQuantity: number;
         startDate: Date | null;
         endDate: Date | null;
       }>;
@@ -1929,7 +1853,7 @@ export class EventsService {
     if (isEventDatePast(eventDate)) {
       return false;
     }
-    // Teto do evento: se atingido, esgotado — nem precisa contar os lotes.
+    // Teto do evento: se atingido, esgotado — nem precisa olhar os lotes.
     const eventCapReached = await this.isEventCapReached(
       prismaRead,
       eventId,
@@ -1938,21 +1862,10 @@ export class EventsService {
     if (eventCapReached) {
       return false;
     }
-    if (!tickets?.length) {
-      return false;
-    }
-    const ticketIds = tickets.map((t) => t.id);
-    const counts = await this.buildConfirmedRegistrationCounts(
-      prismaRead,
-      ticketIds,
-    );
-    return this.computeSlotsFromCounts(
+    return this.computeSlotsFromTickets(
       eventStatus,
       eventDate,
       tickets,
-      counts.totalByTicket,
-      counts.soldWithBatchByTicket,
-      counts.soldByBatch,
       eventCapReached,
     );
   }
@@ -2038,7 +1951,6 @@ export class EventsService {
 
     const {
       clientPage,
-      cardImageUrl,
       kitSelectionDisplay: kitSelDto,
       ...patchFields
     } = updateEventDto;
@@ -2053,12 +1965,7 @@ export class EventsService {
     if (updateData.state !== undefined) {
       updateData.state = EventsService.normalizeState(updateData.state as string);
     }
-    if (
-      cardImageUrl !== undefined &&
-      updateEventDto.logoUrl === undefined
-    ) {
-      updateData.logoUrl = cardImageUrl;
-    }
+    // "Imagem do card" (logoUrl/cardImageUrl) descontinuada — só banner. Nada a gravar.
 
     // Gerar slug se o nome ou slug foi alterado
     if (updateEventDto.name || updateEventDto.slug) {
@@ -2732,15 +2639,15 @@ export class EventsService {
       const submittedHH = String(submittedAt.getHours()).padStart(2, '0');
       const submittedMM = String(submittedAt.getMinutes()).padStart(2, '0');
       const submittedAtFormatted = `${submittedAt.toLocaleDateString('pt-BR')} · ${submittedHH}h${submittedMM}`;
-      // Card do e-mail exibe apenas Estado, Cidade (sem endereço completo)
-      const eventLocation = [event.state, event.city].filter(Boolean).join(', ');
+      // Endereço do card = Local, Cidade, Estado (igual ao card da home).
+      const eventLocation = formatEventCardAddress(event);
 
       this.emailService
         .sendEventUnderReview({
           recipientEmail: organizer.email,
           eventName: event.name,
-          // Template usa imagem 308x308 = imagem do CARD (logoUrl), não o banner.
-          eventBannerUrl: (event as any).logoUrl ?? event.bannerUrl ?? '',
+          // Imagem do e-mail = BANNER do evento (logoUrl descontinuado).
+          eventBannerUrl: event.bannerUrl ?? '',
           eventDate: eventDateFormatted,
           eventLocation,
           submittedAt: submittedAtFormatted,
@@ -5315,6 +5222,12 @@ export class EventsService {
           user: {
             select: { id: true, firstName: true, lastName: true, email: true },
           },
+          // Unidades e cupom do pedido: base p/ reproduzir a distribuição do desconto
+          // por ingresso (valor pago por ingresso no export — computeRegistrationPaidValues).
+          reservedTickets: {
+            select: { ticketId: true, unitPrice: true, quantity: true },
+          },
+          coupon: { select: { type: true, value: true, appliesTo: true } },
         },
       },
     };
@@ -5370,6 +5283,11 @@ export class EventsService {
     // Lookup em lote dos convidados resolvíveis por documento (PRIORITY 2 do modal).
     const userByDoc = await this.buildParticipantUserByDocMap(prismaRead, registrations);
 
+    // Valor pago POR INGRESSO (ingresso + produtos − cupom/voucher, sem taxa) —
+    // reproduz a distribuição do recibo. Calculado sobre as inscrições CRUAS (têm
+    // reservedTickets/coupon/products/batch price) antes do map de saída.
+    const paidByRegId = computeRegistrationPaidValues(registrations);
+
     const mapped = registrations.map((reg: any) => {
       // Mesma resolução do modal de detalhe: snapshot → user → doc → colunas.
       const participant = this.resolveOrganizerParticipant(reg, userByDoc);
@@ -5421,6 +5339,155 @@ export class EventsService {
           // Preserva 0 (pedido gratuito) em vez de virar null — o export usa isto
           // p/ exibir "R$ 0,00" e "Gratuito" como forma de pagamento.
           finalAmount: order.finalAmount != null ? this.normalizeToCents(order.finalAmount) : null,
+          // Valor pago POR INGRESSO desta inscrição (ingresso + produtos − desconto,
+          // sem taxa de serviço). Centavos; 0 preservado (pedido grátis).
+          paidPerTicket: paidByRegId.get(reg.id) ?? null,
+          purchaseDate: order.createdAt ?? null,
+          billingAddress,
+          payment: order.payment
+            ? {
+              status: order.payment.status,
+              method: order.payment.method,
+              paymentDate: order.payment.paymentDate,
+              createdAt: order.payment.createdAt,
+            }
+            : null,
+        },
+      };
+    });
+
+    return { registrations: mapped, eventName };
+  }
+
+  /**
+   * Igual ao `getRegistrationsForExport`, porém filtrado por USUÁRIO (todos os
+   * eventos) em vez de por evento — usado no export CSV do drawer de detalhes do
+   * usuário (admin). Reusa o MESMO include + mapeamento → MESMAS colunas do export
+   * de inscrições. Sem filtros/refino de status: exporta tudo que não é PENDING.
+   */
+  async getUserRegistrationsForExport(
+    userId: string,
+  ): Promise<{ registrations: any[]; eventName: string }> {
+    const prismaRead = this.prisma.getReadClient();
+
+    const user = await prismaRead.user.findUnique({
+      where: { id: userId },
+      select: { firstName: true, lastName: true },
+    });
+    const eventName =
+      `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim() || 'Ingressos';
+
+    const includeClause = {
+      user: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          phone: true,
+          documentNumber: true,
+          documentType: true,
+          country: true,
+          dateOfBirth: true,
+          gender: true,
+          avatarUrl: true,
+        },
+      },
+      tickets: {
+        include: {
+          ticket: {
+            include: {
+              category: { select: { id: true, name: true } },
+            },
+          },
+          batch: { select: { id: true, price: true } },
+        },
+      },
+      products: {
+        include: {
+          product: { select: { id: true, name: true } },
+          variation: { select: { id: true, name: true } },
+        },
+      },
+      questionAnswers: {
+        include: {
+          question: { select: { id: true, question: true, type: true, isActive: true } },
+        },
+      },
+      order: {
+        include: {
+          payment: {
+            select: {
+              id: true,
+              status: true,
+              method: true,
+              amount: true,
+              paymentDate: true,
+              createdAt: true,
+              metadata: true,
+            },
+          },
+          user: {
+            select: { id: true, firstName: true, lastName: true, email: true },
+          },
+          reservedTickets: {
+            select: { ticketId: true, unitPrice: true, quantity: true },
+          },
+          coupon: { select: { type: true, value: true, appliesTo: true } },
+        },
+      },
+    };
+
+    const registrations = await prismaRead.registration.findMany({
+      where: { userId, status: { not: 'PENDING' as any } },
+      include: includeClause,
+      orderBy: [{ order: { createdAt: 'desc' } }, { id: 'asc' }],
+    });
+
+    const userByDoc = await this.buildParticipantUserByDocMap(prismaRead, registrations);
+    const paidByRegId = computeRegistrationPaidValues(registrations);
+
+    const mapped = registrations.map((reg: any) => {
+      const participant = this.resolveOrganizerParticipant(reg, userByDoc);
+      const order = reg.order ?? {};
+      const billingAddress = this.resolveOrderBillingAddress(order, order.payment);
+
+      return {
+        id: reg.id,
+        status: reg.status,
+        user: participant,
+        emergencyContact: {
+          name: reg.emergencyContactName ?? null,
+          phone: reg.emergencyContactPhone ?? null,
+        },
+        tickets: (reg.tickets ?? []).map((rt: any) => ({
+          ticketSnapshot: rt.ticketSnapshot ?? null,
+          ticket: rt.ticket
+            ? {
+              name: rt.ticket.name ?? null,
+              modality: rt.ticket.modality ?? null,
+              category: rt.ticket.category ? { name: rt.ticket.category.name } : null,
+            }
+            : null,
+        })),
+        products: (reg.products ?? []).map((rp: any) => {
+          const snap = rp.productSnapshot as Record<string, any> | null;
+          return {
+            product: { name: snap?.name ?? rp.product?.name ?? '' },
+            variationName: rp.variation?.name ?? snap?.selectedVariation?.name ?? null,
+          };
+        }),
+        questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => {
+          const qSnap = qa.questionSnapshot as Record<string, any> | null;
+          return {
+            question: { question: qSnap?.question ?? qa.question?.question ?? '' },
+            answer: qa.answer ?? '',
+          };
+        }),
+        order: {
+          finalAmount:
+            order.finalAmount != null ? this.normalizeToCents(order.finalAmount) : null,
+          paidPerTicket: paidByRegId.get(reg.id) ?? null,
           purchaseDate: order.createdAt ?? null,
           billingAddress,
           payment: order.payment
