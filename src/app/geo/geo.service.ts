@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { City, Country, State } from 'country-state-city';
+import * as geoip from 'geoip-lite';
 import { ListCitiesDto } from './dto/list-cities.dto';
 
 /** Teto default de cidades quando o cliente não envia `limit` (ver contrato). */
@@ -83,5 +84,52 @@ export class GeoService {
       success: true,
       data: { cities: cities.length > limit ? cities.slice(0, limit) : cities },
     };
+  }
+
+  /**
+   * Geolocalização APROXIMADA (nível cidade) a partir do IP do cliente, resolvida
+   * LOCALMENTE via `geoip-lite` (base embarcada — sem chamada de rede, sem terceiros,
+   * sem persistir o IP). Usada só para CENTRALIZAR o mapa de seleção de local ao
+   * CRIAR um evento; nunca fixa o pino (precisão de IP é de cidade, não de endereço).
+   *
+   * Retorna `location: null` (sem erro) quando o IP é privado/loopback (dev),
+   * IPv6-mapeado sem match, ou não resolvível — o frontend cai no comportamento
+   * atual (centro do Brasil). Resiliência intencional: não é dado crítico.
+   */
+  getIpLocation(ip: string) {
+    // `::ffff:1.2.3.4` (IPv4 mapeado em IPv6) → normaliza igual ao auth.service.
+    const cleanIp = (ip ?? '').replace(/^::ffff:/, '').trim();
+    if (!cleanIp) return { success: true, data: { location: null } };
+
+    try {
+      const geo = geoip.lookup(cleanIp);
+      const ll = geo?.ll;
+      if (Array.isArray(ll) && ll.length === 2) {
+        const [lat, lng] = ll;
+        if (
+          typeof lat === 'number' &&
+          typeof lng === 'number' &&
+          Number.isFinite(lat) &&
+          Number.isFinite(lng)
+        ) {
+          return {
+            success: true,
+            data: {
+              location: {
+                lat,
+                lng,
+                city: geo?.city || null,
+                region: geo?.region || null,
+                country: geo?.country || null,
+              },
+            },
+          };
+        }
+      }
+    } catch {
+      // base indisponível / IP inválido → trata como "sem localização".
+    }
+
+    return { success: true, data: { location: null } };
   }
 }
