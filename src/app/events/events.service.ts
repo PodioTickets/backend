@@ -867,6 +867,7 @@ export class EventsService {
           registrationStartDate: true,
           registrationEndDate: true,
           status: true,
+          featuredOrder: true,
           createdAt: true,
           organization: {
             select: {
@@ -884,9 +885,14 @@ export class EventsService {
             },
           },
         },
-        orderBy: {
-          eventDate: 'asc',
-        },
+        // Destaque PRIMEIRO (admin) e depois por data. `nulls: 'last'` garante que os
+        // eventos sem destaque (featuredOrder = null) fiquem depois dos destacados.
+        // A ordenação explícita do usuário (nome/data-desc) é aplicada no client sobre
+        // a página; a ordem PADRÃO (data-asc) preserva esta prioridade de destaque.
+        orderBy: [
+          { featuredOrder: { sort: 'asc', nulls: 'last' } },
+          { eventDate: 'asc' },
+        ],
       }),
       prismaRead.event.count({ where }),
     ]);
@@ -922,9 +928,16 @@ export class EventsService {
       includeDraft,
       includePast,
       includeHasSlots,
+      featured,
     } = filterDto;
 
     const where: any = {};
+
+    // Carrossel de "Eventos em destaque" da home: só eventos marcados pelo admin
+    // (featuredOrder != null), ordenados pela ordem definida na tela de destaque.
+    if (featured) {
+      where.featuredOrder = { not: null };
+    }
 
     // Catálogo público: nunca listar SUSPENDED (nem por padrão nem via includeDraft).
     // Sem status na query: apenas PUBLISHED. Com status na query: filtra pelo valor (exceto que SUSPENDED continua excluído pelo AND global abaixo).
@@ -1099,6 +1112,7 @@ export class EventsService {
           registrationEndDate: true,
           maxParticipants: true,
           status: true,
+          featuredOrder: true,
           createdAt: true,
           updatedAt: true,
           organization: {
@@ -1111,9 +1125,12 @@ export class EventsService {
             },
           },
         },
-        orderBy: {
-          eventDate: 'asc',
-        },
+        // Carrossel de destaque: honra a ordem do admin (featuredOrder asc). Catálogo
+        // geral: por data. `nulls: 'last'` mantém não-destacados depois no caso featured
+        // (inócuo aqui, pois o where já exige featuredOrder != null).
+        orderBy: featured
+          ? [{ featuredOrder: { sort: 'asc', nulls: 'last' } }]
+          : { eventDate: 'asc' },
       }),
       prismaRead.event.count({ where: whereFinal }),
     ]);

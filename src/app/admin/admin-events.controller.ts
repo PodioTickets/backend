@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Patch, Param, Query, Body, UseGuards,
+  Controller, Get, Post, Patch, Delete, Param, Query, Body, UseGuards,
   DefaultValuePipe, ParseIntPipe, ParseUUIDPipe, Req,
 } from '@nestjs/common';
 import {
@@ -8,7 +8,7 @@ import {
 } from '@nestjs/swagger';
 import {
   IsEnum, IsISO8601, IsNumber, IsNumberString, IsOptional,
-  IsString, IsUUID, IsIn, IsInt, Min, Max,
+  IsString, IsUUID, IsIn, IsInt, Min, Max, IsArray, ArrayNotEmpty,
 } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { EventStatus } from '@prisma/client';
@@ -25,6 +25,14 @@ class AdminUpdateFinancialSettingsDto {
   // Taxas Podio↔organizador por evento (frações 0–1: 0.10 = 10%, 0.02 = 2%).
   @IsOptional() @IsNumber() @Min(0) @Max(1) retentionRate?: number;
   @IsOptional() @IsNumber() @Min(0) @Max(1) refundFeeRate?: number;
+}
+
+class ReorderFeaturedDto {
+  /** Conjunto EXATO de eventos em destaque, na nova ordem desejada. */
+  @IsArray()
+  @ArrayNotEmpty()
+  @IsUUID('all', { each: true })
+  orderedIds!: string[];
 }
 
 class AdminEventsQueryDto {
@@ -153,6 +161,45 @@ export class AdminEventsController {
       search,
       organizationId,
     );
+  }
+
+  // ── Eventos em destaque (carrossel da home + prioridade na busca) ───────────
+  // Rotas ESTÁTICAS (`events/featured`, `events/featured/order`) declaradas antes
+  // das dinâmicas (`events/:eventId/...`) para não serem capturadas por elas.
+
+  @Get('events/featured')
+  @NoCache()
+  @ApiOperation({ summary: '[Admin] Lista os eventos em destaque na ordem do carrossel' })
+  @ApiResponse({ status: 200, description: 'Eventos em destaque' })
+  listFeatured() {
+    return this.adminEventsService.listFeatured();
+  }
+
+  @Patch('events/featured/order')
+  @ApiOperation({ summary: '[Admin] Reordena o carrossel de destaque (orderedIds = conjunto atual)' })
+  @ApiResponse({ status: 200, description: 'Ordem atualizada' })
+  @ApiResponse({ status: 400, description: 'orderedIds não corresponde ao conjunto atual' })
+  reorderFeatured(@Body() dto: ReorderFeaturedDto) {
+    return this.adminEventsService.reorderFeatured(dto.orderedIds);
+  }
+
+  @Post('events/:eventId/featured')
+  @ApiOperation({ summary: '[Admin] Adiciona o evento ao carrossel de destaque' })
+  @ApiParam({ name: 'eventId', type: String, description: 'UUID do evento' })
+  @ApiResponse({ status: 201, description: 'Evento adicionado ao destaque' })
+  @ApiResponse({ status: 400, description: 'Evento não está publicado' })
+  @ApiResponse({ status: 404, description: 'Evento não encontrado' })
+  addFeatured(@Param('eventId', ParseUUIDPipe) eventId: string) {
+    return this.adminEventsService.addFeatured(eventId);
+  }
+
+  @Delete('events/:eventId/featured')
+  @ApiOperation({ summary: '[Admin] Remove o evento do carrossel de destaque' })
+  @ApiParam({ name: 'eventId', type: String, description: 'UUID do evento' })
+  @ApiResponse({ status: 200, description: 'Evento removido do destaque' })
+  @ApiResponse({ status: 404, description: 'Evento não encontrado' })
+  removeFeatured(@Param('eventId', ParseUUIDPipe) eventId: string) {
+    return this.adminEventsService.removeFeatured(eventId);
   }
 
   @Post('events/:eventId/publish')
