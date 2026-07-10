@@ -492,7 +492,27 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
           gap: 16,
         },
       },
-      React.createElement(Image, { src: reg.qrDataUrl, style: { width: 80, height: 80 } }),
+      // QR com moldura branca (borda + padding), igual ao QR da tela de ingresso
+      // do usuário (RegistrationQRCode). Caixa mantida em 80×80 → não altera o
+      // cálculo de altura do participante; o QR fica embutido (64px) com padding.
+      React.createElement(
+        View,
+        {
+          style: {
+            width: 80,
+            height: 80,
+            padding: 8,
+            backgroundColor: '#FFFFFF',
+            borderWidth: 1,
+            borderColor: C.gray6,
+            borderStyle: 'solid',
+            borderRadius: 12,
+            alignItems: 'center',
+            justifyContent: 'center',
+          },
+        },
+        React.createElement(Image, { src: reg.qrDataUrl, style: { width: 64, height: 64 } }),
+      ),
       React.createElement(
         View,
         { style: { gap: 16 } },
