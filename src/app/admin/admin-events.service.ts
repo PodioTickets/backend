@@ -113,6 +113,7 @@ export class AdminEventsService {
           eventDate: true,
           registrationStartDate: true,
           registrationEndDate: true,
+          featuredOrder: true,
           organizerFeePercent: true,
           retentionRate: true,
           createdAt: true,
@@ -248,6 +249,7 @@ export class AdminEventsService {
           eventDate: true,
           registrationStartDate: true,
           registrationEndDate: true,
+          featuredOrder: true,
           organizerFeePercent: true,
           retentionRate: true,
           createdAt: true,
@@ -417,5 +419,138 @@ export class AdminEventsService {
         lockedAt: updated.financialSettingsLockedAt ?? null,
       },
     };
+  }
+
+  // ── Eventos em destaque (carrossel da home + prioridade na busca) ───────────
+  // Modelo: `Event.featuredOrder` (Int?, null = não destacado). A ordem é sempre
+  // renumerada de forma CONTÍGUA (1..N) a cada escrita, então o índice do array
+  // reflete exatamente a posição — o front nunca precisa reconciliar buracos.
+
+  /** Select mínimo do card de destaque (thumb + nome + local + datas p/ status). */
+  private static readonly FEATURED_SELECT = {
+    id: true,
+    name: true,
+    slug: true,
+    bannerUrl: true,
+    city: true,
+    state: true,
+    locationName: true,
+    status: true,
+    eventDate: true,
+    registrationStartDate: true,
+    registrationEndDate: true,
+    featuredOrder: true,
+  } as const;
+
+  /** Lista os destacados na ordem definida. Recebe o client da transação quando
+   *  chamado após uma escrita; fora de txn usa a read replica. */
+  private async readFeatured(
+    client: Prisma.TransactionClient = this.prisma.getReadClient(),
+  ) {
+    return client.event.findMany({
+      where: { featuredOrder: { not: null } },
+      orderBy: { featuredOrder: 'asc' },
+      select: AdminEventsService.FEATURED_SELECT,
+    });
+  }
+
+  /** GET — eventos em destaque, na ordem do carrossel. */
+  async listFeatured() {
+    const events = await this.readFeatured();
+    return { message: 'Featured events fetched successfully', data: { events } };
+  }
+
+  /** POST — adiciona o evento ao fim do carrossel (featuredOrder = max + 1). */
+  async addFeatured(eventId: string) {
+    const w = this.prisma.getWriteClient();
+    const events = await w.$transaction(async (tx) => {
+      const event = await tx.event.findUnique({
+        where: { id: eventId },
+        select: { id: true, status: true, featuredOrder: true },
+      });
+      if (!event) throw new NotFoundException('Evento não encontrado');
+
+      // Idempotente: já em destaque → não duplica nem reordena.
+      if (event.featuredOrder == null) {
+        // Só eventos PUBLICADOS aparecem no carrossel/busca pública — impedir
+        // destacar DRAFT/REVISION/SUSPENDED/etc. evita "furo" no público.
+        if (event.status !== EventStatus.PUBLISHED) {
+          throw new BadRequestException(
+            'Apenas eventos publicados podem entrar em destaque',
+          );
+        }
+        const agg = await tx.event.aggregate({ _max: { featuredOrder: true } });
+        const next = (agg._max.featuredOrder ?? 0) + 1;
+        await tx.event.update({ where: { id: eventId }, data: { featuredOrder: next } });
+      }
+      return this.readFeatured(tx);
+    });
+    return { message: 'Event added to featured', data: { events } };
+  }
+
+  /** DELETE — remove do destaque e renumera o restante de forma contígua. */
+  async removeFeatured(eventId: string) {
+    const w = this.prisma.getWriteClient();
+    const events = await w.$transaction(async (tx) => {
+      const event = await tx.event.findUnique({
+        where: { id: eventId },
+        select: { id: true, featuredOrder: true },
+      });
+      if (!event) throw new NotFoundException('Evento não encontrado');
+
+      if (event.featuredOrder != null) {
+        await tx.event.update({ where: { id: eventId }, data: { featuredOrder: null } });
+        await this.renumberFeatured(tx);
+      }
+      return this.readFeatured(tx);
+    });
+    return { message: 'Event removed from featured', data: { events } };
+  }
+
+  /** PATCH — reordena o carrossel. `orderedIds` deve ser EXATAMENTE o conjunto
+   *  atual de destacados (previne destacar/remover por engano via reorder). */
+  async reorderFeatured(orderedIds: string[]) {
+    const w = this.prisma.getWriteClient();
+    const events = await w.$transaction(async (tx) => {
+      const current = await tx.event.findMany({
+        where: { featuredOrder: { not: null } },
+        select: { id: true },
+      });
+      const currentIds = new Set(current.map((e) => e.id));
+      const uniqueIncoming = new Set(orderedIds);
+      const sameSet =
+        orderedIds.length === currentIds.size &&
+        uniqueIncoming.size === orderedIds.length &&
+        orderedIds.every((id) => currentIds.has(id));
+      if (!sameSet) {
+        throw new BadRequestException(
+          'A ordem enviada não corresponde aos eventos em destaque atuais',
+        );
+      }
+      // Renumera 1..N na ordem recebida.
+      for (let i = 0; i < orderedIds.length; i++) {
+        await tx.event.update({
+          where: { id: orderedIds[i] },
+          data: { featuredOrder: i + 1 },
+        });
+      }
+      return this.readFeatured(tx);
+    });
+    return { message: 'Featured events reordered', data: { events } };
+  }
+
+  /** Renumera os destacados restantes para 1..N (sem buracos), na ordem atual. */
+  private async renumberFeatured(tx: Prisma.TransactionClient) {
+    const rest = await tx.event.findMany({
+      where: { featuredOrder: { not: null } },
+      orderBy: { featuredOrder: 'asc' },
+      select: { id: true },
+    });
+    for (let i = 0; i < rest.length; i++) {
+      await tx.event.update({
+        where: { id: rest[i].id },
+        data: { featuredOrder: i + 1 },
+      });
+    }
   }
 }

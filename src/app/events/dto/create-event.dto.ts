@@ -317,6 +317,15 @@ export class FilterEventsDto {
   @Type(() => Boolean)
   includeHasSlots?: boolean;
 
+  /**
+   * Quando true, retorna APENAS os eventos em destaque (featuredOrder != null),
+   * ordenados pela ordem definida pelo admin. Usado pelo carrossel da home.
+   */
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  featured?: boolean;
+
   @IsOptional()
   @IsInt()
   @Min(1)

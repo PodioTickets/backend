@@ -37,6 +37,7 @@ import {
   ResendResetCodeDto,
   VerifyEmailChangeDto,
   TwoFactorCodeDto,
+  DeleteAccountDto,
   VerifyLoginMfaDto,
 } from './dto/auth.dto';
 import { Response } from 'express';
@@ -617,6 +618,30 @@ export class AuthController {
     return { message: '2FA desativado com sucesso.', success: true };
   }
 
+  @Post('account/delete/send-code')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Envia o código OTP por e-mail para confirmar a EXCLUSÃO da conta',
+    description:
+      'Mesmo mecanismo do 2FA (código de 6 dígitos, TTL 10min, rate limit 1/min por ' +
+      'usuário), porém com e-mail de copy PRÓPRIA de exclusão (sem card de login).',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Código enviado com sucesso',
+    schema: { example: { message: 'Código enviado para o seu e-mail.', success: true } },
+  })
+  @ApiResponse({ status: 400, description: 'Rate limit ativo — aguarde 1 minuto' })
+  @ApiResponse({ status: 401, description: 'Não autenticado' })
+  async sendAccountDeletionCode(@Request() req) {
+    await this.authService.send2FACode(req.user.id, req.user.email, {
+      purpose: 'delete',
+    });
+    return { message: 'Código enviado para o seu e-mail.', success: true };
+  }
+
   @Post('account/delete')
   @UseGuards(JwtAuthGuard, ThrottlerGuard)
   @Throttle({ short: { limit: 5, ttl: 60000 } })
@@ -631,7 +656,7 @@ export class AuthController {
       'organizador (identidade do comprador/participante congelada em snapshot). ' +
       'A sessão é invalidada e os cookies de auth da superfície são limpos.',
   })
-  @ApiBody({ type: TwoFactorCodeDto })
+  @ApiBody({ type: DeleteAccountDto })
   @ApiResponse({
     status: 200,
     description: 'Conta excluída com sucesso',
@@ -646,10 +671,10 @@ export class AuthController {
   @ApiResponse({ status: 429, description: 'Muitas requisições — throttle ativo' })
   async deleteAccount(
     @Request() req,
-    @Body() dto: TwoFactorCodeDto,
+    @Body() dto: DeleteAccountDto,
     @Res({ passthrough: true }) res: Response,
   ) {
-    await this.authService.deleteOwnAccount(req.user.id, dto.code);
+    await this.authService.deleteOwnAccount(req.user.id, dto.code, dto.reason);
     // Invalida a sessão local: limpa os cookies httpOnly da superfície atual.
     clearAuthCookies(res, resolveAuthSurface(req));
     return { message: 'Conta excluída com sucesso.', success: true };

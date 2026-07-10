@@ -1627,7 +1627,7 @@ export class AuthService {
   async send2FACode(
     userId: string,
     userEmail: string,
-    opts?: { userAgent?: string },
+    opts?: { userAgent?: string; purpose?: 'auth' | 'delete' },
   ): Promise<void> {
     const rateLimitKey = `2fa_rate:${userId}`;
     if (await this.cacheManager.get(rateLimitKey)) {
@@ -1656,9 +1656,14 @@ export class AuthService {
     await this.cacheManager.set(cacheKey, code, AuthService.MFA_CODE_TTL_MS);
     await this.cacheManager.del(attemptsKey);
 
-    // Tenta enviar; desfaz o código armazenado se o e-mail falhar
+    // Tenta enviar; desfaz o código armazenado se o e-mail falhar. Exclusão de
+    // conta usa um e-mail PRÓPRIO (copy de exclusão, sem card de login).
     try {
-      await this.emailService.send2FACode(userEmail, code, { loginDate, loginDevice });
+      if (opts?.purpose === 'delete') {
+        await this.emailService.sendAccountDeletionCode(userEmail, code);
+      } else {
+        await this.emailService.send2FACode(userEmail, code, { loginDate, loginDevice });
+      }
     } catch (emailError) {
       await this.cacheManager.del(cacheKey);
       this.logger.error(`Falha ao enviar código 2FA para usuário ${userId}:`, emailError);
@@ -1719,7 +1724,11 @@ export class AuthService {
    *
    * Exige o código OTP enviado por e-mail (mesmo canal do 2FA). Idempotente.
    */
-  async deleteOwnAccount(userId: string, code: string): Promise<void> {
+  async deleteOwnAccount(
+    userId: string,
+    code: string,
+    reason?: string,
+  ): Promise<void> {
     await this.verifyAndConsume2FACode(userId, code);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -1730,6 +1739,19 @@ export class AuthService {
     if (user.deletedAt) {
       return; // Já excluída — idempotente.
     }
+
+    // Dados da conta capturados ANTES da anonimização (usados no aviso LGPD).
+    const deletedAccountInfo = {
+      id: user.id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: user.email,
+      phone: user.phone,
+      documentType: user.documentType,
+      documentNumber: user.documentNumber,
+      country: user.country,
+      createdAt: user.createdAt,
+    };
 
     const now = new Date();
 
@@ -1826,6 +1848,20 @@ export class AuthService {
     this.logger.log(
       `Conta excluída (soft-delete/anonimização) — usuário ${userId}`,
     );
+
+    // Aviso LGPD: notifica o encarregado (lgpd@) com o motivo e os dados da conta
+    // excluída (capturados antes da anonimização). Best-effort — uma falha no envio
+    // NÃO reverte a exclusão (que já foi efetivada e é o objetivo primário).
+    try {
+      await this.emailService.sendAccountDeletionNotice({
+        reason: reason?.trim() || 'Não informado',
+        account: { ...deletedAccountInfo, deletedAt: now },
+      });
+    } catch (err) {
+      this.logger.error(
+        `Falha ao enviar aviso LGPD de exclusão (usuário ${userId}): ${(err as Error)?.message}`,
+      );
+    }
   }
 
   /**

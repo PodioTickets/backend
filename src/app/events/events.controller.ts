@@ -141,6 +141,21 @@ export class EventsController {
     return this.eventsService.search(searchDto);
   }
 
+  @Get('featured')
+  @NoCache()
+  @ApiOperation({
+    summary: 'Eventos em destaque (carrossel da home)',
+    description:
+      'Retorna apenas os eventos marcados como destaque pelo admin (featuredOrder != null), ' +
+      'na ordem definida na tela de destaque. Mesmo contrato público de GET /events.',
+  })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Máximo de eventos (default: 10)' })
+  @ApiResponse({ status: 200, description: 'Featured events retrieved successfully' })
+  findFeatured(@Query() filterDto: FilterEventsDto) {
+    // `featured: true` força o recorte no service; ignora includeDraft (rota pública).
+    return this.eventsService.findAll({ ...filterDto, featured: true });
+  }
+
   @Get()
   @NoCache()
   @ApiOperation({
