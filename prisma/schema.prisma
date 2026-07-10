@@ -188,6 +188,7 @@ model User {
   mfaEnabled            Boolean       @default(false) // Se 2FA está habilitado
   lastLoginAt           DateTime? // Último login (email/senha ou fluxo que chama login())
   passwordChangedAt     DateTime? // Última troca de senha — JwtStrategy rejeita tokens com iat anterior (invalida sessões roubadas)
+  deletedAt             DateTime? // Conta excluída pelo próprio usuário (soft-delete + anonimização). Marcador dedicado — NÃO reusar isActive (resetPassword reativa isActive). Login/reset/refresh rejeitam quando setado.
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
 
@@ -771,6 +772,12 @@ model Order {
   cancelledReason     String?
   pendingParticipants Json?
   pendingProducts     Json?
+  /// Snapshot da identidade do COMPRADOR, congelado quando a conta do usuário é
+  /// excluída/anonimizada (soft-delete). O bloco "comprador" das telas do
+  /// organizador lê este snapshot com precedência sobre o `user` vivo (que passa
+  /// a ser anônimo). null = comprador ainda ativo → lê do `user`. Shape:
+  /// { id, firstName, lastName, email, phone, documentNumber, avatarUrl }.
+  buyerSnapshot       Json?
 
   user            User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
   event           Event                @relation(fields: [eventId], references: [id], onDelete: Cascade)

@@ -910,6 +910,12 @@ export class AuthService {
       throw new BadRequestException('Usuário não encontrado');
     }
 
+    // Conta excluída (soft-delete/anonimização) não pode ser recuperada por reset —
+    // impede "ressurreição" via um link de redefinição emitido antes da exclusão.
+    if (user.deletedAt) {
+      throw new BadRequestException('Esta conta foi excluída e não pode ser recuperada.');
+    }
+
     if (user.password) {
       const isSamePassword = await bcrypt.compare(password, user.password);
       if (isSamePassword) {
@@ -973,6 +979,12 @@ export class AuthService {
 
     if (!user || user.id !== userId) {
       throw new BadRequestException('Usuário não encontrado');
+    }
+
+    // Conta excluída (soft-delete/anonimização) não pode ser recuperada por reset —
+    // impede "ressurreição" via um link de redefinição emitido antes da exclusão.
+    if (user.deletedAt) {
+      throw new BadRequestException('Esta conta foi excluída e não pode ser recuperada.');
     }
 
     if (user.password) {
@@ -1688,6 +1700,132 @@ export class AuthService {
     });
 
     this.logger.log(`2FA desabilitado para usuário ${userId}`);
+  }
+
+  /**
+   * Exclui a conta do PRÓPRIO usuário — soft-delete + anonimização.
+   *
+   * NÃO apaga a linha do usuário nem inscrições/pedidos: `Order.userId` é
+   * `onDelete: Cascade`, então um hard-delete destruiria Orders → Registrations →
+   * ingressos/produtos/pagamentos — exatamente o que o organizador precisa manter.
+   * Em vez disso:
+   *   1. Congela a identidade do COMPRADOR em `Order.buyerSnapshot` (o bloco
+   *      "comprador" do organizador passa a ler daí) e, para inscrições legadas
+   *      sem `receiptSnapshot`, congela o PARTICIPANTE no snapshot (as demais já
+   *      congelam na compra). Assim o organizador continua vendo tudo.
+   *   2. Anonimiza a PII e neutraliza todas as credenciais (senha/Google/TOTP/MFA).
+   *   3. Marca `deletedAt` + `isActive=false` + `passwordChangedAt=now` → bloqueia
+   *      login imediatamente e invalida tokens/sessões existentes.
+   *
+   * Exige o código OTP enviado por e-mail (mesmo canal do 2FA). Idempotente.
+   */
+  async deleteOwnAccount(userId: string, code: string): Promise<void> {
+    await this.verifyAndConsume2FACode(userId, code);
+
+    const prismaWrite = this.prisma.getWriteClient();
+    const user = await prismaWrite.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new BadRequestException('Usuário não encontrado.');
+    }
+    if (user.deletedAt) {
+      return; // Já excluída — idempotente.
+    }
+
+    const now = new Date();
+
+    // Snapshot do COMPRADOR — preserva o bloco "comprador" nas telas do organizador
+    // após a anonimização. Shape lido em EventsService.resolveOrderBuyer.
+    const buyerSnapshot = {
+      id: user.id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: user.email,
+      phone: user.phone,
+      documentNumber: user.documentNumber,
+      avatarUrl: user.avatarUrl,
+    };
+
+    // Snapshot do PARTICIPANTE — só para inscrições legadas sem `receiptSnapshot`
+    // (nas demais o participante já foi congelado na finalização do pedido). As
+    // chaves batem com o que `resolveOrganizerParticipant` lê do snapshot.
+    const participantSnapshot = {
+      name: `${user.firstName} ${user.lastName}`.trim(),
+      email: user.email,
+      phone: user.phone,
+      cpf: user.documentNumber,
+      documentNumber: user.documentNumber,
+      documentType: user.documentType,
+      country: user.country,
+      birthDate: user.dateOfBirth ? user.dateOfBirth.toISOString() : null,
+      gender: user.gender,
+    };
+
+    // E-mail anônimo colisão-proof: a unique é composta ([email, accountType]),
+    // então basta um valor único por usuário para liberar o e-mail real.
+    const anonEmail = `deleted-${user.id}@deleted.podioticket.local`;
+
+    await prismaWrite.$transaction(async (tx) => {
+      // 1. Congela o comprador em TODOS os pedidos do usuário. Roda uma única vez
+      //    (guard `deletedAt`), então sobrescrever é seguro.
+      await tx.order.updateMany({
+        where: { userId },
+        data: { buyerSnapshot: buyerSnapshot as Prisma.InputJsonValue },
+      });
+
+      // 2. Congela o participante APENAS nas inscrições legadas sem receiptSnapshot
+      //    (não tocar nas que já têm — destruiria o recibo imutável real).
+      await tx.registration.updateMany({
+        where: { userId, receiptSnapshot: { equals: Prisma.DbNull } },
+        data: {
+          receiptSnapshot: {
+            participant: participantSnapshot,
+          } as Prisma.InputJsonValue,
+        },
+      });
+
+      // 3. Anonimiza PII + neutraliza credenciais + marca exclusão.
+      await tx.user.update({
+        where: { id: userId },
+        data: {
+          email: anonEmail,
+          firstName: 'Conta',
+          lastName: 'excluída',
+          gender: null,
+          genderDetails: null,
+          phone: null,
+          reservePhone: null,
+          dateOfBirth: null,
+          country: null,
+          state: null,
+          city: null,
+          postalCode: null,
+          street: null,
+          number: null,
+          complement: null,
+          neighborhood: null,
+          documentType: null,
+          documentNumber: null,
+          documentNumberClean: null,
+          avatarUrl: null,
+          googleId: null,
+          googleEmail: null,
+          totpSecret: null,
+          mfaEnabled: false,
+          // Senha inutilizável: não é um hash bcrypt válido → compare sempre falha.
+          password: crypto.randomBytes(48).toString('hex'),
+          isActive: false,
+          deletedAt: now,
+          passwordChangedAt: now, // invalida tokens de acesso já emitidos
+        },
+      });
+    });
+
+    // Limpa qualquer resíduo de OTP/rate-limit do usuário.
+    await this.cacheManager.del(`2fa_rate:${userId}`);
+
+    this.logger.log(
+      `Conta excluída (soft-delete/anonimização) — usuário ${userId}`,
+    );
   }
 
   /**
