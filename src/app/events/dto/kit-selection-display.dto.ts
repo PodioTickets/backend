@@ -39,4 +39,24 @@ export class EventKitSelectionDisplayDto {
     additionalProperties: { type: 'string' },
   })
   primaryKitProductByCategoryId: Record<string, string>;
+
+  @IsOptional()
+  @IsObject()
+  @ApiPropertyOptional({
+    description:
+      'ticketId → lista de URLs de imagens OCULTAS na tela de escolha desse ingresso',
+    type: 'object',
+    additionalProperties: { type: 'array', items: { type: 'string' } },
+  })
+  hiddenKitImageUrlsByTicketId?: Record<string, string[]>;
+
+  @IsOptional()
+  @IsObject()
+  @ApiPropertyOptional({
+    description:
+      'categoryId ou "uncategorized" → lista de URLs de imagens OCULTAS nessa categoria',
+    type: 'object',
+    additionalProperties: { type: 'array', items: { type: 'string' } },
+  })
+  hiddenKitImageUrlsByCategoryId?: Record<string, string[]>;
 }
