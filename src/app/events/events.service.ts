@@ -216,6 +216,27 @@ export class EventsService {
         );
       }
     }
+
+    // Mapas de imagens OCULTAS: mesma validação de chaves (ticket/categoria do evento).
+    for (const tid of Object.keys(payload.hiddenKitImageUrlsByTicketId ?? {})) {
+      this.validateUUID(tid, 'ticketId in hiddenKitImageUrlsByTicketId');
+      if (!ticketIds.has(tid)) {
+        throw new BadRequestException(
+          `kitSelectionDisplay: ticket "${tid}" does not belong to this event`,
+        );
+      }
+    }
+    for (const catKey of Object.keys(
+      payload.hiddenKitImageUrlsByCategoryId ?? {},
+    )) {
+      if (catKey === UNCATEGORIZED_CATEGORY_KEY) continue;
+      this.validateUUID(catKey, 'categoryId in hiddenKitImageUrlsByCategoryId');
+      if (!categoryIds.has(catKey)) {
+        throw new BadRequestException(
+          `kitSelectionDisplay: category "${catKey}" does not belong to this event`,
+        );
+      }
+    }
   }
 
   /**
