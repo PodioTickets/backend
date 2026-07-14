@@ -211,4 +211,39 @@ describe('ExportRegistrationsService — coluna fixa de ID da inscrição', () =
     const r = { id: 'x', user: {}, tickets: [{ ticketSnapshot: { name: 'Lote 1', category: { name: '5km' } }, ticket: null }] };
     expect(txtLines([r], ['ingresso'])[2].split(',').pop()).toBe('5km - Lote 1');
   });
+
+  // ── Campo "Modalidade": modality do ingresso, agregado + dedup ────────────────
+  it('modalidade: lê ticket.modality (label) da relação viva', () => {
+    const r = { id: 'x', user: {}, tickets: [{ ticket: { name: 'Lote 1', modality: 'Corrida' } }] };
+    expect(txtLines([r], ['modalidade'])[2].split(',').pop()).toBe('Corrida');
+  });
+
+  it('modalidade: PREFERE o snapshot sobre a relação viva', () => {
+    const r = {
+      id: 'x', user: {},
+      tickets: [{ ticketSnapshot: { modality: 'Caminhada' }, ticket: { modality: 'Corrida' } }],
+    };
+    expect(txtLines([r], ['modalidade'])[2].split(',').pop()).toBe('Caminhada');
+  });
+
+  it('modalidade: múltiplos ingressos com a MESMA modalidade → sem repetição', () => {
+    const r = {
+      id: 'x', user: {},
+      tickets: [{ ticket: { modality: 'Corrida' } }, { ticket: { modality: 'Corrida' } }],
+    };
+    expect(txtLines([r], ['modalidade'])[2].split(',').pop()).toBe('Corrida');
+  });
+
+  it('modalidade: modalidades distintas → agregadas com "; "', () => {
+    const r = {
+      id: 'x', user: {},
+      tickets: [{ ticket: { modality: 'Corrida' } }, { ticket: { modality: 'Caminhada' } }],
+    };
+    expect(txtLines([r], ['modalidade'])[2].split(',').pop()).toBe('Corrida; Caminhada');
+  });
+
+  it('modalidade: ingresso sem modalidade → célula vazia', () => {
+    const r = { id: 'x', user: {}, tickets: [{ ticket: { name: 'Lote 1' } }] };
+    expect(txtLines([r], ['modalidade'])[2].split(',').pop()).toBe('');
+  });
 });

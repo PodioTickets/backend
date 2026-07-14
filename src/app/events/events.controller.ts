@@ -990,9 +990,9 @@ The response is a binary file download with the appropriate Content-Type and Con
     required: false,
     type: String,
     description: `Comma-separated list of field IDs to include in the export.
-Omit to export all 15 fields. Valid IDs:
+Omit to export all 16 fields. Valid IDs:
 \`nome\` \`email\` \`cpf\` \`dataNascimento\` \`telefone\` \`sexo\`
-\`contatoEmergencia\` \`endereco\` \`ingresso\` \`produtosEscolhidos\`
+\`contatoEmergencia\` \`endereco\` \`ingresso\` \`modalidade\` \`produtosEscolhidos\`
 \`perguntasRespostas\` \`dataPagamento\` \`status\` \`formaPagamento\` \`valorPago\`
 
 Example: \`fields=nome,email,cpf,status,valorPago\``,
