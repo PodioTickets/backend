@@ -5338,6 +5338,10 @@ export class EventsService {
             ? {
               name: rt.ticket.name ?? null,
               modality: rt.ticket.modality ?? null,
+              // Distância + unidade (ex.: 5 + "KM") p/ a coluna "Modalidade" do
+              // export ("Corrida 5KM"). Snapshot tem prioridade no extractField.
+              distance: rt.ticket.distance ?? null,
+              distanceUnit: rt.ticket.distanceUnit ?? null,
               category: rt.ticket.category ? { name: rt.ticket.category.name } : null,
             }
             : null,
@@ -5491,6 +5495,10 @@ export class EventsService {
             ? {
               name: rt.ticket.name ?? null,
               modality: rt.ticket.modality ?? null,
+              // Distância + unidade (ex.: 5 + "KM") p/ a coluna "Modalidade" do
+              // export ("Corrida 5KM"). Snapshot tem prioridade no extractField.
+              distance: rt.ticket.distance ?? null,
+              distanceUnit: rt.ticket.distanceUnit ?? null,
               category: rt.ticket.category ? { name: rt.ticket.category.name } : null,
             }
             : null,
