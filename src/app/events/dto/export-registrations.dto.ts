@@ -12,6 +12,7 @@ export const EXPORT_FIELDS = [
   'contatoEmergencia',
   'endereco',
   'ingresso',
+  'modalidade',
   'produtosEscolhidos',
   'perguntasRespostas',
   'dataPagamento',
