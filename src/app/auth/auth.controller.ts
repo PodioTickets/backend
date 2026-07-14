@@ -37,6 +37,7 @@ import {
   ResendResetCodeDto,
   VerifyEmailChangeDto,
   TwoFactorCodeDto,
+  DeleteAccountDto,
   VerifyLoginMfaDto,
 } from './dto/auth.dto';
 import { Response } from 'express';
@@ -615,6 +616,68 @@ export class AuthController {
   async disable2FA(@Request() req, @Body() dto: TwoFactorCodeDto) {
     await this.authService.disable2FA(req.user.id, dto.code);
     return { message: '2FA desativado com sucesso.', success: true };
+  }
+
+  @Post('account/delete/send-code')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Envia o código OTP por e-mail para confirmar a EXCLUSÃO da conta',
+    description:
+      'Mesmo mecanismo do 2FA (código de 6 dígitos, TTL 10min, rate limit 1/min por ' +
+      'usuário), porém com e-mail de copy PRÓPRIA de exclusão (sem card de login).',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Código enviado com sucesso',
+    schema: { example: { message: 'Código enviado para o seu e-mail.', success: true } },
+  })
+  @ApiResponse({ status: 400, description: 'Rate limit ativo — aguarde 1 minuto' })
+  @ApiResponse({ status: 401, description: 'Não autenticado' })
+  async sendAccountDeletionCode(@Request() req) {
+    await this.authService.send2FACode(req.user.id, req.user.email, {
+      purpose: 'delete',
+    });
+    return { message: 'Código enviado para o seu e-mail.', success: true };
+  }
+
+  @Post('account/delete')
+  @UseGuards(JwtAuthGuard, ThrottlerGuard)
+  @Throttle({ short: { limit: 5, ttl: 60000 } })
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Exclui (soft-delete/anonimiza) a conta do usuário autenticado',
+    description:
+      'Verifica o código OTP enviado por e-mail (mesmo canal do 2FA) e então ' +
+      'anonimiza a PII e neutraliza as credenciais da conta, marcando-a como ' +
+      'excluída. Inscrições, pedidos e histórico são PRESERVADOS para o ' +
+      'organizador (identidade do comprador/participante congelada em snapshot). ' +
+      'A sessão é invalidada e os cookies de auth da superfície são limpos.',
+  })
+  @ApiBody({ type: DeleteAccountDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Conta excluída com sucesso',
+    schema: { example: { message: 'Conta excluída com sucesso.', success: true } },
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Código incorreto, expirado ou número de tentativas excedido',
+    schema: { example: { message: 'Código incorreto ou expirado.' } },
+  })
+  @ApiResponse({ status: 401, description: 'Não autenticado' })
+  @ApiResponse({ status: 429, description: 'Muitas requisições — throttle ativo' })
+  async deleteAccount(
+    @Request() req,
+    @Body() dto: DeleteAccountDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    await this.authService.deleteOwnAccount(req.user.id, dto.code, dto.reason);
+    // Invalida a sessão local: limpa os cookies httpOnly da superfície atual.
+    clearAuthCookies(res, resolveAuthSurface(req));
+    return { message: 'Conta excluída com sucesso.', success: true };
   }
 
   @Post('2fa/verify-login')

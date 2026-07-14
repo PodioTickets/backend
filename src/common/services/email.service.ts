@@ -323,6 +323,8 @@ export class EmailService {
       device: this.escapeHtml(data.device),
     });
 
+
+
     const text = `Olá ${data.firstName},\n\nSeu código de verificação para troca de e-mail é: ${data.code}\n\nNovo e-mail: ${data.newEmail}\nSolicitado em: ${data.requestDate}\n\nSe você não solicitou isso, entre em contato com o suporte.\n\nPodioTicket — podioticket.com.br`;
     await this.send({ from: this.from, to: data.email, subject: 'Solicitação de troca de e-mail — PódioTicket', html, text });
     this.logger.log(`Email change verification sent to: ${data.email}`);
@@ -655,6 +657,93 @@ export class EmailService {
     this.logger.log(`Email alterado: notificação enviada para ${data.oldEmail}`);
   }
 
+  /**
+   * Aviso LGPD ao encarregado (lgpd@podioticket.com.br) quando um usuário exclui
+   * a própria conta. Inclui o MOTIVO informado e os DADOS da conta excluída
+   * (capturados ANTES da anonimização). E-mail interno — HTML inline, sem template.
+   */
+  async sendAccountDeletionNotice(data: {
+    reason: string;
+    account: {
+      id: string;
+      firstName?: string | null;
+      lastName?: string | null;
+      email: string;
+      phone?: string | null;
+      documentType?: string | null;
+      documentNumber?: string | null;
+      country?: string | null;
+      createdAt: Date;
+      deletedAt: Date;
+    };
+  }) {
+    const a = data.account;
+    const e = (v: unknown) =>
+      this.escapeHtml(v == null || v === '' ? '—' : String(v));
+    const fullName = `${a.firstName ?? ''} ${a.lastName ?? ''}`.trim() || '—';
+    const doc = a.documentNumber
+      ? `${a.documentType ? `${a.documentType} ` : ''}${a.documentNumber}`
+      : '—';
+    const iso = (d: Date) => {
+      try {
+        return d.toISOString();
+      } catch {
+        return String(d);
+      }
+    };
+
+    const rows: [string, string][] = [
+      ['ID da conta', e(a.id)],
+      ['Nome', e(fullName)],
+      ['E-mail', e(a.email)],
+      ['Telefone', e(a.phone)],
+      ['Documento', e(doc)],
+      ['País', e(a.country)],
+      ['Conta criada em', e(iso(a.createdAt))],
+      ['Excluída em', e(iso(a.deletedAt))],
+    ];
+    const rowsHtml = rows
+      .map(
+        ([k, v]) =>
+          `<tr><td style="padding:6px 12px;font-weight:600;color:#333;border-bottom:1px solid #eee;">${k}</td><td style="padding:6px 12px;color:#111;border-bottom:1px solid #eee;">${v}</td></tr>`,
+      )
+      .join('');
+
+    const html = `<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;color:#111;">
+      <h2 style="margin:0 0 8px;">Solicitação de exclusão de conta (LGPD)</h2>
+      <p style="margin:0 0 16px;color:#555;">Um usuário excluiu a própria conta na plataforma. Registro para fins de conformidade (LGPD).</p>
+      <p style="margin:0 0 4px;font-weight:600;">Motivo informado:</p>
+      <p style="margin:0 0 16px;padding:10px 12px;background:#f6f6f6;border-radius:6px;">${e(data.reason)}</p>
+      <table style="border-collapse:collapse;width:100%;max-width:520px;">${rowsHtml}</table>
+      <p style="margin:16px 0 0;color:#888;font-size:12px;">E-mail automático. A conta passou por soft-delete/anonimização; inscrições e histórico foram preservados via snapshot para os organizadores.</p>
+    </body></html>`;
+
+    const text = [
+      'Solicitação de exclusão de conta (LGPD)',
+      '',
+      `Motivo: ${data.reason}`,
+      '',
+      `ID: ${a.id}`,
+      `Nome: ${fullName}`,
+      `E-mail: ${a.email}`,
+      `Telefone: ${a.phone ?? '—'}`,
+      `Documento: ${doc}`,
+      `País: ${a.country ?? '—'}`,
+      `Criada em: ${iso(a.createdAt)}`,
+      `Excluída em: ${iso(a.deletedAt)}`,
+    ].join('\n');
+
+    await this.send({
+      from: this.from,
+      to: 'lgpd@podioticket.com.br',
+      subject: 'Exclusão de conta (LGPD) — PódioTicket',
+      html,
+      text,
+    });
+
+    this.logger.log(`Aviso LGPD de exclusão enviado (conta ${a.id})`);
+  }
+
   async sendOrganizerCommunication(data: {
     recipientEmail: string;
     firstName: string;
@@ -735,6 +824,10 @@ export class EmailService {
     opts?: { loginDate?: string; loginDevice?: string; loginLocation?: string },
   ): Promise<void> {
     const html = this.loadTemplate('codigo-2fa.html', {
+      title: 'Código de acesso',
+      description:
+        'Use o código abaixo para concluir a verificação. Ele expira em 10 minutos.',
+      securityNote: 'Não foi você? Ignore este e-mail ou contate o suporte.',
       code: this.escapeHtml(code),
       loginDate: this.escapeHtml(opts?.loginDate ?? ''),
       loginDevice: this.escapeHtml(opts?.loginDevice ?? ''),
@@ -744,10 +837,9 @@ export class EmailService {
     const text = [
       'Código de acesso — PódioTicket',
       '',
-      `Seu código de acesso é: ${code}`,
+      `Seu código é: ${code}`,
       '',
-      'Este código expira em 10 minutos.',
-      'Não foi você? Altere sua senha ou contate o suporte.',
+      'Expira em 10 minutos. Não foi você? Ignore este e-mail ou contate o suporte.',
     ].join('\n');
 
     await this.send({
@@ -759,6 +851,52 @@ export class EmailService {
     });
 
     this.logger.log(`Código 2FA enviado para: ${recipientEmail}`);
+  }
+
+  /**
+   * Código para CONFIRMAR a exclusão da conta. Reusa o template do código, mas
+   * com copy própria e SEM o card de "tentativa de login" (não passa loginDate),
+   * para não parecer um e-mail de acesso.
+   */
+  async sendAccountDeletionCode(
+    recipientEmail: string,
+    code: string,
+  ): Promise<void> {
+    const html = this.loadTemplate('codigo-2fa.html', {
+      title: 'Confirme a exclusão da sua conta',
+      description:
+        'Recebemos um pedido para excluir a sua conta na PódioTicket. Use o código abaixo para confirmar. A exclusão é permanente e não pode ser desfeita — o código expira em 10 minutos.',
+      securityNote:
+        'Não pediu para excluir sua conta? Ignore este e-mail: nada será alterado. Por segurança, recomendamos trocar sua senha.',
+      code: this.escapeHtml(code),
+      // Chaves de login VAZIAS: a remoção por chave (1ª passagem do loadTemplate)
+      // apaga o card de login de forma limpa. Omiti-las cairia no regex genérico
+      // de limpeza, que quebra com o bloco aninhado (loginLocation).
+      loginDate: '',
+      loginDevice: '',
+      loginLocation: '',
+    });
+
+    const text = [
+      'Confirme a exclusão da sua conta — PódioTicket',
+      '',
+      'Recebemos um pedido para excluir a sua conta na PódioTicket.',
+      `Seu código de confirmação é: ${code}`,
+      '',
+      'A exclusão é permanente e não pode ser desfeita. O código expira em 10 minutos.',
+      '',
+      'Não pediu isso? Ignore este e-mail (nada será alterado) e troque sua senha por segurança.',
+    ].join('\n');
+
+    await this.send({
+      from: this.from,
+      to: recipientEmail,
+      subject: 'Confirme a exclusão da sua conta — PódioTicket',
+      html,
+      text,
+    });
+
+    this.logger.log(`Código de exclusão de conta enviado para: ${recipientEmail}`);
   }
 
   async sendEventUnderReview(data: {

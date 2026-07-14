@@ -188,6 +188,7 @@ model User {
   mfaEnabled            Boolean       @default(false) // Se 2FA está habilitado
   lastLoginAt           DateTime? // Último login (email/senha ou fluxo que chama login())
   passwordChangedAt     DateTime? // Última troca de senha — JwtStrategy rejeita tokens com iat anterior (invalida sessões roubadas)
+  deletedAt             DateTime? // Conta excluída pelo próprio usuário (soft-delete + anonimização). Marcador dedicado — NÃO reusar isActive (resetPassword reativa isActive). Login/reset/refresh rejeitam quando setado.
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
 
@@ -392,6 +393,12 @@ model Event {
   /// Enforcement transacional no reserve (advisory lock por evento). Conta Registration != CANCELLED.
   maxParticipants       Int?
   status                EventStatus @default(DRAFT)
+  /// Ordem de exibição no carrossel de "Eventos em destaque" da home (admin).
+  /// `null` = NÃO está em destaque. Valor menor aparece primeiro. Também usado
+  /// como chave PRIMÁRIA de ordenação (nulls last) na busca pública, para os
+  /// eventos em destaque virem no topo da ordem padrão. Segue a convenção de
+  /// `sortOrder` dos modelos irmãos (TicketCategory/Ticket/ProductVariation).
+  featuredOrder         Int?        @map("featured_order")
   /// Opções avançadas de exibição de imagens do kit na escolha de ingressos (camelCase no JSON).
   kitSelectionDisplay   Json?       @map("kit_selection_display")
   /// Meta Pixel (Facebook/Instagram). Não expor em rotas públicas sem decisão explícita de produto.
@@ -448,6 +455,7 @@ model Event {
   @@index([status, country, state, city]) // Para filtros de localização (status primeiro para melhor seletividade)
   @@index([organizationId, createdAt]) // Para listar eventos da organização
   @@index([eventDate]) // Para ordenação e filtros por data
+  @@index([featuredOrder]) // Carrossel de destaque + ordenação "destaque primeiro" na busca
 }
 
 model EventNotification {
@@ -771,6 +779,12 @@ model Order {
   cancelledReason     String?
   pendingParticipants Json?
   pendingProducts     Json?
+  /// Snapshot da identidade do COMPRADOR, congelado quando a conta do usuário é
+  /// excluída/anonimizada (soft-delete). O bloco "comprador" das telas do
+  /// organizador lê este snapshot com precedência sobre o `user` vivo (que passa
+  /// a ser anônimo). null = comprador ainda ativo → lê do `user`. Shape:
+  /// { id, firstName, lastName, email, phone, documentNumber, avatarUrl }.
+  buyerSnapshot       Json?
 
   user            User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
   event           Event                @relation(fields: [eventId], references: [id], onDelete: Cascade)

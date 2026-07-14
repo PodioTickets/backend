@@ -910,6 +910,12 @@ export class AuthService {
       throw new BadRequestException('Usuário não encontrado');
     }
 
+    // Conta excluída (soft-delete/anonimização) não pode ser recuperada por reset —
+    // impede "ressurreição" via um link de redefinição emitido antes da exclusão.
+    if (user.deletedAt) {
+      throw new BadRequestException('Esta conta foi excluída e não pode ser recuperada.');
+    }
+
     if (user.password) {
       const isSamePassword = await bcrypt.compare(password, user.password);
       if (isSamePassword) {
@@ -973,6 +979,12 @@ export class AuthService {
 
     if (!user || user.id !== userId) {
       throw new BadRequestException('Usuário não encontrado');
+    }
+
+    // Conta excluída (soft-delete/anonimização) não pode ser recuperada por reset —
+    // impede "ressurreição" via um link de redefinição emitido antes da exclusão.
+    if (user.deletedAt) {
+      throw new BadRequestException('Esta conta foi excluída e não pode ser recuperada.');
     }
 
     if (user.password) {
@@ -1615,7 +1627,7 @@ export class AuthService {
   async send2FACode(
     userId: string,
     userEmail: string,
-    opts?: { userAgent?: string },
+    opts?: { userAgent?: string; purpose?: 'auth' | 'delete' },
   ): Promise<void> {
     const rateLimitKey = `2fa_rate:${userId}`;
     if (await this.cacheManager.get(rateLimitKey)) {
@@ -1644,9 +1656,14 @@ export class AuthService {
     await this.cacheManager.set(cacheKey, code, AuthService.MFA_CODE_TTL_MS);
     await this.cacheManager.del(attemptsKey);
 
-    // Tenta enviar; desfaz o código armazenado se o e-mail falhar
+    // Tenta enviar; desfaz o código armazenado se o e-mail falhar. Exclusão de
+    // conta usa um e-mail PRÓPRIO (copy de exclusão, sem card de login).
     try {
-      await this.emailService.send2FACode(userEmail, code, { loginDate, loginDevice });
+      if (opts?.purpose === 'delete') {
+        await this.emailService.sendAccountDeletionCode(userEmail, code);
+      } else {
+        await this.emailService.send2FACode(userEmail, code, { loginDate, loginDevice });
+      }
     } catch (emailError) {
       await this.cacheManager.del(cacheKey);
       this.logger.error(`Falha ao enviar código 2FA para usuário ${userId}:`, emailError);
@@ -1688,6 +1705,163 @@ export class AuthService {
     });
 
     this.logger.log(`2FA desabilitado para usuário ${userId}`);
+  }
+
+  /**
+   * Exclui a conta do PRÓPRIO usuário — soft-delete + anonimização.
+   *
+   * NÃO apaga a linha do usuário nem inscrições/pedidos: `Order.userId` é
+   * `onDelete: Cascade`, então um hard-delete destruiria Orders → Registrations →
+   * ingressos/produtos/pagamentos — exatamente o que o organizador precisa manter.
+   * Em vez disso:
+   *   1. Congela a identidade do COMPRADOR em `Order.buyerSnapshot` (o bloco
+   *      "comprador" do organizador passa a ler daí) e, para inscrições legadas
+   *      sem `receiptSnapshot`, congela o PARTICIPANTE no snapshot (as demais já
+   *      congelam na compra). Assim o organizador continua vendo tudo.
+   *   2. Anonimiza a PII e neutraliza todas as credenciais (senha/Google/TOTP/MFA).
+   *   3. Marca `deletedAt` + `isActive=false` + `passwordChangedAt=now` → bloqueia
+   *      login imediatamente e invalida tokens/sessões existentes.
+   *
+   * Exige o código OTP enviado por e-mail (mesmo canal do 2FA). Idempotente.
+   */
+  async deleteOwnAccount(
+    userId: string,
+    code: string,
+    reason?: string,
+  ): Promise<void> {
+    await this.verifyAndConsume2FACode(userId, code);
+
+    const prismaWrite = this.prisma.getWriteClient();
+    const user = await prismaWrite.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new BadRequestException('Usuário não encontrado.');
+    }
+    if (user.deletedAt) {
+      return; // Já excluída — idempotente.
+    }
+
+    // Dados da conta capturados ANTES da anonimização (usados no aviso LGPD).
+    const deletedAccountInfo = {
+      id: user.id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: user.email,
+      phone: user.phone,
+      documentType: user.documentType,
+      documentNumber: user.documentNumber,
+      country: user.country,
+      createdAt: user.createdAt,
+    };
+
+    const now = new Date();
+
+    // Snapshot do COMPRADOR — preserva o bloco "comprador" nas telas do organizador
+    // após a anonimização. Shape lido em EventsService.resolveOrderBuyer.
+    const buyerSnapshot = {
+      id: user.id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: user.email,
+      phone: user.phone,
+      documentNumber: user.documentNumber,
+      avatarUrl: user.avatarUrl,
+    };
+
+    // Snapshot do PARTICIPANTE — só para inscrições legadas sem `receiptSnapshot`
+    // (nas demais o participante já foi congelado na finalização do pedido). As
+    // chaves batem com o que `resolveOrganizerParticipant` lê do snapshot.
+    const participantSnapshot = {
+      name: `${user.firstName} ${user.lastName}`.trim(),
+      email: user.email,
+      phone: user.phone,
+      cpf: user.documentNumber,
+      documentNumber: user.documentNumber,
+      documentType: user.documentType,
+      country: user.country,
+      birthDate: user.dateOfBirth ? user.dateOfBirth.toISOString() : null,
+      gender: user.gender,
+    };
+
+    // E-mail anônimo colisão-proof: a unique é composta ([email, accountType]),
+    // então basta um valor único por usuário para liberar o e-mail real.
+    const anonEmail = `deleted-${user.id}@deleted.podioticket.local`;
+
+    await prismaWrite.$transaction(async (tx) => {
+      // 1. Congela o comprador em TODOS os pedidos do usuário. Roda uma única vez
+      //    (guard `deletedAt`), então sobrescrever é seguro.
+      await tx.order.updateMany({
+        where: { userId },
+        data: { buyerSnapshot: buyerSnapshot as Prisma.InputJsonValue },
+      });
+
+      // 2. Congela o participante APENAS nas inscrições legadas sem receiptSnapshot
+      //    (não tocar nas que já têm — destruiria o recibo imutável real).
+      await tx.registration.updateMany({
+        where: { userId, receiptSnapshot: { equals: Prisma.DbNull } },
+        data: {
+          receiptSnapshot: {
+            participant: participantSnapshot,
+          } as Prisma.InputJsonValue,
+        },
+      });
+
+      // 3. Anonimiza PII + neutraliza credenciais + marca exclusão.
+      await tx.user.update({
+        where: { id: userId },
+        data: {
+          email: anonEmail,
+          firstName: 'Conta',
+          lastName: 'excluída',
+          gender: null,
+          genderDetails: null,
+          phone: null,
+          reservePhone: null,
+          dateOfBirth: null,
+          country: null,
+          state: null,
+          city: null,
+          postalCode: null,
+          street: null,
+          number: null,
+          complement: null,
+          neighborhood: null,
+          documentType: null,
+          documentNumber: null,
+          documentNumberClean: null,
+          avatarUrl: null,
+          googleId: null,
+          googleEmail: null,
+          totpSecret: null,
+          mfaEnabled: false,
+          // Senha inutilizável: não é um hash bcrypt válido → compare sempre falha.
+          password: crypto.randomBytes(48).toString('hex'),
+          isActive: false,
+          deletedAt: now,
+          passwordChangedAt: now, // invalida tokens de acesso já emitidos
+        },
+      });
+    });
+
+    // Limpa qualquer resíduo de OTP/rate-limit do usuário.
+    await this.cacheManager.del(`2fa_rate:${userId}`);
+
+    this.logger.log(
+      `Conta excluída (soft-delete/anonimização) — usuário ${userId}`,
+    );
+
+    // Aviso LGPD: notifica o encarregado (lgpd@) com o motivo e os dados da conta
+    // excluída (capturados antes da anonimização). Best-effort — uma falha no envio
+    // NÃO reverte a exclusão (que já foi efetivada e é o objetivo primário).
+    try {
+      await this.emailService.sendAccountDeletionNotice({
+        reason: reason?.trim() || 'Não informado',
+        account: { ...deletedAccountInfo, deletedAt: now },
+      });
+    } catch (err) {
+      this.logger.error(
+        `Falha ao enviar aviso LGPD de exclusão (usuário ${userId}): ${(err as Error)?.message}`,
+      );
+    }
   }
 
   /**

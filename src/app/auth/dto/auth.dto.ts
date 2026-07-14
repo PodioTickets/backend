@@ -1,4 +1,4 @@
-import { IsEmail, IsString, IsOptional, MinLength, IsNotEmpty, IsBoolean, IsDateString, IsEnum, Matches, Length, ValidateIf, registerDecorator, ValidationOptions, ValidationArguments } from 'class-validator';
+import { IsEmail, IsString, IsOptional, MinLength, MaxLength, IsNotEmpty, IsBoolean, IsDateString, IsEnum, Matches, Length, ValidateIf, registerDecorator, ValidationOptions, ValidationArguments } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Gender, DocumentType, Language, AccountType } from '@prisma/client';
 
@@ -368,6 +368,25 @@ export class TwoFactorCodeDto {
   @Length(6, 6)
   @Matches(/^\d{6}$/, { message: 'O código deve conter exatamente 6 dígitos numéricos' })
   code: string;
+}
+
+export class DeleteAccountDto {
+  @ApiProperty({ description: 'Código numérico de 6 dígitos enviado por e-mail para confirmar a exclusão', example: '482931' })
+  @IsString()
+  @IsNotEmpty()
+  @Length(6, 6)
+  @Matches(/^\d{6}$/, { message: 'O código deve conter exatamente 6 dígitos numéricos' })
+  code: string;
+
+  @ApiProperty({
+    description:
+      'Motivo da exclusão (obrigatório — LGPD). Uma das opções pré-definidas ou o texto livre quando "Outro".',
+    example: 'Não uso mais a plataforma',
+  })
+  @IsString()
+  @IsNotEmpty({ message: 'Informe o motivo da exclusão.' })
+  @MaxLength(500)
+  reason: string;
 }
 
 export class VerifyLoginMfaDto {

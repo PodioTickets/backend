@@ -216,6 +216,27 @@ export class EventsService {
         );
       }
     }
+
+    // Mapas de imagens OCULTAS: mesma validação de chaves (ticket/categoria do evento).
+    for (const tid of Object.keys(payload.hiddenKitImageUrlsByTicketId ?? {})) {
+      this.validateUUID(tid, 'ticketId in hiddenKitImageUrlsByTicketId');
+      if (!ticketIds.has(tid)) {
+        throw new BadRequestException(
+          `kitSelectionDisplay: ticket "${tid}" does not belong to this event`,
+        );
+      }
+    }
+    for (const catKey of Object.keys(
+      payload.hiddenKitImageUrlsByCategoryId ?? {},
+    )) {
+      if (catKey === UNCATEGORIZED_CATEGORY_KEY) continue;
+      this.validateUUID(catKey, 'categoryId in hiddenKitImageUrlsByCategoryId');
+      if (!categoryIds.has(catKey)) {
+        throw new BadRequestException(
+          `kitSelectionDisplay: category "${catKey}" does not belong to this event`,
+        );
+      }
+    }
   }
 
   /**
@@ -867,6 +888,7 @@ export class EventsService {
           registrationStartDate: true,
           registrationEndDate: true,
           status: true,
+          featuredOrder: true,
           createdAt: true,
           organization: {
             select: {
@@ -884,9 +906,14 @@ export class EventsService {
             },
           },
         },
-        orderBy: {
-          eventDate: 'asc',
-        },
+        // Destaque PRIMEIRO (admin) e depois por data. `nulls: 'last'` garante que os
+        // eventos sem destaque (featuredOrder = null) fiquem depois dos destacados.
+        // A ordenação explícita do usuário (nome/data-desc) é aplicada no client sobre
+        // a página; a ordem PADRÃO (data-asc) preserva esta prioridade de destaque.
+        orderBy: [
+          { featuredOrder: { sort: 'asc', nulls: 'last' } },
+          { eventDate: 'asc' },
+        ],
       }),
       prismaRead.event.count({ where }),
     ]);
@@ -922,9 +949,16 @@ export class EventsService {
       includeDraft,
       includePast,
       includeHasSlots,
+      featured,
     } = filterDto;
 
     const where: any = {};
+
+    // Carrossel de "Eventos em destaque" da home: só eventos marcados pelo admin
+    // (featuredOrder != null), ordenados pela ordem definida na tela de destaque.
+    if (featured) {
+      where.featuredOrder = { not: null };
+    }
 
     // Catálogo público: nunca listar SUSPENDED (nem por padrão nem via includeDraft).
     // Sem status na query: apenas PUBLISHED. Com status na query: filtra pelo valor (exceto que SUSPENDED continua excluído pelo AND global abaixo).
@@ -1099,6 +1133,7 @@ export class EventsService {
           registrationEndDate: true,
           maxParticipants: true,
           status: true,
+          featuredOrder: true,
           createdAt: true,
           updatedAt: true,
           organization: {
@@ -1111,9 +1146,12 @@ export class EventsService {
             },
           },
         },
-        orderBy: {
-          eventDate: 'asc',
-        },
+        // Carrossel de destaque: honra a ordem do admin (featuredOrder asc). Catálogo
+        // geral: por data. `nulls: 'last'` mantém não-destacados depois no caso featured
+        // (inócuo aqui, pois o where já exige featuredOrder != null).
+        orderBy: featured
+          ? [{ featuredOrder: { sort: 'asc', nulls: 'last' } }]
+          : { eventDate: 'asc' },
       }),
       prismaRead.event.count({ where: whereFinal }),
     ]);
@@ -4036,13 +4074,7 @@ export class EventsService {
           finalAmount: this.normalizeToCents(reg.order.finalAmount), // Normalizar para centavos
           purchaseDate: reg.order.createdAt.toISOString(), // Data do pedido
           // Informações do comprador (quem fez o pedido/pagamento)
-          buyer: reg.order.user ? {
-            id: reg.order.user.id,
-            firstName: reg.order.user.firstName,
-            lastName: reg.order.user.lastName,
-            email: reg.order.user.email,
-            avatarUrl: reg.order.user.avatarUrl,
-          } : null,
+          buyer: this.resolveOrderBuyer(reg.order),
           billingAddress: this.resolveOrderBillingAddress(reg.order, reg.order.payment),
           // Informações do pagamento
           payment: reg.order.payment ? (() => {
@@ -4263,18 +4295,7 @@ export class EventsService {
           updatedAt: order.updatedAt.toISOString(),
           couponId: order.couponId,
           voucherId: order.voucherId,
-          buyer: order.user
-            ? {
-              id: order.user.id,
-              firstName: order.user.firstName,
-              lastName: order.user.lastName,
-              fullName: `${order.user.firstName} ${order.user.lastName}`,
-              email: order.user.email,
-              phone: order.user.phone,
-              documentNumber: order.user.documentNumber,
-              avatarUrl: order.user.avatarUrl,
-            }
-            : null,
+          buyer: this.resolveOrderBuyer(order),
           billingAddress: this.resolveOrderBillingAddress(order, order.payment),
           payment: order.payment
             ? {
@@ -4554,7 +4575,7 @@ export class EventsService {
           dueDate: dueDate.toISOString(),
           isLastInstallment: isLast,
           retainedUntilAudit: isLast && !isAudited,
-          buyer: order.user,
+          buyer: this.resolveOrderBuyer(order),
         });
 
         totalPending += amount;
@@ -4666,16 +4687,7 @@ export class EventsService {
           paymentDate: order.payment.paymentDate.toISOString(),
           releaseDate: releaseDate.toISOString(),
           daysUntilRelease,
-          buyer: order.user ? {
-            id: order.user.id,
-            firstName: order.user.firstName,
-            lastName: order.user.lastName,
-            fullName: `${order.user.firstName} ${order.user.lastName}`,
-            email: order.user.email,
-            phone: order.user.phone,
-            documentNumber: order.user.documentNumber,
-            avatarUrl: order.user.avatarUrl,
-          } : null,
+          buyer: this.resolveOrderBuyer(order),
           billingAddress: this.resolveOrderBillingAddress(order, order.payment),
           registrationsCount: order.registrations.length,
         });
@@ -4792,13 +4804,7 @@ export class EventsService {
           refundDate: reg.order?.payment?.updatedAt || reg.order?.payment?.paymentDate || reg.order?.createdAt,
           purchaseDate: reg.order?.createdAt,
           paymentMethod: reg.order?.payment?.method,
-          buyer: reg.order?.user ? {
-            id: reg.order.user.id,
-            firstName: reg.order.user.firstName,
-            lastName: reg.order.user.lastName,
-            email: reg.order.user.email,
-            avatarUrl: reg.order.user.avatarUrl,
-          } : null,
+          buyer: this.resolveOrderBuyer(reg.order),
           participant: reg.user ? {
             id: reg.user.id,
             firstName: reg.user.firstName,
@@ -4928,13 +4934,7 @@ export class EventsService {
           chargebackDate: reg.order?.payment?.updatedAt || reg.order?.payment?.paymentDate || reg.order?.createdAt,
           purchaseDate: reg.order?.createdAt,
           paymentMethod: reg.order?.payment?.method,
-          buyer: reg.order?.user ? {
-            id: reg.order.user.id,
-            firstName: reg.order.user.firstName,
-            lastName: reg.order.user.lastName,
-            email: reg.order.user.email,
-            avatarUrl: reg.order.user.avatarUrl,
-          } : null,
+          buyer: this.resolveOrderBuyer(reg.order),
           participant: reg.user ? {
             id: reg.user.id,
             firstName: reg.user.firstName,
@@ -5051,6 +5051,31 @@ export class EventsService {
    * `userByDoc` é o mapa pré-resolvido por {@link buildParticipantUserByDocMap}
    * (lookup em lote — evita N+1).
    */
+  /**
+   * Resolve a identidade do COMPRADOR de um pedido para as telas do organizador,
+   * preferindo o snapshot congelado (`order.buyerSnapshot`, gravado quando a conta
+   * do comprador é excluída/anonimizada) sobre o `order.user` vivo. Sem isso, o
+   * bloco "comprador" mostraria os dados anônimos após o usuário excluir a conta.
+   * Retorna shape uniforme (superset consumido pelas telas) ou null.
+   */
+  private resolveOrderBuyer(order: any) {
+    const snap = (order?.buyerSnapshot as any) ?? null;
+    const src = snap ?? order?.user ?? null;
+    if (!src) return null;
+    const firstName = src.firstName ?? '';
+    const lastName = src.lastName ?? '';
+    return {
+      id: src.id ?? null,
+      firstName,
+      lastName,
+      fullName: `${firstName} ${lastName}`.trim(),
+      email: src.email ?? null,
+      phone: src.phone ?? null,
+      documentNumber: src.documentNumber ?? null,
+      avatarUrl: src.avatarUrl ?? null,
+    };
+  }
+
   private resolveOrganizerParticipant(reg: any, userByDoc: Map<string, any>) {
     const snap = (reg.receiptSnapshot as any)?.participant ?? null;
     const linked = reg.user ?? null;
@@ -5313,6 +5338,10 @@ export class EventsService {
             ? {
               name: rt.ticket.name ?? null,
               modality: rt.ticket.modality ?? null,
+              // Distância + unidade (ex.: 5 + "KM") p/ a coluna "Modalidade" do
+              // export ("Corrida 5KM"). Snapshot tem prioridade no extractField.
+              distance: rt.ticket.distance ?? null,
+              distanceUnit: rt.ticket.distanceUnit ?? null,
               category: rt.ticket.category ? { name: rt.ticket.category.name } : null,
             }
             : null,
@@ -5466,6 +5495,10 @@ export class EventsService {
             ? {
               name: rt.ticket.name ?? null,
               modality: rt.ticket.modality ?? null,
+              // Distância + unidade (ex.: 5 + "KM") p/ a coluna "Modalidade" do
+              // export ("Corrida 5KM"). Snapshot tem prioridade no extractField.
+              distance: rt.ticket.distance ?? null,
+              distanceUnit: rt.ticket.distanceUnit ?? null,
               category: rt.ticket.category ? { name: rt.ticket.category.name } : null,
             }
             : null,

@@ -17,6 +17,7 @@ const FIELD_LABELS: Record<ExportField, string> = {
   contatoEmergencia: 'Contato de emergência',
   endereco: 'Endereço de pagamento',
   ingresso: 'Ingresso',
+  modalidade: 'Modalidade',
   produtosEscolhidos: 'Produtos escolhidos',
   perguntasRespostas: 'Perguntas e respostas',
   dataPagamento: 'Data da compra',
@@ -219,6 +220,32 @@ function extractField(reg: any, field: ExportField): string {
         .map((rt: any) => labelFor(rt))
         .filter((s: string) => s.length > 0);
       return labels.join('; ');
+    }
+    case 'modalidade': {
+      // Modalidade + distância do ingresso (ex.: "Corrida 5KM"). `ticket.modality`
+      // guarda o LABEL do template (não id) — ver TicketForm ao salvar; `distance`
+      // é numérico e `distanceUnit` é "KM"/"M". Prefere o SNAPSHOT (preserva o valor
+      // da compra após rename/exclusão) e cai na relação VIVA como fallback (legados).
+      // Mesma precedência do campo "ingresso".
+      const regTickets = Array.isArray(reg.tickets) ? reg.tickets : [];
+      const modalidades = regTickets
+        .map((rt: any) => {
+          const snap = rt?.ticketSnapshot ?? null;
+          const live = rt?.ticket ?? null;
+          const modality = String(snap?.modality ?? live?.modality ?? '').trim();
+          const distanceRaw = snap?.distance ?? live?.distance ?? null;
+          const unit = String(snap?.distanceUnit ?? live?.distanceUnit ?? '').trim();
+          // Distância só entra se houver valor (>0); unidade é opcional (default vazio).
+          const distanceStr =
+            distanceRaw != null && String(distanceRaw).trim() !== '' && Number(distanceRaw) !== 0
+              ? `${String(distanceRaw).trim()}${unit}`
+              : '';
+          return [modality, distanceStr].filter(Boolean).join(' ');
+        })
+        .filter((s: string) => s.length > 0);
+      // Dedup preservando ordem: no caso comum há 1 modalidade por inscrição, mas
+      // inscrições multi-ingresso não devem repetir a mesma modalidade/distância.
+      return Array.from(new Set(modalidades)).join('; ');
     }
     case 'produtosEscolhidos': {
       const products: any[] = reg.products ?? [];

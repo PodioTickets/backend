@@ -211,4 +211,60 @@ describe('ExportRegistrationsService — coluna fixa de ID da inscrição', () =
     const r = { id: 'x', user: {}, tickets: [{ ticketSnapshot: { name: 'Lote 1', category: { name: '5km' } }, ticket: null }] };
     expect(txtLines([r], ['ingresso'])[2].split(',').pop()).toBe('5km - Lote 1');
   });
+
+  // ── Campo "Modalidade": modality + distância, agregado + dedup ────────────────
+  it('modalidade: modality + distância → "Corrida 5KM"', () => {
+    const r = { id: 'x', user: {}, tickets: [{ ticket: { modality: 'Corrida', distance: 5, distanceUnit: 'KM' } }] };
+    expect(txtLines([r], ['modalidade'])[2].split(',').pop()).toBe('Corrida 5KM');
+  });
+
+  it('modalidade: sem distância → só a modalidade', () => {
+    const r = { id: 'x', user: {}, tickets: [{ ticket: { name: 'Lote 1', modality: 'Corrida' } }] };
+    expect(txtLines([r], ['modalidade'])[2].split(',').pop()).toBe('Corrida');
+  });
+
+  it('modalidade: sem modalidade mas com distância → só a distância', () => {
+    const r = { id: 'x', user: {}, tickets: [{ ticket: { distance: 10, distanceUnit: 'KM' } }] };
+    expect(txtLines([r], ['modalidade'])[2].split(',').pop()).toBe('10KM');
+  });
+
+  it('modalidade: PREFERE o snapshot sobre a relação viva (modality + distância)', () => {
+    const r = {
+      id: 'x', user: {},
+      tickets: [{
+        ticketSnapshot: { modality: 'Caminhada', distance: 3, distanceUnit: 'KM' },
+        ticket: { modality: 'Corrida', distance: 5, distanceUnit: 'KM' },
+      }],
+    };
+    expect(txtLines([r], ['modalidade'])[2].split(',').pop()).toBe('Caminhada 3KM');
+  });
+
+  it('modalidade: distância 0 é ignorada → só a modalidade', () => {
+    const r = { id: 'x', user: {}, tickets: [{ ticket: { modality: 'Corrida', distance: 0, distanceUnit: 'KM' } }] };
+    expect(txtLines([r], ['modalidade'])[2].split(',').pop()).toBe('Corrida');
+  });
+
+  it('modalidade: unidade "M" respeitada → "Corrida 800M"', () => {
+    const r = { id: 'x', user: {}, tickets: [{ ticket: { modality: 'Corrida', distance: 800, distanceUnit: 'M' } }] };
+    expect(txtLines([r], ['modalidade'])[2].split(',').pop()).toBe('Corrida 800M');
+  });
+
+  it('modalidade: duplicatas iguais → sem repetição; distintas → "; "', () => {
+    const same = {
+      id: 'x', user: {},
+      tickets: [{ ticket: { modality: 'Corrida', distance: 5, distanceUnit: 'KM' } }, { ticket: { modality: 'Corrida', distance: 5, distanceUnit: 'KM' } }],
+    };
+    expect(txtLines([same], ['modalidade'])[2].split(',').pop()).toBe('Corrida 5KM');
+
+    const distinct = {
+      id: 'y', user: {},
+      tickets: [{ ticket: { modality: 'Corrida', distance: 5, distanceUnit: 'KM' } }, { ticket: { modality: 'Corrida', distance: 10, distanceUnit: 'KM' } }],
+    };
+    expect(txtLines([distinct], ['modalidade'])[2].split(',').pop()).toBe('Corrida 5KM; Corrida 10KM');
+  });
+
+  it('modalidade: ingresso sem modalidade nem distância → célula vazia', () => {
+    const r = { id: 'x', user: {}, tickets: [{ ticket: { name: 'Lote 1' } }] };
+    expect(txtLines([r], ['modalidade'])[2].split(',').pop()).toBe('');
+  });
 });
