@@ -4732,106 +4732,40 @@ export class EventsService {
   /**
    * Obtém lista de pagamentos estornados (refunded)
    */
-  async getFinancialRefunded(userId: string, eventId: string, page: number = 1, limit: number = 20) {
+  async getFinancialRefunded(
+    userId: string,
+    eventId: string,
+    page: number = 1,
+    limit: number = 20,
+    search?: string,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId, 'financial');
 
     const prismaRead = this.prisma.getReadClient();
     const skip = (page - 1) * limit;
 
-    // Buscar todos os pagamentos estornados do evento
-    const refundedRegistrations = await prismaRead.registration.findMany({
-      where: {
+    // Página + total via helper canônico: pagina DEPOIS do filtro de refundType
+    // (o antigo skip/take ANTES do filtro em memória podia devolver < limit itens)
+    // e aplica a busca textual (nome/e-mail/documento/ID/cupom/voucher/método).
+    const { ids, total } = await this.queryRegistrationIdsPageForRefundedMetadataFilter(
+      prismaRead,
+      {
         eventId,
-        order: {
-          payment: {
-            status: PaymentStatus.REFUNDED,
-          },
-        },
+        targetRefundType: 'REFUND',
+        search,
+        sortBy: 'purchaseDate',
+        sortOrder: 'desc',
+        skip,
+        limit,
       },
-      include: {
-        order: {
-          include: {
-            payment: {
-              include: {
-                user: {
-                  select: {
-                    id: true,
-                    firstName: true,
-                    lastName: true,
-                    email: true,
-                    avatarUrl: true,
-                  },
-                },
-              },
-            },
-            user: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                email: true,
-                avatarUrl: true,
-              },
-            },
-          },
-        },
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-            avatarUrl: true,
-          },
-        },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-      skip,
-      take: limit,
-    });
+    );
 
-    // Filtrar apenas os que têm refundType: 'REFUND' no metadata
-    const refunded = refundedRegistrations
-      .filter((reg) => {
-        const metadata = reg.order?.payment?.metadata as any;
-        return metadata?.refundType === 'REFUND' || (!metadata?.refundType && reg.order?.payment?.status === PaymentStatus.REFUNDED);
-      })
-      .map((reg) => {
-        const metadata = reg.order?.payment?.metadata as any;
-        return {
-          id: reg.order?.payment?.id,
-          orderId: reg.orderId,
-          registrationId: reg.id,
-          amount: this.normalizeToCents(reg.order?.finalAmount),
-          refundDate: reg.order?.payment?.updatedAt || reg.order?.payment?.paymentDate || reg.order?.createdAt,
-          purchaseDate: reg.order?.createdAt,
-          paymentMethod: reg.order?.payment?.method,
-          buyer: this.resolveOrderBuyer(reg.order),
-          participant: reg.user ? {
-            id: reg.user.id,
-            firstName: reg.user.firstName,
-            lastName: reg.user.lastName,
-            email: reg.user.email,
-            avatarUrl: reg.user.avatarUrl,
-          } : null,
-          // O estorno grava `refundReason`; mantém fallback p/ `reason` (legados).
-          reason: metadata?.refundReason || metadata?.reason || 'Estorno solicitado pelo cliente',
-        };
-      });
-
-    // Contar total para paginação
-    const totalRefunded = await prismaRead.registration.count({
-      where: {
-        eventId,
-        order: {
-          payment: {
-            status: PaymentStatus.REFUNDED,
-          },
-        },
-      },
-    });
+    const refunded = await this.mapRefundLikeRegistrationsPage(
+      prismaRead,
+      ids,
+      'refundDate',
+      'Estorno solicitado pelo cliente',
+    );
 
     // Soma por ORDER única — `finalAmount` se repete por inscrição no mesmo pedido;
     // somar por registration triplicava o total em pedidos multi-ingresso.
@@ -4851,8 +4785,8 @@ export class EventsService {
         pagination: {
           page,
           limit,
-          total: totalRefunded,
-          totalPages: Math.ceil(totalRefunded / limit),
+          total,
+          totalPages: Math.ceil(total / limit),
         },
         totalAmount,
       },
@@ -4860,24 +4794,21 @@ export class EventsService {
   }
 
   /**
-   * Obtém lista de chargebacks
+   * Carrega e mapeia a PÁGINA de inscrições (por ids já filtrados/ordenados pelo
+   * helper de metadata) para o shape consumido pelos drawers de Estornados/
+   * Chargebacks. `dateKey` troca o nome do campo de data (refundDate|chargebackDate)
+   * e `defaultReason` o fallback do motivo — únicos pontos que divergem entre os dois.
    */
-  async getFinancialChargebacks(userId: string, eventId: string, page: number = 1, limit: number = 20) {
-    await this.verifyOrganizerAccess(userId, eventId, 'financial');
+  private async mapRefundLikeRegistrationsPage(
+    prismaRead: PrismaClient,
+    ids: string[],
+    dateKey: 'refundDate' | 'chargebackDate',
+    defaultReason: string,
+  ): Promise<any[]> {
+    if (ids.length === 0) return [];
 
-    const prismaRead = this.prisma.getReadClient();
-    const skip = (page - 1) * limit;
-
-    // Buscar todos os pagamentos com chargeback do evento
-    const chargebackRegistrations = await prismaRead.registration.findMany({
-      where: {
-        eventId,
-        order: {
-          payment: {
-            status: PaymentStatus.REFUNDED,
-          },
-        },
-      },
+    const unsorted = await prismaRead.registration.findMany({
+      where: { id: { in: ids } },
       include: {
         order: {
           include: {
@@ -4915,69 +4846,80 @@ export class EventsService {
           },
         },
       },
-      orderBy: {
-        createdAt: 'desc',
-      },
-      skip,
-      take: limit,
     });
 
-    // Filtrar apenas os que têm refundType: 'CHARGEBACK' no metadata
-    const chargebacks = chargebackRegistrations
-      .filter((reg) => {
-        const metadata = reg.order?.payment?.metadata as any;
-        return metadata?.refundType === 'CHARGEBACK';
-      })
-      .map((reg) => {
-        const metadata = reg.order?.payment?.metadata as any;
-        return {
-          id: reg.order?.payment?.id,
-          orderId: reg.orderId,
-          registrationId: reg.id,
-          amount: this.normalizeToCents(reg.order?.finalAmount),
-          chargebackDate: reg.order?.payment?.updatedAt || reg.order?.payment?.paymentDate || reg.order?.createdAt,
-          purchaseDate: reg.order?.createdAt,
-          paymentMethod: reg.order?.payment?.method,
-          buyer: this.resolveOrderBuyer(reg.order),
-          participant: reg.user ? {
-            id: reg.user.id,
-            firstName: reg.user.firstName,
-            lastName: reg.user.lastName,
-            email: reg.user.email,
-            avatarUrl: reg.user.avatarUrl,
-          } : null,
-          reason: metadata?.refundReason || metadata?.reason || 'Chargeback solicitado pelo banco',
-        };
-      });
+    // Reordena conforme a ordem paginada dos ids (findMany não preserva ordem do IN).
+    const orderMap = new Map(ids.map((id, i) => [id, i]));
+    const sorted = [...unsorted].sort(
+      (a, b) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0),
+    );
 
-    // Contar total para paginação via count no banco + filtro JSON em lote limitado.
-    // Prisma não suporta filtro JSON complexo; buscamos apenas os campos necessários
-    // com um limit generoso (5000) para evitar carregar toda a tabela em eventos grandes.
-    const refundedForCount = await prismaRead.registration.findMany({
-      where: {
-        eventId,
-        order: {
-          payment: {
-            status: PaymentStatus.REFUNDED,
-          },
-        },
-      },
-      select: {
-        order: {
-          select: {
-            payment: {
-              select: { metadata: true },
-            },
-          },
-        },
-      },
-      take: 5000,
-    });
-
-    const totalChargebacks = refundedForCount.filter((reg) => {
+    return sorted.map((reg) => {
       const metadata = reg.order?.payment?.metadata as any;
-      return metadata?.refundType === 'CHARGEBACK';
-    }).length;
+      return {
+        id: reg.order?.payment?.id,
+        orderId: reg.orderId,
+        registrationId: reg.id,
+        amount: this.normalizeToCents(reg.order?.finalAmount),
+        [dateKey]:
+          reg.order?.payment?.updatedAt ||
+          reg.order?.payment?.paymentDate ||
+          reg.order?.createdAt,
+        purchaseDate: reg.order?.createdAt,
+        paymentMethod: reg.order?.payment?.method,
+        buyer: this.resolveOrderBuyer(reg.order),
+        participant: reg.user
+          ? {
+              id: reg.user.id,
+              firstName: reg.user.firstName,
+              lastName: reg.user.lastName,
+              email: reg.user.email,
+              avatarUrl: reg.user.avatarUrl,
+            }
+          : null,
+        // Estorno/chargeback gravam `refundReason`; fallback p/ `reason` (legados).
+        reason: metadata?.refundReason || metadata?.reason || defaultReason,
+      };
+    });
+  }
+
+  /**
+   * Obtém lista de chargebacks
+   */
+  async getFinancialChargebacks(
+    userId: string,
+    eventId: string,
+    page: number = 1,
+    limit: number = 20,
+    search?: string,
+  ) {
+    await this.verifyOrganizerAccess(userId, eventId, 'financial');
+
+    const prismaRead = this.prisma.getReadClient();
+    const skip = (page - 1) * limit;
+
+    // Página + total corretos (pagina DEPOIS do filtro de metadata; substitui o
+    // antigo scan em memória com take:5000 que não escalava e ignorava busca) +
+    // busca textual server-side por nome/e-mail/documento/ID/cupom/voucher/método.
+    const { ids, total } = await this.queryRegistrationIdsPageForRefundedMetadataFilter(
+      prismaRead,
+      {
+        eventId,
+        targetRefundType: 'CHARGEBACK',
+        search,
+        sortBy: 'purchaseDate',
+        sortOrder: 'desc',
+        skip,
+        limit,
+      },
+    );
+
+    const chargebacks = await this.mapRefundLikeRegistrationsPage(
+      prismaRead,
+      ids,
+      'chargebackDate',
+      'Chargeback solicitado pelo banco',
+    );
 
     // Soma por ORDER única (evita inflar o total em pedidos multi-ingresso).
     const seenOrders = new Set<string>();
@@ -4996,8 +4938,8 @@ export class EventsService {
         pagination: {
           page,
           limit,
-          total: totalChargebacks,
-          totalPages: Math.ceil(totalChargebacks / limit),
+          total,
+          totalPages: Math.ceil(total / limit),
         },
         totalAmount,
       },

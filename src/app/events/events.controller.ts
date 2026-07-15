@@ -831,6 +831,7 @@ export class EventsController {
   @ApiParam({ name: 'eventId', description: 'Event UUID' })
   @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20, max: 100)' })
+  @ApiQuery({ name: 'search', required: false, type: String, description: 'Filtra por nome/e-mail/documento/ID do pedido/cupom/voucher/método' })
   @ApiResponse({ status: 200, description: 'Refunded payments fetched successfully' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 403, description: 'Forbidden - Only organization owner can access' })
@@ -839,8 +840,9 @@ export class EventsController {
     @Param('eventId') eventId: string,
     @Query('page') page?: number,
     @Query('limit') limit?: number,
+    @Query('search') search?: string,
   ) {
-    return this.eventsService.getFinancialRefunded(req.user.id, eventId, page || 1, limit || 20);
+    return this.eventsService.getFinancialRefunded(req.user.id, eventId, page || 1, limit || 20, search);
   }
 
   @Get(':eventId/financial/chargebacks')
@@ -854,6 +856,7 @@ export class EventsController {
   @ApiParam({ name: 'eventId', description: 'Event UUID' })
   @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20, max: 100)' })
+  @ApiQuery({ name: 'search', required: false, type: String, description: 'Filtra por nome/e-mail/documento/ID do pedido/cupom/voucher/método' })
   @ApiResponse({ status: 200, description: 'Chargebacks fetched successfully' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 403, description: 'Forbidden - Only organization owner can access' })
@@ -862,8 +865,9 @@ export class EventsController {
     @Param('eventId') eventId: string,
     @Query('page') page?: number,
     @Query('limit') limit?: number,
+    @Query('search') search?: string,
   ) {
-    return this.eventsService.getFinancialChargebacks(req.user.id, eventId, page || 1, limit || 20);
+    return this.eventsService.getFinancialChargebacks(req.user.id, eventId, page || 1, limit || 20, search);
   }
 
   // ========== FISCAL EXPORT ==========
