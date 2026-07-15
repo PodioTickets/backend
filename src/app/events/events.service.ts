@@ -3673,9 +3673,13 @@ export class EventsService {
       // Cupom/voucher aplicados no pedido — busca pelo código
       { order: { coupon: { code: { contains: searchTerm, mode: 'insensitive' } } } },
       { order: { voucher: { code: { contains: searchTerm, mode: 'insensitive' } } } },
-      // Método de pagamento (só adiciona quando o termo casa algum método)
+      // Método de pagamento (só adiciona quando o termo casa algum método).
+      // `amount > 0` exclui pedidos GRATUITOS: eles pulam o gateway e gravam um
+      // método apenas NOMINAL (ex.: PIX) para fins de relatório (ver isFreeOrder
+      // em orders.service). Sem esse guard, buscar "pix" trazia ingressos grátis,
+      // que não são pagamento PIX real. Nenhum pagamento real tem amount 0.
       ...(methods.length > 0
-        ? [{ order: { payment: { method: { in: methods } } } }]
+        ? [{ order: { payment: { method: { in: methods }, amount: { gt: 0 } } } }]
         : []),
     ];
   }
