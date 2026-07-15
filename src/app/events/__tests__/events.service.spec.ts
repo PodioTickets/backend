@@ -702,5 +702,30 @@ describe('EventsService', () => {
       expect(row.ticket).toBeUndefined();
     });
   });
+
+  // Busca textual da listagem de inscrições: ao casar um MÉTODO de pagamento
+  // (ex.: "pix"), o branch precisa exigir `amount > 0` para NÃO trazer pedidos
+  // gratuitos — que gravam um método apenas nominal (ver isFreeOrder em
+  // orders.service). Regressão do bug "digitar PIX na busca traz ingressos grátis".
+  describe('buildRegistrationTextSearchOr - método de pagamento exclui grátis', () => {
+    const callBuild = (term: string) =>
+      (service as any).buildRegistrationTextSearchOr(term, []) as any[];
+
+    it('busca por "pix" só casa pagamento PIX com amount > 0 (exclui grátis)', () => {
+      const or = callBuild('pix');
+      const methodClause = or.find(
+        (c) => c?.order?.payment?.method?.in?.includes('PIX'),
+      );
+      expect(methodClause).toBeDefined();
+      // O guard que separa PIX real de pedido gratuito (método nominal).
+      expect(methodClause.order.payment.amount).toEqual({ gt: 0 });
+    });
+
+    it('termo que não casa método não adiciona branch de pagamento', () => {
+      const or = callBuild('joão');
+      const methodClause = or.find((c) => c?.order?.payment?.method);
+      expect(methodClause).toBeUndefined();
+    });
+  });
 });
 
