@@ -93,12 +93,18 @@ export class AuthController {
   @ApiResponse({ status: 201, description: 'User registered successfully' })
   @ApiResponse({ status: 409, description: 'User already exists' })
   @ApiResponse({ status: 400, description: 'Invalid data or terms not accepted' })
-  async register(@Body() registerDto: EmailRegisterDto) {
-    try {
-      return await this.authService.register(registerDto);
-    } catch (error) {
-      throw error;
-    }
+  async register(
+    @Body() registerDto: EmailRegisterDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    // O cadastro JÁ autologa (authService.register termina em login()), então
+    // precisa ESTABELECER a sessão da superfície 'client' via cookies httpOnly —
+    // exatamente como o /login. Sem isto, os tokens voltavam só no body e o front
+    // (que não grava mais token em JS desde a migração httpOnly) ficava sem cookie
+    // de sessão → a 1ª chamada autenticada (reserve do checkout) dava 401
+    // "não autorizado". Mesmo helper/superfície do loginEmail.
+    const result = await this.authService.register(registerDto);
+    return applyAuthCookiesFromResult(res, 'client', result);
   }
 
   @Post('login')
