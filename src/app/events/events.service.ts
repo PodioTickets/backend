@@ -3356,18 +3356,33 @@ export class EventsService {
       parts.push(Prisma.sql`o."createdAt" <= ${new Date(params.endDate)}`);
     }
 
-    const searchTrim = params.search?.trim();
+    // Prefixo '#' restringe a busca a IDs — mesma convenção da listagem de
+    // inscrições (ver `getEventRegistrations`). O front exibe o pedido como
+    // "#999ef0df" (`formatShortId`), então o termo copiado da tela chega com o '#'
+    // e precisa ser removido antes do ILIKE (UUID não contém '#').
+    const searchRaw = params.search?.trim();
+    const isIdSearch = !!searchRaw && searchRaw.startsWith('#');
+    const searchTrim = isIdSearch ? searchRaw.slice(1).trim() : searchRaw;
     if (searchTrim) {
       const pat = `%${this.escapeIlikePattern(searchTrim)}%`;
-      // Métodos de pagamento casados pelo termo (ex.: "pix") — paridade com a listagem.
-      const methods = this.matchPaymentMethodsFromSearch(searchTrim);
-      const methodSql =
-        methods.length > 0
-          ? Prisma.sql` OR p.method::text IN (${Prisma.join(methods.map((m) => Prisma.sql`${m}`))})`
-          : Prisma.empty;
-      parts.push(
-        Prisma.sql`(r.id::text ILIKE ${pat} ESCAPE '\\' OR COALESCE(r."participantName", '') ILIKE ${pat} ESCAPE '\\' OR EXISTS (SELECT 1 FROM "User" u WHERE u.id = r."userId" AND (u."firstName" ILIKE ${pat} ESCAPE '\\' OR u."lastName" ILIKE ${pat} ESCAPE '\\' OR (COALESCE(u."firstName", '') || ' ' || COALESCE(u."lastName", '')) ILIKE ${pat} ESCAPE '\\' OR u.email ILIKE ${pat} ESCAPE '\\' OR COALESCE(u."documentNumber", '') ILIKE ${pat} ESCAPE '\\')) OR EXISTS (SELECT 1 FROM "Coupon" c WHERE c.id = o."couponId" AND COALESCE(c.code, '') ILIKE ${pat} ESCAPE '\\') OR EXISTS (SELECT 1 FROM "Voucher" v WHERE v.id = o."voucherId" AND COALESCE(v.code, '') ILIKE ${pat} ESCAPE '\\')${methodSql})`,
-      );
+      // IDs: inscrição E PEDIDO. Os drawers de Estornado/Chargeback exibem o
+      // `orderId`, então sem `o.id` a busca pelo ID lido na tela não casava nada
+      // — só `r.id`, que não é exibido em lugar nenhum. Paridade com o
+      // pré-filtro de UUID da listagem de inscrições (r.id OR o.id).
+      const idSql = Prisma.sql`(r.id::text ILIKE ${pat} ESCAPE '\\' OR o.id::text ILIKE ${pat} ESCAPE '\\')`;
+      if (isIdSearch) {
+        parts.push(idSql);
+      } else {
+        // Métodos de pagamento casados pelo termo (ex.: "pix") — paridade com a listagem.
+        const methods = this.matchPaymentMethodsFromSearch(searchTrim);
+        const methodSql =
+          methods.length > 0
+            ? Prisma.sql` OR p.method::text IN (${Prisma.join(methods.map((m) => Prisma.sql`${m}`))})`
+            : Prisma.empty;
+        parts.push(
+          Prisma.sql`(${idSql} OR COALESCE(r."participantName", '') ILIKE ${pat} ESCAPE '\\' OR EXISTS (SELECT 1 FROM "User" u WHERE u.id = r."userId" AND (u."firstName" ILIKE ${pat} ESCAPE '\\' OR u."lastName" ILIKE ${pat} ESCAPE '\\' OR (COALESCE(u."firstName", '') || ' ' || COALESCE(u."lastName", '')) ILIKE ${pat} ESCAPE '\\' OR u.email ILIKE ${pat} ESCAPE '\\' OR COALESCE(u."documentNumber", '') ILIKE ${pat} ESCAPE '\\')) OR EXISTS (SELECT 1 FROM "Coupon" c WHERE c.id = o."couponId" AND COALESCE(c.code, '') ILIKE ${pat} ESCAPE '\\') OR EXISTS (SELECT 1 FROM "Voucher" v WHERE v.id = o."voucherId" AND COALESCE(v.code, '') ILIKE ${pat} ESCAPE '\\')${methodSql})`,
+        );
+      }
     }
 
     const whereSql = Prisma.join(parts, ' AND ');
