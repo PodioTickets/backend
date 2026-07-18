@@ -166,8 +166,8 @@ function computeFinalAmount(order: any, serviceFee: number): number {
 // `./order-discount.util` (funções puras reusadas pelo export de inscrições sem
 // puxar este módulo inteiro). Importados p/ uso interno (orderShape) e re-exportados
 // p/ manter os imports/tests que os pegavam daqui.
-import { distributeDiscount, inferEffectiveUsage } from './order-discount.util';
-export { distributeDiscount, inferEffectiveUsage };
+import { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount } from './order-discount.util';
+export { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount };
 
 /**
  * Desconto total do cupom (em centavos), considerando os N melhores slots de ingresso
@@ -1874,9 +1874,6 @@ export class OrdersService {
     // participantes/produtos reais para avaliar QUANTITY com segurança.
     const autoApplyCouponTypes = opts.autoApplyCouponTypes ?? ['QUANTITY', 'AGE'];
     if (!order.couponId && !order.voucherId) {
-      const totalQuantity = reservedTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
-      const ticketIds = reservedTickets.map((rt: any) => rt.ticketId);
-
       const autoCoupons = await w.coupon.findMany({
         where: {
           eventId: order.eventId,
@@ -1888,16 +1885,24 @@ export class OrdersService {
       });
 
       for (const coupon of autoCoupons) {
-        // Verificar appliesTo
+        // appliesTo restringe os ingressos elegíveis; 'all'/null = todos do carrinho.
+        // Filtrado UMA vez e reutilizado pelo gatilho E pela base do desconto — evita a
+        // divergência de escopo que existia entre os dois.
+        let autoApplicableTickets = reservedTickets;
         if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-          const allowed = parseAppliesToArray(coupon.appliesTo);
-          if (!ticketIds.some((id: string) => allowed.includes(id))) continue;
+          const allowedIds = parseAppliesToArray(coupon.appliesTo);
+          autoApplicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
         }
+        if (autoApplicableTickets.length === 0) continue;
 
         if (coupon.minCartValue && ticketsSubtotal < coupon.minCartValue) continue;
 
         if (coupon.couponType === 'QUANTITY') {
-          if (coupon.minQuantity && totalQuantity < coupon.minQuantity) continue;
+          // minQuantity conta as unidades dos ingressos VINCULADOS ao cupom (appliesTo), não
+          // o carrinho inteiro — senão "1 do cupom + 1 de outro ingresso" já satisfaria o
+          // mínimo e o cupom dispararia/descontaria fora da restrição.
+          const applicableQty = autoApplicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
+          if (coupon.minQuantity && applicableQty < coupon.minQuantity) continue;
           // QUANTITY: all-or-nothing — se esgotado, não aplica
           if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) continue;
         } else if (coupon.couponType === 'AGE') {
@@ -1912,27 +1917,14 @@ export class OrdersService {
         }
 
         {
-          let autoApplicableTickets = reservedTickets;
-          if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-            const allowedIds = parseAppliesToArray(coupon.appliesTo);
-            autoApplicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
-          }
-
           if (coupon.couponType === 'QUANTITY') {
-            // QUANTITY: desconto sobre todo o pedido (all-or-nothing).
+            // Desconto SÓ sobre os ingressos vinculados (autoApplicableTickets). FONTE ÚNICA
+            // com o pay (computeQuantityCouponDiscount) — display e cobrança nunca divergem.
             // Produtos adicionais entram na base apenas quando applyToProducts=true.
-            const autoApplicableSubtotal = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.unitPrice * rt.quantity, 0);
-            const autoApplicableQty = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
             const productsContribution = coupon.applyToProducts ? productsSubtotal : 0;
-            if (coupon.type === 'PERCENTAGE') {
-              const applicableRatio = ticketsSubtotal > 0 ? autoApplicableSubtotal / ticketsSubtotal : 1;
-              const applicableBase = autoApplicableSubtotal + Math.round(productsContribution * applicableRatio);
-              autoDiscount = Math.floor(applicableBase * (coupon.value / 100));
-            } else {
-              // FIXED: valor por unidade aplicável; cap definido abaixo.
-              autoDiscount = autoApplicableQty * coupon.value;
-            }
-            autoDiscount = Math.min(autoDiscount, autoApplicableSubtotal + productsContribution);
+            autoDiscount = computeQuantityCouponDiscount(
+              autoApplicableTickets, ticketsSubtotal, productsContribution, coupon,
+            );
           } else {
             // AGE: desconto apenas nos ingressos dos participantes qualificados (slots do stash).
             const ageSlots: number[] = (coupon as any)._ageSlots ?? [];
@@ -1955,18 +1947,25 @@ export class OrdersService {
       }
     }
 
-    // (c) Remover cupom QUANTITY se quantidade ficou abaixo do mínimo
+    // (c) Remover cupom QUANTITY se a quantidade dos ingressos VINCULADOS (appliesTo) caiu
+    // abaixo do mínimo. Conta unidades escopadas — mesma regra do gatilho — e não
+    // participants.length (carrinho inteiro), que manteria o cupom após trocar o ingresso
+    // vinculado por outro qualquer.
     if (order.couponId && !autoCouponId && !shouldRemoveAgeCoupon) {
       const existingCoupon = await r.coupon.findUnique({
         where: { id: order.couponId },
-        select: { couponType: true, minQuantity: true },
+        select: { couponType: true, minQuantity: true, appliesTo: true },
       });
-      if (
-        existingCoupon?.couponType === 'QUANTITY' &&
-        existingCoupon.minQuantity &&
-        participants.length < existingCoupon.minQuantity
-      ) {
-        shouldRemoveQuantityCoupon = true;
+      if (existingCoupon?.couponType === 'QUANTITY' && existingCoupon.minQuantity) {
+        let applicableTickets = reservedTickets;
+        if (existingCoupon.appliesTo && existingCoupon.appliesTo !== 'all') {
+          const allowedIds = parseAppliesToArray(existingCoupon.appliesTo);
+          applicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
+        }
+        const applicableQty = applicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
+        if (applicableQty < existingCoupon.minQuantity) {
+          shouldRemoveQuantityCoupon = true;
+        }
       }
     }
 
@@ -3128,7 +3127,6 @@ export class OrdersService {
 
     // Cupons automáticos (QUANTITY / AGE) — sem código, aplicados se condição satisfeita
     if (!couponId && !effectiveVoucherCode) {
-      const totalQuantity = reservedTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
       const ticketIds = reservedTickets.map((rt: any) => rt.ticketId);
 
       const autoCoupons = await w.coupon.findMany({
@@ -3149,21 +3147,28 @@ export class OrdersService {
         }
 
         if (coupon.couponType === 'QUANTITY') {
-          if (totalQuantity < (coupon.minQuantity ?? 0)) continue;
+          // Ingressos VINCULADOS ao cupom (appliesTo); mínimo e base se restringem a eles —
+          // nunca ao carrinho inteiro. 'all'/null = todos.
+          let applicableTicketsQ = reservedTickets;
+          if (coupon.appliesTo && coupon.appliesTo !== 'all') {
+            const allowedIds = parseAppliesToArray(coupon.appliesTo);
+            applicableTicketsQ = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
+          }
+          const applicableQtyQ = applicableTicketsQ.reduce((s: number, rt: any) => s + rt.quantity, 0);
+          if (applicableQtyQ < (coupon.minQuantity ?? 0)) continue;
           // QUANTITY: all-or-nothing (1 uso/pedido). RESERVA atômica de 1 unidade sob row-lock
           // — esgotado (granted = 0) → não aplica. Substitui o check não-atômico
           // `usageCount >= maxUsage`, que sob concorrência deixava ultrapassar o limite.
           const granted = await claimCouponUnits(w, coupon.id, orderId, 1);
           if (granted <= 0) continue;
 
-          // Base de cálculo respeita applyToProducts: sem flag = só ingressos; com flag =
-          // ingressos + produtos. Cap final é a própria base (não pode descontar mais do
-          // que o subtotal coberto).
-          const quantityBase = coupon.applyToProducts ? preDiscountTotal : ticketsSubtotal;
-          couponDiscount =
-            coupon.type === 'PERCENTAGE'
-              ? Math.floor(quantityBase * (coupon.value / 100))
-              : Math.min(coupon.value, quantityBase);
+          // Base = SÓ os ingressos vinculados (+ produtos quando applyToProducts). FONTE ÚNICA
+          // com o display (computeQuantityCouponDiscount) — o valor cobrado é igual ao exibido,
+          // sem descontar ingressos fora da restrição.
+          const productsContribution = coupon.applyToProducts ? productsSubtotal : 0;
+          couponDiscount = computeQuantityCouponDiscount(
+            applicableTicketsQ, ticketsSubtotal, productsContribution, coupon,
+          );
           couponId = coupon.id;
           couponAppliedToProducts = coupon.applyToProducts;
           break;
