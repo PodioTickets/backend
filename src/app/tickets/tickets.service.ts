@@ -153,7 +153,10 @@ export class TicketsService {
           ageLimitMin: createTicketDto.ageLimit?.min,
           ageLimitMax: createTicketDto.ageLimit?.max,
           hasKit: createTicketDto.hasKit || false,
-          kitId: createTicketDto.kitId,
+          // kitId/produtos só existem quando o ingresso TEM kit. Sem esse gate, um payload
+          // com hasKit=false + productIds/kitId criaria vínculos órfãos e o checkout exibiria
+          // produtos num ingresso sem kit.
+          kitId: createTicketDto.hasKit ? createTicketDto.kitId : null,
           eventId,
           batches: {
             create: createTicketDto.batches.map((b, i) => ({
@@ -166,7 +169,7 @@ export class TicketsService {
               triggerType: b.triggerType ?? 'BY_TIME',
             })),
           },
-          products: createTicketDto.productIds
+          products: createTicketDto.hasKit && createTicketDto.productIds
             ? {
               create: createTicketDto.productIds.map((productId, index) => ({
                 productId,
@@ -642,34 +645,46 @@ export class TicketsService {
       }
     }
 
-    if (updateTicketDto.productIds !== undefined) {
-      if (updateTicketDto.productIds.length > 0) {
-        const allProducts = await prismaWrite.product.findMany({
-          where: {
-            id: { in: updateTicketDto.productIds },
-          },
-          select: {
-            id: true,
-            eventId: true,
-            name: true,
-          },
-        });
-        const foundIds = allProducts.map(p => p.id);
-        const missingIds = updateTicketDto.productIds.filter(id => !foundIds.includes(id));
-
-        if (missingIds.length > 0) {
-          throw new NotFoundException(`Products not found: ${missingIds.join(', ')}`);
-        }
-        const wrongEventProducts = allProducts.filter(p => p.eventId !== eventId);
-        if (wrongEventProducts.length > 0) {
-          const productNames = wrongEventProducts.map(p => p.name).join(', ');
-          throw new BadRequestException(
-            `Products do not belong to this event: ${productNames}`
-          );
-        }
-      }
-      updateData.products = undefined;
+    // Ingresso SEM kit não pode manter vínculos de produto nem kitId. Vale tanto quando o kit
+    // é desligado neste update (hasKit=false) quanto pra higienizar dados legados órfãos no
+    // próximo save. `?? ticket.hasKit`: se o payload não reenvia hasKit, mantém o estado atual.
+    const resultingHasKit = updateTicketDto.hasKit ?? ticket.hasKit;
+    if (!resultingHasKit) {
+      updateData.kitId = null;
     }
+
+    // Valida os produtos apenas quando eles serão de fato vinculados (ingresso com kit).
+    // Ao desligar o kit, um productIds residual no payload é ignorado — não deve gerar erro.
+    if (
+      updateTicketDto.productIds !== undefined &&
+      updateTicketDto.productIds.length > 0 &&
+      resultingHasKit
+    ) {
+      const allProducts = await prismaWrite.product.findMany({
+        where: {
+          id: { in: updateTicketDto.productIds },
+        },
+        select: {
+          id: true,
+          eventId: true,
+          name: true,
+        },
+      });
+      const foundIds = allProducts.map(p => p.id);
+      const missingIds = updateTicketDto.productIds.filter(id => !foundIds.includes(id));
+
+      if (missingIds.length > 0) {
+        throw new NotFoundException(`Products not found: ${missingIds.join(', ')}`);
+      }
+      const wrongEventProducts = allProducts.filter(p => p.eventId !== eventId);
+      if (wrongEventProducts.length > 0) {
+        const productNames = wrongEventProducts.map(p => p.name).join(', ');
+        throw new BadRequestException(
+          `Products do not belong to this event: ${productNames}`
+        );
+      }
+    }
+    updateData.products = undefined;
 
     const { labels: auditLabels, changes: auditChanges } =
       summarizeTicketUpdateForAudit(
@@ -680,17 +695,24 @@ export class TicketsService {
 
     // Usa transação para garantir atomicidade
     const updatedTicket = await prismaWrite.$transaction(async (tx) => {
-      // Atualizar produtos primeiro, se necessário
-      if (updateTicketDto.productIds !== undefined) {
-        // Deletar produtos existentes
+      // Sincroniza os vínculos de produto. Limpa quando o ingresso ficou sem kit
+      // (resultingHasKit=false) OU quando um novo productIds foi enviado; só recria os
+      // produtos quando o ingresso realmente tem kit. Assim, desligar o kit remove os
+      // vínculos mesmo que o payload não reenvie productIds (fonte do "ingresso sem kit
+      // mostrando produtos").
+      const shouldSyncProducts =
+        !resultingHasKit || updateTicketDto.productIds !== undefined;
+      if (shouldSyncProducts) {
         await tx.ticketProduct.deleteMany({
           where: { ticketId },
         });
 
-        // Criar novos produtos se houver
-        if (updateTicketDto.productIds.length > 0) {
+        const productIdsToLink = resultingHasKit
+          ? (updateTicketDto.productIds ?? [])
+          : [];
+        if (productIdsToLink.length > 0) {
           await tx.ticketProduct.createMany({
-            data: updateTicketDto.productIds.map((productId, index) => ({
+            data: productIdsToLink.map((productId, index) => ({
               ticketId,
               productId,
               sortOrder: index,
