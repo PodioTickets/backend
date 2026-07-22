@@ -108,11 +108,47 @@ export function mergePermissionsFromInput(
   return out;
 }
 
+const NO_ORGANIZER_PERMISSIONS: OrganizerPermissionsMap = {
+  dashboard: false,
+  financial: false,
+  create_event: false,
+  edit_event: false,
+  view_event: false,
+  coupons: false,
+  pixel: false,
+  notify: false,
+};
+
+/**
+ * `permissions` do banco → mapa. `null` significa "nunca configurado" e o chamador
+ * trata como acesso total (legado) — ver `effectivePermissionsForMember`.
+ *
+ * Aceita DOIS formatos porque o banco tem os dois:
+ *  - MAPA `{ financial: true, ... }` — canônico, gravado pelo fluxo do organizador;
+ *  - ARRAY `["financial", ...]` — legado, gravado pelo PATCH do painel admin.
+ *
+ * O array precisa ser entendido AQUI, não só corrigido na escrita: enquanto ele
+ * caía no `return null`, o chamador concedia FULL_ORGANIZER_PERMISSIONS — ou seja,
+ * restringir permissões pelo admin dava ACESSO TOTAL ao colaborador (o oposto da
+ * intenção), e continuaria dando para todas as linhas já gravadas.
+ * Semântica de substituição: só as chaves listadas são concedidas.
+ */
 export function fullPermissionsMapFromJson(
   value: unknown,
 ): OrganizerPermissionsMap | null {
   if (value == null) return null;
-  if (typeof value !== 'object' || Array.isArray(value)) return null;
+
+  if (Array.isArray(value)) {
+    const out = { ...NO_ORGANIZER_PERMISSIONS };
+    for (const raw of value) {
+      if (typeof raw !== 'string') continue;
+      const key = resolvePermissionKey(raw);
+      if (key) out[key] = true;
+    }
+    return out;
+  }
+
+  if (typeof value !== 'object') return null;
   const o = value as Record<string, unknown>;
   const out = { ...DEFAULT_NEW_MEMBER_PERMISSIONS };
   for (const key of ORGANIZER_PERMISSION_KEYS) {
