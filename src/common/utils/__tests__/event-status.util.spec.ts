@@ -1,5 +1,9 @@
 import { EventStatus } from '@prisma/client';
-import { isEventDatePast, withPastEventsAsCompleted } from '../event-status.util';
+import {
+  isEventDatePast,
+  pastEventDateCutoff,
+  withPastEventsAsCompleted,
+} from '../event-status.util';
 
 /**
  * Regra de "evento concluído" nas listagens (organizador + admin). `eventDate` é
@@ -46,5 +50,41 @@ describe('event-status.util (evento concluído por data, BRT)', () => {
     expect(out[1].status).toBe(EventStatus.PUBLISHED);
     // Não muta o original.
     expect(past.status).toBe(EventStatus.PUBLISHED);
+  });
+
+  /**
+   * O filtro de status ("Concluído") roda no WHERE do banco via
+   * `pastEventDateCutoff`, enquanto a EXIBIÇÃO usa `isEventDatePast`. Se as duas
+   * divergirem, o filtro volta a mentir (era o bug: "Concluído" devolvia 0 e
+   * "Publicado" trazia concluídos). Aqui o invariante é travado.
+   */
+  describe('pastEventDateCutoff ≡ isEventDatePast (filtro do banco == exibição)', () => {
+    it('cutoff é a meia-noite UTC do dia BRT corrente', () => {
+      // 2026-07-02 00:30 BRT = 2026-07-02T03:30:00Z → dia BRT corrente = 02/07.
+      expect(pastEventDateCutoff(new Date('2026-07-02T03:30:00.000Z')).toISOString())
+        .toBe('2026-07-02T00:00:00.000Z');
+      // 2026-07-01 22:00 BRT = 2026-07-02T01:00:00Z → ainda é 01/07 em BRT.
+      expect(pastEventDateCutoff(new Date('2026-07-02T01:00:00.000Z')).toISOString())
+        .toBe('2026-07-01T00:00:00.000Z');
+    });
+
+    it('`eventDate < cutoff` concorda com isEventDatePast em toda a grade de horas', () => {
+      const nows = [
+        new Date('2026-07-01T21:00:00.000Z'), // 18:00 BRT do dia do evento
+        new Date('2026-07-02T00:00:00.000Z'), // 21:00 BRT do dia do evento
+        new Date('2026-07-02T02:59:59.999Z'), // último ms do dia BRT
+        new Date('2026-07-02T03:00:00.000Z'), // 00:00 BRT do dia seguinte
+        new Date('2026-07-05T12:00:00.000Z'), // dias depois
+      ];
+      for (const now of nows) {
+        const cutoff = pastEventDateCutoff(now);
+        for (let day = 1; day <= 4; day++) {
+          for (const hour of ['00:00', '09:30', '20:00', '23:59']) {
+            const d = new Date(`2026-07-0${day}T${hour}:00.000Z`);
+            expect(d < cutoff).toBe(isEventDatePast(d, now));
+          }
+        }
+      }
+    });
   });
 });
