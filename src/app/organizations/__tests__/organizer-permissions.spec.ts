@@ -73,12 +73,22 @@ describe('organizer-permissions — formatos aceitos de `permissions`', () => {
       expect(Object.values(perms).some(Boolean)).toBe(false);
     });
 
-    it('create_event no array continua equivalendo a acesso total', () => {
+    it('create_event implica editar e visualizar, mas NÃO acesso total', () => {
       const perms = effectivePermissionsForMember({
         role: 'EMPLOYEE',
         permissionsJson: ['create_event'],
       });
-      expect(perms).toEqual(FULL_ORGANIZER_PERMISSIONS);
+      // Implicadas: quem cria evento precisa editar e visualizar.
+      expect(perms.create_event).toBe(true);
+      expect(perms.edit_event).toBe(true);
+      expect(perms.view_event).toBe(true);
+      expect(perms.dashboard).toBe(true); // derivado
+      // NÃO concede as demais — menor privilégio, paridade com o drawer.
+      expect(perms.financial).toBe(false);
+      expect(perms.coupons).toBe(false);
+      expect(perms.pixel).toBe(false);
+      expect(perms.notify).toBe(false);
+      expect(perms).not.toEqual(FULL_ORGANIZER_PERMISSIONS);
     });
 
     it('OWNER tem acesso total qualquer que seja o formato armazenado', () => {
