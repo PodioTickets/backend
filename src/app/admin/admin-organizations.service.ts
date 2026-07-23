@@ -6,6 +6,8 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import {
+  effectivePermissionsForMember,
+  grantedPermissionKeys,
   mapFromPermissionKeys,
   UnknownOrganizerPermissionKeyError,
 } from '../organizations/constants/organizer-permissions';
@@ -92,6 +94,10 @@ export class AdminOrganizationsService {
             id: true,
             role: true,
             createdAt: true,
+            // Cru aqui, convertido para chaves efetivas abaixo — a listagem
+            // alimenta a pintura inicial do drawer e precisa concordar com o
+            // detalhe, senão pisca o conjunto errado antes do GET responder.
+            permissions: true,
             user: {
               select: {
                 id: true,
@@ -126,9 +132,19 @@ export class AdminOrganizationsService {
 
     if (!organization) throw new NotFoundException('Organization not found');
 
+    const members = organization.members.map((m) => ({
+      ...m,
+      permissions: grantedPermissionKeys(
+        effectivePermissionsForMember({
+          role: m.role,
+          permissionsJson: m.permissions,
+        }),
+      ),
+    }));
+
     return {
       message: 'Organization fetched successfully',
-      data: { organization },
+      data: { organization: { ...organization, members } },
     };
   }
 
@@ -357,9 +373,32 @@ export class AdminOrganizationsService {
 
     if (!row) throw new NotFoundException('Membro não encontrado');
 
+    // Permissões EFETIVAS, e não a coluna JSON crua: é o mesmo cálculo do
+    // detalhe do organizador (`organizations.service.getMemberDetail`), então
+    // os dois painéis passam a exibir exatamente o mesmo conjunto.
+    // Entregar o JSON cru deixava a interpretação por conta de cada front —
+    // e a do admin reidratava chaves AUSENTES com o default (`view_event`),
+    // reexibindo permissão que o organizador tinha acabado de remover.
+    // Também cobre de graça os shapes legados (array), `null` = acesso total e
+    // OWNER (sem mapa gravado).
+    const permissions = grantedPermissionKeys(
+      effectivePermissionsForMember({
+        role: row.role,
+        permissionsJson: row.permissions,
+      }),
+    );
+
+    const { permissions: _rawPermissions, eventAccesses, ...memberRest } = row;
+
     return {
       message: 'Member retrieved successfully',
-      data: { member: row },
+      data: {
+        // `permissions` no membro E na raiz: mesma forma do contrato do
+        // organizador, que o front já sabe ler.
+        member: { ...memberRest, eventAccesses, permissions },
+        permissions,
+        eventIds: eventAccesses.map((e) => e.eventId),
+      },
     };
   }
 }

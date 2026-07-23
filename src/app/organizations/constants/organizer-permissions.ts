@@ -150,7 +150,13 @@ export function fullPermissionsMapFromJson(
 
   if (typeof value !== 'object') return null;
   const o = value as Record<string, unknown>;
-  const out = { ...DEFAULT_NEW_MEMBER_PERMISSIONS };
+  // SUBSTITUIÇÃO, igual ao ramo do array e ao escritor (`mapFromPermissionKeys`):
+  // a base é "nada concedido", nunca o default de membro novo. Com a base no
+  // default, qualquer chave AUSENTE do mapa gravado (linha legada, mapa parcial,
+  // `{}`) reaparecia concedida — o organizador removia `view_event` e ela voltava
+  // sozinha na leitura. `dashboard` não se perde: é derivada logo abaixo, em
+  // `effectivePermissionsForMember`.
+  const out = { ...NO_ORGANIZER_PERMISSIONS };
   for (const key of ORGANIZER_PERMISSION_KEYS) {
     if (Object.prototype.hasOwnProperty.call(o, key)) {
       out[key] = Boolean(o[key]);
@@ -171,9 +177,14 @@ export function effectivePermissionsForMember(params: {
     return { ...FULL_ORGANIZER_PERMISSIONS };
   }
 
-  // create_event → acesso equivalente a OWNER em tudo
+  // create_event pressupõe poder EDITAR e VISUALIZAR o evento (quem cria precisa
+  // mexer nele e vê-lo), mas NÃO concede as demais permissões (financeiro,
+  // cupons, pixel, notificar). Antes create_event equivalia a acesso total —
+  // divergia do drawer (que passou a ligar só Editar+Visualizar) e reacendia
+  // todos os checkboxes ao reabrir. Menor privilégio + paridade UI↔backend.
   if (parsed.create_event) {
-    return { ...FULL_ORGANIZER_PERMISSIONS };
+    parsed.edit_event = true;
+    parsed.view_event = true;
   }
 
   // dashboard → derivado: qualquer outra permissão ativa garante acesso ao dashboard
