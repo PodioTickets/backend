@@ -94,6 +94,48 @@ export function distributeDiscount(
 }
 
 /**
+ * Desconto de cupom QUANTITY (all-or-nothing) — FONTE ÚNICA usada pelo caminho de
+ * exibição (`evaluateAndApplyAutoCoupons` / `orderShape`) E pela cobrança (`pay`), para
+ * que os dois NUNCA divirjam (regressão histórica: display escopava por `appliesTo`, o
+ * pay descontava sobre o carrinho inteiro).
+ *
+ * O desconto incide APENAS sobre `applicableTickets` — que já vêm filtrados por
+ * `coupon.appliesTo` pelo caller. Nunca sobre ingressos fora da restrição.
+ *
+ * @param applicableTickets      reservedTickets já restritos ao `coupon.appliesTo`
+ * @param ticketsSubtotal        subtotal de TODOS os ingressos do pedido (base do rateio
+ *                               proporcional de produtos no caso PERCENTAGE)
+ * @param productsContribution   `productsSubtotal` quando `applyToProducts`, senão 0
+ * @param coupon                 tipo (PERCENTAGE/FIXED) e valor do cupom
+ */
+export function computeQuantityCouponDiscount(
+  applicableTickets: any[],
+  ticketsSubtotal: number,
+  productsContribution: number,
+  coupon: { type: string; value: number },
+): number {
+  const applicableSubtotal = applicableTickets.reduce(
+    (s, rt) => s + rt.unitPrice * rt.quantity,
+    0,
+  );
+  const applicableQty = applicableTickets.reduce((s, rt) => s + rt.quantity, 0);
+
+  let discount: number;
+  if (coupon.type === 'PERCENTAGE') {
+    // Produtos entram rateados pela fração aplicável do subtotal de ingressos, mantendo a
+    // base coerente quando o cupom cobre só parte do carrinho.
+    const applicableRatio = ticketsSubtotal > 0 ? applicableSubtotal / ticketsSubtotal : 1;
+    const applicableBase = applicableSubtotal + Math.round(productsContribution * applicableRatio);
+    discount = Math.floor(applicableBase * (coupon.value / 100));
+  } else {
+    // FIXED: valor por unidade aplicável.
+    discount = applicableQty * coupon.value;
+  }
+  // Nunca descontar mais do que a base efetivamente coberta.
+  return Math.min(discount, applicableSubtotal + productsContribution);
+}
+
+/**
  * Deduz o nº de unidades cobertas (`effectiveUsage`) a partir do desconto total
  * congelado num pedido PAGO — quando não há mais os slots/participantes p/ re-derivar.
  * Retorna `undefined` (cobre TODAS as unidades no distributeDiscount) quando não dá

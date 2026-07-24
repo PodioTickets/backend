@@ -17,6 +17,7 @@
  */
 import {
   computePartialCouponDiscount,
+  computeQuantityCouponDiscount,
   distributeDiscount,
   resolveVoucherCoverage,
   computeDocEligibleSlots,
@@ -58,6 +59,52 @@ describe('Cupons & Vouchers — motor de desconto', () => {
     it('A7 escolhe os ingressos MAIS CAROS dentro do uso', () => {
       // mix 5000 + 10000, usage 1 → pega o de 10000 → 50% = 5000
       expect(computePartialCouponDiscount([rt('A', 1, 5000), rt('B', 1, 10000)], 'PERCENTAGE', 50, 1)).toBe(5000);
+    });
+  });
+
+  // ── A'. computeQuantityCouponDiscount (cupom QUANTITY, all-or-nothing) ───────
+  // O caller passa `applicableTickets` JÁ filtrados por `appliesTo`; o helper nunca
+  // desconta fora da restrição. Regressão-alvo: cupom vinculado a 1 ingresso descontando
+  // o carrinho inteiro na cobrança (divergência display×pay).
+  describe("A'. computeQuantityCouponDiscount", () => {
+    const cpn = (type: 'PERCENTAGE' | 'FIXED', value: number) => ({ type, value });
+
+    it("Q1 PERCENTAGE escopado: 50% só sobre o ingresso vinculado (não o carrinho)", () => {
+      // carrinho: A(vinculado)@10000 + B(fora)@10000; base do rateio = subtotal total 20000.
+      // desconto deve incidir SÓ sobre A → 5000, jamais 10000.
+      expect(
+        computeQuantityCouponDiscount([rt('A', 1, 10000)], 20000, 0, cpn('PERCENTAGE', 50)),
+      ).toBe(5000);
+    });
+
+    it("Q2 PERCENTAGE: 2 unidades do ingresso vinculado → base = 20000 → 50% = 10000", () => {
+      expect(
+        computeQuantityCouponDiscount([rt('A', 2, 10000)], 20000, 0, cpn('PERCENTAGE', 50)),
+      ).toBe(10000);
+    });
+
+    it("Q3 FIXED: valor por unidade aplicável (2 × 3000 = 6000)", () => {
+      expect(
+        computeQuantityCouponDiscount([rt('A', 2, 10000)], 20000, 0, cpn('FIXED', 3000)),
+      ).toBe(6000);
+    });
+
+    it("Q4 FIXED: capa na base aplicável (cupom > subtotal do vinculado)", () => {
+      expect(
+        computeQuantityCouponDiscount([rt('A', 1, 5000)], 15000, 0, cpn('FIXED', 20000)),
+      ).toBe(5000);
+    });
+
+    it("Q5 applyToProducts (PERCENTAGE): produtos entram rateados pela fração aplicável", () => {
+      // A(vinculado)@10000 de um total de 20000 → ratio 0.5; produtos 4000 → +2000 na base.
+      // base = 10000 + round(4000 * 0.5) = 12000 → 50% = 6000.
+      expect(
+        computeQuantityCouponDiscount([rt('A', 1, 10000)], 20000, 4000, cpn('PERCENTAGE', 50)),
+      ).toBe(6000);
+    });
+
+    it("Q6 nenhum ingresso aplicável → desconto 0", () => {
+      expect(computeQuantityCouponDiscount([], 20000, 0, cpn('PERCENTAGE', 50))).toBe(0);
     });
   });
 

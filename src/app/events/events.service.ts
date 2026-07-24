@@ -52,7 +52,7 @@ import { RepasseService, RETENTION_DAYS } from '../repasse/repasse.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { isChargeback, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 import { brtDayStartUtc, brtDayEndUtc, eventWindowInstant } from '../../common/utils/brt-date.util';
-import { withPastEventsAsCompleted as markPastEventsCompleted, isEventDatePast } from '../../common/utils/event-status.util';
+import { withPastEventsAsCompleted as markPastEventsCompleted, isEventDatePast, pastEventDateCutoff } from '../../common/utils/event-status.util';
 
 /**
  * Taxas padrão aplicadas na CRIAÇÃO de um evento (escala 0–100, ex.: 4 = 4%).
@@ -867,56 +867,99 @@ export class EventsService {
     // Usar read replica para performance
     const prismaRead = this.prisma.getReadClient();
 
-    // Buscar eventos e total em paralelo
-    const [events, total] = await Promise.all([
-      prismaRead.event.findMany({
-        where,
-        skip: (page - 1) * limit,
-        take: limit,
+    const searchSelect = {
+      id: true,
+      name: true,
+      description: true,
+      bannerUrl: true,
+      slug: true,
+      location: true,
+      city: true,
+      state: true,
+      country: true,
+      locationName: true,
+      eventDate: true,
+      registrationStartDate: true,
+      registrationEndDate: true,
+      status: true,
+      featuredOrder: true,
+      createdAt: true,
+      organization: {
         select: {
           id: true,
           name: true,
-          description: true,
-          bannerUrl: true,
-          slug: true,
-          location: true,
-          city: true,
-          state: true,
-          country: true,
-          locationName: true,
-          eventDate: true,
-          registrationStartDate: true,
-          registrationEndDate: true,
-          status: true,
-          featuredOrder: true,
-          createdAt: true,
-          organization: {
-            select: {
-              id: true,
-              name: true,
-              tradeName: true, // Nome fantasia — mesmo formato de /organizations/me
-              // Contato (email/phone) NÃO entra em rota pública — fora do contrato.
-              logoUrl: true,
-            },
-          },
-          _count: {
-            select: {
-              registrations: true,
-              modalities: true,
-            },
-          },
+          tradeName: true, // Nome fantasia — mesmo formato de /organizations/me
+          // Contato (email/phone) NÃO entra em rota pública — fora do contrato.
+          logoUrl: true,
         },
-        // Destaque PRIMEIRO (admin) e depois por data. `nulls: 'last'` garante que os
-        // eventos sem destaque (featuredOrder = null) fiquem depois dos destacados.
-        // A ordenação explícita do usuário (nome/data-desc) é aplicada no client sobre
-        // a página; a ordem PADRÃO (data-asc) preserva esta prioridade de destaque.
-        orderBy: [
-          { featuredOrder: { sort: 'asc', nulls: 'last' } },
-          { eventDate: 'asc' },
-        ],
-      }),
-      prismaRead.event.count({ where }),
+      },
+      _count: {
+        select: {
+          registrations: true,
+          modalities: true,
+        },
+      },
+    } satisfies Prisma.EventSelect;
+
+    // ORDEM PADRÃO do catálogo: eventos que ainda vão acontecer, do mais PRÓXIMO
+    // ao mais distante; eventos JÁ CONCLUÍDOS (dentro da janela de 30 dias que o
+    // catálogo ainda exibe) sempre no FIM. Antes era `eventDate asc` puro — como
+    // concluído tem a data mais antiga, ele subia para o TOPO da busca.
+    //
+    // Não dá pra expressar "concluído por último" num `orderBy` do Prisma (é uma
+    // condição sobre `eventDate`, não uma coluna), então os dois blocos são
+    // consultados separadamente e a página é montada atravessando a fronteira —
+    // ambos os blocos usam o índice de `eventDate` e a paginação continua
+    // determinística (desempate por `id`).
+    const completedCutoff = pastEventDateCutoff();
+    const upcomingWhere: Prisma.EventWhereInput = {
+      AND: [where, { eventDate: { gte: completedCutoff } }],
+    };
+    const completedWhere: Prisma.EventWhereInput = {
+      AND: [where, { eventDate: { lt: completedCutoff } }],
+    };
+
+    const [upcomingTotal, completedTotal] = await Promise.all([
+      prismaRead.event.count({ where: upcomingWhere }),
+      prismaRead.event.count({ where: completedWhere }),
     ]);
+
+    const skip = (page - 1) * limit;
+    const upcomingTake = Math.max(0, Math.min(limit, upcomingTotal - skip));
+    const completedTake = limit - upcomingTake;
+
+    const [upcoming, completed] = await Promise.all([
+      upcomingTake > 0
+        ? prismaRead.event.findMany({
+            where: upcomingWhere,
+            skip: Math.min(skip, upcomingTotal),
+            take: upcomingTake,
+            select: searchSelect,
+            // Destaque PRIMEIRO (admin) e depois por data. `nulls: 'last'` mantém
+            // os não destacados depois. A ordenação explícita do usuário
+            // (nome/data-desc) é aplicada no client sobre a página.
+            orderBy: [
+              { featuredOrder: { sort: 'asc', nulls: 'last' } },
+              { eventDate: 'asc' },
+              { id: 'asc' },
+            ],
+          })
+        : Promise.resolve([]),
+      completedTake > 0
+        ? prismaRead.event.findMany({
+            where: completedWhere,
+            skip: Math.max(0, skip - upcomingTotal),
+            take: completedTake,
+            select: searchSelect,
+            // Entre concluídos, o mais RECENTE primeiro — também é "proximidade
+            // da data", só que para trás. Destaque não promove evento concluído.
+            orderBy: [{ eventDate: 'desc' }, { id: 'asc' }],
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const events = [...upcoming, ...completed];
+    const total = upcomingTotal + completedTotal;
 
     return {
       message: 'Events search completed successfully',
@@ -1240,22 +1283,32 @@ export class EventsService {
       ...scopeWhere,
     };
 
-    // Filtro por status
-    if (status) {
-      where.status = status;
-    }
-
     // Filtro por data
+    const eventDateFilter: Prisma.DateTimeFilter = {};
     if (startDate && endDate) {
-      where.eventDate = {
-        gte: new Date(startDate),
-        lte: new Date(endDate),
-      };
+      eventDateFilter.gte = new Date(startDate);
+      eventDateFilter.lte = new Date(endDate);
     } else if (!includePast) {
       // Por padrão, apenas eventos futuros
-      where.eventDate = {
-        gte: new Date(),
-      };
+      eventDateFilter.gte = new Date();
+    }
+
+    // Filtro por status — pela regra EXIBIDA, não pela coluna crua. COMPLETED é
+    // derivado da data em `withPastEventsAsCompleted` (nenhuma linha guarda
+    // COMPLETED), então filtrar `status = COMPLETED` devolvia lista vazia e os
+    // demais status devolviam eventos que a tela rotula como "Concluído".
+    // Mesma correção da lista do admin — fonte única em `event-status.util`.
+    if (status === EventStatus.COMPLETED) {
+      eventDateFilter.lt = pastEventDateCutoff();
+    } else if (status) {
+      where.status = status;
+      const cutoff = pastEventDateCutoff();
+      const currentGte = eventDateFilter.gte as Date | undefined;
+      eventDateFilter.gte = currentGte && currentGte > cutoff ? currentGte : cutoff;
+    }
+
+    if (Object.keys(eventDateFilter).length > 0) {
+      where.eventDate = eventDateFilter;
     }
 
     // Filtro por nome

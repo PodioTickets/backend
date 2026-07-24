@@ -2,7 +2,10 @@ import { Injectable, NotFoundException, BadRequestException, Logger } from '@nes
 import { PrismaService } from '../../prisma/prisma.service';
 import { EventStatus, Prisma } from '@prisma/client';
 import { EmailService } from '../../common/services/email.service';
-import { withPastEventsAsCompleted as markPastEventsCompleted } from '../../common/utils/event-status.util';
+import {
+  withPastEventsAsCompleted as markPastEventsCompleted,
+  pastEventDateCutoff,
+} from '../../common/utils/event-status.util';
 import { formatEventCardAddress } from '../../common/utils/event-email-format.util';
 
 export interface AdminEventsQuery {
@@ -32,6 +35,57 @@ export class AdminEventsService {
     private readonly emailService: EmailService,
   ) {}
 
+  /**
+   * Receita paga e inscrições confirmadas por evento.
+   *
+   * `groupBy` do Prisma não suporta filtro por relação (receita depende de
+   * `Payment.status = PAID`), então os dois agregados vão em SQL cru. Chamado
+   * tanto para enriquecer a página quanto para ORDENAR o conjunto inteiro
+   * (sortBy = registrations/revenue) — daí ser um helper e não código inline.
+   */
+  private async fetchEventAggregates(
+    prismaRead: ReturnType<PrismaService['getReadClient']>,
+    eventIds: string[],
+  ): Promise<{
+    revenueByEvent: Map<string, number>;
+    confirmedByEvent: Map<string, number>;
+  }> {
+    if (eventIds.length === 0) {
+      return { revenueByEvent: new Map(), confirmedByEvent: new Map() };
+    }
+
+    const [revenueRows, confirmedRows] = await Promise.all([
+      prismaRead.$queryRaw<{ eventId: string; revenue: bigint }[]>(
+        Prisma.sql`
+          SELECT o."eventId", COALESCE(SUM(o."finalAmount"), 0)::bigint AS revenue
+          FROM "Order" o
+          INNER JOIN "Payment" p ON p."orderId" = o.id
+          WHERE o."eventId" = ANY(${eventIds}::uuid[])
+            AND p.status = 'PAID'
+          GROUP BY o."eventId"
+        `,
+      ),
+      prismaRead.$queryRaw<{ eventId: string; confirmed: bigint }[]>(
+        Prisma.sql`
+          SELECT "eventId", COUNT(id)::bigint AS confirmed
+          FROM "Registration"
+          WHERE "eventId" = ANY(${eventIds}::uuid[])
+            AND status IN ('CONFIRMED', 'COMPLETED')
+          GROUP BY "eventId"
+        `,
+      ),
+    ]);
+
+    return {
+      revenueByEvent: new Map(
+        revenueRows.map((r) => [r.eventId, Number(r.revenue)]),
+      ),
+      confirmedByEvent: new Map(
+        confirmedRows.map((r) => [r.eventId, Number(r.confirmed)]),
+      ),
+    };
+  }
+
   async getEvents(query: AdminEventsQuery) {
     const {
       page,
@@ -56,17 +110,39 @@ export class AdminEventsService {
 
     const where: Prisma.EventWhereInput = {};
 
-    if (status) where.status = status;
     if (organizationId) where.organizationId = organizationId;
     if (city) where.city = { contains: city, mode: 'insensitive' };
     if (state) where.state = { contains: state, mode: 'insensitive' };
     if (country) where.country = { contains: country, mode: 'insensitive' };
     if (hasAudit !== undefined) where.audit = hasAudit ? { isNot: null } : { is: null };
 
-    if (eventDateFrom || eventDateTo) {
-      where.eventDate = {};
-      if (eventDateFrom) where.eventDate.gte = eventDateFrom;
-      if (eventDateTo) where.eventDate.lte = eventDateTo;
+    const eventDateFilter: Prisma.DateTimeFilter = {};
+    if (eventDateFrom) eventDateFilter.gte = eventDateFrom;
+    if (eventDateTo) eventDateFilter.lte = eventDateTo;
+
+    // O status EXIBIDO não é o do banco: COMPLETED é derivado da data
+    // (`withPastEventsAsCompleted`). Filtrar pelo status cru devolvia ZERO em
+    // "Concluído" (nenhuma linha tem COMPLETED persistido) e, pior, devolvia
+    // eventos já concluídos dentro de "Publicado"/"Rascunho". Filtro e exibição
+    // usam agora a MESMA regra — `pastEventDateCutoff` é indexável
+    // (@@index([eventDate]) / @@index([status, eventDate])).
+    const completedCutoff = pastEventDateCutoff();
+    if (status === EventStatus.COMPLETED) {
+      // "Concluído" = data já passou, seja qual for o status cru — é exatamente o
+      // conjunto que a lista rotula assim.
+      eventDateFilter.lt = completedCutoff;
+    } else if (status) {
+      where.status = status;
+      // Evento com data passada aparece como "Concluído", nunca no status cru.
+      // Se já houver um `gte` do filtro de data, vale o mais restritivo.
+      eventDateFilter.gte =
+        eventDateFrom && eventDateFrom > completedCutoff
+          ? eventDateFrom
+          : completedCutoff;
+    }
+
+    if (Object.keys(eventDateFilter).length > 0) {
+      where.eventDate = eventDateFilter;
     }
 
     if (createdFrom || createdTo) {
@@ -85,95 +161,121 @@ export class AdminEventsService {
       ];
     }
 
-    // Ordenação por agregados de relação exige SQL raw — campos simples via orderBy
-    const simpleSort = sortBy === 'registrations' || sortBy === 'revenue'
-      ? { createdAt: sortOrder as Prisma.SortOrder }
-      : sortBy === 'name'
-        ? { name: sortOrder as Prisma.SortOrder }
-        : sortBy === 'eventDate'
-          ? { eventDate: sortOrder as Prisma.SortOrder }
-          : { createdAt: sortOrder as Prisma.SortOrder };
+    // Ordenação por AGREGADO (inscritos/receita) não existe no banco como coluna:
+    // é derivada de Registration/Order. Ordenar depois de paginar ordenaria só a
+    // página corrente (e, com muitos zeros empatados, o sort estável devolvia
+    // exatamente a ordem do banco — o filtro parecia não funcionar). Por isso o
+    // caminho de agregado resolve o conjunto INTEIRO antes de fatiar a página.
+    const isAggregateSort = sortBy === 'registrations' || sortBy === 'revenue';
 
-    const [events, total] = await Promise.all([
-      prismaRead.event.findMany({
-        where,
-        orderBy: simpleSort,
-        skip,
-        take: limit,
+    // Desempate por `id` mantém a paginação determinística (sem ele, empates em
+    // name/eventDate podem repetir ou omitir registros entre páginas).
+    const simpleSort: Prisma.EventOrderByWithRelationInput[] =
+      sortBy === 'name'
+        ? [{ name: sortOrder as Prisma.SortOrder }, { id: sortOrder as Prisma.SortOrder }]
+        : sortBy === 'eventDate'
+          ? [{ eventDate: sortOrder as Prisma.SortOrder }, { id: sortOrder as Prisma.SortOrder }]
+          : [{ createdAt: sortOrder as Prisma.SortOrder }, { id: sortOrder as Prisma.SortOrder }];
+
+    const eventSelect = {
+      id: true,
+      name: true,
+      slug: true,
+      bannerUrl: true,
+      status: true,
+      city: true,
+      state: true,
+      country: true,
+      location: true,
+      eventDate: true,
+      registrationStartDate: true,
+      registrationEndDate: true,
+      featuredOrder: true,
+      organizerFeePercent: true,
+      retentionRate: true,
+      createdAt: true,
+      updatedAt: true,
+      organization: {
         select: {
           id: true,
           name: true,
-          slug: true,
-          bannerUrl: true,
-          status: true,
-          city: true,
-          state: true,
-          country: true,
-          location: true,
-          eventDate: true,
-          registrationStartDate: true,
-          registrationEndDate: true,
-          featuredOrder: true,
-          organizerFeePercent: true,
-          retentionRate: true,
-          createdAt: true,
-          updatedAt: true,
-          organization: {
-            select: {
-              id: true,
-              name: true,
-              tradeName: true,
-              email: true,
-              logoUrl: true,
-              document: true,
-              phone: true,
-            },
-          },
-          audit: { select: { id: true, createdAt: true, retentionReleased: true } },
-          _count: {
-            select: {
-              registrations: true,
-              orders: true,
-              tickets: true,
-              withdrawals: true,
-            },
-          },
+          tradeName: true,
+          email: true,
+          logoUrl: true,
+          document: true,
+          phone: true,
         },
-      }),
-      prismaRead.event.count({ where }),
-    ]);
+      },
+      audit: { select: { id: true, createdAt: true, retentionReleased: true } },
+      _count: {
+        select: {
+          registrations: true,
+          orders: true,
+          tickets: true,
+          withdrawals: true,
+        },
+      },
+    } satisfies Prisma.EventSelect;
 
-    const eventIds = events.map((e) => e.id);
+    let events: Prisma.EventGetPayload<{ select: typeof eventSelect }>[];
+    let total: number;
+    let revenueByEvent: Map<string, number>;
+    let confirmedByEvent: Map<string, number>;
 
-    // groupBy não suporta filtros de relação — SQL raw para os dois agregados
-    const [revenueRows, confirmedRows] = await Promise.all([
-      prismaRead.$queryRaw<{ eventId: string; revenue: bigint }[]>(
-        Prisma.sql`
-          SELECT o."eventId", COALESCE(SUM(o."finalAmount"), 0)::bigint AS revenue
-          FROM "Order" o
-          INNER JOIN "Payment" p ON p."orderId" = o.id
-          WHERE o."eventId" = ANY(${eventIds}::uuid[])
-            AND p.status = 'PAID'
-          GROUP BY o."eventId"
-        `,
-      ),
-      prismaRead.$queryRaw<{ eventId: string; confirmed: bigint }[]>(
-        Prisma.sql`
-          SELECT "eventId", COUNT(id)::bigint AS confirmed
-          FROM "Registration"
-          WHERE "eventId" = ANY(${eventIds}::uuid[])
-            AND status IN ('CONFIRMED', 'COMPLETED')
-          GROUP BY "eventId"
-        `,
-      ),
-    ]);
+    if (isAggregateSort) {
+      // 1) IDs do conjunto filtrado inteiro (projeção mínima — o `where` continua
+      //    sendo fonte única, sem duplicar os filtros em SQL cru).
+      const idRows = await prismaRead.event.findMany({
+        where,
+        select: { id: true, createdAt: true },
+      });
+      total = idRows.length;
+      const allIds = idRows.map((r) => r.id);
 
-    const revenueByEvent = new Map(
-      revenueRows.map((r) => [r.eventId, Number(r.revenue)]),
-    );
-    const confirmedByEvent = new Map(
-      confirmedRows.map((r) => [r.eventId, Number(r.confirmed)]),
-    );
+      ({ revenueByEvent, confirmedByEvent } = await this.fetchEventAggregates(
+        prismaRead,
+        allIds,
+      ));
+
+      const metric = sortBy === 'revenue' ? revenueByEvent : confirmedByEvent;
+      const dir = sortOrder === 'asc' ? 1 : -1;
+      // Desempate por createdAt desc (e id) → ordem estável entre páginas.
+      const pageIds = idRows
+        .sort(
+          (a, b) =>
+            dir * ((metric.get(a.id) ?? 0) - (metric.get(b.id) ?? 0)) ||
+            b.createdAt.getTime() - a.createdAt.getTime() ||
+            a.id.localeCompare(b.id),
+        )
+        .slice(skip, skip + limit)
+        .map((r) => r.id);
+
+      const rows = await prismaRead.event.findMany({
+        where: { id: { in: pageIds } },
+        select: eventSelect,
+      });
+      // `findMany` com `in` não preserva a ordem do array — reordenar pelo índice.
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      events = pageIds
+        .map((id) => byId.get(id))
+        .filter((e): e is (typeof rows)[number] => Boolean(e));
+    } else {
+      [events, total] = await Promise.all([
+        prismaRead.event.findMany({
+          where,
+          orderBy: simpleSort,
+          skip,
+          take: limit,
+          select: eventSelect,
+        }),
+        prismaRead.event.count({ where }),
+      ]);
+
+      ({ revenueByEvent, confirmedByEvent } = await this.fetchEventAggregates(
+        prismaRead,
+        events.map((e) => e.id),
+      ));
+    }
 
     // MESMA regra da lista do organizador: evento cuja DATA já passou (fim do dia
     // BRT) é exibido como COMPLETED. Antes o admin devolvia o status cru do banco,
@@ -186,18 +288,8 @@ export class AdminEventsService {
       })),
     );
 
-    // Ordenação em memória para campos de agregado (registrations/revenue) após enriquecimento
-    if (sortBy === 'registrations') {
-      data.sort((a, b) =>
-        sortOrder === 'asc'
-          ? a.confirmedRegistrations - b.confirmedRegistrations
-          : b.confirmedRegistrations - a.confirmedRegistrations,
-      );
-    } else if (sortBy === 'revenue') {
-      data.sort((a, b) =>
-        sortOrder === 'asc' ? a.revenue - b.revenue : b.revenue - a.revenue,
-      );
-    }
+    // NÃO reordenar aqui: quando `sortBy` é agregado a ordem já veio resolvida
+    // sobre o conjunto inteiro (acima) e `events` está na ordem final da página.
 
     return {
       message: 'Events fetched successfully',

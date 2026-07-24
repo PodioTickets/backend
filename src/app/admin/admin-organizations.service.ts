@@ -1,4 +1,16 @@
-import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ConflictException,
+  BadRequestException,
+} from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import {
+  effectivePermissionsForMember,
+  grantedPermissionKeys,
+  mapFromPermissionKeys,
+  UnknownOrganizerPermissionKeyError,
+} from '../organizations/constants/organizer-permissions';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 
@@ -82,6 +94,10 @@ export class AdminOrganizationsService {
             id: true,
             role: true,
             createdAt: true,
+            // Cru aqui, convertido para chaves efetivas abaixo — a listagem
+            // alimenta a pintura inicial do drawer e precisa concordar com o
+            // detalhe, senão pisca o conjunto errado antes do GET responder.
+            permissions: true,
             user: {
               select: {
                 id: true,
@@ -116,9 +132,19 @@ export class AdminOrganizationsService {
 
     if (!organization) throw new NotFoundException('Organization not found');
 
+    const members = organization.members.map((m) => ({
+      ...m,
+      permissions: grantedPermissionKeys(
+        effectivePermissionsForMember({
+          role: m.role,
+          permissionsJson: m.permissions,
+        }),
+      ),
+    }));
+
     return {
       message: 'Organization fetched successfully',
-      data: { organization },
+      data: { organization: { ...organization, members } },
     };
   }
 
@@ -243,7 +269,13 @@ export class AdminOrganizationsService {
   async updateMember(
     organizationId: string,
     memberUserId: string,
-    dto: { role?: string; permissions?: string[]; eventIds?: string[] },
+    dto: {
+      role?: string;
+      permissions?: string[];
+      eventIds?: string[];
+      firstName?: string;
+      lastName?: string;
+    },
   ) {
     const w = this.prisma.getWriteClient();
     const r = this.prisma.getReadClient();
@@ -253,24 +285,65 @@ export class AdminOrganizationsService {
     });
     if (!member) throw new NotFoundException('Membro não encontrado');
 
-    const data: any = {};
-    if (dto.role !== undefined) data.role = dto.role;
-    if (dto.permissions !== undefined) data.permissions = dto.permissions;
-
-    const updated = await w.organizationMember.update({
-      where: { organizationId_userId: { organizationId, userId: memberUserId } },
-      data,
-      include: {
-        user: { select: { id: true, firstName: true, lastName: true, email: true, phone: true } },
-      },
-    });
-
-    if (dto.role === 'OWNER' || dto.role === 'MANAGER') {
-      await w.user.update({
-        where: { id: memberUserId },
-        data: { role: 'ORGANIZER', accountType: 'ORGANIZER' },
-      });
+    const data: Prisma.OrganizationMemberUpdateInput = {};
+    if (dto.role !== undefined) {
+      data.role = dto.role as Prisma.OrganizationMemberUpdateInput['role'];
     }
+
+    // Permissões são gravadas como MAPA canônico (`{ financial: true, ... }`),
+    // igual ao fluxo do organizador. Antes ia o array cru do payload, que o
+    // leitor (`fullPermissionsMapFromJson`) não entendia — e "não entendido"
+    // caía em acesso TOTAL, então restringir pelo admin liberava tudo.
+    // OWNER tem acesso total implícito; não guardamos mapa para ele (mesmo
+    // critério de `addMemberAsAdmin` e de `patchMemberSettings`).
+    const resultingRole = dto.role ?? member.role;
+    if (dto.permissions !== undefined && resultingRole !== 'OWNER') {
+      try {
+        data.permissions = mapFromPermissionKeys(
+          dto.permissions,
+        ) as unknown as Prisma.InputJsonValue;
+      } catch (err) {
+        if (err instanceof UnknownOrganizerPermissionKeyError) {
+          throw new BadRequestException(
+            `Permissão desconhecida: ${err.raw}`,
+          );
+        }
+        throw err;
+      }
+    }
+
+    // O NOME vive no `User`, não no `OrganizationMember`. A DTO já aceitava
+    // firstName/lastName (o painel os envia), mas nada os gravava — a edição do
+    // nome era aceita e descartada em silêncio. Mesma semântica do caminho do
+    // organizador (`organizations.service.patchMemberSettings`).
+    const userNameData: Prisma.UserUpdateInput = {};
+    if (dto.firstName !== undefined) userNameData.firstName = dto.firstName;
+    if (dto.lastName !== undefined) userNameData.lastName = dto.lastName;
+    const hasNameUpdate = Object.keys(userNameData).length > 0;
+
+    // Promover a OWNER/MANAGER também promove a conta do usuário. Nome, vínculo e
+    // promoção numa transação só: sem isso um erro no meio deixa o membro com
+    // papel novo e nome velho (ou vice-versa).
+    const promotesAccount = dto.role === 'OWNER' || dto.role === 'MANAGER';
+
+    const updated = await w.$transaction(async (tx) => {
+      if (hasNameUpdate) {
+        await tx.user.update({ where: { id: memberUserId }, data: userNameData });
+      }
+      if (promotesAccount) {
+        await tx.user.update({
+          where: { id: memberUserId },
+          data: { role: 'ORGANIZER', accountType: 'ORGANIZER' },
+        });
+      }
+      return tx.organizationMember.update({
+        where: { organizationId_userId: { organizationId, userId: memberUserId } },
+        data,
+        include: {
+          user: { select: { id: true, firstName: true, lastName: true, email: true, phone: true } },
+        },
+      });
+    });
 
     return { message: 'Member updated successfully', data: { member: updated } };
   }
@@ -300,9 +373,32 @@ export class AdminOrganizationsService {
 
     if (!row) throw new NotFoundException('Membro não encontrado');
 
+    // Permissões EFETIVAS, e não a coluna JSON crua: é o mesmo cálculo do
+    // detalhe do organizador (`organizations.service.getMemberDetail`), então
+    // os dois painéis passam a exibir exatamente o mesmo conjunto.
+    // Entregar o JSON cru deixava a interpretação por conta de cada front —
+    // e a do admin reidratava chaves AUSENTES com o default (`view_event`),
+    // reexibindo permissão que o organizador tinha acabado de remover.
+    // Também cobre de graça os shapes legados (array), `null` = acesso total e
+    // OWNER (sem mapa gravado).
+    const permissions = grantedPermissionKeys(
+      effectivePermissionsForMember({
+        role: row.role,
+        permissionsJson: row.permissions,
+      }),
+    );
+
+    const { permissions: _rawPermissions, eventAccesses, ...memberRest } = row;
+
     return {
       message: 'Member retrieved successfully',
-      data: { member: row },
+      data: {
+        // `permissions` no membro E na raiz: mesma forma do contrato do
+        // organizador, que o front já sabe ler.
+        member: { ...memberRest, eventAccesses, permissions },
+        permissions,
+        eventIds: eventAccesses.map((e) => e.eventId),
+      },
     };
   }
 }
