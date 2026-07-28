@@ -12,6 +12,7 @@ import {
   AdminAuditLogQueryDto,
   AdminOrganizationsListQueryDto,
 } from './dto/organization.dto';
+import { OrganizerSignupDto, SignupPersonType } from './dto/organizer-signup.dto';
 import { OrganizationMemberRole } from '@prisma/client';
 import { MFAService } from '../../common/services/mfa.service';
 import { brtDayStartUtc, brtDayEndUtc } from '../../common/utils/brt-date.util';
@@ -619,6 +620,172 @@ export class OrganizationsService {
       data: {
         organization: { ...result.organization, pixKeys },
         member: result.member,
+      },
+    };
+  }
+
+  /**
+   * Auto-cadastro PÚBLICO de organizador (wizard `/organizer/create`).
+   *
+   * Num único request cria: conta `User accountType=ORGANIZER` (com senha
+   * própria) + `Organization` já ATIVA (`isActive` default `true`) + membro
+   * `OWNER`. Diferente de `createOrganization` (admin), este devolve o `user`
+   * COMPLETO para o controller alimentar `authService.login()` e auto-logar na
+   * superfície `organizer`.
+   *
+   * Mapeamento por tipo:
+   *   - PJ: `document` = CNPJ próprio; `name` = razão social (`legalName`).
+   *   - PF: `document` = CPF do responsável (mesma pessoa); `name` = nome
+   *     fantasia (não há razão social).
+   *
+   * Unicidade validada ANTES da transação (409 amigável); race residual coberta
+   * pelo P2002→409 do AllExceptionsFilter.
+   */
+  async signupOrganizer(dto: OrganizerSignupDto) {
+    const prismaRead = this.prisma.getReadClient();
+    const prismaWrite = this.prisma.getWriteClient();
+
+    const isPJ = dto.personType === SignupPersonType.PJ;
+    // Documento da ORG: PJ = CNPJ próprio; PF = CPF do responsável (mesma pessoa).
+    const orgDocumentClean = this.cleanDocumentNumber(
+      isPJ ? dto.document : dto.ownerDocument,
+    );
+    const ownerDocumentClean = this.cleanDocumentNumber(dto.ownerDocument);
+    // Nome da org: PJ usa razão social; PF cai no nome fantasia (sem razão social).
+    const orgName = (isPJ ? dto.legalName : dto.tradeName) as string;
+
+    // Unicidade do e-mail na conta ORGANIZER (coexiste com uma conta USER
+    // homônima — `@@unique([email, accountType])`).
+    const existingUserByEmail = await prismaRead.user.findUnique({
+      where: { email_accountType: { email: dto.email, accountType: 'ORGANIZER' } },
+      select: { id: true },
+    });
+    if (existingUserByEmail) {
+      throw new ConflictException(
+        'Já existe uma conta de organizador com este e-mail.',
+      );
+    }
+
+    // Unicidade do CPF do responsável na conta ORGANIZER.
+    if (ownerDocumentClean) {
+      const existingUserByDoc = await prismaRead.user.findUnique({
+        where: {
+          documentNumberClean_accountType: {
+            documentNumberClean: ownerDocumentClean,
+            accountType: 'ORGANIZER',
+          },
+        },
+        select: { id: true },
+      });
+      if (existingUserByDoc) {
+        throw new ConflictException(
+          'Já existe uma conta de organizador com este CPF.',
+        );
+      }
+    }
+
+    // Unicidade do documento da organização (@unique).
+    if (orgDocumentClean) {
+      const existingOrg = await prismaRead.organization.findUnique({
+        where: { document: orgDocumentClean },
+        select: { id: true, name: true },
+      });
+      if (existingOrg) {
+        throw new ConflictException(
+          `Já existe uma organização cadastrada com este documento (CPF/CNPJ): ${existingOrg.name}`,
+        );
+      }
+    }
+
+    const hashedPassword = await bcrypt.hash(dto.password, 12);
+    const nameParts = dto.completeName.trim().split(/\s+/).filter(Boolean);
+    const firstName = nameParts[0] ?? dto.completeName.trim();
+    const lastName = nameParts.slice(1).join(' ') || firstName;
+
+    const result = await prismaWrite.$transaction(async (tx) => {
+      const user = await tx.user.create({
+        data: {
+          email: dto.email,
+          accountType: 'ORGANIZER',
+          role: 'ORGANIZER',
+          password: hashedPassword,
+          firstName,
+          lastName,
+          phone: dto.phone || dto.whatsapp,
+          documentType: 'CPF',
+          documentNumber: dto.ownerDocument,
+          documentNumberClean: ownerDocumentClean,
+          // O wizard exige aceite dos contratos antes de criar a conta.
+          acceptedTerms: true,
+          acceptedPrivacyPolicy: true,
+        },
+      });
+
+      const organization = await tx.organization.create({
+        data: {
+          name: orgName,
+          tradeName: dto.tradeName,
+          document: orgDocumentClean,
+          email: dto.orgEmail,
+          phone: dto.phone,
+          whatsapp: dto.whatsapp,
+          zipCode: dto.zipCode,
+          street: dto.street,
+          number: dto.number,
+          neighborhood: dto.neighborhood,
+          city: dto.city,
+          state: dto.state,
+          ownerName: dto.ownerName,
+          ownerDocument: ownerDocumentClean,
+        },
+      });
+
+      const member = await tx.organizationMember.create({
+        data: {
+          organizationId: organization.id,
+          userId: user.id,
+          role: 'OWNER',
+        },
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+            },
+          },
+          organization: true,
+        },
+      });
+
+      return { user, organization, member };
+    });
+
+    // Boas-vindas (fire-and-forget) — mesmo helper do fluxo admin.
+    const welcomeRecipient = result.organization.email || result.user.email;
+    if (welcomeRecipient) {
+      const ownerFirstName =
+        result.user.firstName ||
+        result.organization.tradeName ||
+        result.organization.name ||
+        'Organizador';
+      this.emailService
+        .sendWelcomeOrganizer({ email: welcomeRecipient, firstName: ownerFirstName })
+        .catch((err) =>
+          this.logger.warn(
+            `Falha ao enviar e-mail de boas-vindas ao organizador (org=${result.organization.id}): ${err?.message ?? err}`,
+          ),
+        );
+    }
+
+    return {
+      message: 'Organizer account created successfully',
+      data: {
+        organization: result.organization,
+        member: result.member,
+        user: result.user,
       },
     };
   }
