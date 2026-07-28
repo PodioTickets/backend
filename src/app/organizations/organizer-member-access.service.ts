@@ -106,11 +106,16 @@ export class OrganizerMemberAccessService {
 
   /**
    * Verifica membro da org do evento, escopo de evento e permissão granular (owner ignora permissões armazenadas).
+   *
+   * `requiredPermission` aceita uma chave única ou um array de chaves. Com array,
+   * o acesso é liberado se o membro possuir QUALQUER uma delas (semântica OR) —
+   * útil para leituras que devem estar disponíveis tanto para quem visualiza o
+   * evento quanto para quem tem a permissão específica de gerenciamento.
    */
   async assertCanAccessEvent(
     userId: string,
     eventId: string,
-    requiredPermission: OrganizerPermissionKey,
+    requiredPermission: OrganizerPermissionKey | OrganizerPermissionKey[],
   ): Promise<void> {
     const prismaWrite = this.prisma.getWriteClient();
 
@@ -159,8 +164,13 @@ export class OrganizerMemberAccessService {
       throw new ForbiddenException('No access to this event');
     }
 
-    if (!this.effectivePermission(asAccess, requiredPermission)) {
-      throw new ForbiddenException(`Missing permission: ${requiredPermission}`);
+    const requiredKeys = Array.isArray(requiredPermission)
+      ? requiredPermission
+      : [requiredPermission];
+    if (!requiredKeys.some((key) => this.effectivePermission(asAccess, key))) {
+      throw new ForbiddenException(
+        `Missing permission: ${requiredKeys.join(' or ')}`,
+      );
     }
   }
 }

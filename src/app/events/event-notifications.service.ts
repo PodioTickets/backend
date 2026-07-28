@@ -117,7 +117,12 @@ export class EventNotificationsService {
     eventId: string,
     query: ListEventNotificationsQueryDto,
   ) {
-    await this.organizerMemberAccess.assertCanAccessEvent(userId, eventId, 'notify');
+    // Leitura da lista: quem visualiza o evento vê as mensagens (só leitura);
+    // criar exige a permissão específica `notify`.
+    await this.organizerMemberAccess.assertCanAccessEvent(userId, eventId, [
+      'view_event',
+      'notify',
+    ]);
 
     const prismaRead = this.prisma.getReadClient();
     const page = query.page ?? 1;
@@ -174,7 +179,11 @@ export class EventNotificationsService {
   }
 
   async getOne(userId: string, eventId: string, notificationId: string) {
-    await this.organizerMemberAccess.assertCanAccessEvent(userId, eventId, 'notify');
+    // Detalhe é leitura → mesma regra da lista (view_event OU notify).
+    await this.organizerMemberAccess.assertCanAccessEvent(userId, eventId, [
+      'view_event',
+      'notify',
+    ]);
 
     const prismaRead = this.prisma.getReadClient();
     const row = await eventNotifications(prismaRead).findFirst({
