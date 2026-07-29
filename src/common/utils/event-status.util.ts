@@ -35,6 +35,32 @@ export function pastEventDateCutoff(now: Date = new Date()): Date {
   return new Date(`${brtNow.toISOString().slice(0, 10)}T00:00:00.000Z`);
 }
 
+/** Meses que um evento realizado permanece visível no catálogo de BUSCA pública. */
+export const PUBLIC_SEARCH_PAST_EVENT_MONTHS = 4;
+
+/**
+ * Corte de `eventDate` para o catálogo de BUSCA público (`/search`): eventos cuja
+ * realização passou há mais de `PUBLIC_SEARCH_PAST_EVENT_MONTHS` meses somem da
+ * busca. Fonte única para os dois pontos da busca (candidatos de preço + WHERE).
+ *
+ * Rollover-safe: subtrai meses zerando o dia primeiro e recapando ao último dia
+ * do mês alvo — evita o pulo do `setMonth` em meses curtos (ex.: 31/07 → 31/03).
+ * NÃO é usado pela home (`findAll`), que mantém a própria janela.
+ */
+export function publicSearchPastEventCutoff(now: Date = new Date()): Date {
+  const cutoff = new Date(now);
+  const day = cutoff.getDate();
+  cutoff.setDate(1);
+  cutoff.setMonth(cutoff.getMonth() - PUBLIC_SEARCH_PAST_EVENT_MONTHS);
+  const lastDayOfTargetMonth = new Date(
+    cutoff.getFullYear(),
+    cutoff.getMonth() + 1,
+    0,
+  ).getDate();
+  cutoff.setDate(Math.min(day, lastDayOfTargetMonth));
+  return cutoff;
+}
+
 /**
  * Mapeia uma lista de eventos sobrescrevendo o status para COMPLETED quando a data
  * já passou (ver `isEventDatePast`). Não muta os itens originais.

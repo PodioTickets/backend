@@ -764,18 +764,27 @@ export class OrganizationsService {
     });
 
     // Boas-vindas (fire-and-forget) — mesmo helper do fluxo admin.
-    const welcomeRecipient = result.organization.email || result.user.email;
-    if (welcomeRecipient) {
-      const ownerFirstName =
-        result.user.firstName ||
-        result.organization.tradeName ||
-        result.organization.name ||
-        'Organizador';
+    // Envia para AMBOS os e-mails do cadastro (login + contato da organização).
+    // Dedup case-insensitive: se forem iguais, sai só um envio; se diferentes,
+    // um para cada.
+    const ownerFirstName =
+      result.user.firstName ||
+      result.organization.tradeName ||
+      result.organization.name ||
+      'Organizador';
+    const welcomeRecipients = Array.from(
+      new Map(
+        [result.user.email, result.organization.email]
+          .filter((e): e is string => !!e && e.includes('@'))
+          .map((e) => [e.trim().toLowerCase(), e.trim()]),
+      ).values(),
+    );
+    for (const recipient of welcomeRecipients) {
       this.emailService
-        .sendWelcomeOrganizer({ email: welcomeRecipient, firstName: ownerFirstName })
+        .sendWelcomeOrganizer({ email: recipient, firstName: ownerFirstName })
         .catch((err) =>
           this.logger.warn(
-            `Falha ao enviar e-mail de boas-vindas ao organizador (org=${result.organization.id}): ${err?.message ?? err}`,
+            `Falha ao enviar e-mail de boas-vindas ao organizador (org=${result.organization.id}, to=${recipient}): ${err?.message ?? err}`,
           ),
         );
     }

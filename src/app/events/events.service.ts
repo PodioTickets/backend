@@ -52,7 +52,7 @@ import { RepasseService, RETENTION_DAYS } from '../repasse/repasse.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { isChargeback, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 import { brtDayStartUtc, brtDayEndUtc, eventWindowInstant } from '../../common/utils/brt-date.util';
-import { withPastEventsAsCompleted as markPastEventsCompleted, isEventDatePast, pastEventDateCutoff } from '../../common/utils/event-status.util';
+import { withPastEventsAsCompleted as markPastEventsCompleted, isEventDatePast, pastEventDateCutoff, publicSearchPastEventCutoff } from '../../common/utils/event-status.util';
 
 /**
  * Taxas padrão aplicadas na CRIAÇÃO de um evento (escala 0–100, ex.: 4 = 4%).
@@ -603,9 +603,9 @@ export class EventsService {
     // preço que não é mais vendido. Usamos a MESMA regra do checkout/cards
     // (`resolveActiveBatch`): lote ativo por sortOrder + trigger (BY_TIME /
     // AFTER_PREVIOUS_SOLD_OUT). Escopo limitado ao catálogo público (PUBLISHED
-    // dentro da janela de 30 dias) pra manter o conjunto pequeno.
-    const eventDateCutoff = new Date();
-    eventDateCutoff.setDate(eventDateCutoff.getDate() - 30);
+    // dentro da janela da busca) pra manter o conjunto pequeno. MESMA janela do
+    // WHERE da busca — senão eventos visíveis (1–4 meses) ficariam sem casar preço.
+    const eventDateCutoff = publicSearchPastEventCutoff();
 
     const tickets = await prismaRead.ticket.findMany({
       where: {
@@ -763,15 +763,11 @@ export class EventsService {
       }
     }
 
-    // Catálogo público: oculta eventos cuja realização passou de 30 dias — mesma
-    // regra de `findAll`. Aplicado via AND para sobrepor qualquer startDate
-    // anterior ao cutoff (includePast=true ou janela customizada não devem
-    // burlar a regra).
-    const eventDateCutoff = new Date();
-    // Mostra eventos finalizados por 30 dias após a realização, depois oculta.
-    // `setDate(-30)` é exatamente 30 dias (evita o rollover do `setMonth` em
-    // meses curtos, que dava janela inconsistente).
-    eventDateCutoff.setDate(eventDateCutoff.getDate() - 30);
+    // Catálogo de busca público: oculta eventos cuja realização passou de 4 meses
+    // (ver `publicSearchPastEventCutoff`). Aplicado via AND para sobrepor qualquer
+    // startDate anterior ao cutoff (includePast=true ou janela customizada não
+    // devem burlar a regra).
+    const eventDateCutoff = publicSearchPastEventCutoff();
 
     const andConditions: Prisma.EventWhereInput[] = [
       { eventDate: { gte: eventDateCutoff } },

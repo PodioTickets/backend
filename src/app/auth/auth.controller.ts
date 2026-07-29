@@ -73,15 +73,24 @@ export class AuthController {
 
   @Get('email/availability')
   @Throttle({ short: { limit: 10, ttl: 60000 } })
-  @ApiOperation({ summary: 'Check email availability', description: 'Returns whether an email address is already registered' })
+  @ApiOperation({ summary: 'Check email availability', description: 'Returns whether an email address is already registered for the given surface (accountType). USER and ORGANIZER coexist with the same email.' })
   @ApiQuery({ name: 'email', description: 'Email address to check', required: true })
+  @ApiQuery({ name: 'accountType', description: 'USER (default) or ORGANIZER', required: false })
   @ApiResponse({ status: 200, description: '{ available: boolean }' })
   @ApiResponse({ status: 400, description: 'Missing or invalid email' })
-  async checkEmailAvailability(@Query('email') email: string) {
+  async checkEmailAvailability(
+    @Query('email') email: string,
+    @Query('accountType') accountType?: string,
+  ) {
     if (!email || !email.includes('@')) {
       throw new BadRequestException('Endereço de e-mail inválido');
     }
-    const available = await this.authService.isEmailAvailable(email.toLowerCase().trim());
+    // Escopo por superfície: USER e ORGANIZER coexistem com o mesmo e-mail.
+    const surface = accountType === 'ORGANIZER' ? 'ORGANIZER' : 'USER';
+    const available = await this.authService.isEmailAvailable(
+      email.toLowerCase().trim(),
+      surface,
+    );
     return { available };
   }
 
