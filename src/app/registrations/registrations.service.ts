@@ -580,6 +580,7 @@ export class RegistrationsService {
               eventDate: true,
               bannerUrl: true,
               location: true,
+              locationName: true,
               city: true,
               state: true,
             },
@@ -652,6 +653,11 @@ export class RegistrationsService {
             eventDate: snapshotEvent.eventDate,
             bannerUrl: snapshotEvent.bannerUrl ?? null,
             location: snapshotEvent.location?.name ?? null,
+            // Nome do local = MESMO campo do card da home: o `locationName` do
+            // evento AO VIVO. O snapshot guarda o endereço formatado em
+            // `location.name` (não é o nome do local) → prioriza o ao vivo.
+            locationName:
+              order.event?.locationName ?? snapshotEvent.location?.name ?? null,
             city: snapshotEvent.location?.city ?? null,
             state: snapshotEvent.location?.state ?? null,
           }

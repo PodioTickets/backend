@@ -2,6 +2,8 @@ import { EventStatus } from '@prisma/client';
 import {
   isEventDatePast,
   pastEventDateCutoff,
+  publicSearchPastEventCutoff,
+  PUBLIC_SEARCH_PAST_EVENT_MONTHS,
   withPastEventsAsCompleted,
 } from '../event-status.util';
 
@@ -85,6 +87,47 @@ describe('event-status.util (evento concluído por data, BRT)', () => {
           }
         }
       }
+    });
+  });
+
+  /**
+   * Janela de visibilidade da BUSCA pública (`/search`): eventos realizados somem
+   * 4 meses após a data. Deve ser rollover-safe (não pular por causa de meses
+   * curtos ao usar `setMonth`).
+   */
+  describe('publicSearchPastEventCutoff (janela de 4 meses da busca)', () => {
+    it('constante fixada em 4 meses', () => {
+      expect(PUBLIC_SEARCH_PAST_EVENT_MONTHS).toBe(4);
+    });
+
+    it('subtrai 4 meses de uma data normal', () => {
+      // 2026-07-15 → 2026-03-15.
+      const cutoff = publicSearchPastEventCutoff(new Date('2026-07-15T12:00:00.000Z'));
+      expect(cutoff.getFullYear()).toBe(2026);
+      expect(cutoff.getMonth()).toBe(2); // março (0-based)
+      expect(cutoff.getDate()).toBe(15);
+    });
+
+    it('atravessa a virada de ano', () => {
+      // 2026-02-10 → 2025-10-10.
+      const cutoff = publicSearchPastEventCutoff(new Date('2026-02-10T12:00:00.000Z'));
+      expect(cutoff.getFullYear()).toBe(2025);
+      expect(cutoff.getMonth()).toBe(9); // outubro
+      expect(cutoff.getDate()).toBe(10);
+    });
+
+    it('rollover-safe: 31/07 vira 31/03 (não pula para abril)', () => {
+      // 31/07 - 4 meses = março, que TEM 31 dias → 31/03 (sem rollover).
+      const cutoff = publicSearchPastEventCutoff(new Date('2026-07-31T12:00:00.000Z'));
+      expect(cutoff.getMonth()).toBe(2); // março
+      expect(cutoff.getDate()).toBe(31);
+    });
+
+    it('rollover-safe: 31/10 vira 30/06 (capado ao último dia do mês curto)', () => {
+      // 31/10 - 4 meses = junho (30 dias). `setMonth` cru daria 01/07; aqui capa em 30/06.
+      const cutoff = publicSearchPastEventCutoff(new Date('2026-10-31T12:00:00.000Z'));
+      expect(cutoff.getMonth()).toBe(5); // junho
+      expect(cutoff.getDate()).toBe(30);
     });
   });
 });

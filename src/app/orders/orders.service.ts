@@ -1179,6 +1179,7 @@ export class OrdersService {
               eventDate: true,
               bannerUrl: true,
               location: true,
+              locationName: true,
               city: true,
               state: true,
               participantFeePercent: true,
@@ -1471,6 +1472,14 @@ export class OrdersService {
               registrationEndDate: primaryReceipt.event.registrationEndDate ?? null,
               bannerUrl: primaryReceipt.event.bannerUrl ?? null,
               location: primaryReceipt.event.location?.name ?? null,
+              // Nome do local = MESMO campo do card da home: o `locationName` do
+              // evento AO VIVO (POI escolhido no mapa). O snapshot do recibo guarda
+              // o endereço formatado em `location.name`, que NÃO é o nome do local —
+              // por isso priorizamos o evento ao vivo (fallback pro snapshot).
+              locationName:
+                order.event?.locationName ??
+                primaryReceipt.event.location?.name ??
+                null,
               city: primaryReceipt.event.location?.city ?? null,
               state: primaryReceipt.event.location?.state ?? null,
               country: primaryReceipt.event.location?.country ?? null,
