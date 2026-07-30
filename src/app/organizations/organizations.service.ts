@@ -800,6 +800,26 @@ export class OrganizationsService {
   }
 
   /**
+   * Disponibilidade de DOCUMENTO da ORGANIZAÇÃO (CPF de PF ou CNPJ de PJ) para o
+   * auto-cadastro público — valida contra a tabela `Organization` (NÃO `User`).
+   * Usado pelo wizard para checar ao vivo, enquanto o organizador preenche, se já
+   * existe uma organização com aquele documento (mesma regra do pré-check do
+   * `signupOrganizer`). Retorna apenas `{ available }` — não vaza dados da org
+   * existente (anti-enumeração). Documento incompleto/ausente → `available: true`
+   * (a validação de formato/checksum fica a cargo do submit).
+   */
+  async isOrganizationDocumentAvailable(document?: string | null): Promise<boolean> {
+    const clean = this.cleanDocumentNumber(document);
+    // Só consulta com documento de tamanho plausível (CPF=11 / CNPJ=14).
+    if (!clean || (clean.length !== 11 && clean.length !== 14)) return true;
+    const existing = await this.prisma.getReadClient().organization.findUnique({
+      where: { document: clean },
+      select: { id: true },
+    });
+    return existing === null;
+  }
+
+  /**
    * Verifica se o usuário é dono da organização
    */
   async isOwner(userId: string, organizationId: string): Promise<boolean> {
