@@ -21,6 +21,7 @@ import {
   ApiQuery,
 } from '@nestjs/swagger';
 import type { Request as ExpressRequest } from 'express';
+import { Throttle } from '@nestjs/throttler';
 import { OrganizationsService } from './organizations.service';
 import {
   CreateOrganizationDto,
@@ -50,6 +51,24 @@ export class OrganizationsController {
     private readonly organizationsService: OrganizationsService,
     private readonly prisma: PrismaService,
   ) { }
+
+  @Get('document-availability')
+  @Throttle({ short: { limit: 20, ttl: 60000 } })
+  @NoCache()
+  @ApiOperation({
+    summary: 'Check organization document (CPF/CNPJ) availability',
+    description:
+      'Retorna se o documento (CPF de PF / CNPJ de PJ) já pertence a uma organização. Usado pelo auto-cadastro público para validar ao vivo. Não exige auth; não vaza dados da org existente.',
+  })
+  @ApiQuery({ name: 'document', description: 'CPF ou CNPJ (com ou sem máscara)', required: true })
+  @ApiResponse({ status: 200, description: '{ available: boolean }' })
+  async checkOrganizationDocumentAvailability(
+    @Query('document') document?: string,
+  ) {
+    const available =
+      await this.organizationsService.isOrganizationDocumentAvailable(document);
+    return { available };
+  }
 
   @Get('me/check')
   @UseGuards(JwtAuthGuard)
