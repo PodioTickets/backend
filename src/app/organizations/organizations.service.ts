@@ -697,6 +697,20 @@ export class OrganizationsService {
       }
     }
 
+    // Unicidade do e-mail de CONTATO da organização (regra de negócio — o campo
+    // `email` não é @unique). Enforced no servidor: a checagem ao vivo do wizard é
+    // apenas UX e pode ser burlada.
+    if (dto.orgEmail) {
+      const orgEmailAvailable = await this.isOrganizationEmailAvailable(
+        dto.orgEmail,
+      );
+      if (!orgEmailAvailable) {
+        throw new ConflictException(
+          'Já existe uma organização cadastrada com este e-mail de contato.',
+        );
+      }
+    }
+
     const hashedPassword = await bcrypt.hash(dto.password, 12);
     const nameParts = dto.completeName.trim().split(/\s+/).filter(Boolean);
     const firstName = nameParts[0] ?? dto.completeName.trim();
@@ -814,6 +828,24 @@ export class OrganizationsService {
     if (!clean || (clean.length !== 11 && clean.length !== 14)) return true;
     const existing = await this.prisma.getReadClient().organization.findUnique({
       where: { document: clean },
+      select: { id: true },
+    });
+    return existing === null;
+  }
+
+  /**
+   * Disponibilidade do E-MAIL DE CONTATO da ORGANIZAÇÃO para o auto-cadastro
+   * público — valida contra o campo `Organization.email` (regra de negócio; o
+   * campo NÃO é `@unique`, então a checagem é por query, apoiada em `@@index`).
+   * Comparação case-insensitive. Retorna apenas `{ available }` — não vaza dados
+   * da org existente (anti-enumeração). E-mail ausente/sem `@` → `available:
+   * true` (a validação de formato fica a cargo do submit).
+   */
+  async isOrganizationEmailAvailable(email?: string | null): Promise<boolean> {
+    const normalized = (email ?? '').trim().toLowerCase();
+    if (!normalized || !normalized.includes('@')) return true;
+    const existing = await this.prisma.getReadClient().organization.findFirst({
+      where: { email: { equals: normalized, mode: 'insensitive' } },
       select: { id: true },
     });
     return existing === null;

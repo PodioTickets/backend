@@ -70,6 +70,22 @@ export class OrganizationsController {
     return { available };
   }
 
+  @Get('email-availability')
+  @Throttle({ short: { limit: 20, ttl: 60000 } })
+  @NoCache()
+  @ApiOperation({
+    summary: 'Check organization contact email availability',
+    description:
+      'Retorna se o e-mail de contato já pertence a uma organização. Usado pelo auto-cadastro público para validar ao vivo. Não exige auth; não vaza dados da org existente.',
+  })
+  @ApiQuery({ name: 'email', description: 'E-mail de contato', required: true })
+  @ApiResponse({ status: 200, description: '{ available: boolean }' })
+  async checkOrganizationEmailAvailability(@Query('email') email?: string) {
+    const available =
+      await this.organizationsService.isOrganizationEmailAvailable(email);
+    return { available };
+  }
+
   @Get('me/check')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
