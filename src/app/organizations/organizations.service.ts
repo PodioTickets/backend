@@ -803,6 +803,32 @@ export class OrganizationsService {
         );
     }
 
+    // O owner também é um membro (role OWNER), então recebe o MESMO e-mail de
+    // "membro adicionado" do fluxo addMember (fire-and-forget). Vai apenas para o
+    // e-mail de LOGIN do owner (o de contato da org já recebeu o boas-vindas).
+    const memberRegisteredAt = new Intl.DateTimeFormat('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: 'America/Sao_Paulo',
+    })
+      .format(new Date())
+      .replace(',', ' ·');
+    this.emailService
+      .sendMemberAdded({
+        recipientEmail: result.user.email,
+        firstName: result.user.firstName ?? result.user.email,
+        orgName: result.organization.name,
+        registeredAt: memberRegisteredAt,
+      })
+      .catch((err) =>
+        this.logger.warn(
+          `Falha ao enviar e-mail de membro adicionado ao owner (org=${result.organization.id}, userId=${result.user.id}): ${err?.message ?? err}`,
+        ),
+      );
+
     return {
       message: 'Organizer account created successfully',
       data: {
