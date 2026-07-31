@@ -95,6 +95,8 @@ export class AuthController {
   }
 
   @Post('register')
+  @UseGuards(TurnstileGuard)
+  @Throttle({ short: { limit: 5, ttl: 60000 } })
   @UseInterceptors(TrackActivityInterceptor)
   @TrackActivity({ category: 'AUTH', action: 'register' })
   @ApiOperation({
@@ -234,6 +236,8 @@ export class AuthController {
   }
 
   @Post('register/organizer')
+  @UseGuards(TurnstileGuard)
+  @Throttle({ short: { limit: 5, ttl: 60000 } })
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary: 'Public organizer self-signup',

@@ -219,6 +219,14 @@ export class EmailRegisterDto {
   @IsOptional()
   @IsEnum(Language)
   language?: Language;
+
+  // Token do Cloudflare Turnstile — verificado pelo `TurnstileGuard`. Opcional no
+  // DTO (o guard falha-aberto fora de produção quando não há secret), mas
+  // declarado para não ser barrado pelo `forbidNonWhitelisted` do ValidationPipe.
+  @ApiPropertyOptional({ description: 'Cloudflare Turnstile token (anti-bot).' })
+  @IsOptional()
+  @IsString()
+  turnstileToken?: string;
 }
 
 export class RefreshTokenDto {
