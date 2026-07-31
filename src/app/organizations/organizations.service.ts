@@ -841,11 +841,18 @@ export class OrganizationsService {
    * da org existente (anti-enumeração). E-mail ausente/sem `@` → `available:
    * true` (a validação de formato fica a cargo do submit).
    */
-  async isOrganizationEmailAvailable(email?: string | null): Promise<boolean> {
+  async isOrganizationEmailAvailable(
+    email?: string | null,
+    excludeOrganizationId?: string,
+  ): Promise<boolean> {
     const normalized = (email ?? '').trim().toLowerCase();
     if (!normalized || !normalized.includes('@')) return true;
     const existing = await this.prisma.getReadClient().organization.findFirst({
-      where: { email: { equals: normalized, mode: 'insensitive' } },
+      where: {
+        email: { equals: normalized, mode: 'insensitive' },
+        // Na edição, a PRÓPRIA organização não conta como "em uso".
+        ...(excludeOrganizationId ? { NOT: { id: excludeOrganizationId } } : {}),
+      },
       select: { id: true },
     });
     return existing === null;
@@ -978,6 +985,20 @@ export class OrganizationsService {
     const isOwner = await this.isOwner(userId, organizationId);
     if (!isOwner) {
       throw new ForbiddenException('Only organization owner can update organization');
+    }
+
+    // Unicidade do e-mail de CONTATO (regra de negócio — `email` não é @unique).
+    // Exclui a própria org do check para permitir salvar sem trocar o e-mail.
+    if (updateDto.email) {
+      const emailAvailable = await this.isOrganizationEmailAvailable(
+        updateDto.email,
+        organizationId,
+      );
+      if (!emailAvailable) {
+        throw new ConflictException(
+          'Já existe uma organização cadastrada com este e-mail de contato.',
+        );
+      }
     }
 
     const organization = await prismaWrite.organization.update({
