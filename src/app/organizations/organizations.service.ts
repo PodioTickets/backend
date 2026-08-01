@@ -820,7 +820,8 @@ export class OrganizationsService {
       .sendMemberAdded({
         recipientEmail: result.user.email,
         firstName: result.user.firstName ?? result.user.email,
-        orgName: result.organization.name,
+        // Nome exibido = nome fantasia (público); cai na razão social se ausente.
+        orgName: result.organization.tradeName || result.organization.name,
         registeredAt: memberRegisteredAt,
       })
       .catch((err) =>
@@ -1027,9 +1028,14 @@ export class OrganizationsService {
       }
     }
 
+    // `pixKeys` NÃO é coluna escalar da Organization — separa do `data` do update
+    // e trata via substituição completa (mesma semântica do admin). Se ausente,
+    // as chaves atuais são preservadas.
+    const { pixKeys, ...data } = updateDto;
+
     const organization = await prismaWrite.organization.update({
       where: { id: organizationId },
-      data: updateDto,
+      data,
       include: {
         members: {
           include: {
@@ -1061,9 +1067,49 @@ export class OrganizationsService {
       },
     });
 
+    // Substituição completa das chaves PIX quando enviadas (apaga + recria numa
+    // transação). Garante no máximo um `isDefault=true`; sem nenhum marcado, a 1ª
+    // é promovida a padrão. Espelha o fluxo do admin para consistência.
+    if (pixKeys != null) {
+      await prismaWrite.$transaction(async (tx) => {
+        await tx.organizationPixKey.deleteMany({ where: { organizationId } });
+        if (pixKeys.length > 0) {
+          const hasDefault = pixKeys.some((k) => k.isDefault);
+          await tx.organizationPixKey.createMany({
+            data: pixKeys.map((k, i) => ({
+              organizationId,
+              key: k.key,
+              keyType: k.keyType,
+              isDefault: hasDefault ? !!k.isDefault : i === 0,
+              bankName: k.bankName ?? null,
+              accountHolderName: k.accountHolderName ?? null,
+              accountHolderDocument: k.accountHolderDocument ?? null,
+            })),
+          });
+        }
+      });
+    }
+
+    // Sempre devolve as chaves atuais (ordenadas: padrão primeiro) para o front
+    // sincronizar sem re-buscar.
+    const savedPixKeys = await prismaRead.organizationPixKey.findMany({
+      where: { organizationId },
+      select: {
+        id: true,
+        key: true,
+        keyType: true,
+        isDefault: true,
+        bankName: true,
+        accountHolderName: true,
+        accountHolderDocument: true,
+        createdAt: true,
+      },
+      orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+    });
+
     return {
       message: 'Organization updated successfully',
-      data: { organization },
+      data: { organization: { ...organization, pixKeys: savedPixKeys } },
     };
   }
 
@@ -1291,6 +1337,7 @@ export class OrganizationsService {
             select: {
               id: true,
               name: true,
+              tradeName: true,
             },
           },
           eventAccesses: { select: { eventId: true } },
@@ -1341,7 +1388,8 @@ export class OrganizationsService {
       .sendMemberAdded({
         recipientEmail: member.user.email,
         firstName: member.user.firstName ?? member.user.email,
-        orgName: member.organization.name,
+        // Nome exibido = nome fantasia (público); cai na razão social se ausente.
+        orgName: member.organization.tradeName || member.organization.name,
         registeredAt,
       })
       .catch((err: any) =>
@@ -2608,6 +2656,7 @@ export class OrganizationsService {
             select: {
               id: true,
               name: true,
+              tradeName: true,
             },
           },
           eventAccesses: { select: { eventId: true } },
@@ -2637,7 +2686,8 @@ export class OrganizationsService {
       .sendMemberAdded({
         recipientEmail: member.user.email,
         firstName: member.user.firstName ?? member.user.email,
-        orgName: member.organization.name,
+        // Nome exibido = nome fantasia (público); cai na razão social se ausente.
+        orgName: member.organization.tradeName || member.organization.name,
         registeredAt,
       })
       .catch((err: any) =>

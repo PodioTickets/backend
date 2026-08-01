@@ -487,6 +487,14 @@ export class UpdateOrganizationDto {
   @IsOptional()
   @IsString()
   accountHolderDocument?: string; // CPF/CNPJ do titular
+
+  // Chaves PIX — substituição completa quando enviadas (mesma semântica do admin).
+  // Permite o próprio organizador gerir suas chaves pela tela de Configurações.
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => PixKeyItemDto)
+  pixKeys?: PixKeyItemDto[];
 }
 
 export class UpdateOrganizationLogoDto {
