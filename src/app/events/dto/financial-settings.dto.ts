@@ -1,4 +1,4 @@
-import { IsNumber, IsInt, Min, IsIn, IsOptional, IsArray, ArrayMinSize, ArrayUnique } from 'class-validator';
+import { IsNumber, IsInt, Min, Max, IsIn, IsOptional, IsArray, ArrayMinSize, ArrayUnique } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 /** Métodos configuráveis na tela financeira (CRYPTO/BOLETO existem no enum mas não são processados no checkout). */
@@ -12,12 +12,17 @@ export class UpdateFinancialSettingsDto {
   @IsOptional()
   @IsNumber()
   @Min(0)
+  // Comissão da plataforma: mesmo teto do create (`@Max(6)`). Sem isso o update
+  // ficava sem limite superior (inconsistente com a criação do evento).
+  @Max(6)
   organizerFeePercent?: number;
 
-  @ApiProperty({ description: 'Percentual da taxa repassado ao participante (0.0–100.0). Omitir mantém o valor atual. Travado após a publicação (409).', example: 3.0, minimum: 0, required: false })
+  @ApiProperty({ description: 'Percentual da taxa repassado ao participante (0.0–100.0). Omitir mantém o valor atual. Travado após a publicação (409).', example: 3.0, minimum: 0, maximum: 100, required: false })
   @IsOptional()
   @IsNumber()
   @Min(0)
+  // Teto sensato — evita valores absurdos (ex.: taxa 10000% cobrada do comprador).
+  @Max(100)
   participantFeePercent?: number;
 
   @ApiProperty({ description: 'Número máximo de parcelas sem juros aceitas no cartão de crédito. Omitir mantém o valor atual.', example: 2, enum: [1, 2, 3], required: false })

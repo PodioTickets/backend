@@ -17,6 +17,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { EventsService } from '../events/events.service';
 import { EventStatus } from '@prisma/client';
 import { NoCache } from 'src/common/decorators/cache.decorator';
+import { Throttle } from '@nestjs/throttler';
 
 @ApiTags('Organizers')
 @Controller('api/v1/organizers')
@@ -155,7 +156,9 @@ export class OrganizersController {
 
   @Post(':organizationId/contact')
   @UseGuards(OptionalJwtAuthGuard)
-  @ApiOperation({ summary: 'Contact organizer', description: 'Sends a contact message to an organization. Authentication is optional.' })
+  // Rota pública que dispara e-mail → throttle apertado (anti-spam/phishing/reputação).
+  @Throttle({ short: { limit: 3, ttl: 60000 } })
+  @ApiOperation({ summary: 'Contact organizer', description: 'Sends a contact message to an organization. Authentication is optional. Rate-limited (3/min/IP).' })
   @ApiParam({ name: 'organizationId', description: 'Organization UUID' })
   @ApiBody({ type: ContactOrganizerDto })
   @ApiResponse({ status: 201, description: 'Contact message sent successfully' })

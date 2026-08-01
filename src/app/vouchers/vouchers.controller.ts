@@ -57,7 +57,7 @@ export class VouchersController {
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 404, description: 'Event not found' })
   findAll(@Request() req, @Param('eventId') eventId: string, @Query() filterDto: FilterVouchersDto) {
-    return this.vouchersService.findAll(eventId, filterDto);
+    return this.vouchersService.findAll(req.user.id, eventId, filterDto);
   }
 
   @Get('events/:eventId/groups/:groupName')
@@ -87,13 +87,14 @@ export class VouchersController {
     @Param('groupName') groupName: string,
     @Query() filterDto: FilterVouchersDto,
   ) {
-    return this.vouchersService.findGroupVouchers(eventId, groupName, filterDto);
+    return this.vouchersService.findGroupVouchers(req.user.id, eventId, groupName, filterDto);
   }
 
   @Get('code/:code')
   @ApiOperation({
     summary: 'Get voucher by code',
-    description: 'Retrieves a single voucher by its code',
+    description:
+      'Retrieves a single voucher by its code. Público, mas SEM PII (cpfList/documentList) — só dados necessários para validar o código.',
   })
   @ApiParam({ name: 'code', description: 'Voucher code' })
   @ApiResponse({ status: 200, description: 'Voucher retrieved successfully' })
@@ -103,15 +104,17 @@ export class VouchersController {
   }
 
   @Get(':id')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get voucher by ID',
-    description: 'Retrieves a single voucher by its ID',
+    description: 'Retrieves a single voucher by its ID. Requer ser membro da organização do evento.',
   })
   @ApiParam({ name: 'id', description: 'Voucher UUID' })
   @ApiResponse({ status: 200, description: 'Voucher retrieved successfully' })
   @ApiResponse({ status: 404, description: 'Voucher not found' })
-  findOne(@Param('id') id: string) {
-    return this.vouchersService.findOne(id);
+  findOne(@Request() req, @Param('id') id: string) {
+    return this.vouchersService.findOne(req.user.id, id);
   }
 
   @Patch('events/:eventId/:voucherId')

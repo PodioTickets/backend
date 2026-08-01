@@ -251,7 +251,7 @@ describe('VouchersService (integração, banco real)', () => {
         data: { status: VoucherStatus.INACTIVE },
       });
 
-      const res = await service.findGroupVouchers(eventId, 'Lote D');
+      const res = await service.findGroupVouchers(adminUserId, eventId, 'Lote D');
 
       // stats do grupo COMPLETO (independem do filtro)
       expect(res.data.group.totalCount).toBe(4);
@@ -274,7 +274,7 @@ describe('VouchersService (integração, banco real)', () => {
       const lote = await lerLote(eventId, 'Lote E');
       await marcarComoUsado(lote[0].id);
 
-      const res = await service.findGroupVouchers(eventId, 'Lote E', { status: VoucherStatus.USED } as any);
+      const res = await service.findGroupVouchers(adminUserId, eventId, 'Lote E', { status: VoucherStatus.USED } as any);
 
       // a lista filtrada traz só o USADO...
       expect(res.data.vouchers).toHaveLength(1);
@@ -299,7 +299,7 @@ describe('VouchersService (integração, banco real)', () => {
       const loteF = await lerLote(eventId, 'Lote F');
       await marcarComoUsado(loteF[0].id);
 
-      const res = await service.findAll(eventId);
+      const res = await service.findAll(adminUserId, eventId);
 
       expect(res.data.pagination.total).toBe(2); // 2 lotes distintos
       const grupoF = res.data.groups.find((g) => g.name === 'Lote F')!;
@@ -343,9 +343,9 @@ describe('VouchersService (integração, banco real)', () => {
     }
 
     it('findAll: o grupo reflete a config NOVA e o representante é um voucher editável', async () => {
-      const { eventId, usadoId } = await seedLoteUsadoEEditado('Lote Reflete');
+      const { adminUserId, eventId, usadoId } = await seedLoteUsadoEEditado('Lote Reflete');
 
-      const res = await service.findAll(eventId);
+      const res = await service.findAll(adminUserId, eventId);
       const grupo = res.data.groups.find((g) => g.name === 'Lote Reflete')!;
 
       // config exibida é a NOVA (do voucher não-usado), não a congelada do usado
@@ -361,9 +361,9 @@ describe('VouchersService (integração, banco real)', () => {
     });
 
     it('findGroupVouchers: o resumo do grupo reflete a config NOVA', async () => {
-      const { eventId } = await seedLoteUsadoEEditado('Lote Resumo');
+      const { adminUserId, eventId } = await seedLoteUsadoEEditado('Lote Resumo');
 
-      const res = await service.findGroupVouchers(eventId, 'Lote Resumo');
+      const res = await service.findGroupVouchers(adminUserId, eventId, 'Lote Resumo');
 
       // expiryDate do resumo vem do voucher não-usado (config atual do lote)
       expect(res.data.group.expiryDate).not.toBeNull();
@@ -383,7 +383,7 @@ describe('VouchersService (integração, banco real)', () => {
 
       await service.update(adminUserId, eventId, lote[1].id, { applyToProducts: false } as any);
 
-      const res = await service.findAll(eventId);
+      const res = await service.findAll(adminUserId, eventId);
       const grupo = res.data.groups.find((g) => g.name === 'Lote Desliga')!;
       // antes (bool_or) o usado congelado em true forçava o grupo a exibir true pra sempre
       expect(grupo.applyToProducts).toBe(false);
@@ -396,12 +396,12 @@ describe('VouchersService (integração, banco real)', () => {
       const lote = await lerLote(eventId, 'Lote Esgotado');
       await Promise.all(lote.map((v) => marcarComoUsado(v.id)));
 
-      const res = await service.findAll(eventId);
+      const res = await service.findAll(adminUserId, eventId);
       const grupo = res.data.groups.find((g) => g.name === 'Lote Esgotado')!;
       expect(grupo.id).toBe(lote[0].id); // fallback: o mais antigo
       expect(grupo.usedCount).toBe(2);
 
-      const resumo = await service.findGroupVouchers(eventId, 'Lote Esgotado');
+      const resumo = await service.findGroupVouchers(adminUserId, eventId, 'Lote Esgotado');
       expect(resumo.data.group.status).toBe('USED');
     });
   });

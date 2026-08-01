@@ -92,7 +92,9 @@ export class VouchersService {
     };
   }
 
-  async findAll(eventId: string, filterDto: FilterVouchersDto = {}) {
+  async findAll(userId: string, eventId: string, filterDto: FilterVouchersDto = {}) {
+    // Authz: só membro da org do evento (ou admin) — os vouchers expõem cpfList (PII).
+    await this.verifyOrganizerAccess(userId, eventId);
     const prismaRead = this.prisma.getReadClient();
 
     const page = filterDto.page || 1;
@@ -203,7 +205,8 @@ export class VouchersService {
     };
   }
 
-  async findGroupVouchers(eventId: string, groupName: string, filterDto: FilterVouchersDto = {}) {
+  async findGroupVouchers(userId: string, eventId: string, groupName: string, filterDto: FilterVouchersDto = {}) {
+    await this.verifyOrganizerAccess(userId, eventId);
     const prismaRead = this.prisma.getReadClient();
 
     const page = filterDto.page || 1;
@@ -330,7 +333,7 @@ export class VouchersService {
     };
   }
 
-  async findOne(id: string) {
+  async findOne(userId: string, id: string) {
     const prismaRead = this.prisma.getReadClient();
     const voucher = await prismaRead.voucher.findUnique({
       where: { id },
@@ -347,6 +350,9 @@ export class VouchersService {
     if (!voucher) {
       throw new NotFoundException('Voucher not found');
     }
+
+    // Authz: só membro da org do evento (ou admin) — evita IDOR de PII por UUID.
+    await this.verifyOrganizerAccess(userId, voucher.eventId);
 
     // Converter appliesTo de JSON string para array quando necessário
     const transformedVoucher = {
@@ -378,9 +384,14 @@ export class VouchersService {
       throw new NotFoundException('Voucher not found');
     }
 
-    // Converter appliesTo de JSON string para array quando necessário
+    // Rota PÚBLICA (sem auth): NUNCA expor a lista de elegibilidade (PII).
+    // `cpfList`/`documentList` ficam de fora; o resto valida o código no checkout.
+    const { cpfList: _cpf, documentList: _doc, ...safeVoucher } =
+      voucher as typeof voucher & { documentList?: unknown };
+    void _cpf;
+    void _doc;
     const transformedVoucher = {
-      ...voucher,
+      ...safeVoucher,
       appliesTo: this.parseAppliesTo(voucher.appliesTo),
     };
 
