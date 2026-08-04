@@ -16,6 +16,7 @@ import { OrganizerSignupDto, SignupPersonType } from './dto/organizer-signup.dto
 import { OrganizationMemberRole } from '@prisma/client';
 import { MFAService } from '../../common/services/mfa.service';
 import { brtDayStartUtc, brtDayEndUtc } from '../../common/utils/brt-date.util';
+import { isValidCpfOrCnpj } from '../../common/utils/document-validation.util';
 import * as bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import {
@@ -83,6 +84,25 @@ export class OrganizationsService {
   }
 
   /** Garante JSON serializável (datas, etc.) e, em `changes`, old/new + valorAnterior/valorNovo. */
+  /**
+   * Valida o CPF/CNPJ do TITULAR de cada chave PIX recebida (conta de repasse —
+   * documento tem que ser real). Espelha a validação do front, que é burlável.
+   * Só valida quando o documento vier preenchido; documento presente e inválido
+   * → 400. Usado no cadastro e na edição da organização.
+   */
+  private assertValidPixKeyHolderDocuments(
+    pixKeys: ReadonlyArray<{ accountHolderDocument?: string | null }> | null | undefined,
+  ): void {
+    for (const k of pixKeys ?? []) {
+      const doc = (k.accountHolderDocument ?? '').replace(/\D/g, '');
+      if (doc && !isValidCpfOrCnpj(doc)) {
+        throw new BadRequestException(
+          'CPF/CNPJ do titular da chave PIX é inválido.',
+        );
+      }
+    }
+  }
+
   private serializeAuditValue(value: unknown): unknown {
     if (value === undefined) return null;
     if (value === null) return null;
@@ -561,6 +581,7 @@ export class OrganizationsService {
       // Criar chaves PIX iniciais, se enviadas. Mesma semântica do update:
       // se nenhuma vier marcada como default, a primeira é promovida.
       const incomingPixKeys = createDto.pixKeys ?? [];
+      this.assertValidPixKeyHolderDocuments(incomingPixKeys);
       if (incomingPixKeys.length > 0) {
         const hasDefault = incomingPixKeys.some((k) => k.isDefault);
         await tx.organizationPixKey.createMany({
@@ -1071,6 +1092,7 @@ export class OrganizationsService {
     // transação). Garante no máximo um `isDefault=true`; sem nenhum marcado, a 1ª
     // é promovida a padrão. Espelha o fluxo do admin para consistência.
     if (pixKeys != null) {
+      this.assertValidPixKeyHolderDocuments(pixKeys);
       await prismaWrite.$transaction(async (tx) => {
         await tx.organizationPixKey.deleteMany({ where: { organizationId } });
         if (pixKeys.length > 0) {
