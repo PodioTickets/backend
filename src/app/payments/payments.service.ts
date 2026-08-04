@@ -623,20 +623,22 @@ export class PaymentsService {
               ? queriedReg.emergencyContactPhone
               : (reg.emergencyContactPhone ?? null);
 
-            // Nome/e-mail do participante: prioriza os campos ESCALARES da
-            // inscrição (`participantName`/`participantEmail`) e cai p/ o `user`
-            // vinculado. Convidado SEM conta tem `reg.user` null e os dados só
-            // nos escalares — sem este fallback, a lista mostrava "Participante"
-            // genérico (bug intermitente: só aparecia em pedidos com 2º
-            // participante convidado sem conta). Mesma precedência do gerador de
-            // PDF/e-mail de confirmação.
+            // Nome/e-mail do participante: prioriza o `receiptSnapshot.participant`
+            // — o recibo IMUTÁVEL congelado no pagamento, SEMPRE gravado a partir do
+            // formulário do slot (mesma fonte que a lista de inscrições e o modal de
+            // detalhe já usam). Cai p/ os campos escalares e, por fim, o `user`
+            // vinculado (convidado sem conta tem só os escalares). Sem o snapshot,
+            // comprar para um TERCEIRO reutilizando o e-mail do comprador exibia o
+            // COMPRADOR aqui: a coluna `participantName` ficava nula e o fallback caía
+            // no `reg.user` (comprador); o snapshot tem o terceiro correto.
+            const snapParticipant = (reg.receiptSnapshot as any)?.participant ?? null;
             const linkedUserName = reg.user
               ? `${reg.user.firstName ?? ''} ${reg.user.lastName ?? ''}`.trim()
               : '';
             return {
               id: reg.id,
-              name: (reg.participantName ?? linkedUserName) || null,
-              email: reg.participantEmail ?? reg.user?.email ?? null,
+              name: (snapParticipant?.name || reg.participantName || linkedUserName) || null,
+              email: snapParticipant?.email ?? reg.participantEmail ?? reg.user?.email ?? null,
               avatarUrl: reg.user?.avatarUrl ?? null,
               ticket: reg.tickets && reg.tickets.length > 0 ? (() => {
                 const rt = reg.tickets[0];

@@ -3429,7 +3429,7 @@ export class EventsService {
             ? Prisma.sql` OR p.method::text IN (${Prisma.join(methods.map((m) => Prisma.sql`${m}`))})`
             : Prisma.empty;
         parts.push(
-          Prisma.sql`(${idSql} OR COALESCE(r."participantName", '') ILIKE ${pat} ESCAPE '\\' OR EXISTS (SELECT 1 FROM "User" u WHERE u.id = r."userId" AND (u."firstName" ILIKE ${pat} ESCAPE '\\' OR u."lastName" ILIKE ${pat} ESCAPE '\\' OR (COALESCE(u."firstName", '') || ' ' || COALESCE(u."lastName", '')) ILIKE ${pat} ESCAPE '\\' OR u.email ILIKE ${pat} ESCAPE '\\' OR COALESCE(u."documentNumber", '') ILIKE ${pat} ESCAPE '\\')) OR EXISTS (SELECT 1 FROM "Coupon" c WHERE c.id = o."couponId" AND COALESCE(c.code, '') ILIKE ${pat} ESCAPE '\\') OR EXISTS (SELECT 1 FROM "Voucher" v WHERE v.id = o."voucherId" AND COALESCE(v.code, '') ILIKE ${pat} ESCAPE '\\')${methodSql})`,
+          Prisma.sql`(${idSql} OR COALESCE(r."participantName", '') ILIKE ${pat} ESCAPE '\\' OR (r."receiptSnapshot"->'participant'->>'name') ILIKE ${pat} ESCAPE '\\' OR (r."receiptSnapshot"->'participant'->>'email') ILIKE ${pat} ESCAPE '\\' OR (r."receiptSnapshot"->'participant'->>'documentNumber') ILIKE ${pat} ESCAPE '\\' OR (r."receiptSnapshot"->'participant'->>'cpf') ILIKE ${pat} ESCAPE '\\' OR EXISTS (SELECT 1 FROM "User" u WHERE u.id = r."userId" AND (u."firstName" ILIKE ${pat} ESCAPE '\\' OR u."lastName" ILIKE ${pat} ESCAPE '\\' OR (COALESCE(u."firstName", '') || ' ' || COALESCE(u."lastName", '')) ILIKE ${pat} ESCAPE '\\' OR u.email ILIKE ${pat} ESCAPE '\\' OR COALESCE(u."documentNumber", '') ILIKE ${pat} ESCAPE '\\')) OR EXISTS (SELECT 1 FROM "Coupon" c WHERE c.id = o."couponId" AND COALESCE(c.code, '') ILIKE ${pat} ESCAPE '\\') OR EXISTS (SELECT 1 FROM "Voucher" v WHERE v.id = o."voucherId" AND COALESCE(v.code, '') ILIKE ${pat} ESCAPE '\\')${methodSql})`,
         );
       }
     }
@@ -3699,6 +3699,38 @@ export class EventsService {
   }
 
   /**
+   * IDs de inscrições cujo termo casa em fontes fora do alcance do `where` do
+   * Prisma: o nome COMPLETO do usuário vinculado (concat `firstName || ' ' ||
+   * lastName`) e o snapshot IMUTÁVEL do participante (`receiptSnapshot.participant`).
+   * O snapshot é o ÚNICO lugar com o nome/e-mail/documento do TERCEIRO quando ele
+   * reusou o e-mail do comprador (aí a coluna `participantName` fica nula e o
+   * `reg.user` é o comprador). Unir ao id-list de {@link buildRegistrationTextSearchOr}.
+   */
+  private async findRegistrationExtraSearchMatchIds(
+    prismaRead: any,
+    eventId: string,
+    searchTerm: string,
+  ): Promise<string[]> {
+    const pat = `%${this.escapeIlikePattern(searchTerm)}%`;
+    // Documento formatado (503.798.000-00) → casa também sem pontuação.
+    const digitsTerm = searchTerm.replace(/[.\-\/]/g, '');
+    const docPat = `%${this.escapeIlikePattern(digitsTerm)}%`;
+    const rows = await prismaRead.$queryRaw<{ id: string }[]>`
+      SELECT r.id FROM "Registration" r
+      LEFT JOIN "User" u ON u.id = r."userId"
+      WHERE r."eventId" = ${eventId}::uuid
+        AND (
+          (COALESCE(u."firstName", '') || ' ' || COALESCE(u."lastName", '')) ILIKE ${pat} ESCAPE '\\'
+          OR (r."receiptSnapshot"->'participant'->>'name') ILIKE ${pat} ESCAPE '\\'
+          OR (r."receiptSnapshot"->'participant'->>'email') ILIKE ${pat} ESCAPE '\\'
+          OR (r."receiptSnapshot"->'participant'->>'documentNumber') ILIKE ${docPat} ESCAPE '\\'
+          OR (r."receiptSnapshot"->'participant'->>'cpf') ILIKE ${docPat} ESCAPE '\\'
+        )
+    `;
+    return rows.map((row) => row.id);
+  }
+
+  /**
    * Cláusulas OR de busca textual da listagem de inscrições. Compartilhado entre
    * a listagem paginada e o export para manter o mesmo comportamento de pesquisa:
    * nome/e-mail/documento (conta e snapshot do participante), código de cupom,
@@ -3889,20 +3921,16 @@ export class EventsService {
       if (isIdSearch) {
         where.OR = uuidMatchIds.length > 0 ? [{ id: { in: uuidMatchIds } }] : [{ id: 'no-match' }];
       } else {
-        // Nome COMPLETO: "João Silva" não casa firstName nem lastName isolados. O Prisma
-        // não concatena colunas no `where`, então pré-buscamos os IDs cujo
-        // `firstName || ' ' || lastName` casa o termo (mesma tática do uuidMatches) e os
-        // unimos ao OR de busca textual.
-        const namePat = `%${this.escapeIlikePattern(searchTerm)}%`;
-        const fullNameMatches = await prismaRead.$queryRaw<{ id: string }[]>`
-          SELECT r.id FROM "Registration" r
-          JOIN "User" u ON u.id = r."userId"
-          WHERE r."eventId" = ${eventId}::uuid
-            AND (COALESCE(u."firstName", '') || ' ' || COALESCE(u."lastName", '')) ILIKE ${namePat} ESCAPE '\\'
-        `;
-        const mergedIds = Array.from(
-          new Set([...uuidMatchIds, ...fullNameMatches.map((row) => row.id)]),
+        // Nome COMPLETO ("João Silva" não casa firstName/lastName isolados) e o
+        // snapshot do participante (nome/e-mail/doc do TERCEIRO com e-mail reusado)
+        // vivem fora do alcance do `where` do Prisma → pré-buscamos os IDs e unimos
+        // ao OR de busca textual.
+        const extraIds = await this.findRegistrationExtraSearchMatchIds(
+          prismaRead,
+          eventId,
+          searchTerm,
         );
+        const mergedIds = Array.from(new Set([...uuidMatchIds, ...extraIds]));
         where.OR = this.buildRegistrationTextSearchOr(searchTerm, mergedIds);
       }
     }
@@ -5296,7 +5324,14 @@ export class EventsService {
           AND (r.id::text ILIKE ${'%' + searchTerm + '%'} OR o.id::text ILIKE ${'%' + searchTerm + '%'})
       `;
       const uuidMatchIds = uuidMatches.map((row: any) => row.id);
-      where.OR = this.buildRegistrationTextSearchOr(searchTerm, uuidMatchIds);
+      // Inclui nome completo + snapshot do participante (paridade com a listagem).
+      const extraIds = await this.findRegistrationExtraSearchMatchIds(
+        prismaRead,
+        eventId,
+        searchTerm,
+      );
+      const mergedIds = Array.from(new Set([...uuidMatchIds, ...extraIds]));
+      where.OR = this.buildRegistrationTextSearchOr(searchTerm, mergedIds);
     }
 
     let registrations = await prismaRead.registration.findMany({
