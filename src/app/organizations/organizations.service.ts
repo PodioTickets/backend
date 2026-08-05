@@ -718,6 +718,19 @@ export class OrganizationsService {
       }
     }
 
+    // Unicidade do CPF do RESPONSÁVEL entre organizações (regra de negócio; o
+    // campo `ownerDocument` não é @unique). Enforced no servidor: a checagem ao
+    // vivo do wizard é apenas UX e pode ser burlada.
+    if (ownerDocumentClean) {
+      const ownerDocAvailable =
+        await this.isOrganizationOwnerDocumentAvailable(ownerDocumentClean);
+      if (!ownerDocAvailable) {
+        throw new ConflictException(
+          'Já existe uma organização cadastrada com este CPF de responsável.',
+        );
+      }
+    }
+
     // Unicidade do e-mail de CONTATO da organização (regra de negócio — o campo
     // `email` não é @unique). Enforced no servidor: a checagem ao vivo do wizard é
     // apenas UX e pode ser burlada.
@@ -879,6 +892,38 @@ export class OrganizationsService {
       select: { id: true },
     });
     return existing === null;
+  }
+
+  /**
+   * Disponibilidade do CPF do RESPONSÁVEL (`Organization.ownerDocument`) para o
+   * auto-cadastro público — retorna se já existe OUTRA organização cujo responsável
+   * tem este CPF. Regra de negócio (o campo NÃO é `@unique`), então é por query.
+   *
+   * A comparação normaliza os dígitos em ambos os lados via `regexp_replace` — o
+   * `ownerDocument` pode ter sido gravado com máscara em linhas legadas/admin (o
+   * auto-cadastro grava só dígitos, mas o cadastro admin não sanitiza). Um filtro
+   * de igualdade simples não casaria essas linhas. Responsável é sempre PF → só
+   * consulta com CPF de 11 dígitos. Retorna `true` (disponível) fora disso.
+   * `excludeOrganizationId` isenta a própria org (edição). Anti-enumeração: só
+   * `{ available }`.
+   */
+  async isOrganizationOwnerDocumentAvailable(
+    document?: string | null,
+    excludeOrganizationId?: string,
+  ): Promise<boolean> {
+    const clean = this.cleanDocumentNumber(document);
+    if (!clean || clean.length !== 11) return true;
+    const rows = await this.prisma.getReadClient().$queryRaw<{ id: string }[]>`
+      SELECT "id" FROM "Organization"
+      WHERE regexp_replace(COALESCE("ownerDocument", ''), '\\D', '', 'g') = ${clean}
+        ${
+          excludeOrganizationId
+            ? Prisma.sql`AND "id" <> ${excludeOrganizationId}::uuid`
+            : Prisma.empty
+        }
+      LIMIT 1
+    `;
+    return rows.length === 0;
   }
 
   /**

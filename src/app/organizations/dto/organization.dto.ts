@@ -10,6 +10,7 @@ import {
   IsBoolean,
   IsUUID,
   IsInt,
+  IsNumber,
   Min,
   Max,
   ValidateNested,
@@ -487,6 +488,13 @@ export class UpdateOrganizationDto {
   @IsOptional()
   @IsString()
   accountHolderDocument?: string; // CPF/CNPJ do titular
+
+  /// Taxa MENSAL de antecipação (fração: 0.1 = 10%). Editável pelo admin.
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  anticipationMonthlyRate?: number;
 
   // Chaves PIX — substituição completa quando enviadas (mesma semântica do admin).
   // Permite o próprio organizador gerir suas chaves pela tela de Configurações.

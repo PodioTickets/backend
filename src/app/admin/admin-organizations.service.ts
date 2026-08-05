@@ -216,6 +216,7 @@ export class AdminOrganizationsService {
           accountType: true,
           accountHolderName: true,
           accountHolderDocument: true,
+          anticipationMonthlyRate: true,
           isActive: true,
           createdAt: true,
           updatedAt: true,

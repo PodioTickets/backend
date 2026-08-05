@@ -70,6 +70,24 @@ export class OrganizationsController {
     return { available };
   }
 
+  @Get('owner-document-availability')
+  @Throttle({ short: { limit: 20, ttl: 60000 } })
+  @NoCache()
+  @ApiOperation({
+    summary: 'Check organization owner (responsável) CPF availability',
+    description:
+      'Retorna se o CPF do responsável já pertence a alguma organização (campo `ownerDocument`). Usado pelo auto-cadastro público para validar ao vivo. Não exige auth; não vaza dados da org existente.',
+  })
+  @ApiQuery({ name: 'document', description: 'CPF do responsável (com ou sem máscara)', required: true })
+  @ApiResponse({ status: 200, description: '{ available: boolean }' })
+  async checkOrganizationOwnerDocumentAvailability(
+    @Query('document') document?: string,
+  ) {
+    const available =
+      await this.organizationsService.isOrganizationOwnerDocumentAvailable(document);
+    return { available };
+  }
+
   @Get('email-availability')
   @Throttle({ short: { limit: 20, ttl: 60000 } })
   @NoCache()

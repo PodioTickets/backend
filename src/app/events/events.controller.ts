@@ -820,6 +820,50 @@ export class EventsController {
     return this.eventsService.getFinancialPending(req.user.id, eventId, page || 1, limit || 20);
   }
 
+  @Get(':eventId/financial/pending/export')
+  @UseGuards(JwtAuthGuard)
+  @NoCache()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Export awaiting-release data as CSV',
+    description:
+      'Exporta o aguardando liberação em CSV: aba À VISTA (type=avista, default) ou PARCELADOS (type=parcelados). Download binário com Content-Disposition. Rate limited 5/min/user.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiQuery({ name: 'type', required: false, enum: ['avista', 'parcelados'], description: 'Default: avista' })
+  @ApiQuery({ name: 'fields', required: false, type: String, description: 'CSV de colunas a incluir (ex.: orderId,buyer,amount). Vazio = todas.' })
+  @ApiProduces('text/csv')
+  @ApiResponse({ status: 200, description: 'CSV generated successfully' })
+  @ApiResponse({ status: 403, description: 'Forbidden — financial permission required' })
+  @ApiResponse({ status: 429, description: 'Too Many Requests — limite 5/min' })
+  async exportFinancialPending(
+    @Request() req,
+    @Param('eventId') eventId: string,
+    @Res({ passthrough: true }) res: Response,
+    @Query('type') type?: string,
+    @Query('fields') fields?: string,
+  ): Promise<StreamableFile> {
+    const t = type === 'parcelados' ? 'parcelados' : 'avista';
+    const fieldList = (fields ?? '')
+      .split(',')
+      .map((f) => f.trim())
+      .filter(Boolean);
+    const result = await this.eventsService.exportFinancialPendingCsv(
+      req.user.id,
+      eventId,
+      t,
+      fieldList,
+    );
+    res.setHeader('Content-Type', result.contentType);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${result.filename}"`,
+    );
+    res.setHeader('Content-Length', String(result.buffer.length));
+    return new StreamableFile(result.buffer);
+  }
+
   @Get(':eventId/financial/refunded')
   @UseGuards(JwtAuthGuard)
   @NoCache()
