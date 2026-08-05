@@ -251,6 +251,10 @@ model Organization {
   accountHolderName     String? // Nome do titular da conta
   accountHolderDocument String? // CPF/CNPJ do titular
 
+  /// Taxa MENSAL de antecipação de recebíveis desta organização (fração: 0.1 = 10%).
+  /// Custo = valorAntecipado × taxa × (diasAntecipados ÷ 30). Editável pelo admin.
+  anticipationMonthlyRate Float @default(0.1)
+
   isActive  Boolean  @default(true)
 
   createdAt DateTime @default(now())

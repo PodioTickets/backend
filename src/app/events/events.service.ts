@@ -4822,6 +4822,156 @@ export class EventsService {
   }
 
   /**
+   * Exporta em CSV o "aguardando liberação" — aba À VISTA (pending releases) ou
+   * PARCELADOS (parcelas a receber agrupadas por pedido). Reusa os métodos já
+   * validados (`getFinancialPending`/`getFinancialInstallments`), então herda o
+   * controle de acesso e o mesmo cálculo de valores/prazos exibidos na tela.
+   * Separador `;` + BOM UTF-8 (Excel pt-BR abre com acentos corretos).
+   */
+  async exportFinancialPendingCsv(
+    userId: string,
+    eventId: string,
+    type: 'avista' | 'parcelados',
+    fields?: string[],
+  ): Promise<{ buffer: Buffer; filename: string; contentType: string }> {
+    // verifyOrganizerAccess é chamado dentro dos métodos reusados abaixo.
+    const prismaRead = this.prisma.getReadClient();
+    const event = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: { name: true },
+    });
+    const eventName = event?.name ?? 'evento';
+
+    const fmtDate = (iso: string) => {
+      if (!iso) return '';
+      const d = new Date(iso);
+      const pad = (n: number) => String(n).padStart(2, '0');
+      // UTC para bater com a exibição da tela (datetimeBR.ts usa UTC).
+      return `${pad(d.getUTCDate())}/${pad(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
+    };
+    const fmtMoney = (cents: number) =>
+      `R$ ${(cents / 100).toLocaleString('pt-BR', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`;
+    const esc = (v: string) => {
+      const s = v ?? '';
+      // Aspas quando o campo tiver separador, aspa ou quebra de linha.
+      return /[";\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+
+    // Colunas exportáveis (ordem canônica) → cabeçalho + extrator. O modal do front
+    // manda `fields`; sem seleção (ou lixo), exporta TODAS. Colunas type-específicas
+    // (Forma de pagamento / Parcelas pagas) saem vazias quando não se aplicam.
+    interface Rec {
+      orderId: string;
+      name: string;
+      email: string;
+      document: string;
+      releaseISO: string;
+      paymentMethod: string;
+      installments: string;
+      amount: number;
+    }
+    const COLUMNS: {
+      key: string;
+      header: string;
+      value: (r: Rec) => string;
+    }[] = [
+      { key: 'orderId', header: 'ID pedido', value: (r) => r.orderId },
+      { key: 'buyer', header: 'Comprador', value: (r) => r.name },
+      { key: 'email', header: 'E-mail', value: (r) => r.email },
+      { key: 'document', header: 'Documento', value: (r) => r.document },
+      { key: 'releaseDate', header: 'Previsão de liberação', value: (r) => fmtDate(r.releaseISO) },
+      { key: 'paymentMethod', header: 'Forma de pagamento', value: (r) => r.paymentMethod },
+      { key: 'installments', header: 'Parcelas pagas', value: (r) => r.installments },
+      { key: 'amount', header: 'Valor pendente', value: (r) => fmtMoney(r.amount) },
+    ];
+    const requested = Array.isArray(fields)
+      ? fields.filter((f) => typeof f === 'string')
+      : [];
+    const cols =
+      requested.length > 0
+        ? COLUMNS.filter((c) => requested.includes(c.key))
+        : COLUMNS;
+    // Sem colunas válidas → cai de volta em todas (evita CSV só com cabeçalho vazio).
+    const activeCols = cols.length > 0 ? cols : COLUMNS;
+
+    const records: Rec[] = [];
+    if (type === 'parcelados') {
+      const res = await this.getFinancialInstallments(userId, eventId);
+      const installments = (res.data?.installments ?? []) as any[];
+      // Agrupa por pedido (1 linha/pedido); parcelas pagas = nº da próxima − 1.
+      const byOrder = new Map<string, any[]>();
+      for (const inst of installments) {
+        const key = inst.orderId || inst.paymentId || inst.id;
+        const g = byOrder.get(key);
+        if (g) g.push(inst);
+        else byOrder.set(key, [inst]);
+      }
+      for (const group of byOrder.values()) {
+        const sorted = [...group].sort(
+          (a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime(),
+        );
+        const next = sorted[0];
+        const total = next.totalInstallments ?? sorted.length;
+        const paid = Math.max(0, (next.installmentNumber ?? 1) - 1);
+        const amount = sorted.reduce((s, i) => s + (i.amount ?? 0), 0);
+        const buyer = next.buyer ?? {};
+        records.push({
+          orderId: next.orderId || next.paymentId || '',
+          name: buyer.fullName || `${buyer.firstName ?? ''} ${buyer.lastName ?? ''}`.trim(),
+          email: buyer.email ?? '',
+          document: buyer.documentNumber ?? '',
+          releaseISO: next.dueDate,
+          paymentMethod: 'Cartão de crédito',
+          installments: `${paid}/${total}`,
+          amount,
+        });
+      }
+    } else {
+      // Percorre todas as páginas (o método pagina em no máx. 100/página).
+      let page = 1;
+      let hasNext = true;
+      while (hasNext && page <= 50) {
+        const res = await this.getFinancialPending(userId, eventId, page, 100);
+        const pending = (res.data?.pending ?? []) as any[];
+        for (const p of pending) {
+          const buyer = p.buyer ?? {};
+          records.push({
+            orderId: p.orderId ?? '',
+            name: buyer.fullName || `${buyer.firstName ?? ''} ${buyer.lastName ?? ''}`.trim(),
+            email: buyer.email ?? '',
+            document: buyer.documentNumber ?? '',
+            releaseISO: p.releaseDate,
+            paymentMethod: p.paymentMethod === 'PIX' ? 'Pix' : 'Cartão de crédito',
+            installments: '',
+            amount: p.amount ?? 0,
+          });
+        }
+        hasNext = !!res.data?.pagination?.hasNextPage;
+        page += 1;
+      }
+    }
+
+    const lines: string[] = [];
+    lines.push(activeCols.map((c) => esc(c.header)).join(';'));
+    for (const r of records) {
+      lines.push(activeCols.map((c) => esc(String(c.value(r) ?? ''))).join(';'));
+    }
+
+    const csv = lines.join('\r\n');
+    const buffer = Buffer.from('﻿' + csv, 'utf-8');
+    const safeName = eventName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    const suffix = type === 'parcelados' ? 'parcelados' : 'a-vista';
+    return {
+      buffer,
+      filename: `aguardando-liberacao-${suffix}-${safeName}.csv`,
+      contentType: 'text/csv; charset=utf-8',
+    };
+  }
+
+  /**
    * Obtém lista de pagamentos estornados (refunded)
    */
   async getFinancialRefunded(

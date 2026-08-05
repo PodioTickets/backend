@@ -41,3 +41,15 @@ export function isValidCnpj(value: string | null | undefined): boolean {
     checkDigit(13) === parseInt(cnpj.charAt(13), 10)
   );
 }
+
+/**
+ * Valida CPF (11 dígitos) OU CNPJ (14) pelo tamanho. Aceita com/sem máscara.
+ * Vazio/tamanho inesperado → `false`. Útil quando o tipo do documento não é
+ * conhecido a priori (ex.: titular de chave PIX pode ser PF ou PJ).
+ */
+export function isValidCpfOrCnpj(value: string | null | undefined): boolean {
+  const digits = (value ?? '').replace(/\D/g, '');
+  if (digits.length === 11) return isValidCpf(digits);
+  if (digits.length === 14) return isValidCnpj(digits);
+  return false;
+}

@@ -16,6 +16,7 @@ import { OrganizerSignupDto, SignupPersonType } from './dto/organizer-signup.dto
 import { OrganizationMemberRole } from '@prisma/client';
 import { MFAService } from '../../common/services/mfa.service';
 import { brtDayStartUtc, brtDayEndUtc } from '../../common/utils/brt-date.util';
+import { isValidCpfOrCnpj } from '../../common/utils/document-validation.util';
 import * as bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import {
@@ -83,6 +84,25 @@ export class OrganizationsService {
   }
 
   /** Garante JSON serializável (datas, etc.) e, em `changes`, old/new + valorAnterior/valorNovo. */
+  /**
+   * Valida o CPF/CNPJ do TITULAR de cada chave PIX recebida (conta de repasse —
+   * documento tem que ser real). Espelha a validação do front, que é burlável.
+   * Só valida quando o documento vier preenchido; documento presente e inválido
+   * → 400. Usado no cadastro e na edição da organização.
+   */
+  private assertValidPixKeyHolderDocuments(
+    pixKeys: ReadonlyArray<{ accountHolderDocument?: string | null }> | null | undefined,
+  ): void {
+    for (const k of pixKeys ?? []) {
+      const doc = (k.accountHolderDocument ?? '').replace(/\D/g, '');
+      if (doc && !isValidCpfOrCnpj(doc)) {
+        throw new BadRequestException(
+          'CPF/CNPJ do titular da chave PIX é inválido.',
+        );
+      }
+    }
+  }
+
   private serializeAuditValue(value: unknown): unknown {
     if (value === undefined) return null;
     if (value === null) return null;
@@ -561,6 +581,7 @@ export class OrganizationsService {
       // Criar chaves PIX iniciais, se enviadas. Mesma semântica do update:
       // se nenhuma vier marcada como default, a primeira é promovida.
       const incomingPixKeys = createDto.pixKeys ?? [];
+      this.assertValidPixKeyHolderDocuments(incomingPixKeys);
       if (incomingPixKeys.length > 0) {
         const hasDefault = incomingPixKeys.some((k) => k.isDefault);
         await tx.organizationPixKey.createMany({
@@ -693,6 +714,19 @@ export class OrganizationsService {
       if (existingOrg) {
         throw new ConflictException(
           `Já existe uma organização cadastrada com este documento (CPF/CNPJ): ${existingOrg.name}`,
+        );
+      }
+    }
+
+    // Unicidade do CPF do RESPONSÁVEL entre organizações (regra de negócio; o
+    // campo `ownerDocument` não é @unique). Enforced no servidor: a checagem ao
+    // vivo do wizard é apenas UX e pode ser burlada.
+    if (ownerDocumentClean) {
+      const ownerDocAvailable =
+        await this.isOrganizationOwnerDocumentAvailable(ownerDocumentClean);
+      if (!ownerDocAvailable) {
+        throw new ConflictException(
+          'Já existe uma organização cadastrada com este CPF de responsável.',
         );
       }
     }
@@ -858,6 +892,38 @@ export class OrganizationsService {
       select: { id: true },
     });
     return existing === null;
+  }
+
+  /**
+   * Disponibilidade do CPF do RESPONSÁVEL (`Organization.ownerDocument`) para o
+   * auto-cadastro público — retorna se já existe OUTRA organização cujo responsável
+   * tem este CPF. Regra de negócio (o campo NÃO é `@unique`), então é por query.
+   *
+   * A comparação normaliza os dígitos em ambos os lados via `regexp_replace` — o
+   * `ownerDocument` pode ter sido gravado com máscara em linhas legadas/admin (o
+   * auto-cadastro grava só dígitos, mas o cadastro admin não sanitiza). Um filtro
+   * de igualdade simples não casaria essas linhas. Responsável é sempre PF → só
+   * consulta com CPF de 11 dígitos. Retorna `true` (disponível) fora disso.
+   * `excludeOrganizationId` isenta a própria org (edição). Anti-enumeração: só
+   * `{ available }`.
+   */
+  async isOrganizationOwnerDocumentAvailable(
+    document?: string | null,
+    excludeOrganizationId?: string,
+  ): Promise<boolean> {
+    const clean = this.cleanDocumentNumber(document);
+    if (!clean || clean.length !== 11) return true;
+    const rows = await this.prisma.getReadClient().$queryRaw<{ id: string }[]>`
+      SELECT "id" FROM "Organization"
+      WHERE regexp_replace(COALESCE("ownerDocument", ''), '\\D', '', 'g') = ${clean}
+        ${
+          excludeOrganizationId
+            ? Prisma.sql`AND "id" <> ${excludeOrganizationId}::uuid`
+            : Prisma.empty
+        }
+      LIMIT 1
+    `;
+    return rows.length === 0;
   }
 
   /**
@@ -1071,6 +1137,7 @@ export class OrganizationsService {
     // transação). Garante no máximo um `isDefault=true`; sem nenhum marcado, a 1ª
     // é promovida a padrão. Espelha o fluxo do admin para consistência.
     if (pixKeys != null) {
+      this.assertValidPixKeyHolderDocuments(pixKeys);
       await prismaWrite.$transaction(async (tx) => {
         await tx.organizationPixKey.deleteMany({ where: { organizationId } });
         if (pixKeys.length > 0) {
