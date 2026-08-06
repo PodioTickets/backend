@@ -405,6 +405,21 @@ export class RepasseService {
     });
   }
 
+  /**
+   * Antecipações COMPROMETIDAS (PENDING+COMPLETED) — o líquido já foi adiantado ao
+   * organizador. Alimenta o `calcBreakdown` (some do bucket de origem + credita no
+   * saldo). Mesmo filtro de status do `loadAnticipatableUnits` (CANCELLED fora).
+   */
+  private async loadCommittedAnticipations(eventId: string, prisma: any) {
+    return prisma.eventAnticipation.findMany({
+      where: {
+        eventId,
+        status: { in: [WithdrawalStatus.PENDING, WithdrawalStatus.COMPLETED] },
+      },
+      select: { breakdown: true, netAmount: true },
+    });
+  }
+
   // ─── Breakdown ───────────────────────────────────────────────────────────
 
   /**
@@ -442,8 +457,29 @@ export class RepasseService {
     committedWithdrawals: any[],
     organizerFeePercent: number,
     refundFeeRate: number,
+    anticipations: any[] = [],
   ) {
     const now = getNow();
+
+    // Antecipações comprometidas (PENDING+COMPLETED): o recebível foi ADIANTADO ao
+    // organizador. Removemos o valor antecipado do bucket de origem POR UNIDADE
+    // (à vista = order.id em `aguardandoLiberacao`; parcela = `${paymentId}-inst-N`
+    // em `parceladosAReceber`) e somamos o LÍQUIDO no `saldoDisponivel`. Isso evita
+    // contar o mesmo recebível DUAS vezes (adiantado agora E liberado naturalmente
+    // depois, quando o pedido sairia da janela/parcela venceria). Mesma chave/filtro
+    // do `loadAnticipatableUnits`. CANCELLED não entra (já filtrado no load).
+    const anticipatedByUnit = new Map<string, number>();
+    let anticipatedNet = 0;
+    for (const a of anticipations) {
+      anticipatedNet += a.netAmount ?? 0;
+      const bd = (a.breakdown as unknown as any[]) ?? [];
+      for (const item of bd) {
+        const key = item.unitId ?? item.orderId;
+        if (!key) continue;
+        const val = item.gross ?? item.amount ?? 0;
+        anticipatedByUnit.set(key, (anticipatedByUnit.get(key) ?? 0) + val);
+      }
+    }
 
     let aguardandoLiberacao = 0;
     let valorRetido = 0;
@@ -477,7 +513,10 @@ export class RepasseService {
 
         for (let i = 0; i < count; i++) {
           const dueDate = addDays(paymentDate, 31 * (i + 1));
-          const amount = baseInstallment + (i === count - 1 ? lastExtra : 0);
+          const rawAmount = baseInstallment + (i === count - 1 ? lastExtra : 0);
+          // Desconta a parcela do que já foi ANTECIPADO (mesma chave do load).
+          const consumed = anticipatedByUnit.get(`${payment.id}-inst-${i + 1}`) ?? 0;
+          const amount = Math.max(0, rawAmount - consumed);
           if (dueDate > now) {
             parceladosAReceber += amount;
           } else {
@@ -485,15 +524,18 @@ export class RepasseService {
           }
         }
       } else {
+        // À vista (unidade = order.id): desconta o que já foi ANTECIPADO deste pedido.
+        const consumed = anticipatedByUnit.get(order.id) ?? 0;
+        const effectiveOrgNet = Math.max(0, orgNet - consumed);
         const releaseDate = getReleaseDate(paymentDate, payment.method);
         if (releaseDate > now) {
-          aguardandoLiberacao += orgNet;
+          aguardandoLiberacao += effectiveOrgNet;
         } else if (!isAudited) {
-          const retained = Math.round(orgNet * retentionRate);
+          const retained = Math.round(effectiveOrgNet * retentionRate);
           valorRetido += retained;
-          saldoDisponivel += orgNet - retained;
+          saldoDisponivel += effectiveOrgNet - retained;
         } else {
-          saldoDisponivel += orgNet;
+          saldoDisponivel += effectiveOrgNet;
         }
       }
     }
@@ -509,6 +551,11 @@ export class RepasseService {
       // e o valor congelado (ou 2% do subtotal) para estorno proativo. Fonte única.
       saldoDisponivel -= computeRefundImpact(order, organizerFeePercent, refundFeeRate).refundFee;
     }
+
+    // Líquido das antecipações comprometidas entra no saldo (o organizador recebeu
+    // adiantado; depois saca via repasse). O bruto correspondente já saiu de
+    // aguardando/parcelas acima (por unidade), então não há dupla contagem.
+    saldoDisponivel += anticipatedNet;
 
     // Use netAmount so both old records (amount=gross, netAmount=net) and new records
     // (amount=netAmount, feeAmount=0) are subtracted correctly from the net saldoDisponivel
@@ -543,11 +590,12 @@ export class RepasseService {
    */
   async computeBreakdownForEvent(eventId: string) {
     const prismaPrimary = this.prisma.getWriteClient();
-    const [event, ordersResult, audit, withdrawals] = await Promise.all([
+    const [event, ordersResult, audit, withdrawals, anticipations] = await Promise.all([
       this.loadEventConfig(eventId, prismaPrimary),
       this.loadPaidAndRefundedOrders(eventId, prismaPrimary),
       this.loadAudit(eventId, prismaPrimary),
       this.loadWithdrawals(eventId, prismaPrimary),
+      this.loadCommittedAnticipations(eventId, prismaPrimary),
     ]);
     const { paidOrders, refundedOrders } = ordersResult;
 
@@ -566,6 +614,7 @@ export class RepasseService {
       committedWithdrawals,
       event.organizerFeePercent,
       event.refundFeeRate,
+      anticipations,
     );
 
     return {
@@ -584,11 +633,12 @@ export class RepasseService {
     // Usa primary client para evitar lag de replicação após confirmação de pagamento.
     // Dados financeiros precisam refletir o estado mais recente.
     const prismaPrimary = this.prisma.getWriteClient();
-    const [event, ordersResult, audit, withdrawals] = await Promise.all([
+    const [event, ordersResult, audit, withdrawals, anticipations] = await Promise.all([
       this.loadEventConfig(eventId, prismaPrimary),
       this.loadPaidAndRefundedOrders(eventId, prismaPrimary),
       this.loadAudit(eventId, prismaPrimary),
       this.loadWithdrawals(eventId, prismaPrimary),
+      this.loadCommittedAnticipations(eventId, prismaPrimary),
     ]);
     const { paidOrders, refundedOrders } = ordersResult;
 
@@ -608,6 +658,7 @@ export class RepasseService {
       committedWithdrawals,
       event.organizerFeePercent,
       event.refundFeeRate,
+      anticipations,
     );
 
     // Transparência do estorno para o organizador: total revertido (venda perdida)
@@ -869,29 +920,17 @@ export class RepasseService {
       this.loadAnticipationRate(eventId, prisma),
       this.loadAnticipationEnabled(eventId, prisma),
     ]);
-    // Org com antecipação DESLIGADA: cotação zerada + flag `enabled:false` para a UI
-    // exibir "não habilitada". O bloqueio de fato é no requestAnticipation.
-    if (!enabled) {
-      return {
-        message: 'Anticipation quote fetched successfully',
-        data: {
-          enabled: false,
-          anticipatableTotal: 0,
-          availableTotal: 0,
-          maxReceivable: 0,
-          monthlyRate,
-          units: [],
-        },
-      };
-    }
     // "Valor disponível" = total antecipável BRUTO (soma das unidades).
     const availableTotal = totalAvailableGross(units);
     // Líquido MÁXIMO (se antecipar tudo) — teto do que o organizador recebe hoje.
     const maxReceivable = computeAnticipation(units, availableTotal, monthlyRate).recommendedNet;
+    // Org SEM antecipação habilitada ainda enxerga os valores (o front mostra o
+    // formulário e só bloqueia no "Confirmar", exibindo o modal de análise). O
+    // bloqueio de fato/autoritativo é no requestAnticipation.
     return {
       message: 'Anticipation quote fetched successfully',
       data: {
-        enabled: true,
+        enabled,
         // Compat: alguns consumidores antigos liam `anticipatableTotal`.
         anticipatableTotal: availableTotal,
         availableTotal,
@@ -1235,11 +1274,12 @@ export class RepasseService {
       // ignora o retorno e só serializa a contagem de linhas afetadas.
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${eventId}))`;
 
-      const [event, ordersResult, audit, withdrawals] = await Promise.all([
+      const [event, ordersResult, audit, withdrawals, anticipations] = await Promise.all([
         this.loadEventConfig(eventId, tx),
         this.loadPaidAndRefundedOrders(eventId, tx),
         this.loadAudit(eventId, tx),
         this.loadWithdrawals(eventId, tx),
+        this.loadCommittedAnticipations(eventId, tx),
       ]);
       const { paidOrders, refundedOrders } = ordersResult;
 
@@ -1256,6 +1296,7 @@ export class RepasseService {
         committedWithdrawals,
         event.organizerFeePercent,
         event.refundFeeRate,
+        anticipations,
       );
 
       if (amount > saldoParaSaque) {
@@ -1482,10 +1523,11 @@ export class RepasseService {
       const existing = await this.loadAudit(eventId, tx);
       if (existing) throw new BadRequestException('Evento já foi auditado');
 
-      const [event, ordersResult, withdrawals] = await Promise.all([
+      const [event, ordersResult, withdrawals, anticipations] = await Promise.all([
         this.loadEventConfig(eventId, tx),
         this.loadPaidAndRefundedOrders(eventId, tx),
         this.loadWithdrawals(eventId, tx),
+        this.loadCommittedAnticipations(eventId, tx),
       ]);
       const { paidOrders, refundedOrders } = ordersResult;
 
@@ -1501,6 +1543,7 @@ export class RepasseService {
         committedWithdrawals,
         event.organizerFeePercent,
         event.refundFeeRate,
+        anticipations,
       );
 
       return tx.eventAudit.create({
@@ -1590,9 +1633,10 @@ export class RepasseService {
         });
       } else {
         // Pending: calculate current retained amount dynamically
-        const [ordersResult, withdrawals] = await Promise.all([
+        const [ordersResult, withdrawals, anticipations] = await Promise.all([
           this.loadPaidAndRefundedOrders(event.id, prismaRead),
           this.loadWithdrawals(event.id, prismaRead),
+          this.loadCommittedAnticipations(event.id, prismaRead),
         ]);
         const { paidOrders, refundedOrders } = ordersResult;
 
@@ -1608,6 +1652,7 @@ export class RepasseService {
           committedWithdrawals,
           event.organizerFeePercent,
           event.refundFeeRate,
+          anticipations,
         );
 
         if (retainedAmount > 0) {
@@ -1665,10 +1710,11 @@ export class RepasseService {
       const existing = await this.loadAudit(eventId, tx);
       if (existing) throw new BadRequestException('Retenção do evento já foi liberada');
 
-      const [event, ordersResult, withdrawals] = await Promise.all([
+      const [event, ordersResult, withdrawals, anticipations] = await Promise.all([
         this.loadEventConfig(eventId, tx),
         this.loadPaidAndRefundedOrders(eventId, tx),
         this.loadWithdrawals(eventId, tx),
+        this.loadCommittedAnticipations(eventId, tx),
       ]);
       const { paidOrders, refundedOrders } = ordersResult;
 
@@ -1684,6 +1730,7 @@ export class RepasseService {
         committedWithdrawals,
         event.organizerFeePercent,
         event.refundFeeRate,
+        anticipations,
       );
 
       const created = await tx.eventAudit.create({

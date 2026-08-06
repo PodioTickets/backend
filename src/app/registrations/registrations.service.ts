@@ -2,7 +2,9 @@ import { Injectable, NotFoundException, BadRequestException, UnprocessableEntity
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateRegistrationDto, CreateRegistrationWithInvitedUserDto } from './dto/create-registration.dto';
 import { FilterRegistrationsDto, RegistrationFilterStatus } from './dto/filter-registrations.dto';
+import { UpdateRegistrationParticipantDto } from './dto/update-registration-participant.dto';
 import { DocumentType, Prisma, RegistrationStatus, PaymentStatus } from '@prisma/client';
+import { OrganizerMemberAccessService } from '../organizations/organizer-member-access.service';
 import { eventWindowInstant } from '../../common/utils/brt-date.util';
 // QR Code é gerado dinamicamente no frontend/backend usando o payload salvo em qrCode
 import { KitsService } from '../kits/kits.service';
@@ -40,6 +42,19 @@ function formatSnapshotLocation(location: unknown): string {
   return [loc.name, loc.neighborhood, cityState].filter(Boolean).join(', ');
 }
 
+/**
+ * Converte "YYYY-MM-DD" em Date UTC meia-noite. Ancorar em UTC evita o shift de
+ * fuso (em BRT, `new Date('YYYY-MM-DD')` recuaria um dia). Retorna null p/
+ * entrada vazia/inválida.
+ */
+function parseYmdToUtc(ymd: string | null | undefined): Date | null {
+  if (!ymd) return null;
+  const m = String(ymd).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const date = new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00.000Z`);
+  return isNaN(date.getTime()) ? null : date;
+}
+
 @Injectable()
 export class RegistrationsService {
   private readonly logger = new Logger(RegistrationsService.name);
@@ -53,6 +68,10 @@ export class RegistrationsService {
     // e do e-mail de confirmação. Sem ciclo: RegistrationsModule importa
     // PaymentsModule, não o contrário.
     private readonly paymentsService: PaymentsService,
+    // Guard granular de organizador (edit_event) p/ as edições de inscrição pelo
+    // painel. RegistrationsModule importa OrganizationsModule (sem ciclo — a org
+    // não depende de registrations).
+    private readonly organizerMemberAccess: OrganizerMemberAccessService,
   ) { }
 
   private async isAdminUser(userId: string): Promise<boolean> {
@@ -708,6 +727,10 @@ export class RegistrationsService {
         userId: true,
         invitedById: true,
         participantCpfClean: true,
+        // Contato de emergência vive SÓ nas colunas (não no snapshot) — lido aqui
+        // p/ expor no retorno e refletir edições do organizador.
+        emergencyContactName: true,
+        emergencyContactPhone: true,
         receiptSnapshot: true,
         order: { select: { userId: true } },
         event: { select: { organizationId: true } },
@@ -821,6 +844,12 @@ export class RegistrationsService {
             ...snapshot,
             event: snapshotEvent,
             products,
+            // Contato de emergência (colunas mutáveis, fora do snapshot). Depois
+            // do spread do snapshot p/ vencer qualquer valor legado embutido.
+            emergencyContact: {
+              name: registration.emergencyContactName ?? null,
+              phone: registration.emergencyContactPhone ?? null,
+            },
           },
         },
       };
@@ -1696,7 +1725,6 @@ export class RegistrationsService {
     variationId: string,
     userId: string,
   ) {
-    const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
     const registration = await prismaRead.registration.findUnique({
@@ -1796,92 +1824,15 @@ export class RegistrationsService {
       }
     }
 
-    // Validar variationId
-    const validVariation = product.variations.find((v) => v.id === variationId);
-    if (!validVariation) {
-      throw new BadRequestException('Variação inválida para este produto');
-    }
-
-    // Captura nome da variacao anterior antes do update pro email.
-    const previousVariationId = regProduct?.variationId ?? null;
-
-    // ── Contabilização de estoque na troca de variação (A → B) ──────────────────
-    // Espelha finalize/estorno (product-stock.util): a unidade vendida saiu do estoque de A
-    // e entrou no soldCount de A; ao trocar para B, devolvemos a A e tiramos de B.
-    //   A (antiga): availableStock += qty (release) e soldCount -= qty
-    //   B (nova):   availableStock -= qty (acquire)  e soldCount += qty
-    // `held` (segurou estoque) vem CONGELADO do productSnapshot — assim o ciclo
-    // venda→troca→estorno fica balanceado (o estorno lê o mesmo stockHeld + o variationId
-    // atual = B). Para um RegistrationProduct NOVO (produto incluso não enviado no checkout),
-    // usamos a política ATUAL (holdsStock) e gravamos o stockHeld no snapshot.
-    const qty = regProduct?.quantity ?? 1;
-    const snap = (regProduct?.productSnapshot as any) ?? null;
-    const held = regProduct
-      ? (typeof snap?.stockHeld === 'boolean'
-          // Fallback p/ snapshots ANTIGOS (pré-feature): regra LEGADA — incluso+obrigatório
-          // NÃO segurava estoque. Evita liberar/adquirir estoque que o pedido nunca reservou.
-          ? snap.stockHeld
-          : !((product as any).isIncludedInTicket === true && (product as any).isRequired === true))
-      : holdsStock(product as any);
-
-    await prismaWrite.$transaction(async (tx: any) => {
-      // soldCount/availableStock só mudam se a variação realmente trocou.
-      if (previousVariationId !== variationId) {
-        if (held) {
-          // B: adquire estoque ANTES de qualquer outra escrita. Só faz sentido p/ B LIMITADO
-          // (stock > 0); ilimitado é no-op no helper, então checamos o limite p/ distinguir
-          // "esgotado" (0 linhas num limitado) de "ilimitado" (0 linhas por ser stock=0).
-          const newVar = await tx.productVariation.findUnique({
-            where: { id: variationId },
-            select: { stock: true },
-          });
-          const bLimited = (newVar?.stock ?? 0) > 0;
-          if (bLimited) {
-            const acquired = await acquireVariationHold(tx, variationId, qty);
-            if (acquired === 0) {
-              // Esgotado → aborta a troca inteira (atômico): nada é alterado.
-              throw new UnprocessableEntityException('A variação escolhida está esgotada');
-            }
-          }
-          // A: devolve o estoque (release tem cap em stock e no-op p/ ilimitado).
-          if (previousVariationId) {
-            await releaseVariationHold(tx, previousVariationId, qty);
-          }
-        }
-        // soldCount move SEMPRE que há variação (espelha o finalize, que incrementa soldCount
-        // para qualquer item com variationId, independente de stockHeld). Vale p/ ilimitado.
-        if (previousVariationId) {
-          await decrementVariationSold(tx, previousVariationId, qty);
-        }
-        await incrementVariationSold(tx, variationId, qty);
-      }
-
-      if (regProduct) {
-        await tx.registrationProduct.update({
-          where: { id: regProduct.id },
-          data: { variationId, variationEdited: true },
-        });
-      } else {
-        // Criar RegistrationProduct para produto incluso que ainda não tem registro.
-        // Grava o productSnapshot.stockHeld para o estorno futuro saber se devolve availableStock.
-        await tx.registrationProduct.create({
-          data: {
-            registrationId,
-            productId,
-            variationId,
-            variationEdited: true,
-            quantity: 1,
-            unitPrice: 0,
-            totalPrice: 0,
-            productSnapshot: {
-              id: (product as any).id,
-              isIncludedInTicket: (product as any).isIncludedInTicket,
-              isRequired: (product as any).isRequired,
-              stockHeld: held,
-            },
-          },
-        });
-      }
+    // Validação de variação + contabilização de estoque + escrita. Extraído p/
+    // reuso pelo caminho do ORGANIZADOR (updateProductVariationAsOrganizer), que
+    // pula os gates de COMPRADOR mas mantém a mesma correção de estoque.
+    const { previousVariationId } = await this.applyVariationChange({
+      registrationId,
+      productId,
+      variationId,
+      product,
+      regProduct,
     });
 
     // Email best-effort — log warn em caso de falha, nao aborta a operacao.
@@ -1898,6 +1849,369 @@ export class RegistrationsService {
     });
 
     return { message: 'Variação atualizada com sucesso' };
+  }
+
+  /**
+   * Edição dos dados do participante pelo ORGANIZADOR (painel de inscrições).
+   *
+   * Grava no `receiptSnapshot` (recibo IMUTÁVEL — fonte da tela de detalhes e do
+   * PDF) E nas colunas-espelho da `Registration` (que alimentam buscas, `/me/:id`
+   * e as views de pedido). O `User` vivo NÃO é tocado — o participante pode ser um
+   * convidado sem conta ou pessoa distinta do comprador, e o snapshot é
+   * deliberadamente desacoplado das entidades vivas.
+   *
+   * Autorização é VERDADE DO SERVIDOR: `assertCanAccessEvent(edit_event)`. O
+   * modal do front é só UX. Retorna o registro re-hidratado (mesmo shape do GET)
+   * para o front atualizar o estado sem refetch.
+   */
+  async updateRegistrationParticipant(
+    registrationId: string,
+    dto: UpdateRegistrationParticipantDto,
+    userId: string,
+  ) {
+    const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
+
+    const registration = await prismaRead.registration.findUnique({
+      where: { id: registrationId },
+      select: {
+        id: true,
+        status: true,
+        receiptSnapshot: true,
+        participantDocumentType: true,
+        participantDocumentNumber: true,
+        order: { select: { eventId: true } },
+      },
+    });
+
+    if (!registration) {
+      throw new NotFoundException('Inscrição não encontrada');
+    }
+
+    const eventId = registration.order?.eventId;
+    if (!eventId) {
+      throw new NotFoundException('Evento da inscrição não encontrado');
+    }
+
+    // Só o organizador do evento (ou ADMIN/STAFF, via bypass do guard) edita.
+    await this.organizerMemberAccess.assertCanAccessEvent(userId, eventId, 'edit_event');
+
+    // Só inscrições confirmadas (pagas) — espelha o guard de updateProductVariation.
+    if (registration.status !== RegistrationStatus.CONFIRMED) {
+      throw new BadRequestException('Só é possível editar inscrições confirmadas');
+    }
+
+    // ── Patches parciais: só os campos enviados (PATCH) ──────────────────────
+    const snapshot = (registration.receiptSnapshot as Record<string, any> | null) ?? null;
+    const participantPatch: Record<string, any> = {};
+    const columnData: Prisma.RegistrationUpdateInput = {};
+
+    if (dto.name !== undefined) {
+      participantPatch.name = dto.name;
+      columnData.participantName = dto.name;
+    }
+    if (dto.email !== undefined) {
+      participantPatch.email = dto.email;
+      columnData.participantEmail = dto.email;
+    }
+    if (dto.phone !== undefined) {
+      participantPatch.phone = dto.phone;
+      columnData.participantPhone = dto.phone;
+    }
+    if (dto.gender !== undefined) {
+      participantPatch.gender = dto.gender;
+      columnData.participantGender = dto.gender;
+    }
+    if (dto.country !== undefined) {
+      participantPatch.country = dto.country;
+    }
+    if (dto.birthDate !== undefined) {
+      participantPatch.birthDate = dto.birthDate || null;
+      // Coluna-espelho é DateTime — parse YMD como UTC meia-noite (sem shift BRT).
+      columnData.participantDateOfBirth = parseYmdToUtc(dto.birthDate);
+    }
+    if (dto.emergencyContactName !== undefined) {
+      columnData.emergencyContactName = dto.emergencyContactName || null;
+    }
+    if (dto.emergencyContactPhone !== undefined) {
+      columnData.emergencyContactPhone = dto.emergencyContactPhone || null;
+    }
+
+    // ── Documento: normaliza tipo + clean pela regra única (resolveDocument) ──
+    // Nunca `.replace(/\D/g,'')` cru — quebra passaporte estrangeiro.
+    const documentTouched =
+      dto.documentNumber !== undefined || dto.documentType !== undefined;
+    if (documentTouched) {
+      const resolved = resolveDocument({
+        documentType: dto.documentType ?? registration.participantDocumentType ?? null,
+        documentNumber: dto.documentNumber ?? registration.participantDocumentNumber ?? null,
+      });
+      const isCpf = resolved.type === DocumentType.CPF;
+      // Snapshot
+      participantPatch.documentType = resolved.type;
+      participantPatch.documentNumber = resolved.clean;
+      participantPatch.cpf = isCpf ? resolved.clean : null; // legado
+      // Colunas-espelho (índices de busca dependem do *Clean)
+      columnData.participantDocumentType = resolved.type;
+      columnData.participantDocumentNumber = resolved.clean;
+      columnData.participantDocumentNumberClean = resolved.clean;
+      columnData.participantCpf = isCpf ? resolved.clean : null;
+      columnData.participantCpfClean = isCpf ? resolved.clean : null;
+    }
+
+    // Merge no snapshot (rewrite wholesale — padrão do projeto p/ coluna Json).
+    if (snapshot && Object.keys(participantPatch).length > 0) {
+      snapshot.participant = { ...(snapshot.participant ?? {}), ...participantPatch };
+      columnData.receiptSnapshot = snapshot as Prisma.InputJsonValue;
+    }
+
+    await prismaWrite.registration.update({
+      where: { id: registrationId },
+      data: columnData,
+    });
+
+    // Server autoritativo: o front re-hidrata do retorno (mesmo shape do GET).
+    return this.findOne(registrationId, userId);
+  }
+
+  /**
+   * Núcleo compartilhado da troca de variação: valida a variação, contabiliza o
+   * estoque (A→B, espelhando finalize/estorno) e grava o RegistrationProduct
+   * (variationId + variationEdited). Usado pelo caminho do COMPRADOR (com gates)
+   * e pelo do ORGANIZADOR (sem gates). Retorna a variação anterior (p/ o e-mail).
+   */
+  private async applyVariationChange(params: {
+    registrationId: string;
+    productId: string;
+    variationId: string;
+    product: any;
+    regProduct: any | null;
+  }): Promise<{ previousVariationId: string | null }> {
+    const { registrationId, productId, variationId, product, regProduct } = params;
+    const prismaWrite = this.prisma.getWriteClient();
+
+    const validVariation = (product.variations ?? []).find((v: any) => v.id === variationId);
+    if (!validVariation) {
+      throw new BadRequestException('Variação inválida para este produto');
+    }
+
+    // `held` (segurou estoque) vem CONGELADO do productSnapshot p/ o ciclo
+    // venda→troca→estorno ficar balanceado; RegistrationProduct NOVO usa a política atual.
+    const previousVariationId = regProduct?.variationId ?? null;
+    const qty = regProduct?.quantity ?? 1;
+    const snap = (regProduct?.productSnapshot as any) ?? null;
+    const held = regProduct
+      ? (typeof snap?.stockHeld === 'boolean'
+          ? snap.stockHeld
+          : !(product.isIncludedInTicket === true && product.isRequired === true))
+      : holdsStock(product);
+
+    await prismaWrite.$transaction(async (tx: any) => {
+      // soldCount/availableStock só mudam se a variação realmente trocou.
+      if (previousVariationId !== variationId) {
+        if (held) {
+          const newVar = await tx.productVariation.findUnique({
+            where: { id: variationId },
+            select: { stock: true },
+          });
+          const bLimited = (newVar?.stock ?? 0) > 0;
+          if (bLimited) {
+            const acquired = await acquireVariationHold(tx, variationId, qty);
+            if (acquired === 0) {
+              throw new UnprocessableEntityException('A variação escolhida está esgotada');
+            }
+          }
+          if (previousVariationId) {
+            await releaseVariationHold(tx, previousVariationId, qty);
+          }
+        }
+        if (previousVariationId) {
+          await decrementVariationSold(tx, previousVariationId, qty);
+        }
+        await incrementVariationSold(tx, variationId, qty);
+      }
+
+      if (regProduct) {
+        await tx.registrationProduct.update({
+          where: { id: regProduct.id },
+          data: { variationId, variationEdited: true },
+        });
+      } else {
+        await tx.registrationProduct.create({
+          data: {
+            registrationId,
+            productId,
+            variationId,
+            variationEdited: true,
+            quantity: 1,
+            unitPrice: 0,
+            totalPrice: 0,
+            productSnapshot: {
+              id: product.id,
+              isIncludedInTicket: product.isIncludedInTicket,
+              isRequired: product.isRequired,
+              stockHeld: held,
+            },
+          },
+        });
+      }
+    });
+
+    return { previousVariationId };
+  }
+
+  /**
+   * Troca de variação pelo ORGANIZADOR (painel de inscrições). Autoriza por
+   * `edit_event` e PULA os gates de comprador (buyerVariationEditAllowed, prazo,
+   * uma-vez-só) — o organizador troca livremente e repetidas vezes —, mantendo as
+   * validações de integridade (produto incluso, variação válida, vínculo
+   * ticket-produto) e a contabilização de estoque. Retorna a inscrição re-hidratada.
+   */
+  async updateProductVariationAsOrganizer(
+    registrationId: string,
+    productId: string,
+    variationId: string,
+    userId: string,
+  ) {
+    const prismaRead = this.prisma.getReadClient();
+
+    const registration = await prismaRead.registration.findUnique({
+      where: { id: registrationId },
+      include: {
+        order: { select: { eventId: true } },
+        tickets: { select: { ticketId: true } },
+        products: {
+          where: { productId },
+          include: {
+            product: {
+              select: {
+                id: true,
+                isIncludedInTicket: true,
+                isRequired: true,
+                variations: { select: { id: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!registration) {
+      throw new NotFoundException('Inscrição não encontrada');
+    }
+    const eventId = registration.order?.eventId;
+    if (!eventId) {
+      throw new NotFoundException('Evento da inscrição não encontrado');
+    }
+    await this.organizerMemberAccess.assertCanAccessEvent(userId, eventId, 'edit_event');
+
+    if (registration.status !== RegistrationStatus.CONFIRMED) {
+      throw new BadRequestException('Só é possível alterar variação em inscrições confirmadas');
+    }
+
+    const regProduct = registration.products[0] ?? null;
+    const product = regProduct?.product ?? await prismaRead.product.findUnique({
+      where: { id: productId },
+      select: {
+        id: true,
+        isIncludedInTicket: true,
+        isRequired: true,
+        variations: { select: { id: true } },
+      },
+    });
+
+    if (!product) {
+      throw new NotFoundException('Produto não encontrado');
+    }
+    if (!product.isIncludedInTicket) {
+      throw new BadRequestException('Alteração de variação permitida apenas para produtos inclusos no ingresso');
+    }
+
+    const ticketId = registration.tickets[0]?.ticketId;
+    if (ticketId) {
+      const ticketProduct = await prismaRead.ticketProduct.findUnique({
+        where: { ticketId_productId: { ticketId, productId } },
+      });
+      if (!ticketProduct) {
+        throw new BadRequestException('Produto não está vinculado ao ingresso desta inscrição');
+      }
+    }
+
+    await this.applyVariationChange({ registrationId, productId, variationId, product, regProduct });
+
+    return this.findOne(registrationId, userId);
+  }
+
+  /**
+   * Edição das RESPOSTAS das perguntas do organizador pelo ORGANIZADOR (painel).
+   * Atualiza a tabela relacional `QuestionAnswer` (fonte de /me/:id e views de
+   * pedido) E a entrada correspondente em `receiptSnapshot.questionAnswers` (fonte
+   * desta tela/PDF). Guard `edit_event`. Retorna a inscrição re-hidratada.
+   */
+  async updateRegistrationAnswers(
+    registrationId: string,
+    answers: { questionId: string; answer: string }[],
+    userId: string,
+  ) {
+    const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
+
+    const registration = await prismaRead.registration.findUnique({
+      where: { id: registrationId },
+      select: {
+        id: true,
+        status: true,
+        receiptSnapshot: true,
+        order: { select: { eventId: true } },
+      },
+    });
+
+    if (!registration) {
+      throw new NotFoundException('Inscrição não encontrada');
+    }
+    const eventId = registration.order?.eventId;
+    if (!eventId) {
+      throw new NotFoundException('Evento da inscrição não encontrado');
+    }
+    await this.organizerMemberAccess.assertCanAccessEvent(userId, eventId, 'edit_event');
+
+    if (registration.status !== RegistrationStatus.CONFIRMED) {
+      throw new BadRequestException('Só é possível editar inscrições confirmadas');
+    }
+
+    if (!answers.length) {
+      return this.findOne(registrationId, userId);
+    }
+
+    const answerByQuestion = new Map(answers.map((a) => [a.questionId, a.answer]));
+    const snapshot = registration.receiptSnapshot as Record<string, any> | null;
+
+    await prismaWrite.$transaction(async (tx: any) => {
+      for (const { questionId, answer } of answers) {
+        // updateMany (não update): se a pergunta não tinha resposta prévia, é no-op
+        // em vez de estourar. A linha existe p/ toda resposta já exibida no painel.
+        await tx.questionAnswer.updateMany({
+          where: { registrationId, questionId },
+          data: { answer },
+        });
+      }
+
+      // Espelha no snapshot (rewrite wholesale; casado por question.id).
+      if (snapshot && Array.isArray(snapshot.questionAnswers)) {
+        snapshot.questionAnswers = snapshot.questionAnswers.map((entry: any) => {
+          const qid = entry?.question?.id;
+          return qid && answerByQuestion.has(qid)
+            ? { ...entry, answer: answerByQuestion.get(qid) }
+            : entry;
+        });
+        await tx.registration.update({
+          where: { id: registrationId },
+          data: { receiptSnapshot: snapshot as Prisma.InputJsonValue },
+        });
+      }
+    });
+
+    return this.findOne(registrationId, userId);
   }
 
   private async sendVariationChangedEmail(args: {
