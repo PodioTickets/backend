@@ -231,6 +231,40 @@ describe('RepasseService — lógica de estorno (calcBreakdown)', () => {
       expect(b.saldoParaSaque).toBe(-REFUND_FEE * 3); // -600, nada de orgNet
     });
   });
+
+  describe('antecipação — move de aguardando/parcelas p/ saldo disponível', () => {
+    // calcBreakdown(paid, refunded, retention, audited, withdrawals, orgFee, refundFeeRate, anticipations)
+    const calcA = (paid: any[], audited: boolean, anticipations: any[]) =>
+      (service as any).calcBreakdown(paid, [], RETENTION, audited, [], ORG_FEE, undefined, anticipations);
+
+    it('à vista na janela antecipada: sai de aguardando e o LÍQUIDO entra no saldo', () => {
+      const order = mkOrder({ daysAgo: 5 }); // à vista em janela → aguardando ORG_NET
+      const anticipation = { netAmount: 9000, breakdown: [{ unitId: order.id, gross: ORG_NET }] };
+      const b = calcA([order], false, [anticipation]);
+      expect(b.aguardandoLiberacao).toBe(0); // saiu de aguardando (ORG_NET − ORG_NET)
+      expect(b.saldoDisponivel).toBe(9000); // líquido antecipado
+      expect(b.saldoParaSaque).toBe(9000); // sacável via repasse
+    });
+
+    it('à vista JÁ liberada e antecipada NÃO conta duas vezes no saldo', () => {
+      const order = mkOrder({ daysAgo: 60 }); // fora da janela → normalmente saldo ORG_NET
+      const anticipation = { netAmount: 9000, breakdown: [{ unitId: order.id, gross: ORG_NET }] };
+      const b = calcA([order], true, [anticipation]); // audited → sem 10% retido
+      // ORG_NET excluído do saldo (não vem de novo) + líquido antecipado = 9000 (não 9600+9000).
+      expect(b.saldoDisponivel).toBe(9000);
+    });
+
+    it('parcela futura antecipada sai de parcelados e o líquido entra no saldo', () => {
+      const order = mkOrder({ daysAgo: 5, installments: 3 });
+      order.payment.id = 'pay-x'; // chave da parcela = `${payment.id}-inst-N`
+      // orgNet ORG_NET/3 por parcela; antecipa a 1ª parcela (3200).
+      const anticipation = { netAmount: 3000, breakdown: [{ unitId: 'pay-x-inst-1', gross: 3200 }] };
+      const b = calcA([order], false, [anticipation]);
+      // 3 parcelas de 3200 = 9600; menos a 1ª antecipada (3200) = 6400 a receber.
+      expect(b.parceladosAReceber).toBe(6400);
+      expect(b.saldoDisponivel).toBe(3000); // líquido antecipado
+    });
+  });
 });
 
 // ── Integração (e2e de serviço): exercita o caminho público getSummary ────────
@@ -260,7 +294,7 @@ describe('RepasseService.getSummary — integração pós-estorno (roteiro)', ()
     service = module.get<RepasseService>(RepasseService);
   });
 
-  function setupDb(opts: { orders: any[]; audit: any; withdrawals?: any[] }) {
+  function setupDb(opts: { orders: any[]; audit: any; withdrawals?: any[]; anticipations?: any[] }) {
     const writeClient = {
       event: {
         findUnique: jest
@@ -270,6 +304,7 @@ describe('RepasseService.getSummary — integração pós-estorno (roteiro)', ()
       order: { findMany: jest.fn().mockResolvedValue(opts.orders) },
       eventAudit: { findUnique: jest.fn().mockResolvedValue(opts.audit) },
       eventWithdrawal: { findMany: jest.fn().mockResolvedValue(opts.withdrawals ?? []) },
+      eventAnticipation: { findMany: jest.fn().mockResolvedValue(opts.anticipations ?? []) },
     };
     mockPrisma.getWriteClient.mockReturnValue(writeClient);
   }
