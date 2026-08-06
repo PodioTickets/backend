@@ -6,7 +6,7 @@ import {
   ApiTags, ApiOperation, ApiBearerAuth,
   ApiQuery, ApiParam, ApiResponse, ApiBody,
 } from '@nestjs/swagger';
-import { IsArray, IsBoolean, IsObject, IsOptional, IsString, ValidateNested } from 'class-validator';
+import { IsArray, IsBoolean, IsNumber, IsOptional, IsString, Max, Min, ValidateNested } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 import { AdminOrganizationsService, UpdateOrganizationDto } from './admin-organizations.service';
 import { OrganizationsService } from '../organizations/organizations.service';
@@ -50,6 +50,9 @@ class UpdateOrganizationBodyDto implements UpdateOrganizationDto {
   @IsOptional() @IsString() accountHolderName?: string;
   @IsOptional() @IsString() accountHolderDocument?: string;
   @IsOptional() @IsBoolean() @Transform(({ value }) => value === 'true' || value === true) isActive?: boolean;
+  // Antecipação: taxa mensal em fração (0.1 = 10%) e liga/desliga do recurso da org.
+  @IsOptional() @IsNumber() @Min(0) @Max(1) anticipationMonthlyRate?: number;
+  @IsOptional() @IsBoolean() @Transform(({ value }) => value === 'true' || value === true) anticipationEnabled?: boolean;
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => PixKeyItemDto) pixKeys?: PixKeyItemDto[];
 }
 

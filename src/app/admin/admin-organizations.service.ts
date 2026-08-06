@@ -432,4 +432,6 @@ export interface UpdateOrganizationDto {
   accountHolderName?: string;
   accountHolderDocument?: string;
   isActive?: boolean;
+  anticipationMonthlyRate?: number;
+  anticipationEnabled?: boolean;
 }
