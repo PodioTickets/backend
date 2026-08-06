@@ -753,6 +753,19 @@ export class RepasseService {
   }
 
   /**
+   * Antecipação habilitada para a ORGANIZAÇÃO do evento. Controlada pelo admin no
+   * drawer da organização (default OFF). Gate autoritativo do dinheiro — org sem a
+   * flag NÃO pode antecipar, independentemente do que a UI mostrar.
+   */
+  private async loadAnticipationEnabled(eventId: string, prisma: any): Promise<boolean> {
+    const event = await prisma.event.findUnique({
+      where: { id: eventId },
+      select: { organization: { select: { anticipationEnabled: true } } },
+    });
+    return event?.organization?.anticipationEnabled === true;
+  }
+
+  /**
    * Monta o BOLO de unidades antecipáveis (à vista + cada parcela pendente),
    * conforme `adiantamento.md`. À vista = parcela 1x. Cada unidade traz o valor
    * líquido-do-organizador e os dias até a liberação natural. Desconta o que já
@@ -851,10 +864,26 @@ export class RepasseService {
   async getAnticipationQuote(userId: string, eventId: string) {
     await this.assertAccess(userId, eventId);
     const prisma = this.prisma.getWriteClient();
-    const [units, monthlyRate] = await Promise.all([
+    const [units, monthlyRate, enabled] = await Promise.all([
       this.loadAnticipatableUnits(eventId, prisma),
       this.loadAnticipationRate(eventId, prisma),
+      this.loadAnticipationEnabled(eventId, prisma),
     ]);
+    // Org com antecipação DESLIGADA: cotação zerada + flag `enabled:false` para a UI
+    // exibir "não habilitada". O bloqueio de fato é no requestAnticipation.
+    if (!enabled) {
+      return {
+        message: 'Anticipation quote fetched successfully',
+        data: {
+          enabled: false,
+          anticipatableTotal: 0,
+          availableTotal: 0,
+          maxReceivable: 0,
+          monthlyRate,
+          units: [],
+        },
+      };
+    }
     // "Valor disponível" = total antecipável BRUTO (soma das unidades).
     const availableTotal = totalAvailableGross(units);
     // Líquido MÁXIMO (se antecipar tudo) — teto do que o organizador recebe hoje.
@@ -862,6 +891,7 @@ export class RepasseService {
     return {
       message: 'Anticipation quote fetched successfully',
       data: {
+        enabled: true,
         // Compat: alguns consumidores antigos liam `anticipatableTotal`.
         anticipatableTotal: availableTotal,
         availableTotal,
@@ -896,10 +926,20 @@ export class RepasseService {
     const anticipation = await prismaWrite.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${eventId}))`;
 
-      const [units, monthlyRate] = await Promise.all([
+      const [units, monthlyRate, enabled] = await Promise.all([
         this.loadAnticipatableUnits(eventId, tx),
         this.loadAnticipationRate(eventId, tx),
+        this.loadAnticipationEnabled(eventId, tx),
       ]);
+
+      // Gate autoritativo: org com antecipação desligada não antecipa (mesmo que a
+      // UI escape). Dentro da transação (sob advisory lock) para não correr com um
+      // toggle concorrente do admin.
+      if (!enabled) {
+        throw new BadRequestException(
+          'A antecipação de recebíveis não está habilitada para esta organização.',
+        );
+      }
 
       // `amount` = quanto o organizador quer RECEBER hoje (líquido). Recálculo
       // AUTORITATIVO: o motor escolhe as unidades mais baratas por INTEIRO.

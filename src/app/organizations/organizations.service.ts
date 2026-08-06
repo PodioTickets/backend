@@ -553,6 +553,12 @@ export class OrganizationsService {
           accountType: createDto.accountType,
           accountHolderName: createDto.accountHolderName,
           accountHolderDocument: createDto.accountHolderDocument,
+          // Antecipação: taxa opcional (senão default do schema) e SEMPRE desligada
+          // por padrão no cadastro — o admin liga manualmente depois (ou já no form).
+          ...(createDto.anticipationMonthlyRate != null && {
+            anticipationMonthlyRate: createDto.anticipationMonthlyRate,
+          }),
+          anticipationEnabled: createDto.anticipationEnabled ?? false,
         },
       });
 

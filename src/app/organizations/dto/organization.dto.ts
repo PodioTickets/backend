@@ -123,6 +123,18 @@ export class CreateOrganizationDto {
   @IsEmail()
   fiscalEmail?: string; // E-mail fiscal
 
+  /// Taxa MENSAL de antecipação (fração: 0.1 = 10%). Omitida → default do schema.
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  anticipationMonthlyRate?: number;
+
+  /// Antecipação habilitada para a org. Desligada por padrão (schema @default(false)).
+  @IsOptional()
+  @IsBoolean()
+  anticipationEnabled?: boolean;
+
   // Endereço
   @IsOptional()
   @IsString()
@@ -495,6 +507,11 @@ export class UpdateOrganizationDto {
   @Min(0)
   @Max(1)
   anticipationMonthlyRate?: number;
+
+  /// Liga/desliga a antecipação da org (gate autoritativo no requestAnticipation).
+  @IsOptional()
+  @IsBoolean()
+  anticipationEnabled?: boolean;
 
   // Chaves PIX — substituição completa quando enviadas (mesma semântica do admin).
   // Permite o próprio organizador gerir suas chaves pela tela de Configurações.
