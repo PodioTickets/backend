@@ -893,6 +893,7 @@ export class RegistrationsService {
     registrationId: string,
     userId: string,
     targetEmail: string,
+    ticketOnly = false,
   ): Promise<{ message: string; ticketCount: number }> {
     const prismaRead = this.prisma.getReadClient();
 
@@ -961,7 +962,12 @@ export class RegistrationsService {
       );
     }
 
-    const regs: any[] = order.registrations ?? [];
+    // No modo "somente ingresso" (modal de inscrição do organizador) restringe o
+    // envio à inscrição-alvo — os demais ingressos do pedido não vão junto.
+    const allRegs: any[] = order.registrations ?? [];
+    const regs: any[] = ticketOnly
+      ? allRegs.filter((r) => r.id === registrationId)
+      : allRegs;
     if (regs.length === 0) {
       throw new BadRequestException(
         'O pedido não possui ingressos válidos para reenvio',
@@ -986,16 +992,19 @@ export class RegistrationsService {
     }
 
     // 5. Gera o comprovante (recibo) do pedido. Pedido gratuito pode não ter
-    //    recibo — tolera falha e segue só com os ingressos.
-    const receiptPdf = await this.paymentsService
-      .generateReceiptPdf(registrationId, userId)
-      .then((r) => r.buffer)
-      .catch((e: any) => {
-        this.logger.warn(
-          `Comprovante PDF falhou no reenvio (pedido ${order.id}): ${e?.message}`,
-        );
-        return undefined;
-      });
+    //    recibo — tolera falha e segue só com os ingressos. No modo "somente
+    //    ingresso" o comprovante é omitido de propósito.
+    const receiptPdf = ticketOnly
+      ? undefined
+      : await this.paymentsService
+          .generateReceiptPdf(registrationId, userId)
+          .then((r) => r.buffer)
+          .catch((e: any) => {
+            this.logger.warn(
+              `Comprovante PDF falhou no reenvio (pedido ${order.id}): ${e?.message}`,
+            );
+            return undefined;
+          });
 
     if (ticketPdfs.length === 0 && !receiptPdf) {
       throw new BadRequestException(
@@ -1008,9 +1017,16 @@ export class RegistrationsService {
     //    envio pós-pagamento, aqui o erro NÃO é silencioso: propaga p/ o
     //    controller dar feedback ao usuário.
     const event = order.event ?? {};
+    // No modo "somente ingresso" a saudação usa o participante da inscrição
+    // (não o comprador), coerente com o e-mail cadastrado na inscrição.
+    const greetingFirstName = ticketOnly
+      ? (ticketPdfs[0]?.participantName?.split(/\s+/)[0] ||
+          order.user?.firstName ||
+          'Participante')
+      : order.user?.firstName || 'Participante';
     await this.emailService.sendRegistrationConfirmed({
       email: targetEmail,
-      firstName: order.user?.firstName || 'Participante',
+      firstName: greetingFirstName,
       eventName: event.name ?? '',
       eventLocation: event.location ?? '',
       eventDate: formatEventHappensDate(event.eventDate),

@@ -1,6 +1,6 @@
-import { IsEmail, IsNotEmpty } from 'class-validator';
+import { IsBoolean, IsEmail, IsNotEmpty, IsOptional } from 'class-validator';
 import { Transform } from 'class-transformer';
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 /**
  * Reenvio do e-mail de confirmação do PEDIDO (todos os ingressos + comprovante)
@@ -19,4 +19,20 @@ export class ResendRegistrationEmailDto {
   @IsNotEmpty({ message: 'E-mail é obrigatório' })
   @IsEmail({}, { message: 'E-mail inválido' })
   email: string;
+
+  /**
+   * Quando `true`, reenvia SOMENTE o ingresso desta inscrição (sem comprovante e
+   * sem os demais ingressos do pedido). Usado pelo modal de inscrição do
+   * organizador. Omisso/`false` = fluxo de pedido (todos os ingressos +
+   * comprovante).
+   */
+  @ApiPropertyOptional({
+    description:
+      'Se true, envia apenas o ingresso desta inscrição (sem comprovante nem demais ingressos do pedido).',
+    example: true,
+  })
+  @IsOptional()
+  @Transform(({ value }) => value === true || value === 'true')
+  @IsBoolean()
+  ticketOnly?: boolean;
 }
