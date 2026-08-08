@@ -5,6 +5,7 @@ import { KitsService } from '../../kits/kits.service';
 import { EmailService } from '../../../common/services/email.service';
 import { TicketPdfService } from '../../../common/services/ticket-pdf.service';
 import { PaymentsService } from '../../payments/payments.service';
+import { OrganizerMemberAccessService } from '../../organizations/organizer-member-access.service';
 
 describe('RegistrationsService - Performance Tests', () => {
   let service: RegistrationsService;
@@ -93,6 +94,10 @@ describe('RegistrationsService - Performance Tests', () => {
         {
           provide: PaymentsService,
           useValue: { generateReceiptPdf: jest.fn() },
+        },
+        {
+          provide: OrganizerMemberAccessService,
+          useValue: { assertCanAccessEvent: jest.fn() },
         },
       ],
     }).compile();

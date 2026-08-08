@@ -270,7 +270,12 @@ export class RegistrationsController {
     @Param('id') id: string,
     @Body() dto: ResendRegistrationEmailDto,
   ) {
-    return this.registrationsService.resendOrderConfirmation(id, req.user.id, dto.email);
+    return this.registrationsService.resendOrderConfirmation(
+      id,
+      req.user.id,
+      dto.email,
+      dto.ticketOnly ?? false,
+    );
   }
 
   @Delete(':id/cancel')
