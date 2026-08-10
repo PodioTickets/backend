@@ -4795,8 +4795,14 @@ export class EventsService {
       }
     }
 
-    // Ordenar por data de compra (mais recentes primeiro)
-    allPending.sort((a, b) => new Date(b.purchaseDate).getTime() - new Date(a.purchaseDate).getTime());
+    // Ordenar por data de LIBERAÇÃO ascendente: a liberação mais próxima fica em
+    // PRIMEIRO (mais antigo → mais recente). Tiebreak pela data do pagamento.
+    allPending.sort((a, b) => {
+      const byRelease =
+        new Date(a.releaseDate).getTime() - new Date(b.releaseDate).getTime();
+      if (byRelease !== 0) return byRelease;
+      return new Date(a.paymentDate).getTime() - new Date(b.paymentDate).getTime();
+    });
 
     // Aplicar paginação
     const totalOrders = allPending.length;

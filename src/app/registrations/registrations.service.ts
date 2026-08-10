@@ -38,8 +38,13 @@ function formatSnapshotLocation(location: unknown): string {
   if (!location) return '';
   if (typeof location === 'string') return location;
   const loc = location as Record<string, unknown>;
-  const cityState = [loc.city, loc.state].filter(Boolean).join(' - ');
-  return [loc.name, loc.neighborhood, cityState].filter(Boolean).join(', ');
+  // MESMO formato do card da home / e-mail (`formatEventCardAddress`):
+  // "Local, Cidade, Estado" (o venue = `loc.name` = locationName). SEM bairro e
+  // sem "cidade - estado" com traço — o PDF de ingresso deve espelhar o card.
+  return [loc.name, loc.city, loc.state]
+    .map((p) => (typeof p === 'string' ? p.trim() : ''))
+    .filter(Boolean)
+    .join(', ');
 }
 
 /**
