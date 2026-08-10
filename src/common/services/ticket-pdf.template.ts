@@ -452,6 +452,17 @@ const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
     ),
   );
 
+/* Rótulo humano do sexo. O valor persistido pode vir em maiúsculas OU minúsculas
+   (ex.: "OTHER"/"other", "PREFER_NOT_TO_SAY") — normaliza p/ o mapa; valor
+   desconhecido cai no cru (nunca fica vazio). Espelha o `getGenderLabel` do front. */
+const GENDER_LABELS: Record<string, string> = {
+  MALE: 'Masculino',
+  FEMALE: 'Feminino',
+  OTHER: 'Outro',
+  PREFER_NOT_TO_SAY: 'Prefiro não dizer',
+};
+const fmtGender = (g: string): string => GENDER_LABELS[g.toUpperCase()] ?? g;
+
 /* Card de participante — wrap: false garante que o card não é dividido entre páginas */
 const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
   const fields = [
@@ -463,7 +474,7 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
       : null,
     reg.dateOfBirth ? { label: 'Data de nascimento', value: fmtDate(reg.dateOfBirth) } : null,
     reg.phone ? { label: 'Telefone', value: fmtPhone(reg.phone, reg.country, reg.documentType, reg.cpf) } : null,
-    reg.gender ? { label: 'Sexo', value: reg.gender === 'MALE' ? 'Masculino' : reg.gender === 'FEMALE' ? 'Feminino' : reg.gender } : null,
+    reg.gender ? { label: 'Sexo', value: fmtGender(reg.gender) } : null,
   ].filter(Boolean) as { label: string; value: string }[];
 
   return React.createElement(
