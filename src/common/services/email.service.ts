@@ -422,9 +422,20 @@ export class EmailService {
      */
     ticketPdf?: { buffer: Buffer; fileName: string };
   }) {
+    // `changedAt` é um TIMESTAMP REAL (instante da troca). Sem `timeZone` explícito,
+    // `toLocale*` usa o fuso do SERVIDOR (UTC em produção) → horário errado. Fixamos
+    // Brasília (America/Sao_Paulo, UTC-3 sem DST) — padrão do projeto p/ timestamps
+    // reais (PDFs, exports). Ver TZ_BR em ticket-pdf/receipt-pdf.template.ts.
+    const TZ_BR = 'America/Sao_Paulo';
     const formatChangedAt = (d: Date) => {
-      const date = d.toLocaleDateString('pt-BR');
-      const time = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }).replace(':', 'h');
+      const date = d.toLocaleDateString('pt-BR', { timeZone: TZ_BR });
+      const time = d
+        .toLocaleTimeString('pt-BR', {
+          hour: '2-digit',
+          minute: '2-digit',
+          timeZone: TZ_BR,
+        })
+        .replace(':', 'h');
       return `${date} · ${time}`;
     };
 

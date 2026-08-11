@@ -491,6 +491,13 @@ describe('RegistrationsService', () => {
         data: { registration: normalizedRegistration },
       } as any);
       mockTicketPdfService.generateTicketPdf.mockResolvedValue(Buffer.from('pdf-bytes'));
+      // «Local do evento» do PDF ancora no evento AO VIVO (`formatEventCardAddress` =
+      // `locationName, cidade, estado`), MESMA fonte do e-mail — não no endereço legado
+      // do snapshot. Este findUnique é a única leitura de Prisma do método (findOne
+      // está espionado). Formato do card: vírgulas, SEM traço "cidade - estado".
+      mockPrismaService.registration.findUnique.mockResolvedValueOnce({
+        event: { locationName: 'Parque', city: 'Maceió', state: 'AL' },
+      });
 
       const result = await service.generateTicketPdf('reg-abc12345', 'user-1');
 
@@ -502,7 +509,7 @@ describe('RegistrationsService', () => {
       expect(sent.event).toMatchObject({
         name: 'Corrida da Praia',
         organization: 'Org X',
-        location: 'Parque, Maceió - AL',
+        location: 'Parque, Maceió, AL',
         participantCount: 1,
       });
       expect(sent.registrations).toHaveLength(1);
