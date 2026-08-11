@@ -1065,6 +1065,29 @@ export class RegistrationsService {
     }
 
     const pdfData = this.buildSingleTicketPdfData(registration);
+
+    // «Local do evento» do PDF ancora no evento AO VIVO (`formatEventCardAddress` =
+    // `locationName, cidade, estado`), MESMA fonte do e-mail de ingresso e do card da
+    // home. O snapshot antigo congelou a coluna legada `location` (endereço cru), o que
+    // fazia o PDF divergir do e-mail; snapshots novos já gravam `locationName`, mas
+    // ancorar no vivo garante consistência também para pedidos antigos. Sem venue no
+    // evento, mantém o valor do snapshot (fallback).
+    const liveEvent = await this.prisma.getReadClient().registration.findUnique({
+      where: { id },
+      select: {
+        event: {
+          select: { locationName: true, city: true, state: true },
+        },
+      },
+    });
+    // Replica EXATAMENTE o e-mail: `formatEventCardAddress` lê só `locationName`
+    // (sem fallback p/ a coluna legada `location`). Assim, mesmo evento sem venue
+    // no mapa, PDF e e-mail mostram idêntico ("cidade, estado").
+    const liveAddress = liveEvent?.event
+      ? formatEventCardAddress(liveEvent.event)
+      : '';
+    if (liveAddress) pdfData.event.location = liveAddress;
+
     const buffer = await this.ticketPdfService.generateTicketPdf(pdfData);
 
     // Slug ASCII seguro p/ o header HTTP (sem acentos/espaços → sem quebra de

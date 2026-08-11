@@ -679,7 +679,11 @@ export class OrderFinalizationService {
                 }
               : null,
             location: {
-              name: snapshotEvent.location ?? null,
+              // Venue = `locationName` (nome do local escolhido no mapa), MESMA fonte do
+              // card da home e do e-mail (`formatEventCardAddress`). Antes congelava a
+              // coluna legada `location` (endereço cru longo), divergindo do e-mail no
+              // PDF de visualização/reenvio. Fallback p/ `location` em evento sem venue.
+              name: snapshotEvent.locationName ?? snapshotEvent.location ?? null,
               neighborhood: snapshotEvent.neighborhood ?? null,
               city: snapshotEvent.city ?? null,
               state: snapshotEvent.state ?? null,
