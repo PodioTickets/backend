@@ -48,7 +48,7 @@ import { computeRegistrationPaidValues } from './export-paid-value.util';
 import { formatEventCardAddress } from '../../common/utils/event-email-format.util';
 import { TicketCategoriesService } from '../ticket-categories/ticket-categories.service';
 import { EmailService } from '../../common/services/email.service';
-import { RepasseService, RETENTION_DAYS, calendarDaysUntil } from '../repasse/repasse.service';
+import { RepasseService, RETENTION_DAYS, calendarDaysUntil, loadAnticipatedByUnit } from '../repasse/repasse.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { isChargeback, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 import { brtDayStartUtc, brtDayEndUtc, eventWindowInstant } from '../../common/utils/brt-date.util';
@@ -65,12 +65,13 @@ export const DEFAULT_PARTICIPANT_FEE_PERCENT = 2;
 
 /**
  * Taxas financeiras Podio↔organizador aplicadas na CRIAÇÃO do evento (frações 0–1).
- * - Retenção: % do líquido do organizador retido até a auditoria pós-evento (0.10 = 10%).
+ * - Retenção: % do líquido do organizador retido até a auditoria pós-evento (0 = 0%,
+ *   sem retenção de garantia). O admin ainda pode elevar por evento antes do lock.
  * - Estorno: % cobrado do organizador em qualquer estorno/chargeback (0.02 = 2%).
  * Snapshotadas por evento no create; editáveis pelo admin antes do lock. Alterar estes
  * defaults afeta SOMENTE eventos futuros — eventos existentes mantêm o valor gravado.
  */
-export const DEFAULT_RETENTION_RATE = 0.1;
+export const DEFAULT_RETENTION_RATE = 0;
 export const DEFAULT_REFUND_FEE_RATE = 0.02;
 
 @Injectable()
@@ -4628,6 +4629,9 @@ export class EventsService {
 
     const organizerFeeRate: number = (eventConfig?.organizerFeePercent ?? 0) / 100;
     const isAudited = !!audit;
+    // Desconta parcelas já antecipadas (MESMA fonte do motor). Chave da parcela =
+    // `${paymentId}-inst-${n}` (unitId da antecipação).
+    const anticipatedByUnit = await loadAnticipatedByUnit(prismaRead, eventId);
     const installments: any[] = [];
     let totalPending = 0;
 
@@ -4660,6 +4664,9 @@ export class EventsService {
 
         const isLast = i === count - 1;
         const amount = isLast ? lastInstallmentValue : installmentValue;
+        // Parcela já antecipada (chave = unitId `${paymentId}-inst-${n}`) sai da lista.
+        const remaining = amount - (anticipatedByUnit.get(`${payment.id}-inst-${i + 1}`) ?? 0);
+        if (remaining <= 0) continue;
 
         installments.push({
           id: `${payment.id}-installment-${i + 1}`,
@@ -4667,14 +4674,14 @@ export class EventsService {
           paymentId: payment.id,
           installmentNumber: i + 1,
           totalInstallments: count,
-          amount,
+          amount: remaining,
           dueDate: dueDate.toISOString(),
           isLastInstallment: isLast,
           retainedUntilAudit: isLast && !isAudited,
           buyer: this.resolveOrderBuyer(order),
         });
 
-        totalPending += amount;
+        totalPending += remaining;
       }
     }
 
@@ -4748,12 +4755,28 @@ export class EventsService {
       take: MAX_ORDERS_FETCH,
     });
 
+    // Desconta o que já foi antecipado (MESMA fonte do motor de antecipação): um
+    // recebível já antecipado NÃO está mais "aguardando liberação". Sem isso a lista
+    // mostrava o pedido enquanto a antecipação já o tinha descontado → parecia que a
+    // antecipação "pulou o pedido mais próximo".
+    const anticipatedByUnit = await loadAnticipatedByUnit(prismaRead, eventId);
+
     const allPending: any[] = [];
     let totalPending = 0;
     let releaseToday = 0;
 
     for (const order of paidOrders) {
       if (!order.payment?.paymentDate) continue;
+
+      // Parcelado (cartão em N×, N>1) NÃO entra na lista "À vista": cada parcela
+      // libera numa data própria (pagamento + 31×parcela) e é mostrada na aba
+      // Parcelados (getFinancialInstallments). Tratar aqui como à vista mostrava o
+      // valor INTEIRO liberando em pagamento+31 — data/valor errados, divergindo da
+      // antecipação (que quebra em parcelas). À vista = parcela 1x.
+      const paymentMeta = order.payment.metadata as any;
+      if (paymentMeta?.creditCard?.installments && paymentMeta.creditCard.installments > 1) {
+        continue;
+      }
 
       const paymentDate = new Date(order.payment.paymentDate);
       const releaseDate = new Date(paymentDate);
@@ -4772,12 +4795,16 @@ export class EventsService {
         const netAmount = Math.round(
           orgBase * (1 - resolveOrderOrganizerFeePercent(order, eventConfig?.organizerFeePercent ?? 0) / 100),
         );
+        // Desconta o já antecipado (à vista → chave = orderId). Restante 0 = pedido
+        // inteiro já antecipado → não aparece mais no "aguardando liberação".
+        const remaining = netAmount - (anticipatedByUnit.get(order.id) ?? 0);
+        if (remaining <= 0) continue;
 
         allPending.push({
           orderId: order.id,
           paymentId: order.payment.id,
           transactionId: order.payment.transactionId,
-          amount: netAmount,
+          amount: remaining,
           paymentMethod: order.payment.method,
           purchaseDate: order.createdAt.toISOString(),
           paymentDate: order.payment.paymentDate.toISOString(),
@@ -4788,9 +4815,9 @@ export class EventsService {
           registrationsCount: order.registrations.length,
         });
 
-        totalPending += netAmount;
+        totalPending += remaining;
         if (isReleaseToday) {
-          releaseToday += netAmount;
+          releaseToday += remaining;
         }
       }
     }

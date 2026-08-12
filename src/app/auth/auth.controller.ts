@@ -26,6 +26,7 @@ import {
 import { AuthService } from './auth.service';
 import { OrganizationsService } from '../organizations/organizations.service';
 import { OrganizerSignupDto } from '../organizations/dto/organizer-signup.dto';
+import { getClientIp } from '../../common/utils/client-ip.util';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import {
   EmailLoginDto,
@@ -253,7 +254,10 @@ export class AuthController {
     @Request() req,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const { data } = await this.organizationsService.signupOrganizer(dto);
+    const { data } = await this.organizationsService.signupOrganizer(dto, {
+      ip: getClientIp(req),
+      userAgent: req.headers?.['user-agent'],
+    });
     // Auto-login na superfície organizer (mesmo helper/cookies do loginOrganizer).
     const loginResult = await this.authService.login(data.user, {
       userAgent: req.headers?.['user-agent'],

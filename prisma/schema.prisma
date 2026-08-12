@@ -201,6 +201,7 @@ model User {
   organizationMembers       OrganizationMember[]
   organizationAuditLogs     OrganizationAuditLog[]
   organizerAuditPageDedupes OrganizerAuditPageDedupe[]
+  contractAcceptances       ContractAcceptance[]
   orders                    Order[]
   eventNotificationsCreated EventNotification[]        @relation("EventNotificationCreator")
   withdrawals               EventWithdrawal[]
@@ -267,9 +268,10 @@ model Organization {
   members          OrganizationMember[]
   events           Event[]
   contactMessages  ContactMessage[]
-  auditLogs        OrganizationAuditLog[]
-  auditPageDedupes OrganizerAuditPageDedupe[]
-  pixKeys          OrganizationPixKey[]
+  auditLogs           OrganizationAuditLog[]
+  auditPageDedupes    OrganizerAuditPageDedupe[]
+  pixKeys             OrganizationPixKey[]
+  contractAcceptances ContractAcceptance[]
 
   @@index([name])
   @@index([document])
@@ -362,6 +364,31 @@ model OrganizerAuditPageDedupe {
 
   @@unique([organizationId, actorUserId, pageKey])
   @@index([organizationId, lastRecordedAt])
+}
+
+/// Registro de aceite eletrônico de CADA contrato/política pelo organizador no
+/// auto-cadastro público (`signupOrganizer`). Um registro por contrato aceito —
+/// prova da manifestação de vontade exigida pelo Contrato Principal, cl. 4.4
+/// (data, versão aceita, IP e user-agent). O aceite é gatilhado pelo próprio
+/// submit do wizard (que só habilita com os 4 contratos marcados + Turnstile).
+model ContractAcceptance {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId         String   @db.Uuid
+  organizationId String?  @db.Uuid
+  /// Identificador do contrato: 'main' | 'antifraud' | 'cancellation' | 'transfer'.
+  contractId     String
+  /// Versão exibida e aceita (ex.: '27/06/2026'), autoritativa no servidor.
+  version        String
+  ip             String?
+  userAgent      String?
+  acceptedAt     DateTime @default(now())
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([organizationId])
+  @@index([contractId, version])
 }
 
 model Event {

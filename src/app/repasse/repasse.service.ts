@@ -68,6 +68,45 @@ export function calendarDaysUntil(releaseDate: Date, now: Date): number {
 }
 
 /**
+ * Mapa "já antecipado por unidade" (centavos). Chave = `unitId` (novo) ou `orderId`
+ * (legado); à vista = orderId, parcela = `${paymentId}-inst-${n}`. Soma dos breakdowns
+ * das antecipações PENDING/COMPLETED. FONTE ÚNICA usada tanto pelo motor de antecipação
+ * (não antecipar 2×) quanto pelas listas "Aguardando liberação"/"Parcelados" (não mostrar
+ * recebível JÁ antecipado). Sem isso, a lista continua mostrando o pedido enquanto a
+ * antecipação já o descontou → parece que "pulou o pedido mais próximo".
+ */
+export function buildAnticipatedByUnit(
+  priorAnticipations: { breakdown: unknown }[],
+): Map<string, number> {
+  const consumed = new Map<string, number>();
+  for (const a of priorAnticipations) {
+    const bd = (a.breakdown as unknown as any[]) ?? [];
+    for (const item of bd) {
+      const key = item.unitId ?? item.orderId;
+      if (!key) continue;
+      const val = item.gross ?? item.amount ?? 0;
+      consumed.set(key, (consumed.get(key) ?? 0) + val);
+    }
+  }
+  return consumed;
+}
+
+/** Query + monta o mapa `buildAnticipatedByUnit` para um evento. */
+export async function loadAnticipatedByUnit(
+  prisma: any,
+  eventId: string,
+): Promise<Map<string, number>> {
+  const rows = await prisma.eventAnticipation.findMany({
+    where: {
+      eventId,
+      status: { in: [WithdrawalStatus.PENDING, WithdrawalStatus.COMPLETED] },
+    },
+    select: { breakdown: true },
+  });
+  return buildAnticipatedByUnit(rows);
+}
+
+/**
  * Returns the reference "now" used for all retention/release date comparisons.
  * Set REPASSE_TIME_OFFSET_DAYS (integer) to simulate time passing without
  * waiting real days. Only honoured when NODE_ENV !== 'production'.
@@ -858,17 +897,8 @@ export class RepasseService {
       }),
     ]);
 
-    // Consumido por unidade (centavos). Chave = unitId (novo) ou orderId (legado).
-    const consumedByUnit = new Map<string, number>();
-    for (const a of priorAnticipations) {
-      const bd = (a.breakdown as unknown as any[]) ?? [];
-      for (const item of bd) {
-        const key = item.unitId ?? item.orderId;
-        if (!key) continue;
-        const val = item.gross ?? item.amount ?? 0;
-        consumedByUnit.set(key, (consumedByUnit.get(key) ?? 0) + val);
-      }
-    }
+    // Consumido por unidade (fonte única compartilhada com as listas do financeiro).
+    const consumedByUnit = buildAnticipatedByUnit(priorAnticipations);
 
     const now = getNow();
     const units: AnticipationUnit[] = [];
