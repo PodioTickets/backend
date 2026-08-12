@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, UnprocessableEntityException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, UnprocessableEntityException, ForbiddenException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateRegistrationDto, CreateRegistrationWithInvitedUserDto } from './dto/create-registration.dto';
 import { FilterRegistrationsDto, RegistrationFilterStatus } from './dto/filter-registrations.dto';
@@ -85,6 +85,21 @@ export class RegistrationsService {
       select: { role: true },
     });
     return user?.role === 'PODIOGO_STAFF' || user?.role === 'ADMIN';
+  }
+
+  /**
+   * Autorização das EDIÇÕES de inscrição pela tela/PDF (dados do participante,
+   * respostas das perguntas, variação de produto): SOMENTE admin/staff. Decisão de
+   * produto (2026-08-11): o organizador NÃO pode mais editar esses dados, mesmo com
+   * a permissão `edit_event`. Verdade do servidor — o gate no front (superfície
+   * admin) é só UX. Lança 403 para qualquer não-admin.
+   */
+  private async assertRegistrationEditor(userId: string): Promise<void> {
+    if (!(await this.isAdminUser(userId))) {
+      throw new ForbiddenException(
+        'Apenas administradores podem editar os dados da inscrição.',
+      );
+    }
   }
 
   async create(userId: string, createRegistrationDto: CreateRegistrationWithInvitedUserDto) {
@@ -1937,8 +1952,9 @@ export class RegistrationsService {
       throw new NotFoundException('Evento da inscrição não encontrado');
     }
 
-    // Só o organizador do evento (ou ADMIN/STAFF, via bypass do guard) edita.
-    await this.organizerMemberAccess.assertCanAccessEvent(userId, eventId, 'edit_event');
+    // Edição de inscrição = SOMENTE admin/staff (organizador NÃO edita, mesmo com
+    // edit_event) — decisão 2026-08-11. Verdade do servidor.
+    await this.assertRegistrationEditor(userId);
 
     // Só inscrições confirmadas (pagas) — espelha o guard de updateProductVariation.
     if (registration.status !== RegistrationStatus.CONFIRMED) {
@@ -2147,7 +2163,7 @@ export class RegistrationsService {
     if (!eventId) {
       throw new NotFoundException('Evento da inscrição não encontrado');
     }
-    await this.organizerMemberAccess.assertCanAccessEvent(userId, eventId, 'edit_event');
+    await this.assertRegistrationEditor(userId);
 
     if (registration.status !== RegistrationStatus.CONFIRMED) {
       throw new BadRequestException('Só é possível alterar variação em inscrições confirmadas');
@@ -2217,7 +2233,7 @@ export class RegistrationsService {
     if (!eventId) {
       throw new NotFoundException('Evento da inscrição não encontrado');
     }
-    await this.organizerMemberAccess.assertCanAccessEvent(userId, eventId, 'edit_event');
+    await this.assertRegistrationEditor(userId);
 
     if (registration.status !== RegistrationStatus.CONFIRMED) {
       throw new BadRequestException('Só é possível editar inscrições confirmadas');
