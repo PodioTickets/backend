@@ -216,6 +216,8 @@ export class AdminOrganizationsService {
           accountType: true,
           accountHolderName: true,
           accountHolderDocument: true,
+          anticipationMonthlyRate: true,
+          anticipationEnabled: true,
           isActive: true,
           createdAt: true,
           updatedAt: true,
@@ -430,4 +432,6 @@ export interface UpdateOrganizationDto {
   accountHolderName?: string;
   accountHolderDocument?: string;
   isActive?: boolean;
+  anticipationMonthlyRate?: number;
+  anticipationEnabled?: boolean;
 }

@@ -48,11 +48,11 @@ import { computeRegistrationPaidValues } from './export-paid-value.util';
 import { formatEventCardAddress } from '../../common/utils/event-email-format.util';
 import { TicketCategoriesService } from '../ticket-categories/ticket-categories.service';
 import { EmailService } from '../../common/services/email.service';
-import { RepasseService, RETENTION_DAYS } from '../repasse/repasse.service';
+import { RepasseService, RETENTION_DAYS, calendarDaysUntil, loadAnticipatedByUnit } from '../repasse/repasse.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { isChargeback, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 import { brtDayStartUtc, brtDayEndUtc, eventWindowInstant } from '../../common/utils/brt-date.util';
-import { withPastEventsAsCompleted as markPastEventsCompleted, isEventDatePast, pastEventDateCutoff } from '../../common/utils/event-status.util';
+import { withPastEventsAsCompleted as markPastEventsCompleted, isEventDatePast, pastEventDateCutoff, publicSearchPastEventCutoff } from '../../common/utils/event-status.util';
 
 /**
  * Taxas padrão aplicadas na CRIAÇÃO de um evento (escala 0–100, ex.: 4 = 4%).
@@ -65,12 +65,13 @@ export const DEFAULT_PARTICIPANT_FEE_PERCENT = 2;
 
 /**
  * Taxas financeiras Podio↔organizador aplicadas na CRIAÇÃO do evento (frações 0–1).
- * - Retenção: % do líquido do organizador retido até a auditoria pós-evento (0.10 = 10%).
+ * - Retenção: % do líquido do organizador retido até a auditoria pós-evento (0 = 0%,
+ *   sem retenção de garantia). O admin ainda pode elevar por evento antes do lock.
  * - Estorno: % cobrado do organizador em qualquer estorno/chargeback (0.02 = 2%).
  * Snapshotadas por evento no create; editáveis pelo admin antes do lock. Alterar estes
  * defaults afeta SOMENTE eventos futuros — eventos existentes mantêm o valor gravado.
  */
-export const DEFAULT_RETENTION_RATE = 0.1;
+export const DEFAULT_RETENTION_RATE = 0;
 export const DEFAULT_REFUND_FEE_RATE = 0.02;
 
 @Injectable()
@@ -603,9 +604,9 @@ export class EventsService {
     // preço que não é mais vendido. Usamos a MESMA regra do checkout/cards
     // (`resolveActiveBatch`): lote ativo por sortOrder + trigger (BY_TIME /
     // AFTER_PREVIOUS_SOLD_OUT). Escopo limitado ao catálogo público (PUBLISHED
-    // dentro da janela de 30 dias) pra manter o conjunto pequeno.
-    const eventDateCutoff = new Date();
-    eventDateCutoff.setDate(eventDateCutoff.getDate() - 30);
+    // dentro da janela da busca) pra manter o conjunto pequeno. MESMA janela do
+    // WHERE da busca — senão eventos visíveis (1–4 meses) ficariam sem casar preço.
+    const eventDateCutoff = publicSearchPastEventCutoff();
 
     const tickets = await prismaRead.ticket.findMany({
       where: {
@@ -763,15 +764,11 @@ export class EventsService {
       }
     }
 
-    // Catálogo público: oculta eventos cuja realização passou de 30 dias — mesma
-    // regra de `findAll`. Aplicado via AND para sobrepor qualquer startDate
-    // anterior ao cutoff (includePast=true ou janela customizada não devem
-    // burlar a regra).
-    const eventDateCutoff = new Date();
-    // Mostra eventos finalizados por 30 dias após a realização, depois oculta.
-    // `setDate(-30)` é exatamente 30 dias (evita o rollover do `setMonth` em
-    // meses curtos, que dava janela inconsistente).
-    eventDateCutoff.setDate(eventDateCutoff.getDate() - 30);
+    // Catálogo de busca público: oculta eventos cuja realização passou de 4 meses
+    // (ver `publicSearchPastEventCutoff`). Aplicado via AND para sobrepor qualquer
+    // startDate anterior ao cutoff (includePast=true ou janela customizada não
+    // devem burlar a regra).
+    const eventDateCutoff = publicSearchPastEventCutoff();
 
     const andConditions: Prisma.EventWhereInput[] = [
       { eventDate: { gte: eventDateCutoff } },
@@ -3433,7 +3430,7 @@ export class EventsService {
             ? Prisma.sql` OR p.method::text IN (${Prisma.join(methods.map((m) => Prisma.sql`${m}`))})`
             : Prisma.empty;
         parts.push(
-          Prisma.sql`(${idSql} OR COALESCE(r."participantName", '') ILIKE ${pat} ESCAPE '\\' OR EXISTS (SELECT 1 FROM "User" u WHERE u.id = r."userId" AND (u."firstName" ILIKE ${pat} ESCAPE '\\' OR u."lastName" ILIKE ${pat} ESCAPE '\\' OR (COALESCE(u."firstName", '') || ' ' || COALESCE(u."lastName", '')) ILIKE ${pat} ESCAPE '\\' OR u.email ILIKE ${pat} ESCAPE '\\' OR COALESCE(u."documentNumber", '') ILIKE ${pat} ESCAPE '\\')) OR EXISTS (SELECT 1 FROM "Coupon" c WHERE c.id = o."couponId" AND COALESCE(c.code, '') ILIKE ${pat} ESCAPE '\\') OR EXISTS (SELECT 1 FROM "Voucher" v WHERE v.id = o."voucherId" AND COALESCE(v.code, '') ILIKE ${pat} ESCAPE '\\')${methodSql})`,
+          Prisma.sql`(${idSql} OR COALESCE(r."participantName", '') ILIKE ${pat} ESCAPE '\\' OR (r."receiptSnapshot"->'participant'->>'name') ILIKE ${pat} ESCAPE '\\' OR (r."receiptSnapshot"->'participant'->>'email') ILIKE ${pat} ESCAPE '\\' OR (r."receiptSnapshot"->'participant'->>'documentNumber') ILIKE ${pat} ESCAPE '\\' OR (r."receiptSnapshot"->'participant'->>'cpf') ILIKE ${pat} ESCAPE '\\' OR EXISTS (SELECT 1 FROM "User" u WHERE u.id = r."userId" AND (u."firstName" ILIKE ${pat} ESCAPE '\\' OR u."lastName" ILIKE ${pat} ESCAPE '\\' OR (COALESCE(u."firstName", '') || ' ' || COALESCE(u."lastName", '')) ILIKE ${pat} ESCAPE '\\' OR u.email ILIKE ${pat} ESCAPE '\\' OR COALESCE(u."documentNumber", '') ILIKE ${pat} ESCAPE '\\')) OR EXISTS (SELECT 1 FROM "Coupon" c WHERE c.id = o."couponId" AND COALESCE(c.code, '') ILIKE ${pat} ESCAPE '\\') OR EXISTS (SELECT 1 FROM "Voucher" v WHERE v.id = o."voucherId" AND COALESCE(v.code, '') ILIKE ${pat} ESCAPE '\\')${methodSql})`,
         );
       }
     }
@@ -3703,6 +3700,38 @@ export class EventsService {
   }
 
   /**
+   * IDs de inscrições cujo termo casa em fontes fora do alcance do `where` do
+   * Prisma: o nome COMPLETO do usuário vinculado (concat `firstName || ' ' ||
+   * lastName`) e o snapshot IMUTÁVEL do participante (`receiptSnapshot.participant`).
+   * O snapshot é o ÚNICO lugar com o nome/e-mail/documento do TERCEIRO quando ele
+   * reusou o e-mail do comprador (aí a coluna `participantName` fica nula e o
+   * `reg.user` é o comprador). Unir ao id-list de {@link buildRegistrationTextSearchOr}.
+   */
+  private async findRegistrationExtraSearchMatchIds(
+    prismaRead: any,
+    eventId: string,
+    searchTerm: string,
+  ): Promise<string[]> {
+    const pat = `%${this.escapeIlikePattern(searchTerm)}%`;
+    // Documento formatado (503.798.000-00) → casa também sem pontuação.
+    const digitsTerm = searchTerm.replace(/[.\-\/]/g, '');
+    const docPat = `%${this.escapeIlikePattern(digitsTerm)}%`;
+    const rows = await prismaRead.$queryRaw<{ id: string }[]>`
+      SELECT r.id FROM "Registration" r
+      LEFT JOIN "User" u ON u.id = r."userId"
+      WHERE r."eventId" = ${eventId}::uuid
+        AND (
+          (COALESCE(u."firstName", '') || ' ' || COALESCE(u."lastName", '')) ILIKE ${pat} ESCAPE '\\'
+          OR (r."receiptSnapshot"->'participant'->>'name') ILIKE ${pat} ESCAPE '\\'
+          OR (r."receiptSnapshot"->'participant'->>'email') ILIKE ${pat} ESCAPE '\\'
+          OR (r."receiptSnapshot"->'participant'->>'documentNumber') ILIKE ${docPat} ESCAPE '\\'
+          OR (r."receiptSnapshot"->'participant'->>'cpf') ILIKE ${docPat} ESCAPE '\\'
+        )
+    `;
+    return rows.map((row) => row.id);
+  }
+
+  /**
    * Cláusulas OR de busca textual da listagem de inscrições. Compartilhado entre
    * a listagem paginada e o export para manter o mesmo comportamento de pesquisa:
    * nome/e-mail/documento (conta e snapshot do participante), código de cupom,
@@ -3893,20 +3922,16 @@ export class EventsService {
       if (isIdSearch) {
         where.OR = uuidMatchIds.length > 0 ? [{ id: { in: uuidMatchIds } }] : [{ id: 'no-match' }];
       } else {
-        // Nome COMPLETO: "João Silva" não casa firstName nem lastName isolados. O Prisma
-        // não concatena colunas no `where`, então pré-buscamos os IDs cujo
-        // `firstName || ' ' || lastName` casa o termo (mesma tática do uuidMatches) e os
-        // unimos ao OR de busca textual.
-        const namePat = `%${this.escapeIlikePattern(searchTerm)}%`;
-        const fullNameMatches = await prismaRead.$queryRaw<{ id: string }[]>`
-          SELECT r.id FROM "Registration" r
-          JOIN "User" u ON u.id = r."userId"
-          WHERE r."eventId" = ${eventId}::uuid
-            AND (COALESCE(u."firstName", '') || ' ' || COALESCE(u."lastName", '')) ILIKE ${namePat} ESCAPE '\\'
-        `;
-        const mergedIds = Array.from(
-          new Set([...uuidMatchIds, ...fullNameMatches.map((row) => row.id)]),
+        // Nome COMPLETO ("João Silva" não casa firstName/lastName isolados) e o
+        // snapshot do participante (nome/e-mail/doc do TERCEIRO com e-mail reusado)
+        // vivem fora do alcance do `where` do Prisma → pré-buscamos os IDs e unimos
+        // ao OR de busca textual.
+        const extraIds = await this.findRegistrationExtraSearchMatchIds(
+          prismaRead,
+          eventId,
+          searchTerm,
         );
+        const mergedIds = Array.from(new Set([...uuidMatchIds, ...extraIds]));
         where.OR = this.buildRegistrationTextSearchOr(searchTerm, mergedIds);
       }
     }
@@ -4604,6 +4629,9 @@ export class EventsService {
 
     const organizerFeeRate: number = (eventConfig?.organizerFeePercent ?? 0) / 100;
     const isAudited = !!audit;
+    // Desconta parcelas já antecipadas (MESMA fonte do motor). Chave da parcela =
+    // `${paymentId}-inst-${n}` (unitId da antecipação).
+    const anticipatedByUnit = await loadAnticipatedByUnit(prismaRead, eventId);
     const installments: any[] = [];
     let totalPending = 0;
 
@@ -4636,6 +4664,9 @@ export class EventsService {
 
         const isLast = i === count - 1;
         const amount = isLast ? lastInstallmentValue : installmentValue;
+        // Parcela já antecipada (chave = unitId `${paymentId}-inst-${n}`) sai da lista.
+        const remaining = amount - (anticipatedByUnit.get(`${payment.id}-inst-${i + 1}`) ?? 0);
+        if (remaining <= 0) continue;
 
         installments.push({
           id: `${payment.id}-installment-${i + 1}`,
@@ -4643,14 +4674,14 @@ export class EventsService {
           paymentId: payment.id,
           installmentNumber: i + 1,
           totalInstallments: count,
-          amount,
+          amount: remaining,
           dueDate: dueDate.toISOString(),
           isLastInstallment: isLast,
           retainedUntilAudit: isLast && !isAudited,
           buyer: this.resolveOrderBuyer(order),
         });
 
-        totalPending += amount;
+        totalPending += remaining;
       }
     }
 
@@ -4724,12 +4755,28 @@ export class EventsService {
       take: MAX_ORDERS_FETCH,
     });
 
+    // Desconta o que já foi antecipado (MESMA fonte do motor de antecipação): um
+    // recebível já antecipado NÃO está mais "aguardando liberação". Sem isso a lista
+    // mostrava o pedido enquanto a antecipação já o tinha descontado → parecia que a
+    // antecipação "pulou o pedido mais próximo".
+    const anticipatedByUnit = await loadAnticipatedByUnit(prismaRead, eventId);
+
     const allPending: any[] = [];
     let totalPending = 0;
     let releaseToday = 0;
 
     for (const order of paidOrders) {
       if (!order.payment?.paymentDate) continue;
+
+      // Parcelado (cartão em N×, N>1) NÃO entra na lista "À vista": cada parcela
+      // libera numa data própria (pagamento + 31×parcela) e é mostrada na aba
+      // Parcelados (getFinancialInstallments). Tratar aqui como à vista mostrava o
+      // valor INTEIRO liberando em pagamento+31 — data/valor errados, divergindo da
+      // antecipação (que quebra em parcelas). À vista = parcela 1x.
+      const paymentMeta = order.payment.metadata as any;
+      if (paymentMeta?.creditCard?.installments && paymentMeta.creditCard.installments > 1) {
+        continue;
+      }
 
       const paymentDate = new Date(order.payment.paymentDate);
       const releaseDate = new Date(paymentDate);
@@ -4738,7 +4785,7 @@ export class EventsService {
 
       // Se ainda não passou do prazo de retenção, está aguardando liberação
       if (releaseDate > now) {
-        const daysUntilRelease = Math.ceil((releaseDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+        const daysUntilRelease = calendarDaysUntil(releaseDate, now);
         const isReleaseToday = releaseDate.toDateString() === today.toDateString();
         const orgBase = Math.max(
           0,
@@ -4748,12 +4795,16 @@ export class EventsService {
         const netAmount = Math.round(
           orgBase * (1 - resolveOrderOrganizerFeePercent(order, eventConfig?.organizerFeePercent ?? 0) / 100),
         );
+        // Desconta o já antecipado (à vista → chave = orderId). Restante 0 = pedido
+        // inteiro já antecipado → não aparece mais no "aguardando liberação".
+        const remaining = netAmount - (anticipatedByUnit.get(order.id) ?? 0);
+        if (remaining <= 0) continue;
 
         allPending.push({
           orderId: order.id,
           paymentId: order.payment.id,
           transactionId: order.payment.transactionId,
-          amount: netAmount,
+          amount: remaining,
           paymentMethod: order.payment.method,
           purchaseDate: order.createdAt.toISOString(),
           paymentDate: order.payment.paymentDate.toISOString(),
@@ -4764,15 +4815,21 @@ export class EventsService {
           registrationsCount: order.registrations.length,
         });
 
-        totalPending += netAmount;
+        totalPending += remaining;
         if (isReleaseToday) {
-          releaseToday += netAmount;
+          releaseToday += remaining;
         }
       }
     }
 
-    // Ordenar por data de compra (mais recentes primeiro)
-    allPending.sort((a, b) => new Date(b.purchaseDate).getTime() - new Date(a.purchaseDate).getTime());
+    // Ordenar por data de LIBERAÇÃO ascendente: a liberação mais próxima fica em
+    // PRIMEIRO (mais antigo → mais recente). Tiebreak pela data do pagamento.
+    allPending.sort((a, b) => {
+      const byRelease =
+        new Date(a.releaseDate).getTime() - new Date(b.releaseDate).getTime();
+      if (byRelease !== 0) return byRelease;
+      return new Date(a.paymentDate).getTime() - new Date(b.paymentDate).getTime();
+    });
 
     // Aplicar paginação
     const totalOrders = allPending.length;
@@ -4794,6 +4851,156 @@ export class EventsService {
           hasPreviousPage: page > 1,
         },
       },
+    };
+  }
+
+  /**
+   * Exporta em CSV o "aguardando liberação" — aba À VISTA (pending releases) ou
+   * PARCELADOS (parcelas a receber agrupadas por pedido). Reusa os métodos já
+   * validados (`getFinancialPending`/`getFinancialInstallments`), então herda o
+   * controle de acesso e o mesmo cálculo de valores/prazos exibidos na tela.
+   * Separador `;` + BOM UTF-8 (Excel pt-BR abre com acentos corretos).
+   */
+  async exportFinancialPendingCsv(
+    userId: string,
+    eventId: string,
+    type: 'avista' | 'parcelados',
+    fields?: string[],
+  ): Promise<{ buffer: Buffer; filename: string; contentType: string }> {
+    // verifyOrganizerAccess é chamado dentro dos métodos reusados abaixo.
+    const prismaRead = this.prisma.getReadClient();
+    const event = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: { name: true },
+    });
+    const eventName = event?.name ?? 'evento';
+
+    const fmtDate = (iso: string) => {
+      if (!iso) return '';
+      const d = new Date(iso);
+      const pad = (n: number) => String(n).padStart(2, '0');
+      // UTC para bater com a exibição da tela (datetimeBR.ts usa UTC).
+      return `${pad(d.getUTCDate())}/${pad(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
+    };
+    const fmtMoney = (cents: number) =>
+      `R$ ${(cents / 100).toLocaleString('pt-BR', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`;
+    const esc = (v: string) => {
+      const s = v ?? '';
+      // Aspas quando o campo tiver separador, aspa ou quebra de linha.
+      return /[";\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+
+    // Colunas exportáveis (ordem canônica) → cabeçalho + extrator. O modal do front
+    // manda `fields`; sem seleção (ou lixo), exporta TODAS. Colunas type-específicas
+    // (Forma de pagamento / Parcelas pagas) saem vazias quando não se aplicam.
+    interface Rec {
+      orderId: string;
+      name: string;
+      email: string;
+      document: string;
+      releaseISO: string;
+      paymentMethod: string;
+      installments: string;
+      amount: number;
+    }
+    const COLUMNS: {
+      key: string;
+      header: string;
+      value: (r: Rec) => string;
+    }[] = [
+      { key: 'orderId', header: 'ID pedido', value: (r) => r.orderId },
+      { key: 'buyer', header: 'Comprador', value: (r) => r.name },
+      { key: 'email', header: 'E-mail', value: (r) => r.email },
+      { key: 'document', header: 'Documento', value: (r) => r.document },
+      { key: 'releaseDate', header: 'Previsão de liberação', value: (r) => fmtDate(r.releaseISO) },
+      { key: 'paymentMethod', header: 'Forma de pagamento', value: (r) => r.paymentMethod },
+      { key: 'installments', header: 'Parcelas pagas', value: (r) => r.installments },
+      { key: 'amount', header: 'Valor pendente', value: (r) => fmtMoney(r.amount) },
+    ];
+    const requested = Array.isArray(fields)
+      ? fields.filter((f) => typeof f === 'string')
+      : [];
+    const cols =
+      requested.length > 0
+        ? COLUMNS.filter((c) => requested.includes(c.key))
+        : COLUMNS;
+    // Sem colunas válidas → cai de volta em todas (evita CSV só com cabeçalho vazio).
+    const activeCols = cols.length > 0 ? cols : COLUMNS;
+
+    const records: Rec[] = [];
+    if (type === 'parcelados') {
+      const res = await this.getFinancialInstallments(userId, eventId);
+      const installments = (res.data?.installments ?? []) as any[];
+      // Agrupa por pedido (1 linha/pedido); parcelas pagas = nº da próxima − 1.
+      const byOrder = new Map<string, any[]>();
+      for (const inst of installments) {
+        const key = inst.orderId || inst.paymentId || inst.id;
+        const g = byOrder.get(key);
+        if (g) g.push(inst);
+        else byOrder.set(key, [inst]);
+      }
+      for (const group of byOrder.values()) {
+        const sorted = [...group].sort(
+          (a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime(),
+        );
+        const next = sorted[0];
+        const total = next.totalInstallments ?? sorted.length;
+        const paid = Math.max(0, (next.installmentNumber ?? 1) - 1);
+        const amount = sorted.reduce((s, i) => s + (i.amount ?? 0), 0);
+        const buyer = next.buyer ?? {};
+        records.push({
+          orderId: next.orderId || next.paymentId || '',
+          name: buyer.fullName || `${buyer.firstName ?? ''} ${buyer.lastName ?? ''}`.trim(),
+          email: buyer.email ?? '',
+          document: buyer.documentNumber ?? '',
+          releaseISO: next.dueDate,
+          paymentMethod: 'Cartão de crédito',
+          installments: `${paid}/${total}`,
+          amount,
+        });
+      }
+    } else {
+      // Percorre todas as páginas (o método pagina em no máx. 100/página).
+      let page = 1;
+      let hasNext = true;
+      while (hasNext && page <= 50) {
+        const res = await this.getFinancialPending(userId, eventId, page, 100);
+        const pending = (res.data?.pending ?? []) as any[];
+        for (const p of pending) {
+          const buyer = p.buyer ?? {};
+          records.push({
+            orderId: p.orderId ?? '',
+            name: buyer.fullName || `${buyer.firstName ?? ''} ${buyer.lastName ?? ''}`.trim(),
+            email: buyer.email ?? '',
+            document: buyer.documentNumber ?? '',
+            releaseISO: p.releaseDate,
+            paymentMethod: p.paymentMethod === 'PIX' ? 'Pix' : 'Cartão de crédito',
+            installments: '',
+            amount: p.amount ?? 0,
+          });
+        }
+        hasNext = !!res.data?.pagination?.hasNextPage;
+        page += 1;
+      }
+    }
+
+    const lines: string[] = [];
+    lines.push(activeCols.map((c) => esc(c.header)).join(';'));
+    for (const r of records) {
+      lines.push(activeCols.map((c) => esc(String(c.value(r) ?? ''))).join(';'));
+    }
+
+    const csv = lines.join('\r\n');
+    const buffer = Buffer.from('﻿' + csv, 'utf-8');
+    const safeName = eventName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    const suffix = type === 'parcelados' ? 'parcelados' : 'a-vista';
+    return {
+      buffer,
+      filename: `aguardando-liberacao-${suffix}-${safeName}.csv`,
+      contentType: 'text/csv; charset=utf-8',
     };
   }
 
@@ -5300,7 +5507,14 @@ export class EventsService {
           AND (r.id::text ILIKE ${'%' + searchTerm + '%'} OR o.id::text ILIKE ${'%' + searchTerm + '%'})
       `;
       const uuidMatchIds = uuidMatches.map((row: any) => row.id);
-      where.OR = this.buildRegistrationTextSearchOr(searchTerm, uuidMatchIds);
+      // Inclui nome completo + snapshot do participante (paridade com a listagem).
+      const extraIds = await this.findRegistrationExtraSearchMatchIds(
+        prismaRead,
+        eventId,
+        searchTerm,
+      );
+      const mergedIds = Array.from(new Set([...uuidMatchIds, ...extraIds]));
+      where.OR = this.buildRegistrationTextSearchOr(searchTerm, mergedIds);
     }
 
     let registrations = await prismaRead.registration.findMany({

@@ -13,6 +13,7 @@ import { HttpModule } from '@nestjs/axios';
 import { EmailService } from '../../common/services/email.service';
 import { TurnstileGuard } from './guards/turnstile.guard';
 import { CommonModule } from '../../common/common.module';
+import { OrganizationsModule } from '../organizations/organizations.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { CommonModule } from '../../common/common.module';
     ConfigModule,
     HttpModule,
     CommonModule,
+    OrganizationsModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

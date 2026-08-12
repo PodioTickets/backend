@@ -24,6 +24,9 @@ import {
   ApiQuery,
 } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
+import { OrganizationsService } from '../organizations/organizations.service';
+import { OrganizerSignupDto } from '../organizations/dto/organizer-signup.dto';
+import { getClientIp } from '../../common/utils/client-ip.util';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import {
   EmailLoginDto,
@@ -64,25 +67,37 @@ import { TrackActivityInterceptor } from 'src/common/interceptors/track-activity
 export class AuthController {
   constructor(
     private readonly authService: AuthService,
+    private readonly organizationsService: OrganizationsService,
     private readonly oauthState: OAuthStateService,
     private readonly configService: ConfigService,
   ) {}
 
   @Get('email/availability')
   @Throttle({ short: { limit: 10, ttl: 60000 } })
-  @ApiOperation({ summary: 'Check email availability', description: 'Returns whether an email address is already registered' })
+  @ApiOperation({ summary: 'Check email availability', description: 'Returns whether an email address is already registered for the given surface (accountType). USER and ORGANIZER coexist with the same email.' })
   @ApiQuery({ name: 'email', description: 'Email address to check', required: true })
+  @ApiQuery({ name: 'accountType', description: 'USER (default) or ORGANIZER', required: false })
   @ApiResponse({ status: 200, description: '{ available: boolean }' })
   @ApiResponse({ status: 400, description: 'Missing or invalid email' })
-  async checkEmailAvailability(@Query('email') email: string) {
+  async checkEmailAvailability(
+    @Query('email') email: string,
+    @Query('accountType') accountType?: string,
+  ) {
     if (!email || !email.includes('@')) {
       throw new BadRequestException('Endereço de e-mail inválido');
     }
-    const available = await this.authService.isEmailAvailable(email.toLowerCase().trim());
+    // Escopo por superfície: USER e ORGANIZER coexistem com o mesmo e-mail.
+    const surface = accountType === 'ORGANIZER' ? 'ORGANIZER' : 'USER';
+    const available = await this.authService.isEmailAvailable(
+      email.toLowerCase().trim(),
+      surface,
+    );
     return { available };
   }
 
   @Post('register')
+  @UseGuards(TurnstileGuard)
+  @Throttle({ short: { limit: 5, ttl: 60000 } })
   @UseInterceptors(TrackActivityInterceptor)
   @TrackActivity({ category: 'AUTH', action: 'register' })
   @ApiOperation({
@@ -219,6 +234,35 @@ export class AuthController {
     }
     const result = await this.authService.login(user, { userAgent: req.headers?.['user-agent'] });
     return applyAuthCookiesFromResult(res, 'organizer', result);
+  }
+
+  @Post('register/organizer')
+  @UseGuards(TurnstileGuard)
+  @Throttle({ short: { limit: 5, ttl: 60000 } })
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Public organizer self-signup',
+    description:
+      'Cria conta ORGANIZER + organização ativa + membro OWNER e autologa na superfície organizer (cookies httpOnly).',
+  })
+  @ApiBody({ type: OrganizerSignupDto })
+  @ApiResponse({ status: 201, description: 'Organizer created and logged in' })
+  @ApiResponse({ status: 400, description: 'Turnstile verification / validation failed' })
+  @ApiResponse({ status: 409, description: 'E-mail, CPF ou documento já cadastrado' })
+  async registerOrganizer(
+    @Body() dto: OrganizerSignupDto,
+    @Request() req,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { data } = await this.organizationsService.signupOrganizer(dto, {
+      ip: getClientIp(req),
+      userAgent: req.headers?.['user-agent'],
+    });
+    // Auto-login na superfície organizer (mesmo helper/cookies do loginOrganizer).
+    const loginResult = await this.authService.login(data.user, {
+      userAgent: req.headers?.['user-agent'],
+    });
+    return applyAuthCookiesFromResult(res, 'organizer', loginResult);
   }
 
   @Get('google')

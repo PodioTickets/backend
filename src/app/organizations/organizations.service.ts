@@ -12,9 +12,12 @@ import {
   AdminAuditLogQueryDto,
   AdminOrganizationsListQueryDto,
 } from './dto/organization.dto';
+import { OrganizerSignupDto, SignupPersonType } from './dto/organizer-signup.dto';
+import { ORGANIZER_CONTRACTS } from './organizer-contracts.constant';
 import { OrganizationMemberRole } from '@prisma/client';
 import { MFAService } from '../../common/services/mfa.service';
 import { brtDayStartUtc, brtDayEndUtc } from '../../common/utils/brt-date.util';
+import { isValidCpfOrCnpj } from '../../common/utils/document-validation.util';
 import * as bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import {
@@ -82,6 +85,25 @@ export class OrganizationsService {
   }
 
   /** Garante JSON serializável (datas, etc.) e, em `changes`, old/new + valorAnterior/valorNovo. */
+  /**
+   * Valida o CPF/CNPJ do TITULAR de cada chave PIX recebida (conta de repasse —
+   * documento tem que ser real). Espelha a validação do front, que é burlável.
+   * Só valida quando o documento vier preenchido; documento presente e inválido
+   * → 400. Usado no cadastro e na edição da organização.
+   */
+  private assertValidPixKeyHolderDocuments(
+    pixKeys: ReadonlyArray<{ accountHolderDocument?: string | null }> | null | undefined,
+  ): void {
+    for (const k of pixKeys ?? []) {
+      const doc = (k.accountHolderDocument ?? '').replace(/\D/g, '');
+      if (doc && !isValidCpfOrCnpj(doc)) {
+        throw new BadRequestException(
+          'CPF/CNPJ do titular da chave PIX é inválido.',
+        );
+      }
+    }
+  }
+
   private serializeAuditValue(value: unknown): unknown {
     if (value === undefined) return null;
     if (value === null) return null;
@@ -374,7 +396,10 @@ export class OrganizationsService {
    *   - nenhum dos dois           → cria a organização "vazia"; owner pode ser adicionado depois
    *                                 via POST /api/v1/admin/organizations/:id/members.
    */
-  async createOrganization(createDto: CreateOrganizationDto) {
+  async createOrganization(
+    createDto: CreateOrganizationDto,
+    context?: { actorUserId?: string | null; ip?: string | null },
+  ) {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
@@ -532,6 +557,12 @@ export class OrganizationsService {
           accountType: createDto.accountType,
           accountHolderName: createDto.accountHolderName,
           accountHolderDocument: createDto.accountHolderDocument,
+          // Antecipação: taxa opcional (senão default do schema) e SEMPRE desligada
+          // por padrão no cadastro — o admin liga manualmente depois (ou já no form).
+          ...(createDto.anticipationMonthlyRate != null && {
+            anticipationMonthlyRate: createDto.anticipationMonthlyRate,
+          }),
+          anticipationEnabled: createDto.anticipationEnabled ?? false,
         },
       });
 
@@ -560,6 +591,7 @@ export class OrganizationsService {
       // Criar chaves PIX iniciais, se enviadas. Mesma semântica do update:
       // se nenhuma vier marcada como default, a primeira é promovida.
       const incomingPixKeys = createDto.pixKeys ?? [];
+      this.assertValidPixKeyHolderDocuments(incomingPixKeys);
       if (incomingPixKeys.length > 0) {
         const hasDefault = incomingPixKeys.some((k) => k.isDefault);
         await tx.organizationPixKey.createMany({
@@ -577,6 +609,24 @@ export class OrganizationsService {
 
       return { organization, member };
     });
+
+    // Auditoria da criação (admin/bypass). Ator pode ser nulo — o endpoint é
+    // protegido por bypass key, sem usuário logado. Não bloqueia se falhar.
+    this.recordOrganizationAuditLog({
+      organizationId: result.organization.id,
+      actorUserId: context?.actorUserId ?? null,
+      ip: context?.ip ?? null,
+      action: 'Organização criada (admin)',
+      metadata: {
+        kind: 'ORGANIZATION_CREATE',
+        source: 'admin',
+        provisionedOwner: !!result.member,
+      },
+    }).catch((err) =>
+      this.logger.warn(
+        `Falha ao registrar auditoria de criação de organização (org=${result.organization.id}): ${err?.message ?? err}`,
+      ),
+    );
 
     // Boas-vindas vai pro e-mail de CONTATO da organização (fallback: dono).
     // Envia mesmo SEM member — criação via admin não tem owner logado, então
@@ -621,6 +671,355 @@ export class OrganizationsService {
         member: result.member,
       },
     };
+  }
+
+  /**
+   * Auto-cadastro PÚBLICO de organizador (wizard `/organizer/create`).
+   *
+   * Num único request cria: conta `User accountType=ORGANIZER` (com senha
+   * própria) + `Organization` já ATIVA (`isActive` default `true`) + membro
+   * `OWNER`. Diferente de `createOrganization` (admin), este devolve o `user`
+   * COMPLETO para o controller alimentar `authService.login()` e auto-logar na
+   * superfície `organizer`.
+   *
+   * Mapeamento por tipo:
+   *   - PJ: `document` = CNPJ próprio; `name` = razão social (`legalName`).
+   *   - PF: `document` = CPF do responsável (mesma pessoa); `name` = nome
+   *     fantasia (não há razão social).
+   *
+   * Unicidade validada ANTES da transação (409 amigável); race residual coberta
+   * pelo P2002→409 do AllExceptionsFilter.
+   */
+  async signupOrganizer(
+    dto: OrganizerSignupDto,
+    context?: { ip?: string | null; userAgent?: string | null },
+  ) {
+    const prismaRead = this.prisma.getReadClient();
+    const prismaWrite = this.prisma.getWriteClient();
+    const acceptanceIp = context?.ip ?? null;
+    const acceptanceUserAgent = context?.userAgent ?? null;
+
+    const isPJ = dto.personType === SignupPersonType.PJ;
+    // Documento da ORG: PJ = CNPJ próprio; PF = CPF do responsável (mesma pessoa).
+    const orgDocumentClean = this.cleanDocumentNumber(
+      isPJ ? dto.document : dto.ownerDocument,
+    );
+    const ownerDocumentClean = this.cleanDocumentNumber(dto.ownerDocument);
+    // Nome da org: PJ usa razão social; PF cai no nome fantasia (sem razão social).
+    const orgName = (isPJ ? dto.legalName : dto.tradeName) as string;
+
+    // Unicidade do e-mail na conta ORGANIZER (coexiste com uma conta USER
+    // homônima — `@@unique([email, accountType])`).
+    const existingUserByEmail = await prismaRead.user.findUnique({
+      where: { email_accountType: { email: dto.email, accountType: 'ORGANIZER' } },
+      select: { id: true },
+    });
+    if (existingUserByEmail) {
+      throw new ConflictException(
+        'Já existe uma conta de organizador com este e-mail.',
+      );
+    }
+
+    // Unicidade do CPF do responsável na conta ORGANIZER.
+    if (ownerDocumentClean) {
+      const existingUserByDoc = await prismaRead.user.findUnique({
+        where: {
+          documentNumberClean_accountType: {
+            documentNumberClean: ownerDocumentClean,
+            accountType: 'ORGANIZER',
+          },
+        },
+        select: { id: true },
+      });
+      if (existingUserByDoc) {
+        throw new ConflictException(
+          'Já existe uma conta de organizador com este CPF.',
+        );
+      }
+    }
+
+    // Unicidade do documento da organização (@unique).
+    if (orgDocumentClean) {
+      const existingOrg = await prismaRead.organization.findUnique({
+        where: { document: orgDocumentClean },
+        select: { id: true, name: true },
+      });
+      if (existingOrg) {
+        throw new ConflictException(
+          `Já existe uma organização cadastrada com este documento (CPF/CNPJ): ${existingOrg.name}`,
+        );
+      }
+    }
+
+    // Unicidade do CPF do RESPONSÁVEL entre organizações (regra de negócio; o
+    // campo `ownerDocument` não é @unique). Enforced no servidor: a checagem ao
+    // vivo do wizard é apenas UX e pode ser burlada.
+    if (ownerDocumentClean) {
+      const ownerDocAvailable =
+        await this.isOrganizationOwnerDocumentAvailable(ownerDocumentClean);
+      if (!ownerDocAvailable) {
+        throw new ConflictException(
+          'Já existe uma organização cadastrada com este CPF de responsável.',
+        );
+      }
+    }
+
+    // Unicidade do e-mail de CONTATO da organização (regra de negócio — o campo
+    // `email` não é @unique). Enforced no servidor: a checagem ao vivo do wizard é
+    // apenas UX e pode ser burlada.
+    if (dto.orgEmail) {
+      const orgEmailAvailable = await this.isOrganizationEmailAvailable(
+        dto.orgEmail,
+      );
+      if (!orgEmailAvailable) {
+        throw new ConflictException(
+          'Já existe uma organização cadastrada com este e-mail de contato.',
+        );
+      }
+    }
+
+    const hashedPassword = await bcrypt.hash(dto.password, 12);
+    const nameParts = dto.completeName.trim().split(/\s+/).filter(Boolean);
+    const firstName = nameParts[0] ?? dto.completeName.trim();
+    const lastName = nameParts.slice(1).join(' ') || firstName;
+
+    const result = await prismaWrite.$transaction(async (tx) => {
+      const user = await tx.user.create({
+        data: {
+          email: dto.email,
+          accountType: 'ORGANIZER',
+          role: 'ORGANIZER',
+          password: hashedPassword,
+          firstName,
+          lastName,
+          phone: dto.phone || dto.whatsapp,
+          documentType: 'CPF',
+          documentNumber: dto.ownerDocument,
+          documentNumberClean: ownerDocumentClean,
+          // O wizard exige aceite dos contratos antes de criar a conta.
+          acceptedTerms: true,
+          acceptedPrivacyPolicy: true,
+        },
+      });
+
+      const organization = await tx.organization.create({
+        data: {
+          name: orgName,
+          tradeName: dto.tradeName,
+          document: orgDocumentClean,
+          email: dto.orgEmail,
+          phone: dto.phone,
+          whatsapp: dto.whatsapp,
+          zipCode: dto.zipCode,
+          street: dto.street,
+          number: dto.number,
+          neighborhood: dto.neighborhood,
+          city: dto.city,
+          state: dto.state,
+          ownerName: dto.ownerName,
+          ownerDocument: ownerDocumentClean,
+        },
+      });
+
+      const member = await tx.organizationMember.create({
+        data: {
+          organizationId: organization.id,
+          userId: user.id,
+          role: 'OWNER',
+        },
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+            },
+          },
+          organization: true,
+        },
+      });
+
+      // Registro de aceite eletrônico — um por contrato (prova da manifestação de
+      // vontade, Contrato Principal cl. 4.4). Dentro da transação: se a org é
+      // criada, o registro de aceite EXISTE atomicamente. Versões autoritativas
+      // do servidor (ORGANIZER_CONTRACTS); o submit do wizard já gateia os 4.
+      await tx.contractAcceptance.createMany({
+        data: ORGANIZER_CONTRACTS.map((c) => ({
+          userId: user.id,
+          organizationId: organization.id,
+          contractId: c.id,
+          version: c.version,
+          ip: acceptanceIp,
+          userAgent: acceptanceUserAgent,
+        })),
+      });
+
+      return { user, organization, member };
+    });
+
+    // Auditoria da criação (fora da transação, como os demais logs de auditoria).
+    // Ator = o próprio owner recém-criado (auto-cadastro). Não bloqueia o cadastro
+    // se falhar.
+    this.recordOrganizationAuditLog({
+      organizationId: result.organization.id,
+      actorUserId: result.user.id,
+      ip: acceptanceIp,
+      action: 'Organização criada (auto-cadastro)',
+      metadata: {
+        kind: 'ORGANIZATION_CREATE',
+        source: 'self-signup',
+        personType: dto.personType,
+        acceptedContracts: ORGANIZER_CONTRACTS.map((c) => ({
+          contractId: c.id,
+          version: c.version,
+        })),
+      },
+    }).catch((err) =>
+      this.logger.warn(
+        `Falha ao registrar auditoria de criação de organização (org=${result.organization.id}): ${err?.message ?? err}`,
+      ),
+    );
+
+    // Boas-vindas (fire-and-forget) — mesmo helper do fluxo admin.
+    // Envia para AMBOS os e-mails do cadastro (login + contato da organização).
+    // Dedup case-insensitive: se forem iguais, sai só um envio; se diferentes,
+    // um para cada.
+    const ownerFirstName =
+      result.user.firstName ||
+      result.organization.tradeName ||
+      result.organization.name ||
+      'Organizador';
+    const welcomeRecipients = Array.from(
+      new Map(
+        [result.user.email, result.organization.email]
+          .filter((e): e is string => !!e && e.includes('@'))
+          .map((e) => [e.trim().toLowerCase(), e.trim()]),
+      ).values(),
+    );
+    for (const recipient of welcomeRecipients) {
+      this.emailService
+        .sendWelcomeOrganizer({ email: recipient, firstName: ownerFirstName })
+        .catch((err) =>
+          this.logger.warn(
+            `Falha ao enviar e-mail de boas-vindas ao organizador (org=${result.organization.id}, to=${recipient}): ${err?.message ?? err}`,
+          ),
+        );
+    }
+
+    // O owner também é um membro (role OWNER), então recebe o MESMO e-mail de
+    // "membro adicionado" do fluxo addMember (fire-and-forget). Vai apenas para o
+    // e-mail de LOGIN do owner (o de contato da org já recebeu o boas-vindas).
+    const memberRegisteredAt = new Intl.DateTimeFormat('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: 'America/Sao_Paulo',
+    })
+      .format(new Date())
+      .replace(',', ' ·');
+    this.emailService
+      .sendMemberAdded({
+        recipientEmail: result.user.email,
+        firstName: result.user.firstName ?? result.user.email,
+        // Nome exibido = nome fantasia (público); cai na razão social se ausente.
+        orgName: result.organization.tradeName || result.organization.name,
+        registeredAt: memberRegisteredAt,
+      })
+      .catch((err) =>
+        this.logger.warn(
+          `Falha ao enviar e-mail de membro adicionado ao owner (org=${result.organization.id}, userId=${result.user.id}): ${err?.message ?? err}`,
+        ),
+      );
+
+    return {
+      message: 'Organizer account created successfully',
+      data: {
+        organization: result.organization,
+        member: result.member,
+        user: result.user,
+      },
+    };
+  }
+
+  /**
+   * Disponibilidade de DOCUMENTO da ORGANIZAÇÃO (CPF de PF ou CNPJ de PJ) para o
+   * auto-cadastro público — valida contra a tabela `Organization` (NÃO `User`).
+   * Usado pelo wizard para checar ao vivo, enquanto o organizador preenche, se já
+   * existe uma organização com aquele documento (mesma regra do pré-check do
+   * `signupOrganizer`). Retorna apenas `{ available }` — não vaza dados da org
+   * existente (anti-enumeração). Documento incompleto/ausente → `available: true`
+   * (a validação de formato/checksum fica a cargo do submit).
+   */
+  async isOrganizationDocumentAvailable(document?: string | null): Promise<boolean> {
+    const clean = this.cleanDocumentNumber(document);
+    // Só consulta com documento de tamanho plausível (CPF=11 / CNPJ=14).
+    if (!clean || (clean.length !== 11 && clean.length !== 14)) return true;
+    const existing = await this.prisma.getReadClient().organization.findUnique({
+      where: { document: clean },
+      select: { id: true },
+    });
+    return existing === null;
+  }
+
+  /**
+   * Disponibilidade do CPF do RESPONSÁVEL (`Organization.ownerDocument`) para o
+   * auto-cadastro público — retorna se já existe OUTRA organização cujo responsável
+   * tem este CPF. Regra de negócio (o campo NÃO é `@unique`), então é por query.
+   *
+   * A comparação normaliza os dígitos em ambos os lados via `regexp_replace` — o
+   * `ownerDocument` pode ter sido gravado com máscara em linhas legadas/admin (o
+   * auto-cadastro grava só dígitos, mas o cadastro admin não sanitiza). Um filtro
+   * de igualdade simples não casaria essas linhas. Responsável é sempre PF → só
+   * consulta com CPF de 11 dígitos. Retorna `true` (disponível) fora disso.
+   * `excludeOrganizationId` isenta a própria org (edição). Anti-enumeração: só
+   * `{ available }`.
+   */
+  async isOrganizationOwnerDocumentAvailable(
+    document?: string | null,
+    excludeOrganizationId?: string,
+  ): Promise<boolean> {
+    const clean = this.cleanDocumentNumber(document);
+    if (!clean || clean.length !== 11) return true;
+    const rows = await this.prisma.getReadClient().$queryRaw<{ id: string }[]>`
+      SELECT "id" FROM "Organization"
+      WHERE regexp_replace(COALESCE("ownerDocument", ''), '\\D', '', 'g') = ${clean}
+        ${
+          excludeOrganizationId
+            ? Prisma.sql`AND "id" <> ${excludeOrganizationId}::uuid`
+            : Prisma.empty
+        }
+      LIMIT 1
+    `;
+    return rows.length === 0;
+  }
+
+  /**
+   * Disponibilidade do E-MAIL DE CONTATO da ORGANIZAÇÃO para o auto-cadastro
+   * público — valida contra o campo `Organization.email` (regra de negócio; o
+   * campo NÃO é `@unique`, então a checagem é por query, apoiada em `@@index`).
+   * Comparação case-insensitive. Retorna apenas `{ available }` — não vaza dados
+   * da org existente (anti-enumeração). E-mail ausente/sem `@` → `available:
+   * true` (a validação de formato fica a cargo do submit).
+   */
+  async isOrganizationEmailAvailable(
+    email?: string | null,
+    excludeOrganizationId?: string,
+  ): Promise<boolean> {
+    const normalized = (email ?? '').trim().toLowerCase();
+    if (!normalized || !normalized.includes('@')) return true;
+    const existing = await this.prisma.getReadClient().organization.findFirst({
+      where: {
+        email: { equals: normalized, mode: 'insensitive' },
+        // Na edição, a PRÓPRIA organização não conta como "em uso".
+        ...(excludeOrganizationId ? { NOT: { id: excludeOrganizationId } } : {}),
+      },
+      select: { id: true },
+    });
+    return existing === null;
   }
 
   /**
@@ -752,9 +1151,28 @@ export class OrganizationsService {
       throw new ForbiddenException('Only organization owner can update organization');
     }
 
+    // Unicidade do e-mail de CONTATO (regra de negócio — `email` não é @unique).
+    // Exclui a própria org do check para permitir salvar sem trocar o e-mail.
+    if (updateDto.email) {
+      const emailAvailable = await this.isOrganizationEmailAvailable(
+        updateDto.email,
+        organizationId,
+      );
+      if (!emailAvailable) {
+        throw new ConflictException(
+          'Já existe uma organização cadastrada com este e-mail de contato.',
+        );
+      }
+    }
+
+    // `pixKeys` NÃO é coluna escalar da Organization — separa do `data` do update
+    // e trata via substituição completa (mesma semântica do admin). Se ausente,
+    // as chaves atuais são preservadas.
+    const { pixKeys, ...data } = updateDto;
+
     const organization = await prismaWrite.organization.update({
       where: { id: organizationId },
-      data: updateDto,
+      data,
       include: {
         members: {
           include: {
@@ -786,9 +1204,50 @@ export class OrganizationsService {
       },
     });
 
+    // Substituição completa das chaves PIX quando enviadas (apaga + recria numa
+    // transação). Garante no máximo um `isDefault=true`; sem nenhum marcado, a 1ª
+    // é promovida a padrão. Espelha o fluxo do admin para consistência.
+    if (pixKeys != null) {
+      this.assertValidPixKeyHolderDocuments(pixKeys);
+      await prismaWrite.$transaction(async (tx) => {
+        await tx.organizationPixKey.deleteMany({ where: { organizationId } });
+        if (pixKeys.length > 0) {
+          const hasDefault = pixKeys.some((k) => k.isDefault);
+          await tx.organizationPixKey.createMany({
+            data: pixKeys.map((k, i) => ({
+              organizationId,
+              key: k.key,
+              keyType: k.keyType,
+              isDefault: hasDefault ? !!k.isDefault : i === 0,
+              bankName: k.bankName ?? null,
+              accountHolderName: k.accountHolderName ?? null,
+              accountHolderDocument: k.accountHolderDocument ?? null,
+            })),
+          });
+        }
+      });
+    }
+
+    // Sempre devolve as chaves atuais (ordenadas: padrão primeiro) para o front
+    // sincronizar sem re-buscar.
+    const savedPixKeys = await prismaRead.organizationPixKey.findMany({
+      where: { organizationId },
+      select: {
+        id: true,
+        key: true,
+        keyType: true,
+        isDefault: true,
+        bankName: true,
+        accountHolderName: true,
+        accountHolderDocument: true,
+        createdAt: true,
+      },
+      orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+    });
+
     return {
       message: 'Organization updated successfully',
-      data: { organization },
+      data: { organization: { ...organization, pixKeys: savedPixKeys } },
     };
   }
 
@@ -1016,6 +1475,7 @@ export class OrganizationsService {
             select: {
               id: true,
               name: true,
+              tradeName: true,
             },
           },
           eventAccesses: { select: { eventId: true } },
@@ -1066,7 +1526,8 @@ export class OrganizationsService {
       .sendMemberAdded({
         recipientEmail: member.user.email,
         firstName: member.user.firstName ?? member.user.email,
-        orgName: member.organization.name,
+        // Nome exibido = nome fantasia (público); cai na razão social se ausente.
+        orgName: member.organization.tradeName || member.organization.name,
         registeredAt,
       })
       .catch((err: any) =>
@@ -2333,6 +2794,7 @@ export class OrganizationsService {
             select: {
               id: true,
               name: true,
+              tradeName: true,
             },
           },
           eventAccesses: { select: { eventId: true } },
@@ -2362,7 +2824,8 @@ export class OrganizationsService {
       .sendMemberAdded({
         recipientEmail: member.user.email,
         firstName: member.user.firstName ?? member.user.email,
-        orgName: member.organization.name,
+        // Nome exibido = nome fantasia (público); cai na razão social se ausente.
+        orgName: member.organization.tradeName || member.organization.name,
         registeredAt,
       })
       .catch((err: any) =>

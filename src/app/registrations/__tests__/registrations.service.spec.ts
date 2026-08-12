@@ -5,6 +5,7 @@ import { KitsService } from '../../kits/kits.service';
 import { EmailService } from '../../../common/services/email.service';
 import { TicketPdfService } from '../../../common/services/ticket-pdf.service';
 import { PaymentsService } from '../../payments/payments.service';
+import { OrganizerMemberAccessService } from '../../organizations/organizer-member-access.service';
 import { NotFoundException, BadRequestException } from '@nestjs/common';
 import { RegistrationStatus } from '@prisma/client';
 
@@ -94,6 +95,10 @@ describe('RegistrationsService', () => {
         {
           provide: PaymentsService,
           useValue: { generateReceiptPdf: jest.fn() },
+        },
+        {
+          provide: OrganizerMemberAccessService,
+          useValue: { assertCanAccessEvent: jest.fn() },
         },
       ],
     }).compile();
@@ -486,6 +491,13 @@ describe('RegistrationsService', () => {
         data: { registration: normalizedRegistration },
       } as any);
       mockTicketPdfService.generateTicketPdf.mockResolvedValue(Buffer.from('pdf-bytes'));
+      // «Local do evento» do PDF ancora no evento AO VIVO (`formatEventCardAddress` =
+      // `locationName, cidade, estado`), MESMA fonte do e-mail — não no endereço legado
+      // do snapshot. Este findUnique é a única leitura de Prisma do método (findOne
+      // está espionado). Formato do card: vírgulas, SEM traço "cidade - estado".
+      mockPrismaService.registration.findUnique.mockResolvedValueOnce({
+        event: { locationName: 'Parque', city: 'Maceió', state: 'AL' },
+      });
 
       const result = await service.generateTicketPdf('reg-abc12345', 'user-1');
 
@@ -497,7 +509,7 @@ describe('RegistrationsService', () => {
       expect(sent.event).toMatchObject({
         name: 'Corrida da Praia',
         organization: 'Org X',
-        location: 'Parque, Maceió - AL',
+        location: 'Parque, Maceió, AL',
         participantCount: 1,
       });
       expect(sent.registrations).toHaveLength(1);
@@ -637,6 +649,32 @@ describe('RegistrationsService', () => {
         service.resendOrderConfirmation('reg-1', 'buyer-1', 'd@e.com'),
       ).rejects.toThrow(BadRequestException);
       expect(service.generateTicketPdf).not.toHaveBeenCalled();
+    });
+
+    it('ticketOnly: envia SÓ o ingresso da inscrição-alvo, sem comprovante', async () => {
+      mockPrismaService.registration.findUnique.mockResolvedValue({ orderId: 'order-1' });
+      mockPrismaService.order.findUnique.mockResolvedValue(ORDER);
+
+      // Alvo = reg-2 (Beto): só o ingresso dele deve ir, e sem comprovante.
+      const res = await service.resendOrderConfirmation(
+        'reg-2',
+        'buyer-1',
+        'destino@mail.com',
+        true,
+      );
+
+      // Só um ingresso gerado e nenhum comprovante.
+      expect(service.generateTicketPdf).toHaveBeenCalledTimes(1);
+      expect(service.generateTicketPdf).toHaveBeenCalledWith('reg-2', 'buyer-1');
+      expect(genReceipt).not.toHaveBeenCalled();
+
+      const arg = sendEmail.mock.calls[0][0];
+      expect(arg.ticketPdfs).toHaveLength(1);
+      expect(arg.ticketPdfs[0].participantName).toBe('Beto Souza');
+      expect(arg.receiptPdf).toBeUndefined();
+      // Saudação usa o participante da inscrição (não o comprador).
+      expect(arg.firstName).toBe('Beto');
+      expect(res.ticketCount).toBe(1);
     });
   });
 

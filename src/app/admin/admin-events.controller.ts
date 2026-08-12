@@ -18,8 +18,10 @@ import { AdminGuard } from '../auth/guards/admin.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 
 class AdminUpdateFinancialSettingsDto {
-  @IsOptional() @IsNumber() @Min(0) organizerFeePercent?: number;
-  @IsOptional() @IsNumber() @Min(0) participantFeePercent?: number;
+  // Teto 100% (percentual): evita valores absurdos/typo. Admin é trusted, então não
+  // limita ao teto de 6% do organizador — só barra o não-sentido (>100%).
+  @IsOptional() @IsNumber() @Min(0) @Max(100) organizerFeePercent?: number;
+  @IsOptional() @IsNumber() @Min(0) @Max(100) participantFeePercent?: number;
   @IsOptional() @IsInt() @Min(1) maxInstallments?: number;
   @IsOptional() @IsNumber() @Min(0) totalFee?: number;
   // Taxas Podio↔organizador por evento (frações 0–1: 0.10 = 10%, 0.02 = 2%).

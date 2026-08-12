@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Param, UseGuards, Request, Headers, RawBodyRequest, Req, Body, Query, Redirect } from '@nestjs/common';
+import { Controller, Get, Post, Param, UseGuards, Request, Headers, RawBodyRequest, Req, Body, Query, Redirect, ForbiddenException } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
@@ -148,30 +148,46 @@ export class PaymentsController {
     return { url: redirectUrl, statusCode: 302 };
   }
 
+  // Helpers de SANDBOX/teste: marcam pagamentos como PAID. Defesa em profundidade —
+  // NUNCA disponíveis em produção (não confiar só na flag `sandboxMode`, que pode
+  // sofrer config drift) e exigem sessão (removido o acesso anônimo). Mesmo padrão
+  // do `orders/force-expire`.
+  private assertSandboxAllowed() {
+    if (process.env.NODE_ENV === 'production') {
+      throw new ForbiddenException('Not available in production');
+    }
+  }
+
   @Get('sandbox/simulate-pix-paid/:transactionId')
-  @ApiOperation({ summary: '[SANDBOX ONLY] Simulate PIX payment confirmed', description: 'Marks a PIX as PAID and emits the WebSocket event. Only works when CIELO_ENV != production.' })
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: '[SANDBOX ONLY] Simulate PIX payment confirmed', description: 'Marks a PIX as PAID and emits the WebSocket event. Only works when CIELO_ENV != production. Dev-only + authenticated.' })
   @ApiParam({ name: 'transactionId', description: 'Braspag PaymentId (transactionId)' })
   sandboxSimulatePixPaid(@Param('transactionId') transactionId: string) {
+    this.assertSandboxAllowed();
     return this.paymentsService.sandboxSimulatePixPaid(transactionId);
   }
 
   @Get('sandbox/simulate-debit-3ds-pending/:orderId')
+  @UseGuards(JwtAuthGuard)
   @ApiOperation({
     summary: '[SANDBOX ONLY] Simulate debit card 3DS redirect — step 1',
-    description: 'Creates a PENDING DEBIT_CARD payment for the order and returns the redirectUrl the frontend would show in the iframe. Use simulate-debit-3ds-paid to complete.',
+    description: 'Creates a PENDING DEBIT_CARD payment for the order and returns the redirectUrl the frontend would show in the iframe. Use simulate-debit-3ds-paid to complete. Dev-only + authenticated.',
   })
   @ApiParam({ name: 'orderId', description: 'Order UUID' })
   sandboxSimulateDebit3dsPending(@Param('orderId') orderId: string) {
+    this.assertSandboxAllowed();
     return this.paymentsService.sandboxSimulateDebit3dsPending(orderId);
   }
 
   @Get('sandbox/simulate-debit-3ds-paid/:orderId')
+  @UseGuards(JwtAuthGuard)
   @ApiOperation({
     summary: '[SANDBOX ONLY] Simulate debit card 3DS confirmed — step 2',
-    description: 'Marks the DEBIT_CARD payment as PAID, updates the order and registrations, and emits the payment:confirmed WebSocket event.',
+    description: 'Marks the DEBIT_CARD payment as PAID, updates the order and registrations, and emits the payment:confirmed WebSocket event. Dev-only + authenticated.',
   })
   @ApiParam({ name: 'orderId', description: 'Order UUID' })
   sandboxSimulateDebit3dsPaid(@Param('orderId') orderId: string) {
+    this.assertSandboxAllowed();
     return this.paymentsService.sandboxSimulateDebit3dsPaid(orderId);
   }
 

@@ -11,6 +11,12 @@ import { EmailService } from '../../common/services/email.service';
 import { PaymentsRefundService } from '../payments/payments-refund.service';
 import { PaymentMethod, PaymentStatus, WithdrawalStatus } from '@prisma/client';
 import { computeRefundImpact, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
+import {
+  computeAnticipation,
+  totalAvailableGross,
+  unitCost,
+  type AnticipationUnit,
+} from './anticipation-engine';
 
 // Prazo (dias) até que os 90% sejam liberados para saldo disponível.
 //
@@ -40,6 +46,64 @@ function addDays(date: Date, days: number): Date {
 
 function getReleaseDate(paymentDate: Date, method: string): Date {
   return addDays(paymentDate, RETENTION_DAYS[method] ?? 31);
+}
+
+/**
+ * Dias (INTEIROS de calendário) de hoje até a liberação, contados por DIA CIVIL em
+ * UTC — a MESMA base do display (`formatDateBR` no front exibe a data de liberação
+ * em UTC). Assim a taxa de antecipação bate EXATAMENTE com a data mostrada na lista
+ * "Aguardando liberação" (ex.: liberação 20/08 e hoje 11/08 → 9 dias). Antes usávamos
+ * `Math.ceil` da diferença de timestamps, que arredondava a fração (9,x) pra CIMA (→10)
+ * e divergia da data exibida — além de oscilar conforme a hora do dia. Como ambos os
+ * extremos são meia-noite UTC, a divisão é sempre inteira.
+ */
+export function calendarDaysUntil(releaseDate: Date, now: Date): number {
+  const rel = Date.UTC(
+    releaseDate.getUTCFullYear(),
+    releaseDate.getUTCMonth(),
+    releaseDate.getUTCDate(),
+  );
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  return Math.round((rel - today) / 86400000);
+}
+
+/**
+ * Mapa "já antecipado por unidade" (centavos). Chave = `unitId` (novo) ou `orderId`
+ * (legado); à vista = orderId, parcela = `${paymentId}-inst-${n}`. Soma dos breakdowns
+ * das antecipações PENDING/COMPLETED. FONTE ÚNICA usada tanto pelo motor de antecipação
+ * (não antecipar 2×) quanto pelas listas "Aguardando liberação"/"Parcelados" (não mostrar
+ * recebível JÁ antecipado). Sem isso, a lista continua mostrando o pedido enquanto a
+ * antecipação já o descontou → parece que "pulou o pedido mais próximo".
+ */
+export function buildAnticipatedByUnit(
+  priorAnticipations: { breakdown: unknown }[],
+): Map<string, number> {
+  const consumed = new Map<string, number>();
+  for (const a of priorAnticipations) {
+    const bd = (a.breakdown as unknown as any[]) ?? [];
+    for (const item of bd) {
+      const key = item.unitId ?? item.orderId;
+      if (!key) continue;
+      const val = item.gross ?? item.amount ?? 0;
+      consumed.set(key, (consumed.get(key) ?? 0) + val);
+    }
+  }
+  return consumed;
+}
+
+/** Query + monta o mapa `buildAnticipatedByUnit` para um evento. */
+export async function loadAnticipatedByUnit(
+  prisma: any,
+  eventId: string,
+): Promise<Map<string, number>> {
+  const rows = await prisma.eventAnticipation.findMany({
+    where: {
+      eventId,
+      status: { in: [WithdrawalStatus.PENDING, WithdrawalStatus.COMPLETED] },
+    },
+    select: { breakdown: true },
+  });
+  return buildAnticipatedByUnit(rows);
 }
 
 /**
@@ -399,6 +463,21 @@ export class RepasseService {
     });
   }
 
+  /**
+   * Antecipações COMPROMETIDAS (PENDING+COMPLETED) — o líquido já foi adiantado ao
+   * organizador. Alimenta o `calcBreakdown` (some do bucket de origem + credita no
+   * saldo). Mesmo filtro de status do `loadAnticipatableUnits` (CANCELLED fora).
+   */
+  private async loadCommittedAnticipations(eventId: string, prisma: any) {
+    return prisma.eventAnticipation.findMany({
+      where: {
+        eventId,
+        status: { in: [WithdrawalStatus.PENDING, WithdrawalStatus.COMPLETED] },
+      },
+      select: { breakdown: true, netAmount: true },
+    });
+  }
+
   // ─── Breakdown ───────────────────────────────────────────────────────────
 
   /**
@@ -436,8 +515,29 @@ export class RepasseService {
     committedWithdrawals: any[],
     organizerFeePercent: number,
     refundFeeRate: number,
+    anticipations: any[] = [],
   ) {
     const now = getNow();
+
+    // Antecipações comprometidas (PENDING+COMPLETED): o recebível foi ADIANTADO ao
+    // organizador. Removemos o valor antecipado do bucket de origem POR UNIDADE
+    // (à vista = order.id em `aguardandoLiberacao`; parcela = `${paymentId}-inst-N`
+    // em `parceladosAReceber`) e somamos o LÍQUIDO no `saldoDisponivel`. Isso evita
+    // contar o mesmo recebível DUAS vezes (adiantado agora E liberado naturalmente
+    // depois, quando o pedido sairia da janela/parcela venceria). Mesma chave/filtro
+    // do `loadAnticipatableUnits`. CANCELLED não entra (já filtrado no load).
+    const anticipatedByUnit = new Map<string, number>();
+    let anticipatedNet = 0;
+    for (const a of anticipations) {
+      anticipatedNet += a.netAmount ?? 0;
+      const bd = (a.breakdown as unknown as any[]) ?? [];
+      for (const item of bd) {
+        const key = item.unitId ?? item.orderId;
+        if (!key) continue;
+        const val = item.gross ?? item.amount ?? 0;
+        anticipatedByUnit.set(key, (anticipatedByUnit.get(key) ?? 0) + val);
+      }
+    }
 
     let aguardandoLiberacao = 0;
     let valorRetido = 0;
@@ -471,7 +571,10 @@ export class RepasseService {
 
         for (let i = 0; i < count; i++) {
           const dueDate = addDays(paymentDate, 31 * (i + 1));
-          const amount = baseInstallment + (i === count - 1 ? lastExtra : 0);
+          const rawAmount = baseInstallment + (i === count - 1 ? lastExtra : 0);
+          // Desconta a parcela do que já foi ANTECIPADO (mesma chave do load).
+          const consumed = anticipatedByUnit.get(`${payment.id}-inst-${i + 1}`) ?? 0;
+          const amount = Math.max(0, rawAmount - consumed);
           if (dueDate > now) {
             parceladosAReceber += amount;
           } else {
@@ -479,15 +582,18 @@ export class RepasseService {
           }
         }
       } else {
+        // À vista (unidade = order.id): desconta o que já foi ANTECIPADO deste pedido.
+        const consumed = anticipatedByUnit.get(order.id) ?? 0;
+        const effectiveOrgNet = Math.max(0, orgNet - consumed);
         const releaseDate = getReleaseDate(paymentDate, payment.method);
         if (releaseDate > now) {
-          aguardandoLiberacao += orgNet;
+          aguardandoLiberacao += effectiveOrgNet;
         } else if (!isAudited) {
-          const retained = Math.round(orgNet * retentionRate);
+          const retained = Math.round(effectiveOrgNet * retentionRate);
           valorRetido += retained;
-          saldoDisponivel += orgNet - retained;
+          saldoDisponivel += effectiveOrgNet - retained;
         } else {
-          saldoDisponivel += orgNet;
+          saldoDisponivel += effectiveOrgNet;
         }
       }
     }
@@ -503,6 +609,11 @@ export class RepasseService {
       // e o valor congelado (ou 2% do subtotal) para estorno proativo. Fonte única.
       saldoDisponivel -= computeRefundImpact(order, organizerFeePercent, refundFeeRate).refundFee;
     }
+
+    // Líquido das antecipações comprometidas entra no saldo (o organizador recebeu
+    // adiantado; depois saca via repasse). O bruto correspondente já saiu de
+    // aguardando/parcelas acima (por unidade), então não há dupla contagem.
+    saldoDisponivel += anticipatedNet;
 
     // Use netAmount so both old records (amount=gross, netAmount=net) and new records
     // (amount=netAmount, feeAmount=0) are subtracted correctly from the net saldoDisponivel
@@ -537,11 +648,12 @@ export class RepasseService {
    */
   async computeBreakdownForEvent(eventId: string) {
     const prismaPrimary = this.prisma.getWriteClient();
-    const [event, ordersResult, audit, withdrawals] = await Promise.all([
+    const [event, ordersResult, audit, withdrawals, anticipations] = await Promise.all([
       this.loadEventConfig(eventId, prismaPrimary),
       this.loadPaidAndRefundedOrders(eventId, prismaPrimary),
       this.loadAudit(eventId, prismaPrimary),
       this.loadWithdrawals(eventId, prismaPrimary),
+      this.loadCommittedAnticipations(eventId, prismaPrimary),
     ]);
     const { paidOrders, refundedOrders } = ordersResult;
 
@@ -560,6 +672,7 @@ export class RepasseService {
       committedWithdrawals,
       event.organizerFeePercent,
       event.refundFeeRate,
+      anticipations,
     );
 
     return {
@@ -578,11 +691,12 @@ export class RepasseService {
     // Usa primary client para evitar lag de replicação após confirmação de pagamento.
     // Dados financeiros precisam refletir o estado mais recente.
     const prismaPrimary = this.prisma.getWriteClient();
-    const [event, ordersResult, audit, withdrawals] = await Promise.all([
+    const [event, ordersResult, audit, withdrawals, anticipations] = await Promise.all([
       this.loadEventConfig(eventId, prismaPrimary),
       this.loadPaidAndRefundedOrders(eventId, prismaPrimary),
       this.loadAudit(eventId, prismaPrimary),
       this.loadWithdrawals(eventId, prismaPrimary),
+      this.loadCommittedAnticipations(eventId, prismaPrimary),
     ]);
     const { paidOrders, refundedOrders } = ordersResult;
 
@@ -602,6 +716,7 @@ export class RepasseService {
       committedWithdrawals,
       event.organizerFeePercent,
       event.refundFeeRate,
+      anticipations,
     );
 
     // Transparência do estorno para o organizador: total revertido (venda perdida)
@@ -681,7 +796,7 @@ export class RepasseService {
           purchaseDate: order.createdAt,
           paymentDate: payment.paymentDate,
           releaseDate,
-          daysUntilRelease: Math.ceil((releaseDate.getTime() - now.getTime()) / 86400000),
+          daysUntilRelease: calendarDaysUntil(releaseDate, now),
           buyer: order.user,
         });
       } else if (!isAudited) {
@@ -736,10 +851,40 @@ export class RepasseService {
    * (evita antecipar o mesmo recebível duas vezes). Retorna por pedido o líquido do
    * organizador ainda disponível + dias até a liberação + data do pagamento.
    */
-  private async loadAnticipatableOrders(
+  /** Taxa MENSAL de antecipação da ORGANIZAÇÃO do evento (fração). Fallback global. */
+  private async loadAnticipationRate(eventId: string, prisma: any): Promise<number> {
+    const event = await prisma.event.findUnique({
+      where: { id: eventId },
+      select: { organization: { select: { anticipationMonthlyRate: true } } },
+    });
+    const rate = event?.organization?.anticipationMonthlyRate;
+    return typeof rate === 'number' && rate > 0 ? rate : ANTICIPATION_MONTHLY_RATE;
+  }
+
+  /**
+   * Antecipação habilitada para a ORGANIZAÇÃO do evento. Controlada pelo admin no
+   * drawer da organização (default OFF). Gate autoritativo do dinheiro — org sem a
+   * flag NÃO pode antecipar, independentemente do que a UI mostrar.
+   */
+  private async loadAnticipationEnabled(eventId: string, prisma: any): Promise<boolean> {
+    const event = await prisma.event.findUnique({
+      where: { id: eventId },
+      select: { organization: { select: { anticipationEnabled: true } } },
+    });
+    return event?.organization?.anticipationEnabled === true;
+  }
+
+  /**
+   * Monta o BOLO de unidades antecipáveis (à vista + cada parcela pendente),
+   * conforme `adiantamento.md`. À vista = parcela 1x. Cada unidade traz o valor
+   * líquido-do-organizador e os dias até a liberação natural. Desconta o que já
+   * foi antecipado (breakdowns anteriores), suportando tanto o formato NOVO
+   * (por unidade: `unitId`+`gross`) quanto o LEGADO (por pedido: `orderId`+`amount`).
+   */
+  private async loadAnticipatableUnits(
     eventId: string,
     prisma: any,
-  ): Promise<AnticipatableOrder[]> {
+  ): Promise<AnticipationUnit[]> {
     const [event, orders, priorAnticipations] = await Promise.all([
       this.loadEventConfig(eventId, prisma),
       this.loadPaidOrders(eventId, prisma),
@@ -752,30 +897,17 @@ export class RepasseService {
       }),
     ]);
 
-    // Já antecipado por pedido (soma dos breakdowns anteriores).
-    const consumedByOrder = new Map<string, number>();
-    for (const a of priorAnticipations) {
-      const bd = (a.breakdown as unknown as AnticipationBreakdownItem[]) ?? [];
-      for (const item of bd) {
-        consumedByOrder.set(
-          item.orderId,
-          (consumedByOrder.get(item.orderId) ?? 0) + item.amount,
-        );
-      }
-    }
+    // Consumido por unidade (fonte única compartilhada com as listas do financeiro).
+    const consumedByUnit = buildAnticipatedByUnit(priorAnticipations);
 
     const now = getNow();
-    const items: AnticipatableOrder[] = [];
+    const units: AnticipationUnit[] = [];
+
     for (const order of orders) {
       const payment = order.payment;
       if (!payment?.paymentDate) continue;
-      // Parcelado vive em getInstallments; antecipação é só à vista aguardando liberação.
-      if (isInstallment(payment.metadata as any)) continue;
 
       const paymentDate = new Date(payment.paymentDate);
-      const releaseDate = getReleaseDate(paymentDate, payment.method);
-      if (releaseDate <= now) continue; // já liberado → não é antecipável
-
       const organizerBase = Math.max(
         0,
         (order.finalAmount ?? 0) - (order.serviceFee ?? 0),
@@ -784,17 +916,45 @@ export class RepasseService {
         organizerBase *
           (1 - resolveOrderOrganizerFeePercent(order, event.organizerFeePercent) / 100),
       );
-      const available = netAmount - (consumedByOrder.get(order.id) ?? 0);
-      if (available <= 0) continue;
 
-      items.push({
-        orderId: order.id,
-        netAmount: available,
-        daysUntilRelease: Math.ceil((releaseDate.getTime() - now.getTime()) / 86400000),
-        paymentDate,
-      });
+      if (isInstallment(payment.metadata as any)) {
+        // PARCELADO: cada parcela pendente (dueDate > now) é uma unidade.
+        const count: number = (payment.metadata as any).creditCard.installments;
+        const baseInstallment = Math.floor(netAmount / count);
+        const lastExtra = netAmount - baseInstallment * count;
+        for (let i = 0; i < count; i++) {
+          const dueDate = addDays(paymentDate, 31 * (i + 1));
+          if (dueDate <= now) continue; // parcela já liberada → não antecipável
+          const gross = baseInstallment + (i === count - 1 ? lastExtra : 0);
+          const unitId = `${payment.id}-inst-${i + 1}`;
+          const available = gross - (consumedByUnit.get(unitId) ?? 0);
+          if (available <= 0) continue;
+          units.push({
+            unitId,
+            orderId: order.id,
+            paymentId: payment.id,
+            installmentNumber: i + 1,
+            gross: available,
+            daysUntilRelease: calendarDaysUntil(dueDate, now),
+          });
+        }
+      } else {
+        // À VISTA (parcela 1x): 1 unidade, se ainda aguardando liberação.
+        const releaseDate = getReleaseDate(paymentDate, payment.method);
+        if (releaseDate <= now) continue;
+        const available = netAmount - (consumedByUnit.get(order.id) ?? 0);
+        if (available <= 0) continue;
+        units.push({
+          unitId: order.id,
+          orderId: order.id,
+          paymentId: payment.id,
+          installmentNumber: null,
+          gross: available,
+          daysUntilRelease: calendarDaysUntil(releaseDate, now),
+        });
+      }
     }
-    return items;
+    return units;
   }
 
   /**
@@ -804,20 +964,36 @@ export class RepasseService {
   async getAnticipationQuote(userId: string, eventId: string) {
     await this.assertAccess(userId, eventId);
     const prisma = this.prisma.getWriteClient();
-    const orders = await this.loadAnticipatableOrders(eventId, prisma);
-    const anticipatableTotal = orders.reduce((s, o) => s + o.netAmount, 0);
-    const sorted = [...orders].sort(
-      (a, b) => new Date(a.paymentDate).getTime() - new Date(b.paymentDate).getTime(),
-    );
+    const [units, monthlyRate, enabled] = await Promise.all([
+      this.loadAnticipatableUnits(eventId, prisma),
+      this.loadAnticipationRate(eventId, prisma),
+      this.loadAnticipationEnabled(eventId, prisma),
+    ]);
+    // "Valor disponível" = total antecipável BRUTO (soma das unidades).
+    const availableTotal = totalAvailableGross(units);
+    // Líquido MÁXIMO (se antecipar tudo) — teto do que o organizador recebe hoje.
+    const maxReceivable = computeAnticipation(units, availableTotal, monthlyRate).recommendedNet;
+    // Org SEM antecipação habilitada ainda enxerga os valores (o front mostra o
+    // formulário e só bloqueia no "Confirmar", exibindo o modal de análise). O
+    // bloqueio de fato/autoritativo é no requestAnticipation.
     return {
       message: 'Anticipation quote fetched successfully',
       data: {
-        anticipatableTotal,
-        monthlyRate: ANTICIPATION_MONTHLY_RATE,
-        orders: sorted.map((o) => ({
-          orderId: o.orderId,
-          netAmount: o.netAmount,
-          daysUntilRelease: o.daysUntilRelease,
+        enabled,
+        // Compat: alguns consumidores antigos liam `anticipatableTotal`.
+        anticipatableTotal: availableTotal,
+        availableTotal,
+        maxReceivable,
+        monthlyRate,
+        // Unidades (mais barato→caro já é resolvido no motor) p/ a prévia AO VIVO
+        // do front espelhar a mesma conta (recomendado/taxa conforme o usuário digita).
+        units: units.map((u) => ({
+          unitId: u.unitId,
+          orderId: u.orderId,
+          paymentId: u.paymentId,
+          installmentNumber: u.installmentNumber,
+          gross: u.gross,
+          daysUntilRelease: u.daysUntilRelease,
         })),
       },
     };
@@ -838,28 +1014,59 @@ export class RepasseService {
     const anticipation = await prismaWrite.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${eventId}))`;
 
-      const orders = await this.loadAnticipatableOrders(eventId, tx);
-      const anticipatableTotal = orders.reduce((s, o) => s + o.netAmount, 0);
-      if (amount > anticipatableTotal) {
+      const [units, monthlyRate, enabled] = await Promise.all([
+        this.loadAnticipatableUnits(eventId, tx),
+        this.loadAnticipationRate(eventId, tx),
+        this.loadAnticipationEnabled(eventId, tx),
+      ]);
+
+      // Gate autoritativo: org com antecipação desligada não antecipa (mesmo que a
+      // UI escape). Dentro da transação (sob advisory lock) para não correr com um
+      // toggle concorrente do admin.
+      if (!enabled) {
         throw new BadRequestException(
-          `Valor acima do disponível para antecipação. Disponível: ${anticipatableTotal} centavos, solicitado: ${amount} centavos`,
+          'A antecipação de recebíveis não está habilitada para esta organização.',
         );
       }
 
-      const { costAmount, netAmount, breakdown } = computeAnticipationCost(
-        orders,
-        amount,
-        ANTICIPATION_MONTHLY_RATE,
-      );
+      // `amount` = quanto o organizador quer RECEBER hoje (líquido). Recálculo
+      // AUTORITATIVO: o motor escolhe as unidades mais baratas por INTEIRO.
+      const result = computeAnticipation(units, amount, monthlyRate);
+      if (result.consumedGross <= 0) {
+        throw new BadRequestException('Nenhum recebível disponível para antecipação.');
+      }
+      // Teto: não dá pra receber mais do que o líquido total possível.
+      if (amount > result.recommendedNet) {
+        throw new BadRequestException(
+          `Valor acima do disponível para antecipação. Máximo a receber: ${result.recommendedNet} centavos, solicitado: ${amount} centavos`,
+        );
+      }
+
+      // Breakdown por UNIDADE (fonte da dedução em futuras antecipações).
+      const byId = new Map(units.map((u) => [u.unitId, u]));
+      const breakdown = result.consumedUnitIds.map((id) => {
+        const u = byId.get(id)!;
+        return {
+          unitId: u.unitId,
+          orderId: u.orderId,
+          paymentId: u.paymentId,
+          installmentNumber: u.installmentNumber,
+          gross: u.gross,
+          days: u.daysUntilRelease,
+          cost: unitCost(u.gross, u.daysUntilRelease, monthlyRate),
+        };
+      });
 
       return tx.eventAnticipation.create({
         data: {
           eventId,
           requestedById: userId,
-          amount,
-          monthlyRate: ANTICIPATION_MONTHLY_RATE,
-          costAmount,
-          netAmount,
+          // `amount` = total antecipado BRUTO (recebíveis puxados). costAmount = taxa
+          // efetiva (custo real + eventual sobra). netAmount = o que o organizador recebe.
+          amount: result.consumedGross,
+          monthlyRate,
+          costAmount: result.effectiveFee,
+          netAmount: result.receive,
           breakdown: breakdown as any,
           status: WithdrawalStatus.PENDING,
         },
@@ -1116,11 +1323,12 @@ export class RepasseService {
       // ignora o retorno e só serializa a contagem de linhas afetadas.
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${eventId}))`;
 
-      const [event, ordersResult, audit, withdrawals] = await Promise.all([
+      const [event, ordersResult, audit, withdrawals, anticipations] = await Promise.all([
         this.loadEventConfig(eventId, tx),
         this.loadPaidAndRefundedOrders(eventId, tx),
         this.loadAudit(eventId, tx),
         this.loadWithdrawals(eventId, tx),
+        this.loadCommittedAnticipations(eventId, tx),
       ]);
       const { paidOrders, refundedOrders } = ordersResult;
 
@@ -1137,6 +1345,7 @@ export class RepasseService {
         committedWithdrawals,
         event.organizerFeePercent,
         event.refundFeeRate,
+        anticipations,
       );
 
       if (amount > saldoParaSaque) {
@@ -1363,10 +1572,11 @@ export class RepasseService {
       const existing = await this.loadAudit(eventId, tx);
       if (existing) throw new BadRequestException('Evento já foi auditado');
 
-      const [event, ordersResult, withdrawals] = await Promise.all([
+      const [event, ordersResult, withdrawals, anticipations] = await Promise.all([
         this.loadEventConfig(eventId, tx),
         this.loadPaidAndRefundedOrders(eventId, tx),
         this.loadWithdrawals(eventId, tx),
+        this.loadCommittedAnticipations(eventId, tx),
       ]);
       const { paidOrders, refundedOrders } = ordersResult;
 
@@ -1382,6 +1592,7 @@ export class RepasseService {
         committedWithdrawals,
         event.organizerFeePercent,
         event.refundFeeRate,
+        anticipations,
       );
 
       return tx.eventAudit.create({
@@ -1471,9 +1682,10 @@ export class RepasseService {
         });
       } else {
         // Pending: calculate current retained amount dynamically
-        const [ordersResult, withdrawals] = await Promise.all([
+        const [ordersResult, withdrawals, anticipations] = await Promise.all([
           this.loadPaidAndRefundedOrders(event.id, prismaRead),
           this.loadWithdrawals(event.id, prismaRead),
+          this.loadCommittedAnticipations(event.id, prismaRead),
         ]);
         const { paidOrders, refundedOrders } = ordersResult;
 
@@ -1489,6 +1701,7 @@ export class RepasseService {
           committedWithdrawals,
           event.organizerFeePercent,
           event.refundFeeRate,
+          anticipations,
         );
 
         if (retainedAmount > 0) {
@@ -1546,10 +1759,11 @@ export class RepasseService {
       const existing = await this.loadAudit(eventId, tx);
       if (existing) throw new BadRequestException('Retenção do evento já foi liberada');
 
-      const [event, ordersResult, withdrawals] = await Promise.all([
+      const [event, ordersResult, withdrawals, anticipations] = await Promise.all([
         this.loadEventConfig(eventId, tx),
         this.loadPaidAndRefundedOrders(eventId, tx),
         this.loadWithdrawals(eventId, tx),
+        this.loadCommittedAnticipations(eventId, tx),
       ]);
       const { paidOrders, refundedOrders } = ordersResult;
 
@@ -1565,6 +1779,7 @@ export class RepasseService {
         committedWithdrawals,
         event.organizerFeePercent,
         event.refundFeeRate,
+        anticipations,
       );
 
       const created = await tx.eventAudit.create({

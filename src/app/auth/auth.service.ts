@@ -246,9 +246,21 @@ export class AuthService {
     }
   }
 
-  async isEmailAvailable(email: string): Promise<boolean> {
-    const existing = await this.prisma.getReadClient().user.findFirst({
-      where: { email },
+  /**
+   * Disponibilidade de e-mail POR SUPERFÍCIE (accountType). As contas USER
+   * (comprador) e ORGANIZER coexistem com o mesmo e-mail (unique composta
+   * `(email, accountType)`), então o pré-check do cadastro precisa ser escopado —
+   * senão a UI do comprador bloquearia um e-mail que só existe como organizador
+   * (e vice-versa). Default `USER` (consumidor atual = cadastro de comprador).
+   * Point lookup no índice único `email_accountType` (mais eficiente que o
+   * `findFirst({ email })` global anterior).
+   */
+  async isEmailAvailable(
+    email: string,
+    accountType: 'USER' | 'ORGANIZER' = 'USER',
+  ): Promise<boolean> {
+    const existing = await this.prisma.getReadClient().user.findUnique({
+      where: { email_accountType: { email, accountType } },
       select: { id: true },
     });
     return existing === null;

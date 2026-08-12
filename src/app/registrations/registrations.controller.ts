@@ -13,6 +13,8 @@ import { RegistrationsService } from './registrations.service';
 import { CreateRegistrationWithInvitedUserDto } from './dto/create-registration.dto';
 import { FilterRegistrationsDto } from './dto/filter-registrations.dto';
 import { ResendRegistrationEmailDto } from './dto/resend-email.dto';
+import { UpdateRegistrationParticipantDto } from './dto/update-registration-participant.dto';
+import { UpdateRegistrationAnswersDto } from './dto/update-registration-answers.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PaymentsService } from '../payments/payments.service';
 import { NoCache } from 'src/common/decorators/cache.decorator';
@@ -87,6 +89,74 @@ export class RegistrationsController {
     @Body('variationId') variationId: string,
   ) {
     return this.registrationsService.updateProductVariation(registrationId, productId, variationId, req.user.id);
+  }
+
+  @Patch(':registrationId/participant')
+  @NoCache()
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Editar dados do participante (organizador)',
+    description:
+      'Permite ao organizador do evento (permissão edit_event) editar os dados do participante da inscrição. Grava no recibo imutável (receiptSnapshot) e nas colunas-espelho da inscrição.',
+  })
+  @ApiParam({ name: 'registrationId', description: 'UUID da inscrição' })
+  @ApiResponse({ status: 200, description: 'Participante atualizado com sucesso' })
+  @ApiResponse({ status: 400, description: 'Inscrição não confirmada ou dados inválidos' })
+  @ApiResponse({ status: 403, description: 'Sem permissão de edição no evento' })
+  @ApiResponse({ status: 404, description: 'Inscrição não encontrada' })
+  updateRegistrationParticipant(
+    @Request() req,
+    @Param('registrationId') registrationId: string,
+    @Body() dto: UpdateRegistrationParticipantDto,
+  ) {
+    return this.registrationsService.updateRegistrationParticipant(registrationId, dto, req.user.id);
+  }
+
+  @Patch(':registrationId/answers')
+  @NoCache()
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Editar respostas das perguntas (organizador)',
+    description:
+      'Permite ao organizador do evento (permissão edit_event) editar as respostas das perguntas da inscrição. Atualiza a tabela relacional e o recibo imutável.',
+  })
+  @ApiParam({ name: 'registrationId', description: 'UUID da inscrição' })
+  @ApiResponse({ status: 200, description: 'Respostas atualizadas com sucesso' })
+  @ApiResponse({ status: 403, description: 'Sem permissão de edição no evento' })
+  @ApiResponse({ status: 404, description: 'Inscrição não encontrada' })
+  updateRegistrationAnswers(
+    @Request() req,
+    @Param('registrationId') registrationId: string,
+    @Body() dto: UpdateRegistrationAnswersDto,
+  ) {
+    return this.registrationsService.updateRegistrationAnswers(registrationId, dto.answers, req.user.id);
+  }
+
+  @Patch(':registrationId/products/:productId/variation/organizer')
+  @NoCache()
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Alterar variação de produto (organizador)',
+    description:
+      'Permite ao organizador do evento (permissão edit_event) trocar a variação de um produto incluso no ingresso, sem os limites do comprador (prazo/uma-vez-só).',
+  })
+  @ApiParam({ name: 'registrationId', description: 'UUID da inscrição' })
+  @ApiParam({ name: 'productId', description: 'UUID do produto' })
+  @ApiBody({ schema: { type: 'object', properties: { variationId: { type: 'string', format: 'uuid' } }, required: ['variationId'] } })
+  @ApiResponse({ status: 200, description: 'Variação atualizada com sucesso' })
+  @ApiResponse({ status: 400, description: 'Alteração não permitida' })
+  @ApiResponse({ status: 403, description: 'Sem permissão de edição no evento' })
+  @ApiResponse({ status: 404, description: 'Inscrição ou produto não encontrado' })
+  updateProductVariationAsOrganizer(
+    @Request() req,
+    @Param('registrationId') registrationId: string,
+    @Param('productId') productId: string,
+    @Body('variationId') variationId: string,
+  ) {
+    return this.registrationsService.updateProductVariationAsOrganizer(registrationId, productId, variationId, req.user.id);
   }
 
   @Get(':id')
@@ -200,7 +270,12 @@ export class RegistrationsController {
     @Param('id') id: string,
     @Body() dto: ResendRegistrationEmailDto,
   ) {
-    return this.registrationsService.resendOrderConfirmation(id, req.user.id, dto.email);
+    return this.registrationsService.resendOrderConfirmation(
+      id,
+      req.user.id,
+      dto.email,
+      dto.ticketOnly ?? false,
+    );
   }
 
   @Delete(':id/cancel')
