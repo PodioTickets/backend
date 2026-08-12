@@ -49,6 +49,25 @@ function getReleaseDate(paymentDate: Date, method: string): Date {
 }
 
 /**
+ * Dias (INTEIROS de calendário) de hoje até a liberação, contados por DIA CIVIL em
+ * UTC — a MESMA base do display (`formatDateBR` no front exibe a data de liberação
+ * em UTC). Assim a taxa de antecipação bate EXATAMENTE com a data mostrada na lista
+ * "Aguardando liberação" (ex.: liberação 20/08 e hoje 11/08 → 9 dias). Antes usávamos
+ * `Math.ceil` da diferença de timestamps, que arredondava a fração (9,x) pra CIMA (→10)
+ * e divergia da data exibida — além de oscilar conforme a hora do dia. Como ambos os
+ * extremos são meia-noite UTC, a divisão é sempre inteira.
+ */
+export function calendarDaysUntil(releaseDate: Date, now: Date): number {
+  const rel = Date.UTC(
+    releaseDate.getUTCFullYear(),
+    releaseDate.getUTCMonth(),
+    releaseDate.getUTCDate(),
+  );
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  return Math.round((rel - today) / 86400000);
+}
+
+/**
  * Returns the reference "now" used for all retention/release date comparisons.
  * Set REPASSE_TIME_OFFSET_DAYS (integer) to simulate time passing without
  * waiting real days. Only honoured when NODE_ENV !== 'production'.
@@ -738,7 +757,7 @@ export class RepasseService {
           purchaseDate: order.createdAt,
           paymentDate: payment.paymentDate,
           releaseDate,
-          daysUntilRelease: Math.ceil((releaseDate.getTime() - now.getTime()) / 86400000),
+          daysUntilRelease: calendarDaysUntil(releaseDate, now),
           buyer: order.user,
         });
       } else if (!isAudited) {
@@ -886,7 +905,7 @@ export class RepasseService {
             paymentId: payment.id,
             installmentNumber: i + 1,
             gross: available,
-            daysUntilRelease: Math.ceil((dueDate.getTime() - now.getTime()) / 86400000),
+            daysUntilRelease: calendarDaysUntil(dueDate, now),
           });
         }
       } else {
@@ -901,7 +920,7 @@ export class RepasseService {
           paymentId: payment.id,
           installmentNumber: null,
           gross: available,
-          daysUntilRelease: Math.ceil((releaseDate.getTime() - now.getTime()) / 86400000),
+          daysUntilRelease: calendarDaysUntil(releaseDate, now),
         });
       }
     }

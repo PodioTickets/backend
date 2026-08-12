@@ -1,5 +1,6 @@
 import {
   computeAnticipationCost,
+  calendarDaysUntil,
   ANTICIPATION_MONTHLY_RATE,
   type AnticipatableOrder,
 } from '../repasse.service';
@@ -71,5 +72,30 @@ describe('computeAnticipationCost', () => {
     const r = computeAnticipationCost(orders, 2000, RATE);
     expect(r.breakdown).toHaveLength(1);
     expect(r.breakdown[0]).toEqual({ orderId: 'A', amount: 2000, days: 10, cost: Math.round(2000 * RATE * (10 / 30)) });
+  });
+});
+
+describe('calendarDaysUntil', () => {
+  // Conta por DIA CIVIL (UTC) — bate com a data mostrada na lista, não com o ceil
+  // da fração de dia. Ex.: hoje 11/08, liberação 20/08 → 9 (não 10).
+  it('conta dias de calendário, ignorando a hora do dia (9, não 10)', () => {
+    const now = new Date('2026-08-11T10:00:00Z');
+    // Liberação 9 dias e 4h à frente: o ceil daria 10; o dia civil dá 9.
+    expect(calendarDaysUntil(new Date('2026-08-20T14:30:00Z'), now)).toBe(9);
+    // Mesmo dia civil de liberação, hora diferente → ainda 9.
+    expect(calendarDaysUntil(new Date('2026-08-20T00:00:01Z'), now)).toBe(9);
+    expect(calendarDaysUntil(new Date('2026-08-20T23:59:59Z'), now)).toBe(9);
+  });
+
+  it('estável quanto à hora de "agora" (não oscila durante o dia)', () => {
+    const rel = new Date('2026-08-20T14:30:00Z');
+    expect(calendarDaysUntil(rel, new Date('2026-08-11T00:00:00Z'))).toBe(9);
+    expect(calendarDaysUntil(rel, new Date('2026-08-11T23:59:59Z'))).toBe(9);
+  });
+
+  it('libera hoje → 0; ontem → negativo', () => {
+    const now = new Date('2026-08-11T10:00:00Z');
+    expect(calendarDaysUntil(new Date('2026-08-11T23:00:00Z'), now)).toBe(0);
+    expect(calendarDaysUntil(new Date('2026-08-10T09:00:00Z'), now)).toBe(-1);
   });
 });

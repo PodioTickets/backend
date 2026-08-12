@@ -48,7 +48,7 @@ import { computeRegistrationPaidValues } from './export-paid-value.util';
 import { formatEventCardAddress } from '../../common/utils/event-email-format.util';
 import { TicketCategoriesService } from '../ticket-categories/ticket-categories.service';
 import { EmailService } from '../../common/services/email.service';
-import { RepasseService, RETENTION_DAYS } from '../repasse/repasse.service';
+import { RepasseService, RETENTION_DAYS, calendarDaysUntil } from '../repasse/repasse.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { isChargeback, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 import { brtDayStartUtc, brtDayEndUtc, eventWindowInstant } from '../../common/utils/brt-date.util';
@@ -4762,7 +4762,7 @@ export class EventsService {
 
       // Se ainda não passou do prazo de retenção, está aguardando liberação
       if (releaseDate > now) {
-        const daysUntilRelease = Math.ceil((releaseDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+        const daysUntilRelease = calendarDaysUntil(releaseDate, now);
         const isReleaseToday = releaseDate.toDateString() === today.toDateString();
         const orgBase = Math.max(
           0,
