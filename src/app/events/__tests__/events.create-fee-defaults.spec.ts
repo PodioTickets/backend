@@ -3,7 +3,7 @@
  * ================================================================
  * EventsService.create deve gravar, por evento, as taxas padrão (snapshot):
  *   organizerFeePercent=4 (sobrescrevível), participantFeePercent=2,
- *   retentionRate=0.10, refundFeeRate=0.02.
+ *   retentionRate=0 (sem retenção de garantia), refundFeeRate=0.02.
  * Assim, alterar os defaults vale só pra eventos FUTUROS (existentes mantêm o gravado).
  */
 import {
@@ -56,7 +56,7 @@ describe('EventsService.create — defaults financeiros por evento', () => {
   it('as constantes default têm os valores combinados', () => {
     expect(DEFAULT_ORGANIZER_FEE_PERCENT).toBe(4);
     expect(DEFAULT_PARTICIPANT_FEE_PERCENT).toBe(2);
-    expect(DEFAULT_RETENTION_RATE).toBe(0.1);
+    expect(DEFAULT_RETENTION_RATE).toBe(0);
     expect(DEFAULT_REFUND_FEE_RATE).toBe(0.02);
   });
 
@@ -68,7 +68,7 @@ describe('EventsService.create — defaults financeiros por evento', () => {
     const data = create.mock.calls[0][0].data;
     expect(data.organizerFeePercent).toBe(4);
     expect(data.participantFeePercent).toBe(2);
-    expect(data.retentionRate).toBe(0.1);
+    expect(data.retentionRate).toBe(0);
     expect(data.refundFeeRate).toBe(0.02);
   });
 
@@ -80,7 +80,7 @@ describe('EventsService.create — defaults financeiros por evento', () => {
     const data = create.mock.calls[0][0].data;
     expect(data.organizerFeePercent).toBe(3); // veio do DTO
     expect(data.participantFeePercent).toBe(2); // interno
-    expect(data.retentionRate).toBe(0.1); // default
+    expect(data.retentionRate).toBe(0); // default
     expect(data.refundFeeRate).toBe(0.02); // default
   });
 });

@@ -13,6 +13,7 @@ import {
   AdminOrganizationsListQueryDto,
 } from './dto/organization.dto';
 import { OrganizerSignupDto, SignupPersonType } from './dto/organizer-signup.dto';
+import { ORGANIZER_CONTRACTS } from './organizer-contracts.constant';
 import { OrganizationMemberRole } from '@prisma/client';
 import { MFAService } from '../../common/services/mfa.service';
 import { brtDayStartUtc, brtDayEndUtc } from '../../common/utils/brt-date.util';
@@ -395,7 +396,10 @@ export class OrganizationsService {
    *   - nenhum dos dois           → cria a organização "vazia"; owner pode ser adicionado depois
    *                                 via POST /api/v1/admin/organizations/:id/members.
    */
-  async createOrganization(createDto: CreateOrganizationDto) {
+  async createOrganization(
+    createDto: CreateOrganizationDto,
+    context?: { actorUserId?: string | null; ip?: string | null },
+  ) {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
@@ -606,6 +610,24 @@ export class OrganizationsService {
       return { organization, member };
     });
 
+    // Auditoria da criação (admin/bypass). Ator pode ser nulo — o endpoint é
+    // protegido por bypass key, sem usuário logado. Não bloqueia se falhar.
+    this.recordOrganizationAuditLog({
+      organizationId: result.organization.id,
+      actorUserId: context?.actorUserId ?? null,
+      ip: context?.ip ?? null,
+      action: 'Organização criada (admin)',
+      metadata: {
+        kind: 'ORGANIZATION_CREATE',
+        source: 'admin',
+        provisionedOwner: !!result.member,
+      },
+    }).catch((err) =>
+      this.logger.warn(
+        `Falha ao registrar auditoria de criação de organização (org=${result.organization.id}): ${err?.message ?? err}`,
+      ),
+    );
+
     // Boas-vindas vai pro e-mail de CONTATO da organização (fallback: dono).
     // Envia mesmo SEM member — criação via admin não tem owner logado, então
     // antes o e-mail nunca saía. Basta haver um destinatário.
@@ -668,9 +690,14 @@ export class OrganizationsService {
    * Unicidade validada ANTES da transação (409 amigável); race residual coberta
    * pelo P2002→409 do AllExceptionsFilter.
    */
-  async signupOrganizer(dto: OrganizerSignupDto) {
+  async signupOrganizer(
+    dto: OrganizerSignupDto,
+    context?: { ip?: string | null; userAgent?: string | null },
+  ) {
     const prismaRead = this.prisma.getReadClient();
     const prismaWrite = this.prisma.getWriteClient();
+    const acceptanceIp = context?.ip ?? null;
+    const acceptanceUserAgent = context?.userAgent ?? null;
 
     const isPJ = dto.personType === SignupPersonType.PJ;
     // Documento da ORG: PJ = CNPJ próprio; PF = CPF do responsável (mesma pessoa).
@@ -814,8 +841,46 @@ export class OrganizationsService {
         },
       });
 
+      // Registro de aceite eletrônico — um por contrato (prova da manifestação de
+      // vontade, Contrato Principal cl. 4.4). Dentro da transação: se a org é
+      // criada, o registro de aceite EXISTE atomicamente. Versões autoritativas
+      // do servidor (ORGANIZER_CONTRACTS); o submit do wizard já gateia os 4.
+      await tx.contractAcceptance.createMany({
+        data: ORGANIZER_CONTRACTS.map((c) => ({
+          userId: user.id,
+          organizationId: organization.id,
+          contractId: c.id,
+          version: c.version,
+          ip: acceptanceIp,
+          userAgent: acceptanceUserAgent,
+        })),
+      });
+
       return { user, organization, member };
     });
+
+    // Auditoria da criação (fora da transação, como os demais logs de auditoria).
+    // Ator = o próprio owner recém-criado (auto-cadastro). Não bloqueia o cadastro
+    // se falhar.
+    this.recordOrganizationAuditLog({
+      organizationId: result.organization.id,
+      actorUserId: result.user.id,
+      ip: acceptanceIp,
+      action: 'Organização criada (auto-cadastro)',
+      metadata: {
+        kind: 'ORGANIZATION_CREATE',
+        source: 'self-signup',
+        personType: dto.personType,
+        acceptedContracts: ORGANIZER_CONTRACTS.map((c) => ({
+          contractId: c.id,
+          version: c.version,
+        })),
+      },
+    }).catch((err) =>
+      this.logger.warn(
+        `Falha ao registrar auditoria de criação de organização (org=${result.organization.id}): ${err?.message ?? err}`,
+      ),
+    );
 
     // Boas-vindas (fire-and-forget) — mesmo helper do fluxo admin.
     // Envia para AMBOS os e-mails do cadastro (login + contato da organização).

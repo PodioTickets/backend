@@ -608,8 +608,12 @@ export class OrganizationsController {
   @ApiBody({ type: CreateOrganizationDto })
   @ApiResponse({ status: 201, description: 'Organization created successfully' })
   @ApiResponse({ status: 401, description: 'Unauthorized - Invalid or missing bypass key' })
-  async createOrganizationAsAdmin(@Body() createDto: CreateOrganizationDto) {
-    return this.organizationsService.createOrganization(createDto);
+  async createOrganizationAsAdmin(@Request() req, @Body() createDto: CreateOrganizationDto) {
+    // Endpoint bypass (sem usuário logado) — ator nulo; registra ao menos o IP.
+    return this.organizationsService.createOrganization(createDto, {
+      actorUserId: null,
+      ip: clientIp(req),
+    });
   }
 
   @Get('admin/audit-logs')
