@@ -9,6 +9,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { OrganizerMemberAccessService } from '../organizations/organizer-member-access.service';
 import { EmailService } from '../../common/services/email.service';
 import { PaymentsRefundService } from '../payments/payments-refund.service';
+import { OrganizationAuditService } from '../../common/services/organization-audit.service';
 import { PaymentMethod, PaymentStatus, WithdrawalStatus } from '@prisma/client';
 import { computeRefundImpact, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 import {
@@ -200,6 +201,7 @@ export class RepasseService {
     private readonly organizerMemberAccess: OrganizerMemberAccessService,
     private readonly emailService: EmailService,
     private readonly refundService: PaymentsRefundService,
+    private readonly organizationAudit: OrganizationAuditService,
   ) {}
 
   // ─── Email helpers ───────────────────────────────────────────────────────
@@ -1004,7 +1006,12 @@ export class RepasseService {
    * de forma AUTORITATIVA no servidor (a prévia do front é só ilustrativa) e trava
    * o evento com advisory lock pra serializar pedidos concorrentes.
    */
-  async requestAnticipation(userId: string, eventId: string, amount: number) {
+  async requestAnticipation(
+    userId: string,
+    eventId: string,
+    amount: number,
+    clientIp?: string | null,
+  ) {
     await this.assertAccess(userId, eventId);
     if (!amount || amount <= 0) {
       throw new BadRequestException('O valor deve ser maior que zero');
@@ -1072,6 +1079,29 @@ export class RepasseService {
         },
       });
     });
+
+    // Trilha de auditoria ORG-scoped (best-effort — fora da tx pra não arriscar
+    // rollback do pedido já persistido). Resolve a org dona do evento.
+    const evtOrg = await this.prisma
+      .getReadClient()
+      .event.findUnique({ where: { id: eventId }, select: { organizationId: true } });
+    if (evtOrg) {
+      await this.organizationAudit.record({
+        organizationId: evtOrg.organizationId,
+        actorUserId: userId,
+        ip: clientIp ?? null,
+        action: 'Solicitou antecipação de recebíveis',
+        metadata: {
+          kind: 'ANTICIPATION_REQUEST',
+          eventId,
+          anticipationId: anticipation.id,
+          amount: anticipation.amount,
+          costAmount: anticipation.costAmount,
+          netAmount: anticipation.netAmount,
+          monthlyRate: anticipation.monthlyRate,
+        },
+      });
+    }
 
     return { message: 'Anticipation requested successfully', data: { anticipation } };
   }
@@ -1264,7 +1294,13 @@ export class RepasseService {
     };
   }
 
-  async requestWithdrawal(userId: string, eventId: string, amount: number, pixKeyId: string) {
+  async requestWithdrawal(
+    userId: string,
+    eventId: string,
+    amount: number,
+    pixKeyId: string,
+    clientIp?: string | null,
+  ) {
     await this.assertAccess(userId, eventId);
 
     if (!amount || amount <= 0) {
@@ -1370,6 +1406,23 @@ export class RepasseService {
           pixKeySnapshot,
         },
       });
+    });
+
+    // Trilha de auditoria ORG-scoped (best-effort — nunca derruba o saque já criado).
+    // organizationId vem do `pixContext` (org dona do evento/chave PIX).
+    await this.organizationAudit.record({
+      organizationId: pixContext.organizationId,
+      actorUserId: userId,
+      ip: clientIp ?? null,
+      action: `Solicitou um saque de ${this.formatBRL(withdrawal.amount)}`,
+      metadata: {
+        kind: 'WITHDRAWAL_REQUEST',
+        eventId,
+        withdrawalId: withdrawal.id,
+        amount: withdrawal.amount,
+        netAmount: withdrawal.netAmount,
+        pixKeyId: selectedKey.id,
+      },
     });
 
     // Fire-and-forget: send transfer requested email to organizer

@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { RepasseService } from '../repasse.service';
 import { REFUND_FEE_RATE } from '../../../common/utils/refund.util';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { OrganizationAuditService } from '../../../common/services/organization-audit.service';
 import { OrganizerMemberAccessService } from '../../organizations/organizer-member-access.service';
 import { EmailService } from '../../../common/services/email.service';
 import { PaymentsRefundService } from '../../payments/payments-refund.service';
@@ -84,6 +85,7 @@ describe('RepasseService — lógica de estorno (calcBreakdown)', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         RepasseService,
+        { provide: OrganizationAuditService, useValue: { record: jest.fn(), recordForEvent: jest.fn() } },
         { provide: PrismaService, useValue: mockPrisma },
         { provide: OrganizerMemberAccessService, useValue: mockAccess },
         { provide: EmailService, useValue: mockEmail },
@@ -285,6 +287,7 @@ describe('RepasseService.getSummary — integração pós-estorno (roteiro)', ()
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         RepasseService,
+        { provide: OrganizationAuditService, useValue: { record: jest.fn(), recordForEvent: jest.fn() } },
         { provide: PrismaService, useValue: mockPrisma },
         { provide: OrganizerMemberAccessService, useValue: mockAccess },
         { provide: EmailService, useValue: mockEmail },
@@ -382,6 +385,7 @@ describe('RepasseService.getRefunded — detalhe do estorno p/ o organizador', (
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         RepasseService,
+        { provide: OrganizationAuditService, useValue: { record: jest.fn(), recordForEvent: jest.fn() } },
         { provide: PrismaService, useValue: mockPrisma },
         { provide: OrganizerMemberAccessService, useValue: mockAccess },
         { provide: EmailService, useValue: mockEmail },
@@ -454,6 +458,7 @@ describe('RepasseService.refundOrder (organizador c/ permissão financeira)', ()
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         RepasseService,
+        { provide: OrganizationAuditService, useValue: { record: jest.fn(), recordForEvent: jest.fn() } },
         { provide: PrismaService, useValue: mockPrisma },
         { provide: OrganizerMemberAccessService, useValue: mockAccess },
         { provide: EmailService, useValue: {} },

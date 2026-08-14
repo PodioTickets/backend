@@ -7,10 +7,14 @@ import {
   ReorderTicketCategoriesDto,
 } from './dto/create-ticket-category.dto';
 import { stripDeletedCategoryFromKitSelectionDisplay } from '../events/kit-selection-display.prune';
+import { OrganizationAuditService } from '../../common/services/organization-audit.service';
 
 @Injectable()
 export class TicketCategoriesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditService: OrganizationAuditService,
+  ) {}
 
   /** JSON da API usa `sortOrder`; no Prisma o campo do modelo é `order` (@map "sortOrder" no DB). */
   private categoryToApi<T extends { order: number }>(
@@ -20,7 +24,12 @@ export class TicketCategoriesService {
     return { ...rest, sortOrder: order } as Omit<T, 'order'> & { sortOrder: number };
   }
 
-  async create(userId: string, eventId: string, createCategoryDto: CreateTicketCategoryDto) {
+  async create(
+    userId: string,
+    eventId: string,
+    createCategoryDto: CreateTicketCategoryDto,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -41,6 +50,14 @@ export class TicketCategoriesService {
         order: nextOrder,
         eventId,
       },
+    });
+
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'TICKET_CATEGORY_CREATE',
+      action: (ev) => `Criou a categoria "${category.name}" no evento "${ev}"`,
+      extra: { categoryId: category.id },
     });
 
     return {
@@ -74,6 +91,7 @@ export class TicketCategoriesService {
     eventId: string,
     categoryId: string,
     updateCategoryDto: UpdateTicketCategoryDto,
+    clientIp?: string | null,
   ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
@@ -103,6 +121,14 @@ export class TicketCategoriesService {
       data,
     });
 
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'TICKET_CATEGORY_UPDATE',
+      action: (ev) => `Editou a categoria "${updatedCategory.name}" no evento "${ev}"`,
+      extra: { categoryId, fieldsEdited: Object.keys(updateCategoryDto) },
+    });
+
     return {
       message: 'Ticket category updated successfully',
       data: { category: this.categoryToApi(updatedCategory) },
@@ -113,6 +139,7 @@ export class TicketCategoriesService {
     userId: string,
     eventId: string,
     dto: ReorderTicketCategoriesDto,
+    clientIp?: string | null,
   ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
@@ -162,13 +189,26 @@ export class TicketCategoriesService {
       },
     });
 
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'TICKET_CATEGORY_REORDER',
+      action: (ev) => `Reordenou as categorias do evento "${ev}"`,
+      extra: { categoryIds: incoming },
+    });
+
     return {
       message: 'Ticket categories reordered successfully',
       data: { categories: categories.map((c) => this.categoryToApi(c)) },
     };
   }
 
-  async remove(userId: string, eventId: string, categoryId: string) {
+  async remove(
+    userId: string,
+    eventId: string,
+    categoryId: string,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -210,6 +250,14 @@ export class TicketCategoriesService {
         }
       }
       await tx.ticketCategory.delete({ where: { id: categoryId } });
+    });
+
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'TICKET_CATEGORY_DELETE',
+      action: (ev) => `Excluiu a categoria "${category.name}" do evento "${ev}"`,
+      extra: { categoryId },
     });
 
     return {

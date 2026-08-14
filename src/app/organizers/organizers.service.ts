@@ -3,6 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { CreateOrganizerDto, UpdateOrganizerDto } from './dto/create-organizer.dto';
 import { EmailService } from '../../common/services/email.service';
 import { WhatsAppService } from '../../common/services/whatsapp.service';
+import { OrganizationAuditService } from '../../common/services/organization-audit.service';
 
 /**
  * Remove URLs e domínios do texto da mensagem para evitar spam/phishing.
@@ -31,9 +32,14 @@ export class OrganizersService {
     private readonly prisma: PrismaService,
     private readonly emailService: EmailService,
     private readonly whatsappService: WhatsAppService,
+    private readonly organizationAudit: OrganizationAuditService,
   ) {}
 
-  async create(userId: string, createOrganizerDto: CreateOrganizerDto) {
+  async create(
+    userId: string,
+    createOrganizerDto: CreateOrganizerDto,
+    clientIp?: string | null,
+  ) {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
@@ -88,6 +94,19 @@ export class OrganizersService {
       });
 
       return { organization, member };
+    });
+
+    // Trilha de auditoria ORG-scoped: perfil de organizador recém-criado.
+    // A org está claramente associada (recém-criada nesta transação).
+    await this.organizationAudit.record({
+      organizationId: result.organization.id,
+      actorUserId: userId,
+      ip: clientIp ?? null,
+      action: 'Criou o perfil de organizador',
+      metadata: {
+        kind: 'ORGANIZER_PROFILE_CREATE',
+        organizationName: result.organization.name,
+      },
     });
 
     // Boas-vindas vai pro e-mail de CONTATO da organização (fallback: e-mail do dono).
@@ -208,7 +227,11 @@ export class OrganizersService {
     };
   }
 
-  async update(userId: string, updateOrganizerDto: UpdateOrganizerDto) {
+  async update(
+    userId: string,
+    updateOrganizerDto: UpdateOrganizerDto,
+    clientIp?: string | null,
+  ) {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
@@ -244,6 +267,22 @@ export class OrganizersService {
             },
           },
         },
+      },
+    });
+
+    // Trilha de auditoria ORG-scoped. `fieldsEdited` = campos efetivamente
+    // enviados no DTO (chaves com valor definido).
+    const fieldsEdited = Object.keys(updateOrganizerDto).filter(
+      (k) => (updateOrganizerDto as Record<string, unknown>)[k] !== undefined,
+    );
+    await this.organizationAudit.record({
+      organizationId: member.organizationId,
+      actorUserId: userId,
+      ip: clientIp ?? null,
+      action: 'Atualizou o perfil de organizador',
+      metadata: {
+        kind: 'ORGANIZER_PROFILE_UPDATE',
+        fieldsEdited,
       },
     });
 

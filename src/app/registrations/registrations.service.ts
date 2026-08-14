@@ -28,6 +28,7 @@ import {
   TicketPdfRegistration,
 } from '../../common/services/ticket-pdf.service';
 import { PaymentsService } from '../payments/payments.service';
+import { OrganizationAuditService } from '../../common/services/organization-audit.service';
 
 
 /**
@@ -77,7 +78,20 @@ export class RegistrationsService {
     // painel. RegistrationsModule importa OrganizationsModule (sem ciclo — a org
     // não depende de registrations).
     private readonly organizerMemberAccess: OrganizerMemberAccessService,
+    // Trilha de auditoria do organizador/admin: registra TODA operação de escrita
+    // de inscrição (criar cortesia, editar participante/respostas/variação,
+    // cancelar, reenviar e-mail). Best-effort e fora da tx — nunca derruba a ação.
+    private readonly auditService: OrganizationAuditService,
   ) { }
+
+  /**
+   * Rótulo curto e estável da inscrição p/ a trilha de auditoria. A `Registration`
+   * não tem um "número" legível (id é UUID) — os 8 primeiros chars bastam p/ o
+   * operador localizar a inscrição no painel sem poluir o texto com o UUID inteiro.
+   */
+  private registrationShortId(id: string): string {
+    return `#${id.slice(0, 8)}`;
+  }
 
   private async isAdminUser(userId: string): Promise<boolean> {
     const user = await this.prisma.getReadClient().user.findUnique({
@@ -102,7 +116,11 @@ export class RegistrationsService {
     }
   }
 
-  async create(userId: string, createRegistrationDto: CreateRegistrationWithInvitedUserDto) {
+  async create(
+    userId: string,
+    createRegistrationDto: CreateRegistrationWithInvitedUserDto,
+    clientIp?: string | null,
+  ) {
     const { eventId, modalities, kitItems = [], questionAnswers = [], termsAccepted, rulesAccepted, invitedUser, invitedUserId, couponCode, voucherCode } = createRegistrationDto;
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -435,6 +453,23 @@ export class RegistrationsService {
       ...registration,
       qrCode: `https://www.podioticket.com.br/user/tickets/${registration.id}`,
     };
+
+    // Auditoria (best-effort, fora da tx já commitada): registra a criação da
+    // inscrição — cortesia/adicionar inscrição pelo painel do organizador/admin.
+    const createdParticipant =
+      (registration as any)?.participantName || guestSnapshot?.name || 'participante';
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'REGISTRATION_CREATE',
+      action: (ev) =>
+        `Adicionou a inscrição de ${createdParticipant} ${this.registrationShortId(registration.id)} no evento "${ev}"`,
+      extra: {
+        registrationId: registration.id,
+        orderId: (registration as any)?.orderId ?? null,
+        participantName: createdParticipant,
+      },
+    });
 
     return {
       message: 'Registration created successfully',
@@ -914,6 +949,7 @@ export class RegistrationsService {
     userId: string,
     targetEmail: string,
     ticketOnly = false,
+    clientIp?: string | null,
   ): Promise<{ message: string; ticketCount: number }> {
     const prismaRead = this.prisma.getReadClient();
 
@@ -935,6 +971,7 @@ export class RegistrationsService {
         user: { select: { firstName: true, lastName: true } },
         event: {
           select: {
+            id: true,
             organizationId: true,
             name: true,
             eventDate: true,
@@ -1060,6 +1097,31 @@ export class RegistrationsService {
       `Pedido ${order.id} reenviado para ${targetEmail} ` +
         `(${ticketPdfs.length} ingresso(s)${receiptPdf ? ' + comprovante' : ''}) por ${userId}`,
     );
+
+    // Auditoria (best-effort): reenvio de e-mail do pedido pelo comprador/
+    // organizador/admin. Só chega aqui após o envio ter tido sucesso.
+    const resendEventId = order.event?.id;
+    if (resendEventId) {
+      const targetReg = allRegs.find((r) => r.id === registrationId);
+      const targetName =
+        targetReg?.participantName ||
+        `${targetReg?.user?.firstName ?? ''} ${targetReg?.user?.lastName ?? ''}`.trim() ||
+        'participante';
+      await this.auditService.recordForEvent(resendEventId, {
+        actorUserId: userId,
+        ip: clientIp,
+        kind: 'REGISTRATION_RESEND_EMAIL',
+        action: (ev) =>
+          `Reenviou o e-mail da inscrição de ${targetName} ${this.registrationShortId(registrationId)} para ${targetEmail} no evento "${ev}"`,
+        extra: {
+          registrationId,
+          orderId: order.id,
+          targetEmail,
+          ticketOnly,
+          ticketCount: ticketPdfs.length,
+        },
+      });
+    }
 
     return {
       message: 'E-mail reenviado com sucesso',
@@ -1783,6 +1845,7 @@ export class RegistrationsService {
     productId: string,
     variationId: string,
     userId: string,
+    clientIp?: string | null,
   ) {
     const prismaRead = this.prisma.getReadClient();
 
@@ -1907,6 +1970,23 @@ export class RegistrationsService {
       this.logger.warn(`Variation change email failed for reg ${registrationId}: ${err?.message ?? err}`);
     });
 
+    // Auditoria (best-effort, após a troca já persistida): a variação foi alterada
+    // com sucesso. Loga quem executou (comprador/convidante/admin).
+    await this.auditService.recordForEvent(registration.order.eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'REGISTRATION_VARIATION_UPDATE',
+      action: (ev) =>
+        `Alterou a variação de produto da inscrição de ${(registration as any).participantName || 'participante'} ${this.registrationShortId(registrationId)} no evento "${ev}"`,
+      extra: {
+        registrationId,
+        productId,
+        variationId,
+        previousVariationId,
+        fieldsEdited: ['variation'],
+      },
+    });
+
     return { message: 'Variação atualizada com sucesso' };
   }
 
@@ -1927,6 +2007,7 @@ export class RegistrationsService {
     registrationId: string,
     dto: UpdateRegistrationParticipantDto,
     userId: string,
+    clientIp?: string | null,
   ) {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
@@ -2028,6 +2109,22 @@ export class RegistrationsService {
     await prismaWrite.registration.update({
       where: { id: registrationId },
       data: columnData,
+    });
+
+    // Auditoria (best-effort): edição dos dados do participante concluída.
+    // `fieldsEdited` = só os campos efetivamente enviados no PATCH (diff mínimo).
+    const fieldsEdited = Object.keys(dto).filter(
+      (k) => (dto as Record<string, unknown>)[k] !== undefined,
+    );
+    const editedParticipantName =
+      dto.name ?? snapshot?.participant?.name ?? 'participante';
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'REGISTRATION_PARTICIPANT_UPDATE',
+      action: (ev) =>
+        `Editou o participante da inscrição de ${editedParticipantName} ${this.registrationShortId(registrationId)} no evento "${ev}"`,
+      extra: { registrationId, fieldsEdited },
     });
 
     // Server autoritativo: o front re-hidrata do retorno (mesmo shape do GET).
@@ -2132,6 +2229,7 @@ export class RegistrationsService {
     productId: string,
     variationId: string,
     userId: string,
+    clientIp?: string | null,
   ) {
     const prismaRead = this.prisma.getReadClient();
 
@@ -2197,7 +2295,23 @@ export class RegistrationsService {
       }
     }
 
-    await this.applyVariationChange({ registrationId, productId, variationId, product, regProduct });
+    const { previousVariationId } = await this.applyVariationChange({ registrationId, productId, variationId, product, regProduct });
+
+    // Auditoria (best-effort): troca de variação pelo organizador/admin concluída.
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'REGISTRATION_VARIATION_UPDATE',
+      action: (ev) =>
+        `Alterou a variação de produto da inscrição de ${(registration as any).participantName || 'participante'} ${this.registrationShortId(registrationId)} no evento "${ev}"`,
+      extra: {
+        registrationId,
+        productId,
+        variationId,
+        previousVariationId,
+        fieldsEdited: ['variation'],
+      },
+    });
 
     return this.findOne(registrationId, userId);
   }
@@ -2212,6 +2326,7 @@ export class RegistrationsService {
     registrationId: string,
     answers: { questionId: string; answer: string }[],
     userId: string,
+    clientIp?: string | null,
   ) {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
@@ -2269,6 +2384,20 @@ export class RegistrationsService {
           data: { receiptSnapshot: snapshot as Prisma.InputJsonValue },
         });
       }
+    });
+
+    // Auditoria (best-effort): edição das respostas concluída. `fieldsEdited`
+    // guarda os ids das perguntas alteradas (diff mínimo p/ o painel).
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'REGISTRATION_ANSWERS_UPDATE',
+      action: (ev) =>
+        `Editou as respostas da inscrição ${this.registrationShortId(registrationId)} no evento "${ev}"`,
+      extra: {
+        registrationId,
+        fieldsEdited: answers.map((a) => a.questionId),
+      },
     });
 
     return this.findOne(registrationId, userId);
@@ -2363,7 +2492,7 @@ export class RegistrationsService {
     });
   }
 
-  async cancel(id: string, userId: string) {
+  async cancel(id: string, userId: string, clientIp?: string | null) {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
@@ -2420,6 +2549,21 @@ export class RegistrationsService {
           },
         });
       }
+    });
+
+    // Auditoria (best-effort, após a tx commitada): cancelamento concluído. Loga
+    // quem executou (comprador/participante/convidante/admin). `eventId` vem da
+    // coluna direta da inscrição (sempre presente).
+    await this.auditService.recordForEvent(registration.eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'REGISTRATION_CANCEL',
+      action: (ev) =>
+        `Cancelou a inscrição de ${(registration as any).participantName || 'participante'} ${this.registrationShortId(id)} no evento "${ev}"`,
+      extra: {
+        registrationId: id,
+        orderId: registration.orderId ?? null,
+      },
     });
 
     return {

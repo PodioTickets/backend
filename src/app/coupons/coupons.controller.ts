@@ -31,6 +31,7 @@ import {
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
+import { getClientIp } from '../../common/utils/client-ip.util';
 
 @ApiTags('Coupons')
 @Controller('api/v1/coupons')
@@ -52,7 +53,7 @@ export class CouponsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can create coupons' })
   @ApiResponse({ status: 404, description: 'Event not found' })
   create(@Request() req, @Param('eventId') eventId: string, @Body() createCouponDto: CreateCouponDto) {
-    return this.couponsService.create(req.user.id, eventId, createCouponDto);
+    return this.couponsService.create(req.user.id, eventId, createCouponDto, getClientIp(req));
   }
 
   @Get('events/:eventId')
@@ -170,7 +171,7 @@ export class CouponsController {
     @Param('couponId') couponId: string,
     @Body() updateCouponDto: UpdateCouponDto,
   ) {
-    return this.couponsService.update(req.user.id, eventId, couponId, updateCouponDto);
+    return this.couponsService.update(req.user.id, eventId, couponId, updateCouponDto, getClientIp(req));
   }
 
   @Delete('events/:eventId/:couponId')
@@ -188,6 +189,6 @@ export class CouponsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can delete coupons' })
   @ApiResponse({ status: 404, description: 'Coupon not found' })
   remove(@Request() req, @Param('eventId') eventId: string, @Param('couponId') couponId: string) {
-    return this.couponsService.remove(req.user.id, eventId, couponId);
+    return this.couponsService.remove(req.user.id, eventId, couponId, getClientIp(req));
   }
 }

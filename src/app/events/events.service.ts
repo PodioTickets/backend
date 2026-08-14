@@ -303,6 +303,89 @@ export class EventsService {
     );
   }
 
+  /**
+   * Resolve o membro/organização em que o usuário cria eventos: prefere onde é
+   * OWNER; senão a primeira onde é EMPLOYEE com `create_event`. Fonte ÚNICA de
+   * resolução — usada pelo `create` e pela checagem de disponibilidade de nome.
+   * @throws BadRequestException se não for membro de organização alguma.
+   * @throws ForbiddenException se não tiver permissão de criar eventos.
+   */
+  private async resolveCreateEventMember(userId: string) {
+    const memberships = await this.prisma
+      .getWriteClient()
+      .organizationMember.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'asc' },
+      });
+
+    if (!memberships.length) {
+      throw new BadRequestException('Usuário não é membro de nenhuma organização');
+    }
+
+    let member = memberships.find((m) => m.role === 'OWNER') ?? null;
+    if (!member) {
+      member =
+        memberships.find((m) => {
+          if (m.role !== 'EMPLOYEE') return false;
+          return effectivePermissionsForMember({
+            role: m.role,
+            permissionsJson: m.permissions,
+          }).create_event;
+        }) ?? null;
+    }
+
+    if (!member) {
+      throw new ForbiddenException('Missing permission: create_event');
+    }
+    return member;
+  }
+
+  /**
+   * Nome de evento disponível DENTRO de uma organização. Regra: ÚNICO por
+   * organização (independe da data), comparação case-insensitive + trim.
+   * `excludeEventId` ignora o próprio evento (fluxo de edição). Cliente Prisma
+   * injetável: `create` passa o write client (evita lag de réplica antes de
+   * gravar); o endpoint usa o read client (leitura frequente, escala melhor).
+   */
+  private async isEventNameAvailableForOrg(
+    organizationId: string,
+    name?: string | null,
+    excludeEventId?: string,
+    client: ReturnType<PrismaService['getReadClient']> = this.prisma.getReadClient(),
+  ): Promise<boolean> {
+    const normalized = (name ?? '').trim();
+    if (!normalized) return true; // vazio → tratado pela validação de obrigatório
+    const existing = await client.event.findFirst({
+      where: {
+        organizationId,
+        name: { equals: normalized, mode: 'insensitive' },
+        ...(excludeEventId ? { NOT: { id: excludeEventId } } : {}),
+      },
+      select: { id: true },
+    });
+    return existing === null;
+  }
+
+  /**
+   * Endpoint: nome de evento disponível para o usuário autenticado (na sua org).
+   * Read-only. Sem org/permissão → `true` (não há como duplicar). Espelha a regra
+   * do `create` (`isEventNameAvailableForOrg`), mantendo as duas em sincronia.
+   */
+  async isEventNameAvailable(
+    userId: string,
+    name?: string | null,
+    excludeEventId?: string,
+  ): Promise<boolean> {
+    let organizationId: string;
+    try {
+      const member = await this.resolveCreateEventMember(userId);
+      organizationId = member.organizationId;
+    } catch {
+      return true;
+    }
+    return this.isEventNameAvailableForOrg(organizationId, name, excludeEventId);
+  }
+
   async create(
     userId: string,
     createEventDto: CreateEventDto,
@@ -310,51 +393,19 @@ export class EventsService {
   ) {
     // Verificar se o usuário tem permissão para criar eventos
     const prismaWrite = this.prisma.getWriteClient();
+    const member = await this.resolveCreateEventMember(userId);
 
-    const memberships = await prismaWrite.organizationMember.findMany({
-      where: { userId },
-      include: { organization: true },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    if (!memberships.length) {
-      throw new BadRequestException('Usuário não é membro de nenhuma organização');
-    }
-
-    // Prefere OWNER; fallback para EMPLOYEE com create_event
-    let member = memberships.find((m) => m.role === 'OWNER') ?? null;
-    if (!member) {
-      member =
-        memberships.find((m) => {
-          if (m.role !== 'EMPLOYEE') return false;
-          const perms = effectivePermissionsForMember({
-            role: m.role,
-            permissionsJson: m.permissions,
-          });
-          return perms.create_event;
-        }) ?? null;
-    }
-
-    if (!member) {
-      throw new ForbiddenException('Missing permission: create_event');
-    }
-
-    // Verificar se já existe um evento com o mesmo nome, data e organização
-    const eventDate = new Date(createEventDto.eventDate);
-    const existingEvent = await prismaWrite.event.findFirst({
-      where: {
-        organizationId: member.organizationId,
-        name: createEventDto.name,
-        eventDate: {
-          gte: new Date(eventDate.getTime() - 24 * 60 * 60 * 1000), // 1 dia antes
-          lte: new Date(eventDate.getTime() + 24 * 60 * 60 * 1000), // 1 dia depois
-        },
-      },
-    });
-
-    if (existingEvent) {
+    // Nome do evento é ÚNICO por organização (independe da data). A checagem ao
+    // vivo no wizard (isEventNameAvailable) usa a MESMA regra — manter em sincronia.
+    const nameAvailable = await this.isEventNameAvailableForOrg(
+      member.organizationId,
+      createEventDto.name,
+      undefined,
+      prismaWrite,
+    );
+    if (!nameAvailable) {
       throw new BadRequestException(
-        'An event with the same name and date already exists for this organization',
+        'An event with the same name already exists for this organization',
       );
     }
 
@@ -2153,7 +2204,7 @@ export class EventsService {
     };
   }
 
-  async remove(userId: string, id: string) {
+  async remove(userId: string, id: string, clientIp?: string | null) {
     this.validateUUID(id, 'event ID');
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -2186,6 +2237,17 @@ export class EventsService {
 
     this.cache.del([this.eventCacheKeyById(id), this.eventCacheKeyBySlug(event.slug)])
       .catch(() => undefined);
+
+    await this.organizationsService.recordOrganizationAuditLog({
+      organizationId: event.organizationId,
+      actorUserId: userId,
+      ip: clientIp ?? null,
+      action: `Excluiu o evento "${event.name}"`,
+      metadata: {
+        kind: 'EVENT_DELETE',
+        eventId: id,
+      } as Prisma.InputJsonValue,
+    });
 
     return {
       message: 'Event deleted successfully',
@@ -2273,6 +2335,7 @@ export class EventsService {
     userId: string,
     eventId: string,
     dto: UpdateEventAdsTrackingDto,
+    clientIp?: string | null,
   ) {
     this.validateUUID(eventId, 'event ID');
     await this.organizerMemberAccess.assertCanAccessEvent(
@@ -2286,7 +2349,7 @@ export class EventsService {
 
     const existing = await prismaRead.event.findUnique({
       where: { id: eventId },
-      select: { id: true },
+      select: { id: true, organizationId: true, name: true },
     });
     if (!existing) {
       throw new NotFoundException('Evento não encontrado');
@@ -2322,6 +2385,18 @@ export class EventsService {
 
     this.invalidateEventCacheById(eventId);
 
+    await this.organizationsService.recordOrganizationAuditLog({
+      organizationId: existing.organizationId,
+      actorUserId: userId,
+      ip: clientIp ?? null,
+      action: `Atualizou os pixels de rastreamento do evento "${existing.name}"`,
+      metadata: {
+        kind: 'EVENT_TRACKING_UPDATE',
+        eventId,
+        fieldsEdited: Object.keys(data),
+      } as Prisma.InputJsonValue,
+    });
+
     return {
       message: 'Event tracking updated successfully',
       data: {
@@ -2335,6 +2410,7 @@ export class EventsService {
     userId: string,
     eventId: string,
     createTopicDto: CreateEventTopicDto,
+    clientIp?: string | null,
   ) {
     await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
@@ -2345,6 +2421,15 @@ export class EventsService {
         ...createTopicDto,
         eventId,
       },
+    });
+
+    await this.recordEventResourceAudit({
+      eventId,
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'EVENT_TOPIC_CREATE',
+      actionPrefix: 'Adicionou um tópico ao evento',
+      extraMetadata: { topicId: topic.id },
     });
 
     return {
@@ -2358,6 +2443,7 @@ export class EventsService {
     eventId: string,
     topicId: string,
     updateTopicDto: UpdateEventTopicDto,
+    clientIp?: string | null,
   ) {
     this.validateUUID(topicId, 'topic ID');
     await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
@@ -2377,6 +2463,18 @@ export class EventsService {
       data: updateTopicDto,
     });
 
+    await this.recordEventResourceAudit({
+      eventId,
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'EVENT_TOPIC_UPDATE',
+      actionPrefix: 'Atualizou um tópico do evento',
+      extraMetadata: {
+        topicId,
+        fieldsEdited: Object.keys(updateTopicDto),
+      },
+    });
+
     return {
       message: 'Topic updated successfully',
       data: { topic: updatedTopic },
@@ -2387,6 +2485,7 @@ export class EventsService {
     userId: string,
     eventId: string,
     dto: ReorderEventTopicsDto,
+    clientIp?: string | null,
   ) {
     this.validateUUID(eventId, 'event ID');
     await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
@@ -2430,13 +2529,27 @@ export class EventsService {
       orderBy: { order: 'asc' },
     });
 
+    await this.recordEventResourceAudit({
+      eventId,
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'EVENT_TOPIC_REORDER',
+      actionPrefix: 'Reordenou os tópicos do evento',
+      extraMetadata: { topicIds: incoming },
+    });
+
     return {
       message: 'Topics reordered successfully',
       data: { topics },
     };
   }
 
-  async deleteTopic(userId: string, eventId: string, topicId: string) {
+  async deleteTopic(
+    userId: string,
+    eventId: string,
+    topicId: string,
+    clientIp?: string | null,
+  ) {
     this.validateUUID(topicId, 'topic ID');
     await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
@@ -2460,6 +2573,15 @@ export class EventsService {
       where: { id: topicId },
     });
 
+    await this.recordEventResourceAudit({
+      eventId,
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'EVENT_TOPIC_DELETE',
+      actionPrefix: 'Removeu um tópico do evento',
+      extraMetadata: { topicId },
+    });
+
     return {
       message: 'Topic deleted successfully',
     };
@@ -2470,6 +2592,7 @@ export class EventsService {
     userId: string,
     eventId: string,
     createLocationDto: CreateEventLocationDto,
+    clientIp?: string | null,
   ) {
     await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
@@ -2480,6 +2603,15 @@ export class EventsService {
         ...createLocationDto,
         eventId,
       },
+    });
+
+    await this.recordEventResourceAudit({
+      eventId,
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'EVENT_LOCATION_CREATE',
+      actionPrefix: 'Adicionou um local ao evento',
+      extraMetadata: { locationId: location.id },
     });
 
     return {
@@ -2493,6 +2625,7 @@ export class EventsService {
     eventId: string,
     locationId: string,
     updateLocationDto: CreateEventLocationDto,
+    clientIp?: string | null,
   ) {
     this.validateUUID(locationId, 'location ID');
     await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
@@ -2512,13 +2645,30 @@ export class EventsService {
       data: updateLocationDto,
     });
 
+    await this.recordEventResourceAudit({
+      eventId,
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'EVENT_LOCATION_UPDATE',
+      actionPrefix: 'Atualizou um local do evento',
+      extraMetadata: {
+        locationId,
+        fieldsEdited: Object.keys(updateLocationDto),
+      },
+    });
+
     return {
       message: 'Location updated successfully',
       data: { location: updatedLocation },
     };
   }
 
-  async deleteLocation(userId: string, eventId: string, locationId: string) {
+  async deleteLocation(
+    userId: string,
+    eventId: string,
+    locationId: string,
+    clientIp?: string | null,
+  ) {
     this.validateUUID(locationId, 'location ID');
     await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
@@ -2534,6 +2684,15 @@ export class EventsService {
 
     await prismaWrite.eventLocation.delete({
       where: { id: locationId },
+    });
+
+    await this.recordEventResourceAudit({
+      eventId,
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'EVENT_LOCATION_DELETE',
+      actionPrefix: 'Removeu um local do evento',
+      extraMetadata: { locationId },
     });
 
     return {
@@ -2552,6 +2711,40 @@ export class EventsService {
       eventId,
       requiredPermission,
     );
+  }
+
+  /**
+   * Helper de auditoria para recursos aninhados do evento (tópicos/locais).
+   * Resolve organizationId + nome do evento numa leitura enxuta e delega ao
+   * mesmo mecanismo já usado por create/update (organizationsService).
+   * Fire-and-forget defensivo: se o evento sumiu entre a operação e o log,
+   * apenas não registra — nunca quebra a operação principal.
+   */
+  private async recordEventResourceAudit(params: {
+    eventId: string;
+    actorUserId: string;
+    ip?: string | null;
+    kind: string;
+    actionPrefix: string;
+    extraMetadata?: Record<string, unknown>;
+  }) {
+    const event = await this.prisma.getReadClient().event.findUnique({
+      where: { id: params.eventId },
+      select: { organizationId: true, name: true },
+    });
+    if (!event) return;
+
+    await this.organizationsService.recordOrganizationAuditLog({
+      organizationId: event.organizationId,
+      actorUserId: params.actorUserId,
+      ip: params.ip ?? null,
+      action: `${params.actionPrefix} "${event.name}"`,
+      metadata: {
+        kind: params.kind,
+        eventId: params.eventId,
+        ...(params.extraMetadata ?? {}),
+      } as Prisma.InputJsonValue,
+    });
   }
 
   private buildFinancialSettingsPayload(event: any) {
@@ -2603,6 +2796,7 @@ export class EventsService {
       acceptedPaymentMethods?: string[];
     },
     opts: { bypassLock?: boolean } = {},
+    clientIp?: string | null,
   ) {
     await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
@@ -2664,6 +2858,15 @@ export class EventsService {
     // acceptedPaymentMethods do payload público (TTL 30s degrada o resto).
     this.invalidateEventCacheById(eventId);
 
+    await this.recordEventResourceAudit({
+      eventId,
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'EVENT_FINANCIAL_UPDATE',
+      actionPrefix: 'Atualizou as configurações financeiras do evento',
+      extraMetadata: { fieldsEdited: Object.keys(data) },
+    });
+
     const updated = await prismaWrite.event.findUnique({
       where: { id: eventId },
       select: this.financialSettingsSelect(),
@@ -2672,7 +2875,7 @@ export class EventsService {
     return { data: this.buildFinancialSettingsPayload(updated) };
   }
 
-  async publish(userId: string, eventId: string) {
+  async publish(userId: string, eventId: string, clientIp?: string | null) {
     await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -2713,6 +2916,17 @@ export class EventsService {
     });
 
     this.invalidateEventCacheById(eventId);
+
+    await this.organizationsService.recordOrganizationAuditLog({
+      organizationId: event.organizationId,
+      actorUserId: userId,
+      ip: clientIp ?? null,
+      action: `Publicou o evento "${event.name}"`,
+      metadata: {
+        kind: 'EVENT_PUBLISH',
+        eventId,
+      } as Prisma.InputJsonValue,
+    });
 
     // Buscar e-mail e nome do organizador para notificação
     const organizer = await prismaRead.user.findUnique({
@@ -2755,7 +2969,7 @@ export class EventsService {
    * Suspende o evento (some da vitrine pública e bloqueia novas inscrições).
    * Apenas eventos PUBLISHED podem ser suspensos.
    */
-  async suspend(userId: string, eventId: string) {
+  async suspend(userId: string, eventId: string, clientIp?: string | null) {
     await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -2780,6 +2994,17 @@ export class EventsService {
 
     this.invalidateEventCacheById(eventId);
 
+    await this.organizationsService.recordOrganizationAuditLog({
+      organizationId: event.organizationId,
+      actorUserId: userId,
+      ip: clientIp ?? null,
+      action: `Suspendeu o evento "${event.name}"`,
+      metadata: {
+        kind: 'EVENT_SUSPEND',
+        eventId,
+      } as Prisma.InputJsonValue,
+    });
+
     return {
       message: 'Evento suspenso com sucesso',
       data: { event: updatedEvent },
@@ -2789,7 +3014,7 @@ export class EventsService {
   /**
    * Volta o evento para publicado após suspensão (reaparece na vitrine).
    */
-  async resumePublished(userId: string, eventId: string) {
+  async resumePublished(userId: string, eventId: string, clientIp?: string | null) {
     await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -2813,6 +3038,17 @@ export class EventsService {
     });
 
     this.invalidateEventCacheById(eventId);
+
+    await this.organizationsService.recordOrganizationAuditLog({
+      organizationId: event.organizationId,
+      actorUserId: userId,
+      ip: clientIp ?? null,
+      action: `Retomou o evento "${event.name}"`,
+      metadata: {
+        kind: 'EVENT_RESUME',
+        eventId,
+      } as Prisma.InputJsonValue,
+    });
 
     return {
       message: 'Evento reativado com sucesso',
@@ -4169,6 +4405,12 @@ export class EventsService {
           serviceFee: this.normalizeToCents(reg.order.serviceFee), // Normalizar para centavos
           discount: this.normalizeToCents(reg.order.discount), // Normalizar para centavos
           finalAmount: this.normalizeToCents(reg.order.finalAmount), // Normalizar para centavos
+          // Sinais para derivar o status "Voucher" na lista (frontend):
+          // - isCourtesy: pedido criado pelo painel "adicionar inscrição" (cortesia).
+          // - voucherId: pedido usou voucher; combinado com finalAmount === 0
+          //   define voucher totalmente grátis (com valor pago vira "Pago").
+          isCourtesy: reg.order.isCourtesy,
+          voucherId: reg.order.voucherId ?? null,
           purchaseDate: reg.order.createdAt.toISOString(), // Data do pedido
           // Informações do comprador (quem fez o pedido/pagamento)
           buyer: this.resolveOrderBuyer(reg.order),

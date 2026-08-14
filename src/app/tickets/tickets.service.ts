@@ -77,7 +77,12 @@ export class TicketsService {
     return `tickets:list:${eventId}:org:${isOrganizer ? 1 : 0}:cat:${categoryId ?? 'all'}:p:${page}:l:${limit}:inact:${includeInactive ? 1 : 0}:base:${baseUrl ?? ''}`;
   }
 
-  async create(userId: string, eventId: string, createTicketDto: CreateTicketDto) {
+  async create(
+    userId: string,
+    eventId: string,
+    createTicketDto: CreateTicketDto,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -193,6 +198,25 @@ export class TicketsService {
 
       return created;
     });
+
+    // Auditoria best-effort: registra a criação do ingresso na trilha da organização.
+    const eventRecord = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: { organizationId: true, name: true },
+    });
+    if (eventRecord) {
+      await this.organizationsService.recordOrganizationAuditLog({
+        organizationId: eventRecord.organizationId,
+        actorUserId: userId,
+        ip: clientIp ?? null,
+        action: `Criou o ingresso "${ticket.name}" no evento "${eventRecord.name}"`,
+        metadata: {
+          kind: 'TICKET_CREATE',
+          eventId,
+          ticketId: ticket.id,
+        } as Prisma.InputJsonValue,
+      });
+    }
 
     return {
       message: 'Ticket created successfully',
@@ -839,10 +863,16 @@ export class TicketsService {
     };
   }
 
-  async remove(userId: string, eventId: string, ticketId: string) {
+  async remove(
+    userId: string,
+    eventId: string,
+    ticketId: string,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
 
     const ticket = await prismaWrite.ticket.findUnique({
       where: { id: ticketId },
@@ -896,12 +926,36 @@ export class TicketsService {
       });
     }
 
+    // Auditoria best-effort: registra a exclusão do ingresso na trilha da organização.
+    const eventRecord = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: { organizationId: true, name: true },
+    });
+    if (eventRecord) {
+      await this.organizationsService.recordOrganizationAuditLog({
+        organizationId: eventRecord.organizationId,
+        actorUserId: userId,
+        ip: clientIp ?? null,
+        action: `Excluiu o ingresso "${ticket.name}" do evento "${eventRecord.name}"`,
+        metadata: {
+          kind: 'TICKET_DELETE',
+          eventId,
+          ticketId,
+        } as Prisma.InputJsonValue,
+      });
+    }
+
     return {
       message: 'Ticket deleted successfully',
     };
   }
 
-  async duplicate(userId: string, eventId: string, ticketId: string) {
+  async duplicate(
+    userId: string,
+    eventId: string,
+    ticketId: string,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -1002,6 +1056,25 @@ export class TicketsService {
       },
       productIds: duplicatedTicket.products.map((tp) => tp.productId),
     };
+
+    // Auditoria best-effort: registra a duplicação do ingresso na trilha da organização.
+    const eventRecord = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: { organizationId: true, name: true },
+    });
+    if (eventRecord) {
+      await this.organizationsService.recordOrganizationAuditLog({
+        organizationId: eventRecord.organizationId,
+        actorUserId: userId,
+        ip: clientIp ?? null,
+        action: `Duplicou o ingresso "${duplicatedTicket.name}" no evento "${eventRecord.name}"`,
+        metadata: {
+          kind: 'TICKET_DUPLICATE',
+          eventId,
+          ticketId: duplicatedTicket.id,
+        } as Prisma.InputJsonValue,
+      });
+    }
 
     return {
       message: 'Ticket duplicated successfully',

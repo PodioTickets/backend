@@ -15,6 +15,7 @@ import {
 } from './dto/create-ticket-category.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
+import { getClientIp } from '../../common/utils/client-ip.util';
 
 @ApiTags('Ticket Categories')
 @Controller('api/v1/tickets')
@@ -42,7 +43,7 @@ export class TicketCategoriesController {
     @Param('eventId') eventId: string,
     @Body() createCategoryDto: CreateTicketCategoryDto,
   ) {
-    return this.ticketCategoriesService.create(req.user.id, eventId, createCategoryDto);
+    return this.ticketCategoriesService.create(req.user.id, eventId, createCategoryDto, getClientIp(req));
   }
 
   @Get('events/:eventId/categories')
@@ -80,7 +81,7 @@ export class TicketCategoriesController {
     @Param('eventId') eventId: string,
     @Body() body: ReorderTicketCategoriesDto,
   ) {
-    return this.ticketCategoriesService.reorder(req.user.id, eventId, body);
+    return this.ticketCategoriesService.reorder(req.user.id, eventId, body, getClientIp(req));
   }
 
   @Patch('events/:eventId/categories/:categoryId')
@@ -106,7 +107,7 @@ export class TicketCategoriesController {
     @Param('categoryId') categoryId: string,
     @Body() updateCategoryDto: UpdateTicketCategoryDto,
   ) {
-    return this.ticketCategoriesService.update(req.user.id, eventId, categoryId, updateCategoryDto);
+    return this.ticketCategoriesService.update(req.user.id, eventId, categoryId, updateCategoryDto, getClientIp(req));
   }
 
   @Delete('events/:eventId/categories/:categoryId')
@@ -131,6 +132,6 @@ export class TicketCategoriesController {
     @Param('eventId') eventId: string,
     @Param('categoryId') categoryId: string,
   ) {
-    return this.ticketCategoriesService.remove(req.user.id, eventId, categoryId);
+    return this.ticketCategoriesService.remove(req.user.id, eventId, categoryId, getClientIp(req));
   }
 }

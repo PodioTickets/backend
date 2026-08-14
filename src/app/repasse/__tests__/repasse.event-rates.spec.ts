@@ -11,6 +11,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { RepasseService } from '../repasse.service';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { OrganizationAuditService } from '../../../common/services/organization-audit.service';
 import { OrganizerMemberAccessService } from '../../organizations/organizer-member-access.service';
 import { EmailService } from '../../../common/services/email.service';
 import { PaymentsRefundService } from '../../payments/payments-refund.service';
@@ -59,6 +60,7 @@ describe('RepasseService — taxas por evento no calcBreakdown', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         RepasseService,
+        { provide: OrganizationAuditService, useValue: { record: jest.fn(), recordForEvent: jest.fn() } },
         { provide: PrismaService, useValue: mockPrisma },
         { provide: OrganizerMemberAccessService, useValue: { assertCanAccessEvent: jest.fn() } },
         { provide: EmailService, useValue: {} },

@@ -31,6 +31,7 @@ import {
 } from './constants/organizer-permissions';
 import { resolveOrganizerPageViewActionLabel } from './organizer-audit-page-label.util';
 import { formatAuditLogItemForResponse } from './audit-log-item-format.util';
+import { OrganizationAuditService } from '../../common/services/organization-audit.service';
 import { buildAuditChangeDetails } from './audit-log-change-details.util';
 import { diffOrganizationUpdateForAudit } from './organization-audit.helpers';
 import { EmailService } from '../../common/services/email.service';
@@ -43,6 +44,7 @@ export class OrganizationsService {
     private readonly prisma: PrismaService,
     private readonly mfaService: MFAService,
     private readonly emailService: EmailService,
+    private readonly auditService: OrganizationAuditService,
   ) {}
 
   private mapFromKeysOrThrow(keys: string[]): OrganizerPermissionsMap {
@@ -105,62 +107,12 @@ export class OrganizationsService {
     }
   }
 
-  private serializeAuditValue(value: unknown): unknown {
-    if (value === undefined) return null;
-    if (value === null) return null;
-    if (value instanceof Date) return value.toISOString();
-    if (typeof value === 'bigint') return value.toString();
-    if (Array.isArray(value)) {
-      return value.map((v) => this.serializeAuditValue(v));
-    }
-    if (typeof value === 'object') {
-      const o = value as Record<string, unknown> & { toJSON?: () => unknown };
-      if (typeof o.toJSON === 'function') {
-        return this.serializeAuditValue(o.toJSON());
-      }
-      const out: Record<string, unknown> = {};
-      for (const [k, val] of Object.entries(o)) {
-        out[k] = this.serializeAuditValue(val);
-      }
-      return out;
-    }
-    return value;
-  }
 
-  private prepareAuditMetadata(meta: Prisma.InputJsonValue): Prisma.InputJsonValue {
-    if (meta === null || typeof meta !== 'object' || Array.isArray(meta)) {
-      return this.serializeAuditValue(meta) as Prisma.InputJsonValue;
-    }
-    const base = meta as Record<string, unknown>;
-    const out: Record<string, unknown> = { ...base };
-    if (Array.isArray(out.changes)) {
-      out.changes = out.changes.map((entry: unknown) => {
-        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-          return this.serializeAuditValue(entry);
-        }
-        const e = entry as Record<string, unknown>;
-        const oldS = this.serializeAuditValue(e.old);
-        const newS = this.serializeAuditValue(e.new);
-        const row: Record<string, unknown> = {
-          field: e.field,
-          old: oldS,
-          new: newS,
-          valorAnterior: oldS,
-          valorNovo: newS,
-        };
-        if ('label' in e && e.label !== undefined) {
-          row.label = this.serializeAuditValue(e.label);
-        }
-        return row;
-      });
-    }
-    for (const key of Object.keys(out)) {
-      if (key === 'changes') continue;
-      out[key] = this.serializeAuditValue(out[key]);
-    }
-    return out as Prisma.InputJsonValue;
-  }
-
+  /**
+   * Compat: mantém a API pública histórica. Delega ao `OrganizationAuditService`
+   * (CommonModule) — fonte única do sink de auditoria, reusada por todos os
+   * domínios sem puxar este service pesado.
+   */
   async recordOrganizationAuditLog(params: {
     organizationId: string;
     actorUserId: string | null;
@@ -168,19 +120,7 @@ export class OrganizationsService {
     action: string;
     metadata?: Prisma.InputJsonValue;
   }) {
-    const prismaWrite = this.prisma.getWriteClient();
-    await prismaWrite.organizationAuditLog.create({
-      data: {
-        organizationId: params.organizationId,
-        actorUserId: params.actorUserId,
-        ip: params.ip ?? null,
-        action: params.action,
-        metadata:
-          params.metadata === undefined
-            ? Prisma.JsonNull
-            : this.prepareAuditMetadata(params.metadata),
-      },
-    });
+    await this.auditService.record(params);
   }
 
   /** Janela em que F5 na mesma página não gera novo log (por org + usuário + pageKey). */
@@ -1354,7 +1294,12 @@ export class OrganizationsService {
   /**
    * Atualiza apenas o logo da organização (apenas dono)
    */
-  async updateOrganizationLogo(userId: string, organizationId: string, logoUrl: string) {
+  async updateOrganizationLogo(
+    userId: string,
+    organizationId: string,
+    logoUrl: string,
+    clientIp?: string | null,
+  ) {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
@@ -1404,6 +1349,18 @@ export class OrganizationsService {
             },
           },
         },
+      },
+    });
+
+    // Trilha de auditoria ORG-scoped (reusa o sink histórico deste service).
+    await this.recordOrganizationAuditLog({
+      organizationId,
+      actorUserId: userId,
+      ip: clientIp ?? null,
+      action: 'Atualizou o logo da organização',
+      metadata: {
+        kind: 'ORGANIZATION_LOGO_UPDATE',
+        logoUrl,
       },
     });
 

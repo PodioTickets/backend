@@ -11,6 +11,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { CouponsService } from '../coupons.service';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { OrganizationAuditService } from '../../../common/services/organization-audit.service';
 
 describe('CouponsService.previewByCode', () => {
   let service: CouponsService;
@@ -46,7 +47,7 @@ describe('CouponsService.previewByCode', () => {
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
-      providers: [CouponsService, { provide: PrismaService, useValue: mockPrisma }],
+      providers: [CouponsService, { provide: PrismaService, useValue: mockPrisma }, { provide: OrganizationAuditService, useValue: { record: jest.fn(), recordForEvent: jest.fn() } }],
     }).compile();
     service = module.get<CouponsService>(CouponsService);
   });
@@ -276,6 +277,50 @@ describe('CouponsService.previewByCode', () => {
       const res: any = await service.getApplicableAgeCoupons('evt-1', { dateOfBirth: dob20 });
       expect(res.data.applicable).toBe(true);
       expect(mockPrisma.getWriteClient().$queryRaw).not.toHaveBeenCalled();
+    });
+
+    // ── Lista exclusiva de documento (idade E lista) ───────────────────────
+    it('lista ENABLED + CPF do comprador NA lista → aplicável', async () => {
+      setupAge({
+        coupons: [ageCoupon({ maxUsage: null, cpfListStatus: 'ENABLED', cpfList: ['11111111111'], documentList: null })],
+        reserved: 0,
+      });
+      const res: any = await service.getApplicableAgeCoupons('evt-1', {
+        dateOfBirth: dob20, documentType: 'CPF', documentNumber: '111.111.111-11',
+      });
+      expect(res.data.applicable).toBe(true);
+    });
+
+    it('lista ENABLED + CPF do comprador FORA da lista → NÃO aplicável (mesmo na faixa)', async () => {
+      setupAge({
+        coupons: [ageCoupon({ maxUsage: null, cpfListStatus: 'ENABLED', cpfList: ['11111111111'], documentList: null })],
+        reserved: 0,
+      });
+      const res: any = await service.getApplicableAgeCoupons('evt-1', {
+        dateOfBirth: dob20, documentType: 'CPF', documentNumber: '99999999999',
+      });
+      expect(res.data.applicable).toBe(false);
+      expect(res.data.appliedCoupon).toBeNull();
+    });
+
+    it('lista ENABLED + comprador SEM documento → NÃO aplicável (segurança)', async () => {
+      setupAge({
+        coupons: [ageCoupon({ maxUsage: null, cpfListStatus: 'ENABLED', cpfList: ['11111111111'], documentList: null })],
+        reserved: 0,
+      });
+      const res: any = await service.getApplicableAgeCoupons('evt-1', { dateOfBirth: dob20 });
+      expect(res.data.applicable).toBe(false);
+    });
+
+    it('lista DISABLED → aplicável independente do documento (lista ignorada)', async () => {
+      setupAge({
+        coupons: [ageCoupon({ maxUsage: null, cpfListStatus: 'DISABLED', cpfList: ['11111111111'] })],
+        reserved: 0,
+      });
+      const res: any = await service.getApplicableAgeCoupons('evt-1', {
+        dateOfBirth: dob20, documentType: 'CPF', documentNumber: '99999999999',
+      });
+      expect(res.data.applicable).toBe(true);
     });
   });
 
