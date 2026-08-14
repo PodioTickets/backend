@@ -205,6 +205,35 @@ export class EventsController {
     return this.eventsService.findBySlug(slug, userId);
   }
 
+  @Get('name-availability')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @NoCache()
+  @ApiOperation({
+    summary: 'Disponibilidade do nome do evento (na organização do usuário)',
+    description:
+      'Retorna se o nome já pertence a um evento da MESMA organização (regra ' +
+      'name-only, case-insensitive + trim). `excludeEventId` ignora o próprio ' +
+      'evento (edição). Sem org/permissão → available:true. Declarada ANTES de ' +
+      '`:id` para não ser capturada como parâmetro de rota.',
+  })
+  @ApiQuery({ name: 'name', required: true, description: 'Nome do evento' })
+  @ApiQuery({ name: 'excludeEventId', required: false, description: 'UUID do evento a ignorar (edição)' })
+  @ApiResponse({ status: 200, description: '{ available: boolean }' })
+  @ApiResponse({ status: 401, description: 'Não autenticado' })
+  async checkEventNameAvailability(
+    @Request() req: ExpressRequest & { user: { id: string } },
+    @Query('name') name?: string,
+    @Query('excludeEventId') excludeEventId?: string,
+  ) {
+    const available = await this.eventsService.isEventNameAvailable(
+      req.user.id,
+      name,
+      excludeEventId,
+    );
+    return { available };
+  }
+
   @Get(':id')
   @NoCache()
   @UseGuards(OptionalJwtAuthGuard)
@@ -254,7 +283,7 @@ export class EventsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can delete' })
   @ApiResponse({ status: 404, description: 'Event not found' })
   remove(@Request() req, @Param('id') id: string) {
-    return this.eventsService.remove(req.user.id, id);
+    return this.eventsService.remove(req.user.id, id, clientIp(req));
   }
 
   // ── GET /events/:eventId/tickets-management ───────────────────────────────
@@ -336,7 +365,7 @@ export class EventsController {
     @Param('eventId') eventId: string,
     @Body() body: UpdateEventAdsTrackingDto,
   ) {
-    return this.eventsService.updateAdsTracking(req.user.id, eventId, body);
+    return this.eventsService.updateAdsTracking(req.user.id, eventId, body, clientIp(req));
   }
 
   // Event Topics
@@ -351,7 +380,7 @@ export class EventsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can create topics' })
   @ApiResponse({ status: 404, description: 'Event not found' })
   createTopic(@Request() req, @Param('eventId') eventId: string, @Body() createTopicDto: CreateEventTopicDto) {
-    return this.eventsService.createTopic(req.user.id, eventId, createTopicDto);
+    return this.eventsService.createTopic(req.user.id, eventId, createTopicDto, clientIp(req));
   }
 
   @Patch(':eventId/topics/reorder')
@@ -373,7 +402,7 @@ export class EventsController {
     @Param('eventId') eventId: string,
     @Body() body: ReorderEventTopicsDto,
   ) {
-    return this.eventsService.reorderTopics(req.user.id, eventId, body);
+    return this.eventsService.reorderTopics(req.user.id, eventId, body, clientIp(req));
   }
 
   @Patch(':eventId/topics/:topicId')
@@ -393,7 +422,7 @@ export class EventsController {
     @Param('topicId') topicId: string,
     @Body() updateTopicDto: UpdateEventTopicDto,
   ) {
-    return this.eventsService.updateTopic(req.user.id, eventId, topicId, updateTopicDto);
+    return this.eventsService.updateTopic(req.user.id, eventId, topicId, updateTopicDto, clientIp(req));
   }
 
   @Delete(':eventId/topics/:topicId')
@@ -407,7 +436,7 @@ export class EventsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can delete topics' })
   @ApiResponse({ status: 404, description: 'Topic not found' })
   deleteTopic(@Request() req, @Param('eventId') eventId: string, @Param('topicId') topicId: string) {
-    return this.eventsService.deleteTopic(req.user.id, eventId, topicId);
+    return this.eventsService.deleteTopic(req.user.id, eventId, topicId, clientIp(req));
   }
 
   // Event Locations
@@ -422,7 +451,7 @@ export class EventsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can create locations' })
   @ApiResponse({ status: 404, description: 'Event not found' })
   createLocation(@Request() req, @Param('eventId') eventId: string, @Body() createLocationDto: CreateEventLocationDto) {
-    return this.eventsService.createLocation(req.user.id, eventId, createLocationDto);
+    return this.eventsService.createLocation(req.user.id, eventId, createLocationDto, clientIp(req));
   }
 
   @Patch(':eventId/locations/:locationId')
@@ -442,7 +471,7 @@ export class EventsController {
     @Param('locationId') locationId: string,
     @Body() updateLocationDto: CreateEventLocationDto,
   ) {
-    return this.eventsService.updateLocation(req.user.id, eventId, locationId, updateLocationDto);
+    return this.eventsService.updateLocation(req.user.id, eventId, locationId, updateLocationDto, clientIp(req));
   }
 
   @Delete(':eventId/locations/:locationId')
@@ -456,7 +485,7 @@ export class EventsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can delete locations' })
   @ApiResponse({ status: 404, description: 'Location not found' })
   deleteLocation(@Request() req, @Param('eventId') eventId: string, @Param('locationId') locationId: string) {
-    return this.eventsService.deleteLocation(req.user.id, eventId, locationId);
+    return this.eventsService.deleteLocation(req.user.id, eventId, locationId, clientIp(req));
   }
 
   @Get(':eventId/financial-settings')
@@ -507,7 +536,7 @@ export class EventsController {
     @Param('eventId') eventId: string,
     @Body() dto: UpdateFinancialSettingsDto,
   ) {
-    return this.eventsService.updateFinancialSettings(req.user.id, eventId, dto, { bypassLock: req.user.role === 'ADMIN' });
+    return this.eventsService.updateFinancialSettings(req.user.id, eventId, dto, { bypassLock: req.user.role === 'ADMIN' }, clientIp(req));
   }
 
   @Post(':eventId/publish')
@@ -524,7 +553,7 @@ export class EventsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can publish events' })
   @ApiResponse({ status: 404, description: 'Event not found' })
   publish(@Request() req, @Param('eventId') eventId: string) {
-    return this.eventsService.publish(req.user.id, eventId);
+    return this.eventsService.publish(req.user.id, eventId, clientIp(req));
   }
 
   @Post(':eventId/suspend')
@@ -545,7 +574,7 @@ export class EventsController {
   })
   @ApiResponse({ status: 404, description: 'Event not found' })
   suspend(@Request() req, @Param('eventId') eventId: string) {
-    return this.eventsService.suspend(req.user.id, eventId);
+    return this.eventsService.suspend(req.user.id, eventId, clientIp(req));
   }
 
   @Post(':eventId/resume')
@@ -566,7 +595,7 @@ export class EventsController {
   })
   @ApiResponse({ status: 404, description: 'Event not found' })
   resumePublished(@Request() req, @Param('eventId') eventId: string) {
-    return this.eventsService.resumePublished(req.user.id, eventId);
+    return this.eventsService.resumePublished(req.user.id, eventId, clientIp(req));
   }
 
   @Get(':eventId/stats')

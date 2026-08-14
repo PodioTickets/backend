@@ -6,16 +6,26 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateCouponDto, UpdateCouponDto, FilterCouponsDto, CouponStatus } from './dto/create-coupon.dto';
-import { buildDocumentList } from '../../common/utils/document.util';
+import { buildDocumentList, isDocumentInList, cleanDocumentNumber } from '../../common/utils/document.util';
+import { DocumentType } from '@prisma/client';
+import { OrganizationAuditService } from '../../common/services/organization-audit.service';
 import { computeAgeAt } from '../../common/utils/age.util';
 import { brtDayEndUtc } from '../../common/utils/brt-date.util';
 import { sumActiveCouponReservations } from '../../common/utils/coupon-reservation.util';
 
 @Injectable()
 export class CouponsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditService: OrganizationAuditService,
+  ) {}
 
-  async create(userId: string, eventId: string, createCouponDto: CreateCouponDto) {
+  async create(
+    userId: string,
+    eventId: string,
+    createCouponDto: CreateCouponDto,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -95,6 +105,15 @@ export class CouponsService {
       ...coupon,
       appliesTo: this.parseAppliesTo(coupon.appliesTo),
     };
+
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'COUPON_CREATE',
+      action: (ev) =>
+        `Criou o cupom "${coupon.code ?? '(sem código)'}" no evento "${ev}"`,
+      extra: { couponId: coupon.id, couponType: coupon.couponType },
+    });
 
     return {
       message: 'Coupon created successfully',
@@ -410,7 +429,11 @@ export class CouponsService {
    */
   async getApplicableAgeCoupons(
     eventId: string,
-    user: { dateOfBirth?: Date | string | null } | null,
+    user: {
+      dateOfBirth?: Date | string | null;
+      documentType?: DocumentType | null;
+      documentNumber?: string | null;
+    } | null,
   ) {
     const prismaRead = this.prisma.getReadClient();
 
@@ -470,17 +493,37 @@ export class CouponsService {
         note: true,
         usageCount: true,
         maxUsage: true,
+        // Lista exclusiva de documento: quando ENABLED, o AGE só vale para o
+        // documento na lista (idade E lista) — mesmo gate do checkout/pay.
+        cpfListStatus: true,
+        documentList: true,
+        cpfList: true,
       },
       // minAge asc → desempate determinístico caso (dado legado) haja sobreposição.
       orderBy: { minAge: 'asc' },
     });
 
+    // Documento do comprador (conta autenticada) — usado só para o gate da lista
+    // exclusiva. Espelha a idade, que também é avaliada pela conta nesta etapa
+    // (antes de existirem participantes). Sem documento → nunca entra em lista ENABLED.
+    const buyerDocClean = cleanDocumentNumber(user.documentNumber, user.documentType);
+
     // Candidatos pela FAIXA ETÁRIA (invariante de não-sobreposição → normalmente
     // 0 ou 1; ordenados por minAge asc p/ desempate determinístico em dado legado).
+    // Cupom com lista exclusiva ENABLED só entra se o documento do comprador está
+    // na lista — senão o desconto aparecia no /ingressos e sumia (ou era barrado) no pay.
     const ageMatches = ageCoupons.filter((c) => {
       const min = c.minAge ?? 0;
       const max = c.maxAge ?? Number.POSITIVE_INFINITY;
-      return age >= min && age <= max;
+      if (age < min || age > max) return false;
+      if (c.cpfListStatus === 'ENABLED') {
+        return isDocumentInList(
+          { documentType: user.documentType ?? null, documentNumberClean: buyerDocClean || null },
+          c.documentList,
+          c.cpfList,
+        );
+      }
+      return true;
     });
 
     // Esgotamento considera VENDAS (usageCount) + RESERVAS ATIVAS (pedidos PENDING) —
@@ -533,7 +576,13 @@ export class CouponsService {
     };
   }
 
-  async update(userId: string, eventId: string, couponId: string, updateCouponDto: UpdateCouponDto) {
+  async update(
+    userId: string,
+    eventId: string,
+    couponId: string,
+    updateCouponDto: UpdateCouponDto,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -640,13 +689,30 @@ export class CouponsService {
       appliesTo: this.parseAppliesTo(updatedCoupon.appliesTo),
     };
 
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'COUPON_UPDATE',
+      action: (ev) =>
+        `Editou o cupom "${updatedCoupon.code ?? '(sem código)'}" no evento "${ev}"`,
+      extra: {
+        couponId,
+        fieldsEdited: Object.keys(updateCouponDto),
+      },
+    });
+
     return {
       message: 'Coupon updated successfully',
       data: { coupon: transformedCoupon },
     };
   }
 
-  async remove(userId: string, eventId: string, couponId: string) {
+  async remove(
+    userId: string,
+    eventId: string,
+    couponId: string,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -669,6 +735,15 @@ export class CouponsService {
         where: { id: couponId },
       });
     }
+
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'COUPON_DELETE',
+      action: (ev) =>
+        `Excluiu o cupom "${coupon.code ?? '(sem código)'}" do evento "${ev}"`,
+      extra: { couponId },
+    });
 
     return {
       message: 'Coupon deleted successfully',

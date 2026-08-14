@@ -1,12 +1,16 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateKitDto, UpdateKitDto, CreateKitItemDto, UpdateKitItemDto } from './dto/create-kit.dto';
+import { OrganizationAuditService } from '../../common/services/organization-audit.service';
 
 @Injectable()
 export class KitsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditService: OrganizationAuditService,
+  ) {}
 
-  async create(userId: string, eventId: string, createKitDto: CreateKitDto) {
+  async create(userId: string, eventId: string, createKitDto: CreateKitDto, clientIp?: string | null) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     // Usar write client para criação
@@ -33,6 +37,14 @@ export class KitsService {
       include: {
         items: true,
       },
+    });
+
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'KIT_CREATE',
+      action: (ev) => `Criou o kit "${kit.name}" no evento "${ev}"`,
+      extra: { kitId: kit.id },
     });
 
     return {
@@ -97,7 +109,7 @@ export class KitsService {
     };
   }
 
-  async update(userId: string, eventId: string, kitId: string, updateKitDto: UpdateKitDto) {
+  async update(userId: string, eventId: string, kitId: string, updateKitDto: UpdateKitDto, clientIp?: string | null) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -115,13 +127,21 @@ export class KitsService {
       data: updateKitDto,
     });
 
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'KIT_UPDATE',
+      action: (ev) => `Editou o kit "${updatedKit.name}" no evento "${ev}"`,
+      extra: { kitId, fieldsEdited: Object.keys(updateKitDto) },
+    });
+
     return {
       message: 'Kit updated successfully',
       data: { kit: updatedKit },
     };
   }
 
-  async remove(userId: string, eventId: string, kitId: string) {
+  async remove(userId: string, eventId: string, kitId: string, clientIp?: string | null) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -150,13 +170,21 @@ export class KitsService {
       where: { id: kitId },
     });
 
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'KIT_DELETE',
+      action: (ev) => `Excluiu o kit "${kit.name}" do evento "${ev}"`,
+      extra: { kitId },
+    });
+
     return {
       message: 'Kit deleted successfully',
     };
   }
 
   // Kit Items
-  async createItem(userId: string, eventId: string, kitId: string, createItemDto: CreateKitItemDto) {
+  async createItem(userId: string, eventId: string, kitId: string, createItemDto: CreateKitItemDto, clientIp?: string | null) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -194,13 +222,21 @@ export class KitsService {
       },
     });
 
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'KIT_ITEM_CREATE',
+      action: (ev) => `Criou o item "${item.name}" do kit "${kit.name}" no evento "${ev}"`,
+      extra: { kitId, kitItemId: item.id },
+    });
+
     return {
       message: 'Kit item created successfully',
       data: { item },
     };
   }
 
-  async updateItem(userId: string, eventId: string, kitId: string, itemId: string, updateItemDto: UpdateKitItemDto) {
+  async updateItem(userId: string, eventId: string, kitId: string, itemId: string, updateItemDto: UpdateKitItemDto, clientIp?: string | null) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -239,13 +275,21 @@ export class KitsService {
       },
     });
 
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'KIT_ITEM_UPDATE',
+      action: (ev) => `Editou o item "${updatedItem.name}" no evento "${ev}"`,
+      extra: { kitId, kitItemId: itemId, fieldsEdited: Object.keys(updateItemDto) },
+    });
+
     return {
       message: 'Kit item updated successfully',
       data: { item: updatedItem },
     };
   }
 
-  async removeItem(userId: string, eventId: string, kitId: string, itemId: string) {
+  async removeItem(userId: string, eventId: string, kitId: string, itemId: string, clientIp?: string | null) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -267,6 +311,14 @@ export class KitsService {
 
     await prismaWrite.kitItem.delete({
       where: { id: itemId },
+    });
+
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'KIT_ITEM_DELETE',
+      action: (ev) => `Excluiu o item "${item.name}" do evento "${ev}"`,
+      extra: { kitId, kitItemId: itemId },
     });
 
     return {

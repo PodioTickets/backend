@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateQuestionDto, UpdateQuestionDto } from './dto/create-question.dto';
+import { OrganizationAuditService } from '../../common/services/organization-audit.service';
 
 @Injectable()
 export class QuestionsService {
@@ -9,7 +10,10 @@ export class QuestionsService {
   // Tipos que NÃO têm opções: qualquer valor enviado é ignorado (armazenado como null).
   private static readonly NO_OPTION_TYPES = new Set(['text', 'true_false', 'number']);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditService: OrganizationAuditService,
+  ) {}
 
   /**
    * Valida/normaliza `options` conforme o tipo da pergunta.
@@ -51,7 +55,12 @@ export class QuestionsService {
     return Array.isArray(options) ? (options as string[]) : null;
   }
 
-  async create(userId: string, eventId: string, createQuestionDto: CreateQuestionDto) {
+  async create(
+    userId: string,
+    eventId: string,
+    createQuestionDto: CreateQuestionDto,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -79,6 +88,14 @@ export class QuestionsService {
       ...question,
       appliesTo: this.parseAppliesTo(question.appliesTo),
     };
+
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'QUESTION_CREATE',
+      action: (ev) => `Criou a pergunta "${question.question}" no evento "${ev}"`,
+      extra: { questionId: question.id },
+    });
 
     return {
       message: 'Question created successfully',
@@ -134,7 +151,13 @@ export class QuestionsService {
     };
   }
 
-  async update(userId: string, eventId: string, questionId: string, updateQuestionDto: UpdateQuestionDto) {
+  async update(
+    userId: string,
+    eventId: string,
+    questionId: string,
+    updateQuestionDto: UpdateQuestionDto,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -174,13 +197,27 @@ export class QuestionsService {
       appliesTo: this.parseAppliesTo(updatedQuestion.appliesTo),
     };
 
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'QUESTION_UPDATE',
+      action: (ev) =>
+        `Editou a pergunta "${updatedQuestion.question}" no evento "${ev}"`,
+      extra: { questionId, fieldsEdited: Object.keys(updateQuestionDto) },
+    });
+
     return {
       message: 'Question updated successfully',
       data: { question: transformedQuestion },
     };
   }
 
-  async remove(userId: string, eventId: string, questionId: string) {
+  async remove(
+    userId: string,
+    eventId: string,
+    questionId: string,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -206,6 +243,15 @@ export class QuestionsService {
         where: { id: questionId },
       });
     }
+
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'QUESTION_DELETE',
+      action: (ev) =>
+        `Excluiu a pergunta "${question.question}" do evento "${ev}"`,
+      extra: { questionId },
+    });
 
     return {
       message: 'Question deleted successfully',

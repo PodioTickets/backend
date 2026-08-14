@@ -52,6 +52,7 @@ import {
   computeDocEligibleSlots,
   computeVoucherEligibleSlots,
   computeAgeEligibleSlots,
+  computeAgeCouponEligibleSlots,
   computeCouponCoveredUnits,
 } from '../../common/utils/coupon-eligibility.util';
 import { claimVoucher, releaseVoucherByOrder } from '../../common/utils/voucher-reservation.util';
@@ -69,6 +70,7 @@ export {
   computeDocEligibleSlots,
   computeVoucherEligibleSlots,
   computeAgeEligibleSlots,
+  computeAgeCouponEligibleSlots,
   computeCouponCoveredUnits,
 };
 
@@ -402,12 +404,11 @@ export function orderShape(order: any, discountOverride?: number, extra?: Record
   // `maxUsage - usageCount` subtrairia o PRÓPRIO uso já contabilizado no finalize → erraria).
   if (resolvedEffectiveUsage === undefined && coupon?.couponType === 'AGE' && order.status === 'PENDING' && Array.isArray(order.pendingParticipants) && order.pendingParticipants.length > 0) {
     const participants = order.pendingParticipants as any[];
-    const min: number = coupon.minAge ?? 0;
-    const max: number = coupon.maxAge ?? Infinity;
     const refDate = resolveAgeReferenceDate(order);
     const totalUnits = (order.reservedTickets ?? []).reduce((s: number, rt: any) => s + (rt.quantity ?? 1), 0);
     // Lenient (PENDING): slot ainda sem birthDate mantém o cupom aplicado até preencher.
-    const derived = computeAgeEligibleSlots(participants, min, max, refDate, totalUnits, true);
+    // AGE respeita a lista exclusiva de documento quando ENABLED (idade E lista).
+    const derived = computeAgeCouponEligibleSlots(participants, coupon, refDate, totalUnits, true);
     if (derived.length > 0) {
       // Capa pelo uso RESTANTE do cupom (maxUsage − usageCount). Em PENDING o usageCount
       // ainda não conta este pedido (só incrementa no finalize), então é o remaining correto.
@@ -2185,17 +2186,16 @@ export class OrdersService {
     if (order.couponId && !order.voucherId) {
       const existingCoupon = await r.coupon.findUnique({
         where: { id: order.couponId },
-        select: { id: true, couponType: true, type: true, value: true, minAge: true, maxAge: true, maxUsage: true, usageCount: true, appliesTo: true, applyToProducts: true },
+        select: { id: true, couponType: true, type: true, value: true, minAge: true, maxAge: true, maxUsage: true, usageCount: true, appliesTo: true, applyToProducts: true, cpfListStatus: true, documentList: true, cpfList: true },
       });
       if (existingCoupon?.couponType === 'AGE') {
         const refDate = resolveAgeReferenceDate(order);
-        const min = existingCoupon.minAge ?? 0;
-        const max = existingCoupon.maxAge ?? Infinity;
         const totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
         // Lenient (PENDING): slot ainda sem birthDate MANTÉM o cupom aplicado até o comprador
         // preencher; participante preenchido é validado pela idade. Só remove o cupom quando há
         // participantes preenchidos e NENHUM (preenchido ou vazio) qualifica.
-        const ageSlots = computeAgeEligibleSlots(participants, min, max, refDate, totalUnits, true);
+        // AGE respeita a lista exclusiva de documento quando ENABLED (idade E lista).
+        const ageSlots = computeAgeCouponEligibleSlots(participants, existingCoupon, refDate, totalUnits, true);
         const ageMatchCount = ageSlots.length;
 
         if (ageMatchCount <= 0) {
@@ -2260,11 +2260,10 @@ export class OrdersService {
           if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) continue;
         } else if (coupon.couponType === 'AGE') {
           const refDate = resolveAgeReferenceDate(order);
-          const min = coupon.minAge ?? 0;
-          const max = coupon.maxAge ?? Infinity;
           const totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
           // Lenient (PENDING): slot vazio (sem birthDate) conta como elegível até preencher.
-          const ageSlots = computeAgeEligibleSlots(participants, min, max, refDate, totalUnits, true);
+          // AGE respeita a lista exclusiva de documento quando ENABLED (idade E lista).
+          const ageSlots = computeAgeCouponEligibleSlots(participants, coupon, refDate, totalUnits, true);
           if (ageSlots.length <= 0) continue;
           (coupon as any)._ageSlots = ageSlots;
         }
@@ -3528,11 +3527,11 @@ export class OrdersService {
         } else if (coupon.couponType === 'AGE') {
           // Validar idade na data do evento. ESTRITO no pay (lenient=false): slot sem birthDate
           // NÃO recebe o desconto no commit — só idade informada e dentro da faixa.
+          // AGE respeita a lista exclusiva de documento quando ENABLED (idade E lista):
+          // no commit, só participante com documento na lista E idade na faixa recebe.
           const refDate = resolveAgeReferenceDate(order);
-          const minAge = coupon.minAge ?? 0;
-          const maxAge = coupon.maxAge ?? Infinity;
           const totalUnitsAge = reservedTickets.reduce((s: number, rt: any) => s + (rt.quantity ?? 0), 0);
-          const ageMatchCount = computeAgeEligibleSlots(participants, minAge, maxAge, refDate, totalUnitsAge).length;
+          const ageMatchCount = computeAgeCouponEligibleSlots(participants, coupon, refDate, totalUnitsAge).length;
 
           if (ageMatchCount <= 0) continue;
 

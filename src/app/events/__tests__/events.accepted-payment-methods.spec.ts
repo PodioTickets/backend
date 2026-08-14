@@ -42,7 +42,7 @@ describe('EventsService — acceptedPaymentMethods na configuração financeira'
     };
     const cache: any = { del: jest.fn().mockResolvedValue(undefined) };
     const service = new EventsService(
-      prisma, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, cache,
+      prisma, {} as any, { recordOrganizationAuditLog: jest.fn() } as any, {} as any, {} as any, {} as any, {} as any, cache,
     );
     // Acesso do organizador fora do escopo deste teste
     jest.spyOn(service as any, 'verifyOrganizerAccess').mockResolvedValue(undefined);

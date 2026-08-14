@@ -12,6 +12,7 @@ import { VouchersService } from './vouchers.service';
 import { CreateVoucherDto, UpdateVoucherDto, FilterVouchersDto } from './dto/create-voucher.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
+import { getClientIp } from '../../common/utils/client-ip.util';
 
 @ApiTags('Vouchers')
 @Controller('api/v1/vouchers')
@@ -33,7 +34,7 @@ export class VouchersController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can create vouchers' })
   @ApiResponse({ status: 404, description: 'Event not found' })
   create(@Request() req, @Param('eventId') eventId: string, @Body() createVoucherDto: CreateVoucherDto) {
-    return this.vouchersService.create(req.user.id, eventId, createVoucherDto);
+    return this.vouchersService.create(req.user.id, eventId, createVoucherDto, getClientIp(req));
   }
 
   @Get('events/:eventId')
@@ -138,7 +139,7 @@ export class VouchersController {
     @Param('voucherId') voucherId: string,
     @Body() updateVoucherDto: UpdateVoucherDto,
   ) {
-    return this.vouchersService.update(req.user.id, eventId, voucherId, updateVoucherDto);
+    return this.vouchersService.update(req.user.id, eventId, voucherId, updateVoucherDto, getClientIp(req));
   }
 
   @Delete('events/:eventId/:voucherId')
@@ -156,6 +157,6 @@ export class VouchersController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can delete vouchers' })
   @ApiResponse({ status: 404, description: 'Voucher not found' })
   remove(@Request() req, @Param('eventId') eventId: string, @Param('voucherId') voucherId: string) {
-    return this.vouchersService.remove(req.user.id, eventId, voucherId);
+    return this.vouchersService.remove(req.user.id, eventId, voucherId, getClientIp(req));
   }
 }

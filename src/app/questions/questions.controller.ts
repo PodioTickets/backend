@@ -12,6 +12,7 @@ import { CreateQuestionDto, UpdateQuestionDto } from './dto/create-question.dto'
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { NoCache } from 'src/common/decorators/cache.decorator';
+import { getClientIp } from '../../common/utils/client-ip.util';
 
 @ApiTags('Questions')
 @Controller('api/v1/questions')
@@ -29,7 +30,7 @@ export class QuestionsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can create questions' })
   @ApiResponse({ status: 404, description: 'Event not found' })
   create(@Request() req, @Param('eventId') eventId: string, @Body() createQuestionDto: CreateQuestionDto) {
-    return this.questionsService.create(req.user.id, eventId, createQuestionDto);
+    return this.questionsService.create(req.user.id, eventId, createQuestionDto, getClientIp(req));
   }
 
   @Get('events/:eventId')
@@ -69,7 +70,7 @@ export class QuestionsController {
     @Param('questionId') questionId: string,
     @Body() updateQuestionDto: UpdateQuestionDto,
   ) {
-    return this.questionsService.update(req.user.id, eventId, questionId, updateQuestionDto);
+    return this.questionsService.update(req.user.id, eventId, questionId, updateQuestionDto, getClientIp(req));
   }
 
   @Delete('events/:eventId/:questionId')
@@ -83,7 +84,7 @@ export class QuestionsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can delete questions' })
   @ApiResponse({ status: 404, description: 'Question not found' })
   remove(@Request() req, @Param('eventId') eventId: string, @Param('questionId') questionId: string) {
-    return this.questionsService.remove(req.user.id, eventId, questionId);
+    return this.questionsService.remove(req.user.id, eventId, questionId, getClientIp(req));
   }
 }
 

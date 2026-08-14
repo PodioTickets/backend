@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ModalitiesService } from '../modalities.service';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { OrganizationAuditService } from '../../../common/services/organization-audit.service';
 import { NotFoundException, BadRequestException } from '@nestjs/common';
 
 describe('ModalitiesService', () => {
@@ -42,6 +43,10 @@ describe('ModalitiesService', () => {
         {
           provide: PrismaService,
           useValue: mockPrismaService,
+        },
+        {
+          provide: OrganizationAuditService,
+          useValue: { record: jest.fn(), recordForEvent: jest.fn() },
         },
       ],
     }).compile();

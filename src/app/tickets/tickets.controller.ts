@@ -59,7 +59,7 @@ export class TicketsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can create tickets' })
   @ApiResponse({ status: 404, description: 'Event not found' })
   create(@Request() req, @Param('eventId') eventId: string, @Body() createTicketDto: CreateTicketDto) {
-    return this.ticketsService.create(req.user.id, eventId, createTicketDto);
+    return this.ticketsService.create(req.user.id, eventId, createTicketDto, clientIp(req));
   }
 
   @Get('events/:eventId')
@@ -199,7 +199,7 @@ export class TicketsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can delete tickets' })
   @ApiResponse({ status: 404, description: 'Ticket not found' })
   remove(@Request() req, @Param('eventId') eventId: string, @Param('ticketId') ticketId: string) {
-    return this.ticketsService.remove(req.user.id, eventId, ticketId);
+    return this.ticketsService.remove(req.user.id, eventId, ticketId, clientIp(req));
   }
 
   @Post('events/:eventId/:ticketId/duplicate')
@@ -216,6 +216,6 @@ export class TicketsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can duplicate tickets' })
   @ApiResponse({ status: 404, description: 'Ticket not found' })
   duplicate(@Request() req, @Param('eventId') eventId: string, @Param('ticketId') ticketId: string) {
-    return this.ticketsService.duplicate(req.user.id, eventId, ticketId);
+    return this.ticketsService.duplicate(req.user.id, eventId, ticketId, clientIp(req));
   }
 }

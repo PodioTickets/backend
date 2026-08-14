@@ -13,6 +13,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException } from '@nestjs/common';
 import { QuestionsService } from '../questions.service';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { OrganizationAuditService } from '../../../common/services/organization-audit.service';
 
 describe('QuestionsService — validação de options (create/update)', () => {
   let service: QuestionsService;
@@ -34,7 +35,7 @@ describe('QuestionsService — validação de options (create/update)', () => {
     const prisma: any = { getReadClient: () => db, getWriteClient: () => db };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
-      providers: [QuestionsService, { provide: PrismaService, useValue: prisma }],
+      providers: [QuestionsService, { provide: PrismaService, useValue: prisma }, { provide: OrganizationAuditService, useValue: { record: jest.fn(), recordForEvent: jest.fn() } }],
     }).compile();
     service = moduleRef.get(QuestionsService);
   });

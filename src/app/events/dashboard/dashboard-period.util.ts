@@ -140,3 +140,43 @@ export function lastSixMonthKeys(now: Date = new Date()): string[] {
   }
   return keys;
 }
+
+// BRT = UTC-3 FIXO (sem horário de verão desde 2019). Deslocar o instante em −3h
+// e ler os campos UTC dá o wall-clock civil de Brasília de forma portável (não
+// depende do fuso do processo/CI). Espelha `brt-date.util`.
+const BRT_OFFSET_MS = 3 * 60 * 60 * 1000;
+
+/**
+ * Chaves `YYYY-MM-DD` de cada DIA CIVIL DE BRASÍLIA no intervalo [from, to]
+ * (inclusive). Diferente de `eachUtcDayKeys`: alinha as colunas do chart ao dia
+ * BRT — o mesmo bucket usado pelo SQL (`AT TIME ZONE 'America/Sao_Paulo'`), então
+ * "hoje" = dia civil de Brasília (recebe as vendas do dia) e só vira à meia-noite
+ * BRT, não à meia-noite UTC (21h BRT). Cap em 500 dias contra range inválido.
+ */
+export function eachBrtDayKeys(from: Date, to: Date): string[] {
+  const f = new Date(from.getTime() - BRT_OFFSET_MS);
+  const tEnd = new Date(to.getTime() - BRT_OFFSET_MS);
+  const keys: string[] = [];
+  let t = Date.UTC(f.getUTCFullYear(), f.getUTCMonth(), f.getUTCDate());
+  const endT = Date.UTC(tEnd.getUTCFullYear(), tEnd.getUTCMonth(), tEnd.getUTCDate());
+  while (t <= endT) {
+    keys.push(new Date(t).toISOString().split('T')[0]);
+    t += 24 * 60 * 60 * 1000;
+    if (keys.length > 500) break;
+  }
+  return keys;
+}
+
+/**
+ * Últimos 6 meses calendário DE BRASÍLIA (chave `YYYY-MM`). Variante BRT de
+ * `lastSixMonthKeys` — casa com o bucket mensal BRT do SQL no período `GERAL`.
+ */
+export function lastSixBrtMonthKeys(now: Date = new Date()): string[] {
+  const b = new Date(now.getTime() - BRT_OFFSET_MS);
+  const keys: string[] = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(Date.UTC(b.getUTCFullYear(), b.getUTCMonth() - i, 1));
+    keys.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+  }
+  return keys;
+}

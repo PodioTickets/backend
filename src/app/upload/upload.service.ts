@@ -3,6 +3,9 @@ import * as path from 'path';
 import * as fsSync from 'fs';
 import sharp from 'sharp';
 import { Storage, Bucket } from '@google-cloud/storage';
+import { Prisma } from '@prisma/client';
+import { PrismaService } from '../../prisma/prisma.service';
+import { OrganizationAuditService } from '../../common/services/organization-audit.service';
 
 // Saída por formato de ENTRADA (detectado pelo sharp). Re-encoda no MESMO formato
 // — mantém o tipo do arquivo — e serve como allowlist: formato fora daqui (ex.:
@@ -21,7 +24,10 @@ export class UploadService {
   private readonly cdnUrl: string;
   private readonly cdnEnabled: boolean;
 
-  constructor() {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly organizationAudit: OrganizationAuditService,
+  ) {
     this.cdnEnabled = process.env.CDN_ENABLED === 'true';
     this.cdnUrl = (process.env.CDN_URL ?? '').replace(/\/$/, '');
 
@@ -41,6 +47,52 @@ export class UploadService {
     const storage = new Storage(storageOptions);
     const bucketName = process.env.GCS_BUCKET ?? process.env.BUCKET_NAME ?? '';
     this.bucket = storage.bucket(bucketName);
+  }
+
+  /**
+   * Auditoria BEST-EFFORT de upload (imagem/PDF). As rotas de upload não têm
+   * eventId no momento do envio, então associamos o log à organização do próprio
+   * ator (via OrganizationMember). Se o ator não pertence a nenhuma organização
+   * (ex.: admin sem org), NÃO logamos — nunca inventamos organizationId. O efeito
+   * real (vincular a imagem ao evento) já é auditado por events.update.
+   *
+   * Falhas de auditoria jamais derrubam o upload já concluído: engolimos qualquer
+   * erro (o `record` já é best-effort fora de transação; o try/catch aqui protege
+   * também a resolução da org).
+   */
+  async auditUpload(params: {
+    actorUserId?: string | null;
+    ip?: string | null;
+    kind: 'UPLOAD_IMAGE' | 'UPLOAD_PDF';
+  }): Promise<void> {
+    try {
+      if (!params.actorUserId) return;
+
+      // Primeira organização do ator (qualquer papel). Determinístico via createdAt.
+      const membership = await this.prisma
+        .getReadClient()
+        .organizationMember.findFirst({
+          where: { userId: params.actorUserId },
+          orderBy: { createdAt: 'asc' },
+          select: { organizationId: true },
+        });
+
+      // Sem org resolvível → pula silenciosamente (não inventa organizationId).
+      if (!membership) return;
+
+      await this.organizationAudit.record({
+        organizationId: membership.organizationId,
+        actorUserId: params.actorUserId,
+        ip: params.ip ?? null,
+        action:
+          params.kind === 'UPLOAD_IMAGE'
+            ? 'Enviou uma imagem'
+            : 'Enviou um arquivo PDF',
+        metadata: { kind: params.kind } as Prisma.InputJsonValue,
+      });
+    } catch {
+      // Best-effort: auditoria nunca inviabiliza o upload já concluído.
+    }
   }
 
   /**

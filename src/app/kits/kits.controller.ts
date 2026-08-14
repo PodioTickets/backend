@@ -10,6 +10,7 @@ import {
 import { KitsService } from './kits.service';
 import { CreateKitDto, UpdateKitDto, CreateKitItemDto, UpdateKitItemDto } from './dto/create-kit.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { getClientIp } from '../../common/utils/client-ip.util';
 
 @ApiTags('Kits')
 @Controller('api/v1/kits')
@@ -27,7 +28,7 @@ export class KitsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can create kits' })
   @ApiResponse({ status: 404, description: 'Event not found' })
   create(@Request() req, @Param('eventId') eventId: string, @Body() createKitDto: CreateKitDto) {
-    return this.kitsService.create(req.user.id, eventId, createKitDto);
+    return this.kitsService.create(req.user.id, eventId, createKitDto, getClientIp(req));
   }
 
   @Get('events/:eventId')
@@ -60,7 +61,7 @@ export class KitsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can update kits' })
   @ApiResponse({ status: 404, description: 'Kit not found' })
   update(@Request() req, @Param('eventId') eventId: string, @Param('kitId') kitId: string, @Body() updateKitDto: UpdateKitDto) {
-    return this.kitsService.update(req.user.id, eventId, kitId, updateKitDto);
+    return this.kitsService.update(req.user.id, eventId, kitId, updateKitDto, getClientIp(req));
   }
 
   @Delete('events/:eventId/:kitId')
@@ -75,7 +76,7 @@ export class KitsController {
   @ApiResponse({ status: 404, description: 'Kit not found' })
   @ApiResponse({ status: 400, description: 'Bad request - Kit has active items' })
   remove(@Request() req, @Param('eventId') eventId: string, @Param('kitId') kitId: string) {
-    return this.kitsService.remove(req.user.id, eventId, kitId);
+    return this.kitsService.remove(req.user.id, eventId, kitId, getClientIp(req));
   }
 
   // Kit Items
@@ -91,7 +92,7 @@ export class KitsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can create items' })
   @ApiResponse({ status: 404, description: 'Kit not found' })
   createItem(@Request() req, @Param('eventId') eventId: string, @Param('kitId') kitId: string, @Body() createItemDto: CreateKitItemDto) {
-    return this.kitsService.createItem(req.user.id, eventId, kitId, createItemDto);
+    return this.kitsService.createItem(req.user.id, eventId, kitId, createItemDto, getClientIp(req));
   }
 
   @Patch('events/:eventId/kits/:kitId/items/:itemId')
@@ -113,7 +114,7 @@ export class KitsController {
     @Param('itemId') itemId: string,
     @Body() updateItemDto: UpdateKitItemDto,
   ) {
-    return this.kitsService.updateItem(req.user.id, eventId, kitId, itemId, updateItemDto);
+    return this.kitsService.updateItem(req.user.id, eventId, kitId, itemId, updateItemDto, getClientIp(req));
   }
 
   @Delete('events/:eventId/kits/:kitId/items/:itemId')
@@ -128,7 +129,7 @@ export class KitsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only organizer can delete items' })
   @ApiResponse({ status: 404, description: 'Kit item not found' })
   removeItem(@Request() req, @Param('eventId') eventId: string, @Param('kitId') kitId: string, @Param('itemId') itemId: string) {
-    return this.kitsService.removeItem(req.user.id, eventId, kitId, itemId);
+    return this.kitsService.removeItem(req.user.id, eventId, kitId, itemId, getClientIp(req));
   }
 }
 

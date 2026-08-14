@@ -43,7 +43,7 @@ describe('OrganizationsService.signupOrganizer — rastro de aceite e auditoria'
       sendWelcomeOrganizer: jest.fn().mockResolvedValue(undefined),
       sendMemberAdded: jest.fn().mockResolvedValue(undefined),
     };
-    const service = new OrganizationsService(prisma, {} as any, emailService);
+    const service = new OrganizationsService(prisma, {} as any, emailService, { record: jest.fn(), recordForEvent: jest.fn() } as any);
     // Unicidades de negócio (docs/e-mails) fora do escopo deste teste.
     jest.spyOn(service as any, 'isOrganizationOwnerDocumentAvailable').mockResolvedValue(true);
     jest.spyOn(service as any, 'isOrganizationEmailAvailable').mockResolvedValue(true);
