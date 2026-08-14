@@ -27,6 +27,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { NoCache } from '../../common/decorators/cache.decorator';
 import { OrdersService } from './orders.service';
 import { ReserveOrderDto } from './dto/reserve-order.dto';
+import { CreateCourtesyOrderDto } from './dto/create-courtesy-order.dto';
 import { PatchParticipantsDto } from './dto/patch-participants.dto';
 import { PatchProductsDto } from './dto/patch-products.dto';
 import { PatchBillingAddressDto } from './dto/patch-billing-address.dto';
@@ -63,6 +64,49 @@ export class OrdersController {
   @ApiResponse({ status: 429, description: 'Rate limit exceeded' })
   async reserve(@Request() req: any, @Body() dto: ReserveOrderDto) {
     return this.ordersService.reserve(req.user.id, dto);
+  }
+
+  // ── POST /orders/courtesy ──────────────────────────────────────────────
+
+  @Post('courtesy')
+  @Throttle({ short: { limit: 10, ttl: 60000 } })
+  @ApiOperation({
+    summary: 'Create a courtesy registration (organizer)',
+    description:
+      'Cria uma inscrição de CORTESIA (R$0, sem pagamento) para o evento — replica ' +
+      'o checkout (ingressos → participantes → produtos), sem preço nem etapa de ' +
+      'pagamento, e finaliza o pedido como PAID. Requer admin OU permissão ' +
+      'edit_event na organização do evento. Envia o ingresso por e-mail.',
+  })
+  @ApiResponse({ status: 201, description: 'Courtesy registration created' })
+  @ApiResponse({ status: 403, description: 'Missing permission' })
+  @ApiResponse({ status: 409, description: 'Batch/event sold out' })
+  async createCourtesy(
+    @Request() req: any,
+    @Body() dto: CreateCourtesyOrderDto,
+  ) {
+    return this.ordersService.createCourtesyRegistration(req.user.id, dto);
+  }
+
+  // ── POST /orders/:orderId/courtesy-finalize ────────────────────────────
+
+  @Post(':orderId/courtesy-finalize')
+  @Throttle({ short: { limit: 10, ttl: 60000 } })
+  @ApiOperation({
+    summary: 'Finalize a reserved order as courtesy (organizer)',
+    description:
+      'Finaliza como CORTESIA (R$0) um pedido já RESERVADO pelo organizador — o ' +
+      'fluxo reaproveita reserve → participants → products do checkout e troca o ' +
+      'pagamento por esta chamada. Requer admin OU edit_event e ser dono do pedido.',
+  })
+  @ApiParam({ name: 'orderId', description: 'Order ID' })
+  @ApiResponse({ status: 201, description: 'Courtesy registration finalized' })
+  @ApiResponse({ status: 403, description: 'Missing permission' })
+  async finalizeCourtesy(
+    @Request() req: any,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+  ) {
+    return this.ordersService.finalizeCourtesy(req.user.id, orderId);
   }
 
   // ── GET /orders/:orderId ───────────────────────────────────────────────

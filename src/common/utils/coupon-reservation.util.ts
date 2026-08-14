@@ -71,17 +71,23 @@ export async function claimCouponUnits(
         "couponId" = CASE WHEN sub.granted > 0 THEN ${couponId}::uuid ELSE o."couponId" END,
         "updatedAt" = NOW()
     FROM (
-      SELECT GREATEST(0, LEAST(
-        ${want}::int,
-        COALESCE(c."maxUsage", ${want}::int) - c."usageCount" - COALESCE((
-          SELECT SUM(o2."couponReservedUnits")::int
-          FROM "Order" o2
-          WHERE o2."couponId" = c.id
-            AND o2."status" = 'PENDING'
-            AND o2."expiresAt" > NOW()
-            AND o2.id <> ${orderId}::uuid
-        ), 0)
-      )) AS granted
+      SELECT (CASE
+        -- maxUsage NULL = ILIMITADO: concede o desejado integralmente. Sem o CASE,
+        -- o COALESCE(maxUsage, want) usava want como teto e subtraia usageCount, entao
+        -- apos o 1o uso (usageCount >= want) o cupom ilimitado zerava (esgotado indevido).
+        WHEN c."maxUsage" IS NULL THEN ${want}::int
+        ELSE GREATEST(0, LEAST(
+          ${want}::int,
+          c."maxUsage" - c."usageCount" - COALESCE((
+            SELECT SUM(o2."couponReservedUnits")::int
+            FROM "Order" o2
+            WHERE o2."couponId" = c.id
+              AND o2."status" = 'PENDING'
+              AND o2."expiresAt" > NOW()
+              AND o2.id <> ${orderId}::uuid
+          ), 0)
+        ))
+      END) AS granted
       FROM "Coupon" c
       WHERE c.id = ${couponId}::uuid
       FOR UPDATE OF c
