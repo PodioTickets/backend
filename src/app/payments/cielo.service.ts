@@ -904,11 +904,18 @@ export class CieloService {
 
       const response = await this.axiosInstance.put<any>(url, requestBody);
       const status = response.data.Status;
-      const isReversed = status === 10 || status === 11; // Voided ou Refunded
+      const isReversed = status === 10 || status === 11; // Voided ou Refunded (síncrono — cartão)
       const isPending = status === 12; // Aguardando confirmação assíncrona
+      // PIX: o estorno é ASSÍNCRONO — o void retorna HTTP 2xx com o Status da venda
+      // ainda 2 (PaymentConfirmed) e a liquidação (Status 11) só vem depois, via
+      // webhook/consulta. Recusa de verdade chega como erro HTTP (cai no catch).
+      // Sem tratar o 2 como aceito, todo estorno de PIX era reportado como "Cielo
+      // recusou" (erro na tela + refundCompensationPending) mesmo com o dinheiro
+      // chegando ao cliente — confirmado em produção (5/5 casos liquidaram).
+      const isAsyncAccepted = status === 2;
 
       return {
-        success: isReversed || isPending,
+        success: isReversed || isPending || isAsyncAccepted,
         paymentId: response.data.PaymentId,
         cieloStatus: this.mapCieloStatusToString(status),
         returnCode: response.data.ReturnCode?.toString(),
