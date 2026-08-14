@@ -110,6 +110,35 @@ describe('Reserva de uso de cupom (integração, banco real)', () => {
     expect(o.couponId).toBe(couponId); // vínculo gravado atomicamente
   });
 
+  // REGRESSÃO (bug do cupom ilimitado "esgotado" após o 1º uso):
+  // com maxUsage null e usageCount > 0, o COALESCE(maxUsage, want) fazia
+  // `want − usageCount − reservas`, zerando o grant depois do 1º uso. Um cupom
+  // SEM limite NUNCA deve esgotar, independente de usos anteriores.
+  it('cupom SEM limite com usageCount > 0 → NÃO esgota (concede tudo)', async () => {
+    const { eventId } = await seedOrgUserEvent(prisma);
+    const userId = await seedUser(prisma, 'USER');
+    // Já foi usado 5x, mas é ILIMITADO → o 6º pedido ainda concede tudo.
+    const couponId = await seedCoupon(eventId, { maxUsage: null, usageCount: 5 });
+    const orderA = await seedOrder(eventId, userId);
+
+    expect(await claimCouponUnits(w, couponId, orderA, 2)).toBe(2);
+    const o = await readOrder(orderA);
+    expect(o.couponReservedUnits).toBe(2);
+    expect(o.couponId).toBe(couponId);
+  });
+
+  it('cupom SEM limite ignora reservas de OUTROS pedidos → concede tudo', async () => {
+    const { eventId } = await seedOrgUserEvent(prisma);
+    const userId = await seedUser(prisma, 'USER');
+    const couponId = await seedCoupon(eventId, { maxUsage: null, usageCount: 3 });
+    // Outro pedido PENDING segurando 4 unidades — irrelevante para ilimitado.
+    await seedOrder(eventId, userId, { couponId, couponReservedUnits: 4 });
+    const orderB = await seedOrder(eventId, userId);
+
+    expect(await claimCouponUnits(w, couponId, orderB, 3)).toBe(3);
+    expect((await readOrder(orderB)).couponReservedUnits).toBe(3);
+  });
+
   it('com folga → concede o pedido inteiro', async () => {
     const { eventId } = await seedOrgUserEvent(prisma);
     const userId = await seedUser(prisma, 'USER');
