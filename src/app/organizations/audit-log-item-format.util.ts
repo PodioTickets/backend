@@ -1,9 +1,11 @@
 import { EVENT_UPDATE_FIELD_LABELS } from '../events/event-audit.helpers';
+import { ORGANIZATION_UPDATE_FIELD_LABELS } from './organization-audit.helpers';
 
 const EDIT_AUDIT_KINDS = new Set([
   'EVENT_UPDATE',
   'TICKET_UPDATE',
   'PRODUCT_UPDATE',
+  'ORGANIZATION_UPDATE',
 ]);
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -29,6 +31,16 @@ export function formatAuditLogItemForResponse(
       editedFields =
         keys
           .map((k) => EVENT_UPDATE_FIELD_LABELS[k] ?? k)
+          .filter(Boolean)
+          .join(', ') || null;
+    } else if (
+      kind === 'ORGANIZATION_UPDATE' &&
+      Array.isArray(meta?.fieldsEdited)
+    ) {
+      const keys = meta.fieldsEdited as string[];
+      editedFields =
+        keys
+          .map((k) => ORGANIZATION_UPDATE_FIELD_LABELS[k] ?? k)
           .filter(Boolean)
           .join(', ') || null;
     } else if (

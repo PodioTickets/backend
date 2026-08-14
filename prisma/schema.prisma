@@ -808,6 +808,10 @@ model Order {
   updatedAt   DateTime @updatedAt
 
   status              OrderStatus @default(PENDING)
+  /// Inscrição de CORTESIA criada manualmente pelo organizador (sem pagamento):
+  /// pedido R$0 (finalAmount/serviceFee=0) finalizado direto como PAID. Distingue
+  /// cortesias de vendas reais nos relatórios/financeiro. false = pedido normal.
+  isCourtesy          Boolean  @default(false)
   expiresAt           DateTime?
   reservedAt          DateTime?
   cancelledAt         DateTime?

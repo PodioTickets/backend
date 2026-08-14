@@ -32,6 +32,7 @@ import {
 import { resolveOrganizerPageViewActionLabel } from './organizer-audit-page-label.util';
 import { formatAuditLogItemForResponse } from './audit-log-item-format.util';
 import { buildAuditChangeDetails } from './audit-log-change-details.util';
+import { diffOrganizationUpdateForAudit } from './organization-audit.helpers';
 import { EmailService } from '../../common/services/email.service';
 
 @Injectable()
@@ -1141,7 +1142,12 @@ export class OrganizationsService {
   /**
    * Atualiza informações da organização (apenas dono)
    */
-  async updateOrganization(userId: string, organizationId: string, updateDto: UpdateOrganizationDto) {
+  async updateOrganization(
+    userId: string,
+    organizationId: string,
+    updateDto: UpdateOrganizationDto,
+    clientIp?: string | null,
+  ) {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
 
@@ -1169,6 +1175,57 @@ export class OrganizationsService {
     // e trata via substituição completa (mesma semântica do admin). Se ausente,
     // as chaves atuais são preservadas.
     const { pixKeys, ...data } = updateDto;
+
+    // Estado ANTES da atualização — base do diff de auditoria (ORGANIZATION_UPDATE).
+    const beforeOrg = await prismaRead.organization.findUnique({
+      where: { id: organizationId },
+    });
+
+    /* Assinatura das chaves PIX atuais (só quando o payload traz `pixKeys`), para
+     * detectar troca SEM expor os valores no log. Normaliza campos relevantes e
+     * ordena por (keyType,key) — ignora ordem/ids/timestamps do recreate. */
+    const pixSignature = (
+      keys: Array<{
+        key: string;
+        keyType: string;
+        isDefault?: boolean | null;
+        bankName?: string | null;
+        accountHolderName?: string | null;
+        accountHolderDocument?: string | null;
+      }>,
+    ): string =>
+      JSON.stringify(
+        keys
+          .map((k) => ({
+            key: k.key,
+            keyType: k.keyType,
+            isDefault: !!k.isDefault,
+            bankName: k.bankName ?? null,
+            accountHolderName: k.accountHolderName ?? null,
+            accountHolderDocument: k.accountHolderDocument ?? null,
+          }))
+          .sort((a, b) =>
+            `${a.keyType}:${a.key}`.localeCompare(`${b.keyType}:${b.key}`),
+          ),
+      );
+
+    let pixBeforeCount = 0;
+    let pixBeforeSig = '';
+    if (pixKeys != null) {
+      const beforePix = await prismaRead.organizationPixKey.findMany({
+        where: { organizationId },
+        select: {
+          key: true,
+          keyType: true,
+          isDefault: true,
+          bankName: true,
+          accountHolderName: true,
+          accountHolderDocument: true,
+        },
+      });
+      pixBeforeCount = beforePix.length;
+      pixBeforeSig = pixSignature(beforePix);
+    }
 
     const organization = await prismaWrite.organization.update({
       where: { id: organizationId },
@@ -1244,6 +1301,49 @@ export class OrganizationsService {
       },
       orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
     });
+
+    /* Auditoria ORGANIZATION_UPDATE — mesmo padrão do EVENT_UPDATE: registra só os
+     * campos que mudaram (valores sensíveis mascarados no helper). Antes disso não
+     * havia NENHUM registro de edição de dados da organização, então essas
+     * alterações não apareciam nos logs (admin nem organizador). Só grava quando
+     * há mudança real; falha do log não derruba o update (fire-and-forget). */
+    try {
+      const auditChanges = beforeOrg
+        ? diffOrganizationUpdateForAudit(
+            beforeOrg as unknown as Record<string, unknown>,
+            data as Record<string, unknown>,
+          )
+        : [];
+
+      // Troca de chaves PIX: entra como uma alteração (só contagem, sem valores).
+      if (pixKeys != null) {
+        const pixAfterSig = pixSignature(savedPixKeys);
+        if (pixAfterSig !== pixBeforeSig) {
+          auditChanges.push({
+            field: 'pixKeys',
+            old: `${pixBeforeCount} chave(s)`,
+            new: `${savedPixKeys.length} chave(s)`,
+          });
+        }
+      }
+
+      if (auditChanges.length > 0) {
+        await this.recordOrganizationAuditLog({
+          organizationId,
+          actorUserId: userId,
+          ip: clientIp ?? null,
+          action: `Editou os dados da organização "${organization.name}"`,
+          metadata: {
+            kind: 'ORGANIZATION_UPDATE',
+            page: 'organization-settings',
+            fieldsEdited: auditChanges.map((c) => c.field),
+            changes: auditChanges,
+          } as Prisma.InputJsonValue,
+        });
+      }
+    } catch {
+      // Log é acessório — nunca falha o salvamento da organização.
+    }
 
     return {
       message: 'Organization updated successfully',
