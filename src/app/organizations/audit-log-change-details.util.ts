@@ -1,6 +1,7 @@
 import { EVENT_UPDATE_FIELD_LABELS } from '../events/event-audit.helpers';
 import { TICKET_FIELD_LABELS } from '../tickets/ticket-audit.helpers';
 import { PRODUCT_FIELD_LABELS } from '../products/product-audit.helpers';
+import { ORGANIZATION_UPDATE_FIELD_LABELS } from './organization-audit.helpers';
 
 const ORG_AUDIT_FIELD_LABELS: Record<string, string> = {
   role: 'papel',
@@ -32,6 +33,9 @@ function fieldLabelForAuditKind(
   }
   if (kind === 'PRODUCT_UPDATE') {
     return PRODUCT_FIELD_LABELS[field] ?? field;
+  }
+  if (kind === 'ORGANIZATION_UPDATE') {
+    return ORGANIZATION_UPDATE_FIELD_LABELS[field] ?? field;
   }
   return ORG_AUDIT_FIELD_LABELS[field] ?? field;
 }

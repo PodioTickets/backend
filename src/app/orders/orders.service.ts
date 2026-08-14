@@ -2,6 +2,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   HttpException,
   Injectable,
   Logger,
@@ -26,6 +27,8 @@ import { PatchProductsDto } from './dto/patch-products.dto';
 import { PatchBillingAddressDto } from './dto/patch-billing-address.dto';
 import { PayOrderDto } from './dto/pay-order.dto';
 import { PatchCouponDto } from './dto/patch-coupon.dto';
+import { CreateCourtesyOrderDto } from './dto/create-courtesy-order.dto';
+import { effectivePermissionsForMember } from '../organizations/constants/organizer-permissions';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
 import { ReceiptPdfService } from '../../common/services/receipt-pdf.service';
@@ -1137,6 +1140,347 @@ export class OrdersService {
       undefined,
       ageCouponId ? ageQualifyingSlots : undefined,
     );
+  }
+
+  // ── 1b. createCourtesyRegistration (organizador) ───────────────────────────
+
+  /**
+   * Inscrição de CORTESIA criada pelo organizador na tela de inscrições (sem
+   * pagamento). Reaproveita o ciclo do checkout — `reserve` (estoque+vaga) →
+   * `patchParticipants` → `patchProducts` — e finaliza o pedido como R$0/PAID,
+   * materializando as inscrições pela FONTE ÚNICA (`confirmAndFinalizeOrder`).
+   * O e-mail com o ingresso é enviado ao final.
+   *
+   * Gate: admin OU membro com `edit_event` na organização do evento.
+   * O organizador é o "dono" do pedido; cada inscrição recebe `invitedById`.
+   */
+  async createCourtesyRegistration(
+    userId: string,
+    dto: CreateCourtesyOrderDto,
+  ): Promise<Record<string, any>> {
+    await this.assertCanManageCourtesy(userId, dto.eventId);
+
+    const totalUnits = dto.tickets.reduce((sum, t) => sum + (t.quantity ?? 0), 0);
+    if (totalUnits < 1) {
+      throw new BadRequestException('Selecione ao menos um ingresso.');
+    }
+    if ((dto.participants?.length ?? 0) !== totalUnits) {
+      throw new BadRequestException(
+        'Informe os dados de exatamente um participante por ingresso.',
+      );
+    }
+
+    // 1. Reserva (estoque + vaga + placeholders). Esgotado → erro (mesma regra
+    //    do checkout). O organizador é o dono do pedido de cortesia.
+    const reserved = await this.reserve(userId, {
+      eventId: dto.eventId,
+      tickets: dto.tickets,
+    });
+    const orderId = reserved.id as string;
+
+    try {
+      // 2. Participantes (posicional: 1 por unidade de ingresso).
+      await this.patchParticipants(userId, orderId, {
+        participants: dto.participants,
+      } as PatchParticipantsDto);
+
+      // 3. Produtos/kit (opcional).
+      if (dto.products && dto.products.length > 0) {
+        await this.patchProducts(userId, orderId, {
+          products: dto.products,
+        } as PatchProductsDto);
+      }
+
+      // 4. Finaliza como cortesia (R$0, PAID) + cria inscrições CONFIRMED.
+      await this.finalizeCourtesyOrder(userId, orderId);
+    } catch (err) {
+      // Falha após a reserva: cancela o pedido e DEVOLVE o estoque/vaga.
+      await this.cancelOrderAndRestoreStock(
+        orderId,
+        'COURTESY_FAILED',
+        this.prisma.getWriteClient(),
+      ).catch(() => undefined);
+      throw err;
+    }
+
+    // 5. E-mail com o ingresso (fire-and-forget — não bloqueia a resposta).
+    void this.sendOrderConfirmationEmails(orderId);
+
+    return { orderId, message: 'Inscrição de cortesia criada com sucesso.' };
+  }
+
+  /**
+   * Finaliza como CORTESIA um pedido JÁ reservado pelo organizador (o fluxo do
+   * front reaproveita `reserve` → `patchParticipants` → `patchProducts` do
+   * checkout e troca o `pay` por esta chamada). Gate: admin OU `edit_event` na
+   * org do evento + ser dono do pedido. Zera → PAID → inscrições + e-mail.
+   */
+  async finalizeCourtesy(
+    userId: string,
+    orderId: string,
+  ): Promise<Record<string, any>> {
+    const r: any = this.prisma.getReadClient();
+    const order = await r.order.findUnique({
+      where: { id: orderId },
+      select: { id: true, userId: true, eventId: true, status: true },
+    });
+    if (!order) throw new NotFoundException('Pedido não encontrado');
+    await this.assertCanManageCourtesy(userId, order.eventId);
+    if (order.userId !== userId && !(await this.isAdminUser(userId))) {
+      throw new ForbiddenException('Você não é o dono deste pedido.');
+    }
+    if (order.status !== 'PENDING') {
+      throw new ConflictException('Este pedido não está mais pendente.');
+    }
+    await this.finalizeCourtesyOrder(userId, orderId);
+    void this.sendOrderConfirmationEmails(orderId);
+    return { orderId, message: 'Inscrição de cortesia criada com sucesso.' };
+  }
+
+  /** Zera o pedido (R$0), grava Payment simbólico e finaliza (PENDING→PAID). */
+  private async finalizeCourtesyOrder(
+    userId: string,
+    orderId: string,
+  ): Promise<void> {
+    const w: any = this.prisma.getWriteClient();
+    await w.$transaction(async (tx: any) => {
+      // Cortesia = R$0 real: zera financeiro e limpa cupom/voucher (evita que o
+      // finalize consuma uso de cupom). Snapshots de ingresso/produto mantêm o
+      // valor de catálogo (informativo); o financeiro/repasse lê o pedido → 0.
+      await tx.order.update({
+        where: { id: orderId },
+        data: {
+          totalAmount: 0,
+          serviceFee: 0,
+          discount: 0,
+          finalAmount: 0,
+          couponId: null,
+          couponReservedUnits: null,
+          voucherId: null,
+          participantFeePercent: 0,
+          organizerFeePercent: 0,
+          isCourtesy: true,
+        },
+      });
+
+      // Pagamento simbólico R$0/PAID — método PIX + metadata de cortesia (mesmo
+      // shape do caminho de pedido grátis do checkout).
+      await tx.payment.create({
+        data: {
+          orderId,
+          userId,
+          method: PaymentMethod.PIX,
+          status: PaymentStatus.PAID,
+          amount: 0,
+          paymentDate: new Date(),
+          metadata: { courtesy: true, createdByOrganizerId: userId },
+        },
+      });
+
+      // PENDING→PAID + inscrições CONFIRMED (fonte única do checkout).
+      const result = await this.orderFinalization.confirmAndFinalizeOrder(
+        tx,
+        orderId,
+      );
+      if (!result.finalized) {
+        throw new ConflictException(
+          'Não foi possível finalizar a inscrição de cortesia (pedido não estava pendente).',
+        );
+      }
+    });
+  }
+
+  /** Gate de permissão da cortesia: admin OU `edit_event` na org do evento. */
+  private async assertCanManageCourtesy(
+    userId: string,
+    eventId: string,
+  ): Promise<void> {
+    if (await this.isAdminUser(userId)) return;
+    const r: any = this.prisma.getReadClient();
+    const event = await r.event.findUnique({
+      where: { id: eventId },
+      select: { organizationId: true },
+    });
+    if (!event) throw new NotFoundException('Evento não encontrado');
+    const member = await r.organizationMember.findFirst({
+      where: { userId, organizationId: event.organizationId },
+      select: { role: true, permissions: true },
+    });
+    if (!member) {
+      throw new ForbiddenException('Você não tem acesso a este evento.');
+    }
+    const perms = effectivePermissionsForMember({
+      role: member.role,
+      permissionsJson: member.permissions,
+    });
+    if (!perms.edit_event) {
+      throw new ForbiddenException('Missing permission: edit_event');
+    }
+  }
+
+  /**
+   * Envia o e-mail de confirmação (ingresso PDF/QR por participante + recibo ao
+   * comprador) a partir de um pedido JÁ finalizado (PAID). Autossuficiente:
+   * recarrega o pedido e deriva os dados do evento de `order.event`. Usado pela
+   * inscrição de CORTESIA; espelha o bloco fire-and-forget do `pay()` (candidato
+   * a dedup — manter os dois em sincronia).
+   */
+  private async sendOrderConfirmationEmails(orderId: string): Promise<void> {
+    const r2: any = this.prisma.getReadClient();
+    try {
+      const order: any = await r2.order.findUnique({
+        where: { id: orderId },
+        include: {
+          user: true,
+          reservedTickets: true,
+          event: { include: { organization: true } },
+          payment: true,
+          coupon: true,
+          voucher: true,
+          registrations: {
+            include: {
+              user: true,
+              tickets: { include: { ticket: { include: { category: true } }, batch: true } },
+              products: { include: { product: true, variation: true } },
+              questionAnswers: { include: { question: true } },
+            },
+          },
+        },
+      });
+      if (!order) return;
+      const event = order.event;
+      if (!event) return;
+      const org = event?.organization ?? {};
+      const orgName = org.tradeName || org.name || '';
+      const regs: any[] = order.registrations ?? [];
+      const location = formatEventCardAddress(event) || '—';
+
+      const issuedAt = new Date();
+      const orderNumber = orderId.slice(0, 8).toUpperCase();
+
+      const ticketPdfData = {
+        orderId,
+        orderNumber,
+        issuedAt,
+        event: {
+          name: event.name ?? '',
+          date: event.eventDate ?? new Date(),
+          organization: orgName,
+          location,
+          participantCount: regs.length,
+        },
+        registrations: regs.map((reg: any, idx: number) => {
+          const user = reg.user ?? {};
+          const ticket = reg.tickets?.[0]?.ticket;
+          const catName = ticket?.category?.name ?? '';
+          const ticketName = ticket?.name ?? '';
+          return {
+            index: idx + 1,
+            registrationId: reg.id,
+            qrCode: reg.qrCode ?? reg.id,
+            participantName: (reg.participantName ?? `${(reg.user ?? {}).firstName ?? ''} ${(reg.user ?? {}).lastName ?? ''}`.trim()) || 'Participante',
+            ticketCategory: catName || 'Ingresso avulso',
+            ticketName: ticketName || '—',
+            email: reg.participantEmail ?? user.email,
+            cpf: reg.participantCpf ?? user.documentNumber,
+            country:
+              (reg.receiptSnapshot as any)?.participant?.country
+              ?? order.billingCountry
+              ?? reg.user?.country
+              ?? null,
+            documentType:
+              (reg.receiptSnapshot as any)?.participant?.documentType
+              ?? reg.user?.documentType
+              ?? null,
+            dateOfBirth: reg.participantDateOfBirth ?? user.dateOfBirth,
+            phone: reg.participantPhone ?? user.phone,
+            gender: reg.participantGender ?? user.gender,
+            questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => ({
+              question: qa.question?.question ?? '',
+              answer: formatPdfAnswer(qa.answer),
+            })),
+            products: (reg.products ?? []).map((rp: any) => ({
+              name: rp.product?.name ?? '',
+              price: rp.unitPrice ?? 0,
+              variationName: rp.variation?.name,
+              imageUrl: rp.product?.images?.[rp.product?.primaryImageIndex ?? 0],
+              isIncluded: rp.product?.isIncludedInTicket ?? false,
+            }))
+            .filter((p: any) => p.variationName !== 'Sem interesse'),
+          };
+        }),
+      };
+
+      const eventName = event.name ?? '';
+      const eventDate = formatEventHappensDate(event.eventDate);
+      const eventBannerUrl = (event as any).bannerUrl || '';
+
+      let emailBuyer = regs.find((r: any) => r.user?.id === order.userId)?.user;
+      if (!emailBuyer && order.userId) {
+        emailBuyer = await r2.user.findUnique({
+          where: { id: order.userId },
+          select: { id: true, email: true, firstName: true, lastName: true },
+        });
+      }
+      const buyerEmail: string | undefined = emailBuyer?.email;
+
+      const individualPdfs: Array<{ pdf: Buffer | undefined; participantEmail: string | undefined; participantName: string }> = [];
+      for (const [idx, reg] of regs.entries()) {
+        const participantEmail: string | undefined = reg.participantEmail ?? reg.user?.email;
+        const participantName: string = (reg.participantName
+          ?? `${reg.user?.firstName ?? ''} ${reg.user?.lastName ?? ''}`.trim())
+          || 'Participante';
+        const regEntry = ticketPdfData.registrations[idx];
+        if (!regEntry) { individualPdfs.push({ pdf: undefined, participantEmail, participantName }); continue; }
+        const singlePdfData = {
+          ...ticketPdfData,
+          event: { ...ticketPdfData.event, participantCount: 1 },
+          registrations: [{ ...regEntry, index: 1 }],
+        };
+        const pdf = await this.ticketPdfService.generateTicketPdf(singlePdfData)
+          .catch((e: any) => { this.logger.warn(`PDF individual falhou para ${participantName}:`, e?.message); return undefined; });
+        individualPdfs.push({ pdf, participantEmail, participantName });
+      }
+
+      const receiptPdf = await this.receiptPdfService
+        .generateReceiptPdf(buildReceiptPdfData(order))
+        .catch((e: any) => { this.logger.warn(`Recibo PDF falhou para pedido ${orderId}:`, e?.message); return undefined; });
+
+      if (buyerEmail) {
+        const buyerPdfs = individualPdfs
+          .filter(p => p.pdf)
+          .map(p => ({ buffer: p.pdf as Buffer, participantName: p.participantName }));
+        await this.emailService.sendRegistrationConfirmed({
+          email: buyerEmail,
+          firstName: emailBuyer?.firstName || 'Participante',
+          eventName,
+          eventLocation: location,
+          eventDate,
+          eventAddress: location,
+          eventBannerUrl,
+          ticketPdfs: buyerPdfs,
+          receiptPdf,
+        }).catch((err: any) => this.logger.warn('Email comprador falhou:', err));
+      }
+
+      const invitedByFullName = `${emailBuyer?.firstName ?? ''} ${emailBuyer?.lastName ?? ''}`.trim();
+      for (const p of individualPdfs) {
+        if (!p.participantEmail || p.participantEmail === buyerEmail) continue;
+        await this.emailService.sendRegistrationConfirmed({
+          email: p.participantEmail,
+          firstName: p.participantName.split(' ')[0] || 'Participante',
+          eventName,
+          eventLocation: location,
+          eventDate,
+          eventAddress: location,
+          eventBannerUrl,
+          invitedByName: invitedByFullName || undefined,
+          ticketPdfs: p.pdf ? [{ buffer: p.pdf, participantName: p.participantName }] : [],
+        }).catch((err: any) => this.logger.warn(`Email participante ${p.participantEmail} falhou:`, err));
+      }
+    } catch (err: any) {
+      this.logger.warn('Failed to send registration confirmation email (courtesy):', err?.message);
+    }
   }
 
   // ── 2. findOrder ───────────────────────────────────────────────────────────

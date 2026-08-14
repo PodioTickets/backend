@@ -196,7 +196,12 @@ export class OrganizationsController {
     // O organizador pode editar os Contatos da organização (e-mail, WhatsApp e telefone)
     // pela tela de Configurações. WhatsApp/telefone passam pelo `UpdateOrganizationDto`
     // (validados, opcionais) e são persistidos junto com o restante.
-    return this.organizationsService.updateOrganization(req.user.id, member.organizationId, updateDto);
+    return this.organizationsService.updateOrganization(
+      req.user.id,
+      member.organizationId,
+      updateDto,
+      clientIp(req),
+    );
   }
 
   @Patch('me/logo')
