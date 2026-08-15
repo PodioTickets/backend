@@ -18,6 +18,7 @@ import { EventsService } from '../events/events.service';
 import { EventStatus } from '@prisma/client';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 import { Throttle } from '@nestjs/throttler';
+import { getClientIp } from '../../common/utils/client-ip.util';
 
 @ApiTags('Organizers')
 @Controller('api/v1/organizers')
@@ -37,7 +38,7 @@ export class OrganizersController {
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 400, description: 'Bad request - User already has organizer profile' })
   create(@Request() req, @Body() createOrganizerDto: CreateOrganizerDto) {
-    return this.organizersService.create(req.user.id, createOrganizerDto);
+    return this.organizersService.create(req.user.id, createOrganizerDto, getClientIp(req));
   }
 
   @Get('me')
@@ -61,7 +62,7 @@ export class OrganizersController {
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 404, description: 'Organizer profile not found' })
   update(@Request() req, @Body() updateOrganizerDto: UpdateOrganizerDto) {
-    return this.organizersService.update(req.user.id, updateOrganizerDto);
+    return this.organizersService.update(req.user.id, updateOrganizerDto, getClientIp(req));
   }
 
   @Get('me/organizations')

@@ -52,6 +52,7 @@ import {
   computeDocEligibleSlots,
   computeVoucherEligibleSlots,
   computeAgeEligibleSlots,
+  computeAgeCouponEligibleSlots,
   computeCouponCoveredUnits,
 } from '../../common/utils/coupon-eligibility.util';
 import { claimVoucher, releaseVoucherByOrder } from '../../common/utils/voucher-reservation.util';
@@ -69,6 +70,7 @@ export {
   computeDocEligibleSlots,
   computeVoucherEligibleSlots,
   computeAgeEligibleSlots,
+  computeAgeCouponEligibleSlots,
   computeCouponCoveredUnits,
 };
 
@@ -402,12 +404,11 @@ export function orderShape(order: any, discountOverride?: number, extra?: Record
   // `maxUsage - usageCount` subtrairia o PRÓPRIO uso já contabilizado no finalize → erraria).
   if (resolvedEffectiveUsage === undefined && coupon?.couponType === 'AGE' && order.status === 'PENDING' && Array.isArray(order.pendingParticipants) && order.pendingParticipants.length > 0) {
     const participants = order.pendingParticipants as any[];
-    const min: number = coupon.minAge ?? 0;
-    const max: number = coupon.maxAge ?? Infinity;
     const refDate = resolveAgeReferenceDate(order);
     const totalUnits = (order.reservedTickets ?? []).reduce((s: number, rt: any) => s + (rt.quantity ?? 1), 0);
     // Lenient (PENDING): slot ainda sem birthDate mantém o cupom aplicado até preencher.
-    const derived = computeAgeEligibleSlots(participants, min, max, refDate, totalUnits, true);
+    // AGE respeita a lista exclusiva de documento quando ENABLED (idade E lista).
+    const derived = computeAgeCouponEligibleSlots(participants, coupon, refDate, totalUnits, true);
     if (derived.length > 0) {
       // Capa pelo uso RESTANTE do cupom (maxUsage − usageCount). Em PENDING o usageCount
       // ainda não conta este pedido (só incrementa no finalize), então é o remaining correto.
@@ -688,6 +689,16 @@ export class OrdersService {
       );
     }
 
+    // 1.1c Cortesia (organizador "adicionar inscrito"): reserva mesmo com a janela
+    // de inscrição encerrada, o lote esgotado e o evento no teto. Exige autorização
+    // de organizador/admin (MESMA gate do finalize) — sem isso um público poderia
+    // setar `isCourtesy` e furar as regras. `assertCanManageCourtesy` = admin OU
+    // `edit_event` na org do evento.
+    const isCourtesy = dto.isCourtesy === true;
+    if (isCourtesy) {
+      await this.assertCanManageCourtesy(userId, dto.eventId);
+    }
+
     // 1.1b Um checkout ativo por vez. Ao INICIAR uma reserva, cancela os pedidos
     // PENDING do usuário em OUTROS eventos (abandonados) e devolve o estoque/voucher
     // deles. Sem isso: (a) pedidos acumulados de eventos anteriores disparavam
@@ -768,14 +779,18 @@ export class OrdersService {
     const now = new Date();
     // Janela é wall-clock (UTC); comparar com o tempo real exige o instante em BRT
     // (+3h via eventWindowInstant), senão abre/fecha 3h cedo no Brasil.
-    if (event.registrationStartDate && now < eventWindowInstant(event.registrationStartDate)) {
-      throw new AppConflictException(
-        'REGISTRATION_NOT_OPEN',
-        'Inscrições ainda não abertas para este evento',
-      );
-    }
-    if (event.registrationEndDate && now > eventWindowInstant(event.registrationEndDate)) {
-      throw new AppConflictException('REGISTRATION_CLOSED', 'Período de inscrição encerrado');
+    // Cortesia (organizador) IGNORA a janela — pode inscrever antes de abrir ou
+    // depois de encerrar.
+    if (!isCourtesy) {
+      if (event.registrationStartDate && now < eventWindowInstant(event.registrationStartDate)) {
+        throw new AppConflictException(
+          'REGISTRATION_NOT_OPEN',
+          'Inscrições ainda não abertas para este evento',
+        );
+      }
+      if (event.registrationEndDate && now > eventWindowInstant(event.registrationEndDate)) {
+        throw new AppConflictException('REGISTRATION_CLOSED', 'Período de inscrição encerrado');
+      }
     }
 
     // 1.6 Idempotency: return existing PENDING order somente se os tickets/quantidades
@@ -897,36 +912,41 @@ export class OrdersService {
       // abriu — a regra canônica nunca devolve um lote FUTURO como ativo (lote
       // encerrado cai em fallback/esgotado). `eventWindowInstant` (+3h) evita
       // rejeitar 3h cedo no Brasil.
-      if (
-        batch.triggerType !== 'AFTER_PREVIOUS_SOLD_OUT' &&
-        batch.startDate &&
-        now < eventWindowInstant(batch.startDate)
-      ) {
-        throw new AppConflictException(
-          'BATCH_NOT_STARTED',
-          `Lote ainda não iniciado para o ingresso "${ticket.name}"`,
-        );
-      }
-      // Lote encerrado (janela BY_TIME fechada) e sem fallback elegível → esgotado.
-      if (activeStatus === 'SOLD_OUT') {
-        throw new AppConflictException(
-          'BATCH_SOLD_OUT',
-          `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
-        );
-      }
+      // Cortesia IGNORA janela/estoque do lote (organizador pode inscrever com o
+      // lote não iniciado ou esgotado). O decremento em 1.8 vira incondicional
+      // (pode ficar negativo) para a cortesia — ver branch lá.
+      if (!isCourtesy) {
+        if (
+          batch.triggerType !== 'AFTER_PREVIOUS_SOLD_OUT' &&
+          batch.startDate &&
+          now < eventWindowInstant(batch.startDate)
+        ) {
+          throw new AppConflictException(
+            'BATCH_NOT_STARTED',
+            `Lote ainda não iniciado para o ingresso "${ticket.name}"`,
+          );
+        }
+        // Lote encerrado (janela BY_TIME fechada) e sem fallback elegível → esgotado.
+        if (activeStatus === 'SOLD_OUT') {
+          throw new AppConflictException(
+            'BATCH_SOLD_OUT',
+            `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
+          );
+        }
 
-      // Fix #37: pre-check via write client (não réplica) para evitar leitura defasada
-      // que permitiria oversell em janelas de replicação. O UPDATE atômico dentro da
-      // transação ainda é a proteção real; este pre-check serve ao UX (falha cedo).
-      const batchFromWrite = await w.ticketBatch.findUnique({
-        where: { id: batch.id },
-        select: { availableQuantity: true },
-      });
-      if (!batchFromWrite || batchFromWrite.availableQuantity < item.quantity) {
-        throw new AppConflictException(
-          'BATCH_SOLD_OUT',
-          `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
-        );
+        // Fix #37: pre-check via write client (não réplica) para evitar leitura defasada
+        // que permitiria oversell em janelas de replicação. O UPDATE atômico dentro da
+        // transação ainda é a proteção real; este pre-check serve ao UX (falha cedo).
+        const batchFromWrite = await w.ticketBatch.findUnique({
+          where: { id: batch.id },
+          select: { availableQuantity: true },
+        });
+        if (!batchFromWrite || batchFromWrite.availableQuantity < item.quantity) {
+          throw new AppConflictException(
+            'BATCH_SOLD_OUT',
+            `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
+          );
+        }
       }
 
       batchInfos.push({
@@ -942,7 +962,8 @@ export class OrdersService {
     // proteção REAL contra oversell é o guard transacional em 1.8 (advisory lock +
     // contagem sob lock). Conta no write client (sem lag de réplica) — mesmo
     // predicado do enforcement: Registration != CANCELLED (inclui reservas ativas).
-    if (event.maxParticipants != null) {
+    // Cortesia IGNORA o teto do evento (organizador pode furar o limite de vagas).
+    if (!isCourtesy && event.maxParticipants != null) {
       const requestedUnits = dto.tickets.reduce((sum, t) => sum + t.quantity, 0);
       const currentRegistrations = await w.registration.count({
         where: { eventId: dto.eventId, status: { not: 'CANCELLED' } },
@@ -1004,7 +1025,7 @@ export class OrdersService {
       // reservas deste evento COM teto (eventos sem teto nem entram aqui → zero
       // impacto de performance). Sob o lock, a contagem enxerga todas as reservas
       // já commitadas, então a checagem não pode ser furada por corrida.
-      if (event.maxParticipants != null) {
+      if (!isCourtesy && event.maxParticipants != null) {
         const capLockKey = `event_cap:${dto.eventId}`;
         // pg_advisory_xact_lock retorna void; usar $executeRaw (não desserializa
         // colunas) — $queryRaw quebraria com "Failed to deserialize column of type 'void'".
@@ -1031,6 +1052,17 @@ export class OrdersService {
       //   1) availableQuantity >= quantity_solicitada  (counter atômico)
       //   2) quantity - vendas_reais >= quantity_solicitada  (fonte de verdade)
       for (const info of batchInfos) {
+        // Cortesia: decrementa SEM guard (decisão do usuário — pode ficar NEGATIVO
+        // quando o lote está esgotado; a cortesia conta como vaga dada e o estorno
+        // devolve o estoque normalmente via cancelOrderAndRestoreStock).
+        if (isCourtesy) {
+          await tx.$executeRaw`
+            UPDATE "TicketBatch"
+            SET "availableQuantity" = "availableQuantity" - ${info.quantity}
+            WHERE id = ${info.batchId}::uuid
+          `;
+          continue;
+        }
         const rows: any[] = await tx.$queryRaw`
           UPDATE "TicketBatch" tb
           SET "availableQuantity" = tb."availableQuantity" - ${info.quantity}
@@ -1170,11 +1202,13 @@ export class OrdersService {
       );
     }
 
-    // 1. Reserva (estoque + vaga + placeholders). Esgotado → erro (mesma regra
-    //    do checkout). O organizador é o dono do pedido de cortesia.
+    // 1. Reserva (estoque + vaga + placeholders). `isCourtesy` libera janela
+    //    encerrada + lote esgotado + teto do evento (o organizador é o dono do
+    //    pedido de cortesia; a autorização é revalidada dentro do reserve).
     const reserved = await this.reserve(userId, {
       eventId: dto.eventId,
       tickets: dto.tickets,
+      isCourtesy: true,
     });
     const orderId = reserved.id as string;
 
@@ -2185,17 +2219,16 @@ export class OrdersService {
     if (order.couponId && !order.voucherId) {
       const existingCoupon = await r.coupon.findUnique({
         where: { id: order.couponId },
-        select: { id: true, couponType: true, type: true, value: true, minAge: true, maxAge: true, maxUsage: true, usageCount: true, appliesTo: true, applyToProducts: true },
+        select: { id: true, couponType: true, type: true, value: true, minAge: true, maxAge: true, maxUsage: true, usageCount: true, appliesTo: true, applyToProducts: true, cpfListStatus: true, documentList: true, cpfList: true },
       });
       if (existingCoupon?.couponType === 'AGE') {
         const refDate = resolveAgeReferenceDate(order);
-        const min = existingCoupon.minAge ?? 0;
-        const max = existingCoupon.maxAge ?? Infinity;
         const totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
         // Lenient (PENDING): slot ainda sem birthDate MANTÉM o cupom aplicado até o comprador
         // preencher; participante preenchido é validado pela idade. Só remove o cupom quando há
         // participantes preenchidos e NENHUM (preenchido ou vazio) qualifica.
-        const ageSlots = computeAgeEligibleSlots(participants, min, max, refDate, totalUnits, true);
+        // AGE respeita a lista exclusiva de documento quando ENABLED (idade E lista).
+        const ageSlots = computeAgeCouponEligibleSlots(participants, existingCoupon, refDate, totalUnits, true);
         const ageMatchCount = ageSlots.length;
 
         if (ageMatchCount <= 0) {
@@ -2260,11 +2293,10 @@ export class OrdersService {
           if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) continue;
         } else if (coupon.couponType === 'AGE') {
           const refDate = resolveAgeReferenceDate(order);
-          const min = coupon.minAge ?? 0;
-          const max = coupon.maxAge ?? Infinity;
           const totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
           // Lenient (PENDING): slot vazio (sem birthDate) conta como elegível até preencher.
-          const ageSlots = computeAgeEligibleSlots(participants, min, max, refDate, totalUnits, true);
+          // AGE respeita a lista exclusiva de documento quando ENABLED (idade E lista).
+          const ageSlots = computeAgeCouponEligibleSlots(participants, coupon, refDate, totalUnits, true);
           if (ageSlots.length <= 0) continue;
           (coupon as any)._ageSlots = ageSlots;
         }
@@ -3528,11 +3560,11 @@ export class OrdersService {
         } else if (coupon.couponType === 'AGE') {
           // Validar idade na data do evento. ESTRITO no pay (lenient=false): slot sem birthDate
           // NÃO recebe o desconto no commit — só idade informada e dentro da faixa.
+          // AGE respeita a lista exclusiva de documento quando ENABLED (idade E lista):
+          // no commit, só participante com documento na lista E idade na faixa recebe.
           const refDate = resolveAgeReferenceDate(order);
-          const minAge = coupon.minAge ?? 0;
-          const maxAge = coupon.maxAge ?? Infinity;
           const totalUnitsAge = reservedTickets.reduce((s: number, rt: any) => s + (rt.quantity ?? 0), 0);
-          const ageMatchCount = computeAgeEligibleSlots(participants, minAge, maxAge, refDate, totalUnitsAge).length;
+          const ageMatchCount = computeAgeCouponEligibleSlots(participants, coupon, refDate, totalUnitsAge).length;
 
           if (ageMatchCount <= 0) continue;
 

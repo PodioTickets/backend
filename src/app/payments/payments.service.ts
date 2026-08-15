@@ -526,7 +526,9 @@ export class PaymentsService {
           paymentDate: payment.paymentDate,
           gateway: 'CIELO',
           authorizationCode: metadata.authorizationCode || null,
-          nsu: metadata.proofOfSale || null,
+          // NSU: cartão = ProofOfSale da Cielo; PIX (Cielo2 não tem ProofOfSale) =
+          // EndToEndId (E2E), persistido no metadata pelo webhook de confirmação.
+          nsu: metadata.proofOfSale || metadata.endToEndId || null,
           transactionIp: metadata.transactionIp || null,
           // Parcelamento (se aplicável)
           installments: creditCardInfo.installments || null,
@@ -862,6 +864,11 @@ export class PaymentsService {
               cieloStatus: this.cieloService.mapCieloStatusToString(braspagPayment.Payment.Status),
               confirmedViaPolling: true,
               confirmedAt: new Date().toISOString(),
+              // NSU/E2E: o polling é caminho de confirmação real (corre contra o
+              // webhook). Persistir aqui garante o NSU do PIX mesmo quando o polling
+              // vence a corrida. Só grava quando a Cielo devolveu valor.
+              ...(braspagPayment.Payment.ProofOfSale ? { proofOfSale: braspagPayment.Payment.ProofOfSale } : {}),
+              ...(braspagPayment.Payment.EndToEndId ? { endToEndId: braspagPayment.Payment.EndToEndId } : {}),
             } as any,
           },
         });
@@ -932,6 +939,9 @@ export class PaymentsService {
             ...(payment.metadata as object),
             simulatedAt: new Date().toISOString(),
             simulatedViaScript: true,
+            // E2E simulado: em produção o webhook grava o EndToEndId real da Cielo.
+            // Aqui damos um valor para o NSU do modal aparecer no PIX em homolog/sandbox.
+            endToEndId: `E2E-SANDBOX-${transactionId}`,
           } as any,
         },
       });

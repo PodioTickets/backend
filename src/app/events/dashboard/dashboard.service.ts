@@ -13,8 +13,8 @@ import {
   calculateDateRange,
   getComparisonBounds,
   percentChange,
-  eachUtcDayKeys,
-  lastSixMonthKeys,
+  eachBrtDayKeys,
+  lastSixBrtMonthKeys,
   DateRange,
 } from './dashboard-period.util';
 
@@ -415,10 +415,14 @@ export class DashboardService {
     ticketIds: string[] | null,
     organizerFeeRate: number,
   ): Promise<OrderBucketRow[]> {
+    // Bucket por DIA/MÊS CIVIL DE BRASÍLIA (não UTC). `createdAt` é timestamp sem
+    // tz (valores UTC): `AT TIME ZONE 'UTC'` o torna o instante real; `AT TIME
+    // ZONE 'America/Sao_Paulo'` volta pro wall-clock BRT. Sem isso, vendas após
+    // 21h BRT caíam no dia UTC seguinte e "hoje" (BRT) ficava zerado.
     const bucketExpr =
       period === DashboardPeriod.GERAL
-        ? Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM')`
-        : Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD')`;
+        ? Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM')`
+        : Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD')`;
 
     const effectiveRange = this.effectiveChartRange(period, dateRange);
 
@@ -471,10 +475,11 @@ export class DashboardService {
     dateRange: DateRange,
     ticketIds: string[] | null,
   ): Promise<RegBucketRow[]> {
+    // Bucket por dia/mês civil de Brasília — ver nota em queryChartOrderBuckets.
     const bucketExpr =
       period === DashboardPeriod.GERAL
-        ? Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM')`
-        : Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD')`;
+        ? Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM')`
+        : Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD')`;
 
     const effectiveRange = this.effectiveChartRange(period, dateRange);
 
@@ -723,9 +728,9 @@ export class DashboardService {
   ) {
     const keys =
       period === DashboardPeriod.GERAL
-        ? lastSixMonthKeys()
+        ? lastSixBrtMonthKeys()
         : dateRange.start && dateRange.end
-          ? eachUtcDayKeys(dateRange.start, dateRange.end)
+          ? eachBrtDayKeys(dateRange.start, dateRange.end)
           : [];
 
     const labels = this.formatLabels(period, keys);

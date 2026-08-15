@@ -111,6 +111,57 @@ export function computeAgeEligibleSlots(
 }
 
 /**
+ * Slots elegíveis de um cupom AGE, opcionalmente restringidos pela LISTA DE
+ * DOCUMENTO exclusiva (`cpfListStatus === 'ENABLED'`).
+ *
+ * Regra do produto (confirmada 2026-08-14): **idade E lista (interseção)** — o
+ * participante só recebe o desconto se estiver na faixa etária E com o documento
+ * na lista. Com a lista DISABLED, equivale a `computeAgeEligibleSlots` puro.
+ *
+ * `treatUnfilledAsEligible` propaga para AMBAS as checagens (idade e documento),
+ * mantendo o desconto PROVISÓRIO no PENDING até o participante ser preenchido —
+ * espelha exatamente o comportamento consolidado do DISCOUNT+cpfList.
+ *
+ * Fonte ÚNICA da regra AGE+lista: todos os call-sites (reserve provisório,
+ * re-avaliação de PATCH, pay estrito, cobertura de uso) passam por aqui.
+ */
+export function computeAgeCouponEligibleSlots(
+  participants: any[],
+  coupon: {
+    minAge?: number | null;
+    maxAge?: number | null;
+    cpfListStatus?: string | null;
+    documentList?: unknown;
+    cpfList?: unknown;
+  },
+  refDate: Date,
+  totalUnits: number,
+  treatUnfilledAsEligible = false,
+): number[] {
+  const ageSlots = computeAgeEligibleSlots(
+    participants ?? [],
+    coupon.minAge ?? 0,
+    coupon.maxAge ?? Number.POSITIVE_INFINITY,
+    refDate,
+    totalUnits,
+    treatUnfilledAsEligible,
+  );
+  if (coupon.cpfListStatus !== 'ENABLED') return ageSlots;
+
+  // Interseção com os slots elegíveis por documento (mesma semântica lenient/estrita).
+  const docSlots = new Set(
+    computeDocEligibleSlots(
+      participants ?? [],
+      coupon.documentList,
+      coupon.cpfList,
+      totalUnits,
+      treatUnfilledAsEligible,
+    ),
+  );
+  return ageSlots.filter((i) => docSlots.has(i));
+}
+
+/**
  * Nº de INGRESSOS efetivamente cobertos por um cupom — base canônica do incremento de
  * `usageCount` no finalize (e do decremento no estorno). Espelha EXATAMENTE a regra de
  * `effectiveUsage` do `pay`, garantindo que o uso contabilizado = ingressos que de fato
@@ -155,10 +206,10 @@ export function computeCouponCoveredUnits(
   if (applicableQty === 0) return 0;
 
   if (coupon.couponType === 'AGE') {
-    const ageMatch = computeAgeEligibleSlots(
+    // AGE respeita a lista exclusiva de documento quando ENABLED (idade E lista).
+    const ageMatch = computeAgeCouponEligibleSlots(
       participants ?? [],
-      coupon.minAge ?? 0,
-      coupon.maxAge ?? Infinity,
+      coupon as any,
       ageRefDate,
       totalUnits,
     ).length;

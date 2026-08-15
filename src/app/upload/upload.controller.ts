@@ -11,7 +11,9 @@ import {
   UploadedFile,
   UploadedFiles,
   BadRequestException,
+  Request,
 } from '@nestjs/common';
+import type { Request as ExpressRequest } from 'express';
 import { IsArray, ArrayMaxSize, IsString, MaxLength } from 'class-validator';
 import { SkipThrottle } from '@nestjs/throttler';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
@@ -32,6 +34,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { SecurityMonitoringService } from '../../common/services/security-monitoring.service';
 import { SecurityAlertsService } from '../../common/services/security-alerts.service';
 import { NoCache } from 'src/common/decorators/cache.decorator';
+import { getClientIp } from '../../common/utils/client-ip.util';
 
 // DTOs para os endpoints de delete
 class DeleteFilesDto {
@@ -572,12 +575,21 @@ export class UploadController {
     status: 201,
     description: 'Imagem carregada e comprimida com sucesso',
   })
-  async uploadImage(@UploadedFile() file: any) {
+  async uploadImage(
+    @Request() req: ExpressRequest & { user?: { id?: string } },
+    @UploadedFile() file: any,
+  ) {
     try {
       if (!file) {
         throw new BadRequestException('Nenhum arquivo enviado');
       }
       const imageUrl = await this.uploadService.compressImage(file);
+      // Auditoria best-effort (não bloqueia a resposta do upload).
+      await this.uploadService.auditUpload({
+        actorUserId: req.user?.id ?? null,
+        ip: getClientIp(req),
+        kind: 'UPLOAD_IMAGE',
+      });
       return { url: imageUrl };
     } catch (error) {
       console.error('❌ Upload error:', error);
@@ -611,12 +623,21 @@ export class UploadController {
     status: 201,
     description: 'PDF carregado com sucesso',
   })
-  async uploadPdf(@UploadedFile() file: any) {
+  async uploadPdf(
+    @Request() req: ExpressRequest & { user?: { id?: string } },
+    @UploadedFile() file: any,
+  ) {
     try {
       if (!file) {
         throw new BadRequestException('Nenhum arquivo enviado');
       }
       const pdfUrl = await this.uploadService.uploadPdf(file);
+      // Auditoria best-effort (não bloqueia a resposta do upload).
+      await this.uploadService.auditUpload({
+        actorUserId: req.user?.id ?? null,
+        ip: getClientIp(req),
+        kind: 'UPLOAD_PDF',
+      });
       return { url: pdfUrl };
     } catch (error) {
       console.error('❌ PDF upload error:', error);

@@ -7,6 +7,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { OrganizerMemberAccessService } from '../organizations/organizer-member-access.service';
 import { EmailService } from '../../common/services/email.service';
+import { OrganizationAuditService } from '../../common/services/organization-audit.service';
 import {
   CreateEventNotificationDto,
   EVENT_NOTIFICATION_CHANNEL_VALUES,
@@ -87,6 +88,7 @@ export class EventNotificationsService {
     private readonly prisma: PrismaService,
     private readonly organizerMemberAccess: OrganizerMemberAccessService,
     private readonly emailService: EmailService,
+    private readonly auditService: OrganizationAuditService,
   ) {}
 
   private allowedChannelSet = new Set<string>(EVENT_NOTIFICATION_CHANNEL_VALUES);
@@ -215,7 +217,12 @@ export class EventNotificationsService {
     };
   }
 
-  async create(userId: string, eventId: string, dto: CreateEventNotificationDto) {
+  async create(
+    userId: string,
+    eventId: string,
+    dto: CreateEventNotificationDto,
+    clientIp?: string | null,
+  ) {
     await this.organizerMemberAccess.assertCanAccessEvent(userId, eventId, 'notify');
 
     const title = dto.title?.trim() ?? '';
@@ -252,6 +259,14 @@ export class EventNotificationsService {
         channels: true,
         status: true,
       },
+    });
+
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'NOTIFICATION_CREATE',
+      action: (ev) => `Criou a notificação "${created.title}" no evento "${ev}"`,
+      extra: { notificationId: created.id },
     });
 
     return {

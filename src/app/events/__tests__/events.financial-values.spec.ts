@@ -56,6 +56,7 @@ describe('EventsService.getFinancial — valores por método de pagamento (ponta
     {} as any,
     {} as any,
     {} as any,
+    { record: jest.fn(), recordForEvent: jest.fn() } as any,
   );
   const breakdownFor = (orders: any[], audited = false) =>
     (repasseReal as any).calcBreakdown(orders, [], RETENTION, audited, [], ORG_FEE);

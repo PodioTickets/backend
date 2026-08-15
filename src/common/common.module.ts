@@ -14,6 +14,7 @@ import { CacheRedisService } from './services/cache-redis.service';
 import { UserActivityService } from './services/user-activity.service';
 import { UserActivityCleanupService } from './services/user-activity-cleanup.service';
 import { TrackActivityInterceptor } from './interceptors/track-activity.interceptor';
+import { OrganizationAuditService } from './services/organization-audit.service';
 
 @Module({
   imports: [ConfigModule],
@@ -31,6 +32,7 @@ import { TrackActivityInterceptor } from './interceptors/track-activity.intercep
     UserActivityService,
     UserActivityCleanupService,
     TrackActivityInterceptor,
+    OrganizationAuditService,
   ],
   exports: [
     RequestOriginGuard,
@@ -43,6 +45,7 @@ import { TrackActivityInterceptor } from './interceptors/track-activity.intercep
     CacheRedisService,
     UserActivityService,
     TrackActivityInterceptor,
+    OrganizationAuditService,
   ],
 })
 export class CommonModule {}

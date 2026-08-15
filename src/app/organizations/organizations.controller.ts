@@ -228,7 +228,12 @@ export class OrganizationsController {
       throw new Error('Organizer not found');
     }
 
-    return this.organizationsService.updateOrganizationLogo(req.user.id, member.organizationId, updateDto.logoUrl);
+    return this.organizationsService.updateOrganizationLogo(
+      req.user.id,
+      member.organizationId,
+      updateDto.logoUrl,
+      clientIp(req),
+    );
   }
 
   @Get('me/members')

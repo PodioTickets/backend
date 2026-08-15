@@ -52,6 +52,12 @@ export class PaymentsWebhookService {
     // Status REAL consultado na Cielo (não o do payload) — usado nas transições
     // e na delegação de reversão abaixo.
     let actualCieloStatus: number;
+    // Identificadores da liquidação (mesma resposta da Cielo já consultada acima —
+    // sem request extra). Cartão devolve ProofOfSale (NSU); PIX Cielo2 devolve
+    // EndToEndId (E2E), que só existe DEPOIS do pagamento e chega justamente aqui.
+    // Persistidos no metadata para o modal de pedido exibir o NSU também no PIX.
+    let cieloProofOfSale: string | undefined;
+    let cieloEndToEndId: string | undefined;
     try {
       const cieloPayment = await this.cieloService.getPayment(event.PaymentId);
       if (!cieloPayment) {
@@ -59,6 +65,8 @@ export class PaymentsWebhookService {
         return;
       }
       actualCieloStatus = cieloPayment.Payment.Status;
+      cieloProofOfSale = cieloPayment.Payment.ProofOfSale;
+      cieloEndToEndId = cieloPayment.Payment.EndToEndId;
       paymentStatus = this.cieloService.mapCieloStatusToPaymentStatus(actualCieloStatus);
       if (actualCieloStatus !== event.Status) {
         this.logger.warn(`Webhook status divergente da Cielo: payload=${event.Status}, Cielo=${actualCieloStatus}. Usando valor real (${actualCieloStatus}).`);
@@ -148,6 +156,10 @@ export class PaymentsWebhookService {
               webhookProcessedAt: new Date().toISOString(),
               returnCode: event.ReturnCode,
               returnMessage: event.ReturnMessage,
+              // NSU/E2E da liquidação. Só sobrescreve quando a Cielo devolveu o
+              // valor (evita apagar um proofOfSale já gravado no pay do cartão).
+              ...(cieloProofOfSale ? { proofOfSale: cieloProofOfSale } : {}),
+              ...(cieloEndToEndId ? { endToEndId: cieloEndToEndId } : {}),
             } as any,
           },
         });

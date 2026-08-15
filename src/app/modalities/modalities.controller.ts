@@ -27,6 +27,7 @@ import {
   UpdateModalityGroupDto,
 } from './dto/create-modality-group.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { getClientIp } from '../../common/utils/client-ip.util';
 
 @ApiTags('Modalities')
 @Controller('api/v1/modalities')
@@ -73,6 +74,7 @@ export class ModalitiesController {
       req.user.id,
       eventId,
       createModalityDto,
+      getClientIp(req),
     );
   }
 
@@ -122,6 +124,7 @@ export class ModalitiesController {
       eventId,
       modalityId,
       updateModalityDto,
+      getClientIp(req),
     );
   }
 
@@ -133,7 +136,12 @@ export class ModalitiesController {
     @Param('eventId') eventId: string,
     @Param('modalityId') modalityId: string,
   ) {
-    return this.modalitiesService.remove(req.user.id, eventId, modalityId);
+    return this.modalitiesService.remove(
+      req.user.id,
+      eventId,
+      modalityId,
+      getClientIp(req),
+    );
   }
 
   // Modality Groups routes
@@ -158,7 +166,12 @@ export class ModalitiesController {
     @Param('eventId') eventId: string,
     @Body() createGroupDto: CreateModalityGroupDto,
   ) {
-    return this.modalitiesService.createGroup(req.user.id, eventId, createGroupDto);
+    return this.modalitiesService.createGroup(
+      req.user.id,
+      eventId,
+      createGroupDto,
+      getClientIp(req),
+    );
   }
 
   @Get('events/:eventId/groups')
@@ -198,7 +211,13 @@ export class ModalitiesController {
     @Param('groupId') groupId: string,
     @Body() updateGroupDto: UpdateModalityGroupDto,
   ) {
-    return this.modalitiesService.updateGroup(req.user.id, eventId, groupId, updateGroupDto);
+    return this.modalitiesService.updateGroup(
+      req.user.id,
+      eventId,
+      groupId,
+      updateGroupDto,
+      getClientIp(req),
+    );
   }
 
   @Delete('events/:eventId/groups/:groupId')
@@ -223,6 +242,11 @@ export class ModalitiesController {
     @Param('eventId') eventId: string,
     @Param('groupId') groupId: string,
   ) {
-    return this.modalitiesService.removeGroup(req.user.id, eventId, groupId);
+    return this.modalitiesService.removeGroup(
+      req.user.id,
+      eventId,
+      groupId,
+      getClientIp(req),
+    );
   }
 }

@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { OrganizersService } from '../organizers.service';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { OrganizationAuditService } from '../../../common/services/organization-audit.service';
 import { EmailService } from '../../../common/services/email.service';
 import { WhatsAppService } from '../../../common/services/whatsapp.service';
 import { NotFoundException, BadRequestException } from '@nestjs/common';
@@ -51,6 +52,7 @@ describe('OrganizersService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         OrganizersService,
+        { provide: OrganizationAuditService, useValue: { record: jest.fn(), recordForEvent: jest.fn() } },
         {
           provide: PrismaService,
           useValue: mockPrismaService,

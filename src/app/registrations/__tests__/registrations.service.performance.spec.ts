@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { RegistrationsService } from '../registrations.service';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { OrganizationAuditService } from '../../../common/services/organization-audit.service';
 import { KitsService } from '../../kits/kits.service';
 import { EmailService } from '../../../common/services/email.service';
 import { TicketPdfService } from '../../../common/services/ticket-pdf.service';
@@ -98,6 +99,10 @@ describe('RegistrationsService - Performance Tests', () => {
         {
           provide: OrganizerMemberAccessService,
           useValue: { assertCanAccessEvent: jest.fn() },
+        },
+        {
+          provide: OrganizationAuditService,
+          useValue: { record: jest.fn(), recordForEvent: jest.fn() },
         },
       ],
     }).compile();

@@ -6,9 +6,11 @@ import { memoryStorage } from 'multer';
 import { ConfigModule } from '@nestjs/config';
 import { SecurityMonitoringService } from 'src/common/services/security-monitoring.service';
 import { SecurityAlertsService } from 'src/common/services/security-alerts.service';
+import { CommonModule } from '../../common/common.module';
 
 @Module({
   imports: [
+    CommonModule,
     MulterModule.register({
       storage: memoryStorage(),
       limits: { fileSize: 10 * 1024 * 1024 },

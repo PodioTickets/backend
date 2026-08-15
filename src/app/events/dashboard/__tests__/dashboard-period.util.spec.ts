@@ -27,7 +27,9 @@ import {
   getComparisonBounds,
   percentChange,
   eachUtcDayKeys,
+  eachBrtDayKeys,
   lastSixMonthKeys,
+  lastSixBrtMonthKeys,
 } from '../dashboard-period.util';
 
 describe('calculateDateRange', () => {
@@ -124,6 +126,31 @@ describe('lastSixMonthKeys', () => {
   it('últimos 6 meses (YYYY-MM), do mais antigo ao mais recente', () => {
     const now = new Date(2026, 5, 15); // junho/2026
     expect(lastSixMonthKeys(now)).toEqual([
+      '2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06',
+    ]);
+  });
+});
+
+describe('eachBrtDayKeys', () => {
+  it('venda após 21h BRT (= dia UTC seguinte) permanece no DIA BRT (hoje ≠ 0)', () => {
+    // 2026-06-16T01:00Z = 2026-06-15 22:00 BRT → ainda é o dia 15 em Brasília.
+    const from = new Date('2026-06-15T12:00:00.000Z'); // 09:00 BRT dia 15
+    const to = new Date('2026-06-16T01:00:00.000Z'); // 22:00 BRT dia 15
+    expect(eachBrtDayKeys(from, to)).toEqual(['2026-06-15']);
+  });
+
+  it('lista os dias civis BRT do intervalo (inclusive)', () => {
+    const from = new Date('2026-06-01T04:00:00.000Z'); // 01:00 BRT dia 1
+    const to = new Date('2026-06-03T23:00:00.000Z'); // 20:00 BRT dia 3
+    expect(eachBrtDayKeys(from, to)).toEqual(['2026-06-01', '2026-06-02', '2026-06-03']);
+  });
+});
+
+describe('lastSixBrtMonthKeys', () => {
+  it('usa o mês civil de Brasília na fronteira (00:00–03:00Z = mês anterior BRT)', () => {
+    // 2026-07-01T01:00Z = 2026-06-30 22:00 BRT → mês corrente BRT = junho.
+    const now = new Date('2026-07-01T01:00:00.000Z');
+    expect(lastSixBrtMonthKeys(now)).toEqual([
       '2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06',
     ]);
   });

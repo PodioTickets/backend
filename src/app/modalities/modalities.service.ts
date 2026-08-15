@@ -12,10 +12,14 @@ import {
   CreateModalityGroupDto,
   UpdateModalityGroupDto,
 } from './dto/create-modality-group.dto';
+import { OrganizationAuditService } from '../../common/services/organization-audit.service';
 
 @Injectable()
 export class ModalitiesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditService: OrganizationAuditService,
+  ) {}
 
   /**
    * Busca todos os templates de modalidades disponíveis
@@ -45,6 +49,7 @@ export class ModalitiesService {
     userId: string,
     eventId: string,
     createModalityDto: CreateModalityDto,
+    clientIp?: string | null,
   ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
@@ -89,6 +94,15 @@ export class ModalitiesService {
         template: true,
         group: true,
       },
+    });
+
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'MODALITY_CREATE',
+      action: (ev) =>
+        `Criou a modalidade "${modality.name}" no evento "${ev}"`,
+      extra: { modalityId: modality.id },
     });
 
     return {
@@ -171,6 +185,7 @@ export class ModalitiesService {
     eventId: string,
     modalityId: string,
     updateModalityDto: UpdateModalityDto,
+    clientIp?: string | null,
   ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
@@ -189,13 +204,30 @@ export class ModalitiesService {
       data: updateModalityDto,
     });
 
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'MODALITY_UPDATE',
+      action: (ev) =>
+        `Editou a modalidade "${updatedModality.name}" no evento "${ev}"`,
+      extra: {
+        modalityId,
+        fieldsEdited: Object.keys(updateModalityDto),
+      },
+    });
+
     return {
       message: 'Modality updated successfully',
       data: { modality: updatedModality },
     };
   }
 
-  async remove(userId: string, eventId: string, modalityId: string) {
+  async remove(
+    userId: string,
+    eventId: string,
+    modalityId: string,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -219,6 +251,15 @@ export class ModalitiesService {
 
     await prismaWrite.modality.delete({
       where: { id: modalityId },
+    });
+
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'MODALITY_DELETE',
+      action: (ev) =>
+        `Excluiu a modalidade "${modality.name}" do evento "${ev}"`,
+      extra: { modalityId },
     });
 
     return {
@@ -262,7 +303,12 @@ export class ModalitiesService {
   }
 
   // Modality Groups methods
-  async createGroup(userId: string, eventId: string, createGroupDto: CreateModalityGroupDto) {
+  async createGroup(
+    userId: string,
+    eventId: string,
+    createGroupDto: CreateModalityGroupDto,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -282,6 +328,14 @@ export class ModalitiesService {
         order: createGroupDto.order,
         eventId,
       },
+    });
+
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'MODALITY_GROUP_CREATE',
+      action: (ev) => `Criou o grupo "${group.name}" no evento "${ev}"`,
+      extra: { groupId: group.id },
     });
 
     return {
@@ -315,6 +369,7 @@ export class ModalitiesService {
     eventId: string,
     groupId: string,
     updateGroupDto: UpdateModalityGroupDto,
+    clientIp?: string | null,
   ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
@@ -333,13 +388,29 @@ export class ModalitiesService {
       data: updateGroupDto,
     });
 
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'MODALITY_GROUP_UPDATE',
+      action: (ev) => `Editou o grupo "${updatedGroup.name}" no evento "${ev}"`,
+      extra: {
+        groupId,
+        fieldsEdited: Object.keys(updateGroupDto),
+      },
+    });
+
     return {
       message: 'Modality group updated successfully',
       data: { group: updatedGroup },
     };
   }
 
-  async removeGroup(userId: string, eventId: string, groupId: string) {
+  async removeGroup(
+    userId: string,
+    eventId: string,
+    groupId: string,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -362,6 +433,14 @@ export class ModalitiesService {
 
     await prismaWrite.modalityGroup.delete({
       where: { id: groupId },
+    });
+
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'MODALITY_GROUP_DELETE',
+      action: (ev) => `Excluiu o grupo "${group.name}" do evento "${ev}"`,
+      extra: { groupId },
     });
 
     return {

@@ -25,6 +25,7 @@ import {
   CreateEventNotificationDto,
   ListEventNotificationsQueryDto,
 } from './dto/event-notification.dto';
+import { getClientIp } from '../../common/utils/client-ip.util';
 
 @ApiTags('Organizer Event Notifications')
 @Controller('api/v1/organizer/events')
@@ -82,6 +83,11 @@ export class OrganizerEventNotificationsController {
     @Param('eventId') eventId: string,
     @Body() dto: CreateEventNotificationDto,
   ) {
-    return this.eventNotifications.create(req.user.id, eventId, dto);
+    return this.eventNotifications.create(
+      req.user.id,
+      eventId,
+      dto,
+      getClientIp(req as any),
+    );
   }
 }

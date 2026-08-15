@@ -12,6 +12,7 @@ import { IsInt, IsOptional, IsString, IsUUID, Min } from 'class-validator';
 import { Type } from 'class-transformer';
 import { RepasseService } from './repasse.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { getClientIp } from '../../common/utils/client-ip.util';
 
 class RequestWithdrawalDto {
   @IsInt()
@@ -115,7 +116,13 @@ export class RepasseController {
     @Param('eventId') eventId: string,
     @Body() dto: RequestWithdrawalDto,
   ) {
-    return this.repasseService.requestWithdrawal(req.user.id, eventId, dto.amount, dto.pixKeyId);
+    return this.repasseService.requestWithdrawal(
+      req.user.id,
+      eventId,
+      dto.amount,
+      dto.pixKeyId,
+      getClientIp(req),
+    );
   }
 
   @Patch('withdrawals/:withdrawalId/complete')
@@ -173,7 +180,12 @@ export class RepasseController {
     @Param('eventId') eventId: string,
     @Body() dto: RequestAnticipationDto,
   ) {
-    return this.repasseService.requestAnticipation(req.user.id, eventId, dto.amount);
+    return this.repasseService.requestAnticipation(
+      req.user.id,
+      eventId,
+      dto.amount,
+      getClientIp(req),
+    );
   }
 
   @Patch('anticipations/:anticipationId/complete')

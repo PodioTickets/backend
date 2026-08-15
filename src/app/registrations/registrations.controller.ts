@@ -18,6 +18,7 @@ import { UpdateRegistrationAnswersDto } from './dto/update-registration-answers.
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PaymentsService } from '../payments/payments.service';
 import { NoCache } from 'src/common/decorators/cache.decorator';
+import { getClientIp } from '../../common/utils/client-ip.util';
 
 @ApiTags('Registrations')
 @Controller('api/v1/registrations')
@@ -37,7 +38,7 @@ export class RegistrationsController {
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 404, description: 'Event, modality, or kit item not found' })
   create(@Request() req, @Body() createRegistrationDto: CreateRegistrationWithInvitedUserDto) {
-    return this.registrationsService.create(req.user.id, createRegistrationDto);
+    return this.registrationsService.create(req.user.id, createRegistrationDto, getClientIp(req));
   }
 
   @Get('me')
@@ -88,7 +89,7 @@ export class RegistrationsController {
     @Param('productId') productId: string,
     @Body('variationId') variationId: string,
   ) {
-    return this.registrationsService.updateProductVariation(registrationId, productId, variationId, req.user.id);
+    return this.registrationsService.updateProductVariation(registrationId, productId, variationId, req.user.id, getClientIp(req));
   }
 
   @Patch(':registrationId/participant')
@@ -110,7 +111,7 @@ export class RegistrationsController {
     @Param('registrationId') registrationId: string,
     @Body() dto: UpdateRegistrationParticipantDto,
   ) {
-    return this.registrationsService.updateRegistrationParticipant(registrationId, dto, req.user.id);
+    return this.registrationsService.updateRegistrationParticipant(registrationId, dto, req.user.id, getClientIp(req));
   }
 
   @Patch(':registrationId/answers')
@@ -131,7 +132,7 @@ export class RegistrationsController {
     @Param('registrationId') registrationId: string,
     @Body() dto: UpdateRegistrationAnswersDto,
   ) {
-    return this.registrationsService.updateRegistrationAnswers(registrationId, dto.answers, req.user.id);
+    return this.registrationsService.updateRegistrationAnswers(registrationId, dto.answers, req.user.id, getClientIp(req));
   }
 
   @Patch(':registrationId/products/:productId/variation/organizer')
@@ -156,7 +157,7 @@ export class RegistrationsController {
     @Param('productId') productId: string,
     @Body('variationId') variationId: string,
   ) {
-    return this.registrationsService.updateProductVariationAsOrganizer(registrationId, productId, variationId, req.user.id);
+    return this.registrationsService.updateProductVariationAsOrganizer(registrationId, productId, variationId, req.user.id, getClientIp(req));
   }
 
   @Get(':id')
@@ -275,6 +276,7 @@ export class RegistrationsController {
       req.user.id,
       dto.email,
       dto.ticketOnly ?? false,
+      getClientIp(req),
     );
   }
 
@@ -288,7 +290,7 @@ export class RegistrationsController {
   @ApiResponse({ status: 403, description: 'Forbidden - Only registration owner can cancel' })
   @ApiResponse({ status: 404, description: 'Registration not found' })
   cancel(@Request() req, @Param('id') id: string) {
-    return this.registrationsService.cancel(id, req.user.id);
+    return this.registrationsService.cancel(id, req.user.id, getClientIp(req));
   }
 }
 

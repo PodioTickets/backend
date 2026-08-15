@@ -9,12 +9,21 @@ import {
 } from './dto/create-voucher.dto';
 import { buildDocumentList } from '../../common/utils/document.util';
 import { brtDayEndUtc, eventWindowInstant } from '../../common/utils/brt-date.util';
+import { OrganizationAuditService } from '../../common/services/organization-audit.service';
 
 @Injectable()
 export class VouchersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditService: OrganizationAuditService,
+  ) {}
 
-  async create(userId: string, eventId: string, createVoucherDto: CreateVoucherDto) {
+  async create(
+    userId: string,
+    eventId: string,
+    createVoucherDto: CreateVoucherDto,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -85,6 +94,15 @@ export class VouchersService {
       ...voucher,
       appliesTo: this.parseAppliesTo(voucher.appliesTo),
     }));
+
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'VOUCHER_CREATE',
+      action: (ev) =>
+        `Criou o voucher "${createVoucherDto.name}" no evento "${ev}"`,
+      extra: { voucherName: createVoucherDto.name, quantity: createVoucherDto.quantity },
+    });
 
     return {
       message: `${createVoucherDto.quantity} voucher(s) created successfully`,
@@ -401,7 +419,13 @@ export class VouchersService {
     };
   }
 
-  async update(userId: string, eventId: string, voucherId: string, updateVoucherDto: UpdateVoucherDto) {
+  async update(
+    userId: string,
+    eventId: string,
+    voucherId: string,
+    updateVoucherDto: UpdateVoucherDto,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -534,13 +558,27 @@ export class VouchersService {
       appliesTo: this.parseAppliesTo(representative.appliesTo),
     };
 
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'VOUCHER_UPDATE',
+      action: (ev) =>
+        `Editou o voucher "${voucher.code ?? voucher.name}" no evento "${ev}"`,
+      extra: { voucherId, voucherName: voucher.name, fieldsEdited: Object.keys(updateVoucherDto) },
+    });
+
     return {
       message: 'Voucher updated successfully',
       data: { voucher: transformedVoucher },
     };
   }
 
-  async remove(userId: string, eventId: string, voucherId: string) {
+  async remove(
+    userId: string,
+    eventId: string,
+    voucherId: string,
+    clientIp?: string | null,
+  ) {
     await this.verifyOrganizerAccess(userId, eventId);
 
     const prismaWrite = this.prisma.getWriteClient();
@@ -584,6 +622,15 @@ export class VouchersService {
         where: { eventId, name: representative.name, deletedAt: null },
       });
     }
+
+    await this.auditService.recordForEvent(eventId, {
+      actorUserId: userId,
+      ip: clientIp,
+      kind: 'VOUCHER_DELETE',
+      action: (ev) =>
+        `Excluiu o voucher "${representative.name}" do evento "${ev}"`,
+      extra: { voucherId, voucherName: representative.name },
+    });
 
     return {
       message: hasSales

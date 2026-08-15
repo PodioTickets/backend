@@ -46,7 +46,7 @@ describe('TicketCategoriesService (integração, banco real)', () => {
   beforeAll(async () => {
     prisma = createTestPrisma();
     await prisma.$connect();
-    service = new TicketCategoriesService(prisma);
+    service = new TicketCategoriesService(prisma, { record: jest.fn(), recordForEvent: jest.fn() } as any);
   });
 
   afterAll(async () => {

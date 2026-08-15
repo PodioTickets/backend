@@ -58,7 +58,7 @@ describe('VouchersService (integração, banco real)', () => {
   beforeAll(async () => {
     prisma = createTestPrisma();
     await prisma.$connect();
-    service = new VouchersService(prisma);
+    service = new VouchersService(prisma, { record: jest.fn(), recordForEvent: jest.fn() } as any);
   });
 
   afterAll(async () => {

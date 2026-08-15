@@ -88,6 +88,7 @@ describe('AdminRepasseService (integração, banco real)', () => {
       memberAccess,
       {} as any, // EmailService
       {} as any, // PaymentsRefundService
+      { record: jest.fn(), recordForEvent: jest.fn() } as any, // OrganizationAuditService
     );
     service = new AdminRepasseService(prisma, repasseService);
   });
