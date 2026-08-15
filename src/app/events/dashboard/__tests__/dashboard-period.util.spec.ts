@@ -28,6 +28,7 @@ import {
   percentChange,
   eachUtcDayKeys,
   eachBrtDayKeys,
+  eachBrtHourKeys,
   lastSixMonthKeys,
   lastSixBrtMonthKeys,
 } from '../dashboard-period.util';
@@ -143,6 +144,29 @@ describe('eachBrtDayKeys', () => {
     const from = new Date('2026-06-01T04:00:00.000Z'); // 01:00 BRT dia 1
     const to = new Date('2026-06-03T23:00:00.000Z'); // 20:00 BRT dia 3
     expect(eachBrtDayKeys(from, to)).toEqual(['2026-06-01', '2026-06-02', '2026-06-03']);
+  });
+});
+
+describe('eachBrtHourKeys', () => {
+  it('cobre o dia BRT inteiro por hora (00→23), 24 chaves, mesmo com `to` no meio do dia', () => {
+    // "Hoje" (LAST_24H): start = 00:00 BRT = 03:00Z; end = agora (ex.: 14:00 BRT).
+    const start = new Date('2026-08-14T03:00:00.000Z'); // 00:00 BRT dia 14
+    const end = new Date('2026-08-14T17:00:00.000Z'); // 14:00 BRT dia 14
+    const keys = eachBrtHourKeys(start, end);
+    expect(keys).toHaveLength(24);
+    expect(keys[0]).toBe('2026-08-14 00:00');
+    expect(keys[14]).toBe('2026-08-14 14:00');
+    expect(keys[23]).toBe('2026-08-14 23:00');
+  });
+
+  it('venda após 21h BRT (= dia UTC seguinte) fica no dia BRT correto', () => {
+    // 2026-08-15T01:00Z = 2026-08-14 22:00 BRT → hora 22 do dia 14.
+    const start = new Date('2026-08-14T03:00:00.000Z');
+    const end = new Date('2026-08-15T01:00:00.000Z');
+    const keys = eachBrtHourKeys(start, end);
+    expect(keys).toHaveLength(24);
+    expect(keys[22]).toBe('2026-08-14 22:00');
+    expect(keys[23]).toBe('2026-08-14 23:00');
   });
 });
 

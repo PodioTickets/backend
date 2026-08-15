@@ -14,6 +14,7 @@ import {
   getComparisonBounds,
   percentChange,
   eachBrtDayKeys,
+  eachBrtHourKeys,
   lastSixBrtMonthKeys,
   DateRange,
 } from './dashboard-period.util';
@@ -415,14 +416,7 @@ export class DashboardService {
     ticketIds: string[] | null,
     organizerFeeRate: number,
   ): Promise<OrderBucketRow[]> {
-    // Bucket por DIA/MÊS CIVIL DE BRASÍLIA (não UTC). `createdAt` é timestamp sem
-    // tz (valores UTC): `AT TIME ZONE 'UTC'` o torna o instante real; `AT TIME
-    // ZONE 'America/Sao_Paulo'` volta pro wall-clock BRT. Sem isso, vendas após
-    // 21h BRT caíam no dia UTC seguinte e "hoje" (BRT) ficava zerado.
-    const bucketExpr =
-      period === DashboardPeriod.GERAL
-        ? Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM')`
-        : Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD')`;
+    const bucketExpr = this.chartBucketExpr(period);
 
     const effectiveRange = this.effectiveChartRange(period, dateRange);
 
@@ -475,11 +469,7 @@ export class DashboardService {
     dateRange: DateRange,
     ticketIds: string[] | null,
   ): Promise<RegBucketRow[]> {
-    // Bucket por dia/mês civil de Brasília — ver nota em queryChartOrderBuckets.
-    const bucketExpr =
-      period === DashboardPeriod.GERAL
-        ? Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM')`
-        : Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD')`;
+    const bucketExpr = this.chartBucketExpr(period);
 
     const effectiveRange = this.effectiveChartRange(period, dateRange);
 
@@ -720,6 +710,24 @@ export class DashboardService {
     return { start, end: now };
   }
 
+  /**
+   * Expressão SQL do bucket do chart por período, em BRT (America/Sao_Paulo).
+   * `createdAt` é timestamp sem tz (UTC): `AT TIME ZONE 'UTC'` → instante real;
+   * `AT TIME ZONE 'America/Sao_Paulo'` → wall-clock BRT. Sem isso, vendas após 21h
+   * BRT caíam no bucket UTC seguinte e "hoje" (BRT) ficava zerado.
+   * - GERAL: mês (`YYYY-MM`). LAST_24H ("Hoje"): HORA (`YYYY-MM-DD HH24:00`) — o
+   *   chart cobre o dia inteiro por hora. Demais: dia (`YYYY-MM-DD`).
+   */
+  private chartBucketExpr(period: DashboardPeriod) {
+    if (period === DashboardPeriod.GERAL) {
+      return Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM')`;
+    }
+    if (period === DashboardPeriod.LAST_24H) {
+      return Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD HH24:00')`;
+    }
+    return Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD')`;
+  }
+
   private assembleChartData(
     period: DashboardPeriod,
     dateRange: DateRange,
@@ -730,7 +738,9 @@ export class DashboardService {
       period === DashboardPeriod.GERAL
         ? lastSixBrtMonthKeys()
         : dateRange.start && dateRange.end
-          ? eachBrtDayKeys(dateRange.start, dateRange.end)
+          ? period === DashboardPeriod.LAST_24H
+            ? eachBrtHourKeys(dateRange.start, dateRange.end)
+            : eachBrtDayKeys(dateRange.start, dateRange.end)
           : [];
 
     const labels = this.formatLabels(period, keys);
@@ -772,6 +782,10 @@ export class DashboardService {
         const [year, month] = k.split('-');
         return `${monthNames[parseInt(month, 10) - 1]}/${year.slice(-2)}`;
       });
+    }
+    // "Hoje" (LAST_24H): chave `YYYY-MM-DD HH:00` → rótulo de hora "HHh".
+    if (period === DashboardPeriod.LAST_24H) {
+      return keys.map((k) => `${k.slice(11, 13)}h`);
     }
     return keys.map((k) => {
       const [y, m, d] = k.split('-').map(Number);
