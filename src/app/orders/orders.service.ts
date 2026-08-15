@@ -689,6 +689,16 @@ export class OrdersService {
       );
     }
 
+    // 1.1c Cortesia (organizador "adicionar inscrito"): reserva mesmo com a janela
+    // de inscrição encerrada, o lote esgotado e o evento no teto. Exige autorização
+    // de organizador/admin (MESMA gate do finalize) — sem isso um público poderia
+    // setar `isCourtesy` e furar as regras. `assertCanManageCourtesy` = admin OU
+    // `edit_event` na org do evento.
+    const isCourtesy = dto.isCourtesy === true;
+    if (isCourtesy) {
+      await this.assertCanManageCourtesy(userId, dto.eventId);
+    }
+
     // 1.1b Um checkout ativo por vez. Ao INICIAR uma reserva, cancela os pedidos
     // PENDING do usuário em OUTROS eventos (abandonados) e devolve o estoque/voucher
     // deles. Sem isso: (a) pedidos acumulados de eventos anteriores disparavam
@@ -769,14 +779,18 @@ export class OrdersService {
     const now = new Date();
     // Janela é wall-clock (UTC); comparar com o tempo real exige o instante em BRT
     // (+3h via eventWindowInstant), senão abre/fecha 3h cedo no Brasil.
-    if (event.registrationStartDate && now < eventWindowInstant(event.registrationStartDate)) {
-      throw new AppConflictException(
-        'REGISTRATION_NOT_OPEN',
-        'Inscrições ainda não abertas para este evento',
-      );
-    }
-    if (event.registrationEndDate && now > eventWindowInstant(event.registrationEndDate)) {
-      throw new AppConflictException('REGISTRATION_CLOSED', 'Período de inscrição encerrado');
+    // Cortesia (organizador) IGNORA a janela — pode inscrever antes de abrir ou
+    // depois de encerrar.
+    if (!isCourtesy) {
+      if (event.registrationStartDate && now < eventWindowInstant(event.registrationStartDate)) {
+        throw new AppConflictException(
+          'REGISTRATION_NOT_OPEN',
+          'Inscrições ainda não abertas para este evento',
+        );
+      }
+      if (event.registrationEndDate && now > eventWindowInstant(event.registrationEndDate)) {
+        throw new AppConflictException('REGISTRATION_CLOSED', 'Período de inscrição encerrado');
+      }
     }
 
     // 1.6 Idempotency: return existing PENDING order somente se os tickets/quantidades
@@ -898,36 +912,41 @@ export class OrdersService {
       // abriu — a regra canônica nunca devolve um lote FUTURO como ativo (lote
       // encerrado cai em fallback/esgotado). `eventWindowInstant` (+3h) evita
       // rejeitar 3h cedo no Brasil.
-      if (
-        batch.triggerType !== 'AFTER_PREVIOUS_SOLD_OUT' &&
-        batch.startDate &&
-        now < eventWindowInstant(batch.startDate)
-      ) {
-        throw new AppConflictException(
-          'BATCH_NOT_STARTED',
-          `Lote ainda não iniciado para o ingresso "${ticket.name}"`,
-        );
-      }
-      // Lote encerrado (janela BY_TIME fechada) e sem fallback elegível → esgotado.
-      if (activeStatus === 'SOLD_OUT') {
-        throw new AppConflictException(
-          'BATCH_SOLD_OUT',
-          `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
-        );
-      }
+      // Cortesia IGNORA janela/estoque do lote (organizador pode inscrever com o
+      // lote não iniciado ou esgotado). O decremento em 1.8 vira incondicional
+      // (pode ficar negativo) para a cortesia — ver branch lá.
+      if (!isCourtesy) {
+        if (
+          batch.triggerType !== 'AFTER_PREVIOUS_SOLD_OUT' &&
+          batch.startDate &&
+          now < eventWindowInstant(batch.startDate)
+        ) {
+          throw new AppConflictException(
+            'BATCH_NOT_STARTED',
+            `Lote ainda não iniciado para o ingresso "${ticket.name}"`,
+          );
+        }
+        // Lote encerrado (janela BY_TIME fechada) e sem fallback elegível → esgotado.
+        if (activeStatus === 'SOLD_OUT') {
+          throw new AppConflictException(
+            'BATCH_SOLD_OUT',
+            `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
+          );
+        }
 
-      // Fix #37: pre-check via write client (não réplica) para evitar leitura defasada
-      // que permitiria oversell em janelas de replicação. O UPDATE atômico dentro da
-      // transação ainda é a proteção real; este pre-check serve ao UX (falha cedo).
-      const batchFromWrite = await w.ticketBatch.findUnique({
-        where: { id: batch.id },
-        select: { availableQuantity: true },
-      });
-      if (!batchFromWrite || batchFromWrite.availableQuantity < item.quantity) {
-        throw new AppConflictException(
-          'BATCH_SOLD_OUT',
-          `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
-        );
+        // Fix #37: pre-check via write client (não réplica) para evitar leitura defasada
+        // que permitiria oversell em janelas de replicação. O UPDATE atômico dentro da
+        // transação ainda é a proteção real; este pre-check serve ao UX (falha cedo).
+        const batchFromWrite = await w.ticketBatch.findUnique({
+          where: { id: batch.id },
+          select: { availableQuantity: true },
+        });
+        if (!batchFromWrite || batchFromWrite.availableQuantity < item.quantity) {
+          throw new AppConflictException(
+            'BATCH_SOLD_OUT',
+            `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
+          );
+        }
       }
 
       batchInfos.push({
@@ -943,7 +962,8 @@ export class OrdersService {
     // proteção REAL contra oversell é o guard transacional em 1.8 (advisory lock +
     // contagem sob lock). Conta no write client (sem lag de réplica) — mesmo
     // predicado do enforcement: Registration != CANCELLED (inclui reservas ativas).
-    if (event.maxParticipants != null) {
+    // Cortesia IGNORA o teto do evento (organizador pode furar o limite de vagas).
+    if (!isCourtesy && event.maxParticipants != null) {
       const requestedUnits = dto.tickets.reduce((sum, t) => sum + t.quantity, 0);
       const currentRegistrations = await w.registration.count({
         where: { eventId: dto.eventId, status: { not: 'CANCELLED' } },
@@ -1005,7 +1025,7 @@ export class OrdersService {
       // reservas deste evento COM teto (eventos sem teto nem entram aqui → zero
       // impacto de performance). Sob o lock, a contagem enxerga todas as reservas
       // já commitadas, então a checagem não pode ser furada por corrida.
-      if (event.maxParticipants != null) {
+      if (!isCourtesy && event.maxParticipants != null) {
         const capLockKey = `event_cap:${dto.eventId}`;
         // pg_advisory_xact_lock retorna void; usar $executeRaw (não desserializa
         // colunas) — $queryRaw quebraria com "Failed to deserialize column of type 'void'".
@@ -1032,6 +1052,17 @@ export class OrdersService {
       //   1) availableQuantity >= quantity_solicitada  (counter atômico)
       //   2) quantity - vendas_reais >= quantity_solicitada  (fonte de verdade)
       for (const info of batchInfos) {
+        // Cortesia: decrementa SEM guard (decisão do usuário — pode ficar NEGATIVO
+        // quando o lote está esgotado; a cortesia conta como vaga dada e o estorno
+        // devolve o estoque normalmente via cancelOrderAndRestoreStock).
+        if (isCourtesy) {
+          await tx.$executeRaw`
+            UPDATE "TicketBatch"
+            SET "availableQuantity" = "availableQuantity" - ${info.quantity}
+            WHERE id = ${info.batchId}::uuid
+          `;
+          continue;
+        }
         const rows: any[] = await tx.$queryRaw`
           UPDATE "TicketBatch" tb
           SET "availableQuantity" = tb."availableQuantity" - ${info.quantity}
@@ -1171,11 +1202,13 @@ export class OrdersService {
       );
     }
 
-    // 1. Reserva (estoque + vaga + placeholders). Esgotado → erro (mesma regra
-    //    do checkout). O organizador é o dono do pedido de cortesia.
+    // 1. Reserva (estoque + vaga + placeholders). `isCourtesy` libera janela
+    //    encerrada + lote esgotado + teto do evento (o organizador é o dono do
+    //    pedido de cortesia; a autorização é revalidada dentro do reserve).
     const reserved = await this.reserve(userId, {
       eventId: dto.eventId,
       tickets: dto.tickets,
+      isCourtesy: true,
     });
     const orderId = reserved.id as string;
 
