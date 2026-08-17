@@ -1208,6 +1208,20 @@ export class RegistrationsService {
     // ingresso não tem categoria) e o nome do ingresso abaixo.
     const ticketCategory = categoryName || 'Ingresso avulso';
     const ticketName = baseTicketName || '—';
+    // Modalidade/distância exibida no bloco "Ingresso" do PDF (ex.: "Corrida 5 KM",
+    // "0.3 Km"). Combina o rótulo da modalidade com a distância. Trata os 2 shapes:
+    //   - findOne (snapshot): `ticket.distance` (nº) + `ticket.distanceUnit` separados;
+    //   - findOneLive: `ticket.distance` já vem combinado ("0.3 Km"), sem unit.
+    // Modalidade: escalar `ticket.modality` com fallback p/ a relação `modalities`.
+    const modalityName =
+      reg?.ticket?.modality ?? reg?.modalities?.[0]?.modality?.name ?? null;
+    const distanceRaw = reg?.ticket?.distance;
+    const distanceStr = distanceRaw
+      ? reg?.ticket?.distanceUnit
+        ? `${distanceRaw} ${reg.ticket.distanceUnit}`
+        : `${distanceRaw}`
+      : null;
+    const modality = [modalityName, distanceStr].filter(Boolean).join(' ') || null;
 
     // Produtos: snapshot traz os campos no topo (name/images/selectedVariation/
     // unitPrice); o legado (findOneLive) aninha em product/variation. Detecta
@@ -1276,6 +1290,7 @@ export class RegistrationsService {
       participantName,
       ticketCategory,
       ticketName,
+      modality,
       email: snapshotParticipant?.email ?? user?.email ?? undefined,
       cpf:
         snapshotParticipant?.documentNumber ?? user?.documentNumber ?? undefined,

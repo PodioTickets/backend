@@ -270,6 +270,7 @@ export class PaymentsWebhookService {
               // Cabeçalho do PDF: categoria (ou "Ingresso avulso") em destaque + nome abaixo.
               ticketCategory: catName || 'Ingresso avulso',
               ticketName: ticketName || '—',
+              modality: [ticket?.modality, ticket?.distance ? `${ticket.distance}${ticket?.distanceUnit ? ` ${ticket.distanceUnit}` : ''}` : null].filter(Boolean).join(' ') || null,
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
               /* Nacionalidade. Prioridade:
@@ -569,6 +570,7 @@ export class PaymentsWebhookService {
               // Cabeçalho do PDF: categoria (ou "Ingresso avulso") em destaque + nome abaixo.
               ticketCategory: catName || 'Ingresso avulso',
               ticketName: ticketName || '—',
+              modality: [ticket?.modality, ticket?.distance ? `${ticket.distance}${ticket?.distanceUnit ? ` ${ticket.distanceUnit}` : ''}` : null].filter(Boolean).join(' ') || null,
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
               /* País do participante: usado pelo template do PDF para decidir
