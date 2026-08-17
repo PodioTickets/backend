@@ -1415,6 +1415,7 @@ export class OrdersService {
             participantName: (reg.participantName ?? `${(reg.user ?? {}).firstName ?? ''} ${(reg.user ?? {}).lastName ?? ''}`.trim()) || 'Participante',
             ticketCategory: catName || 'Ingresso avulso',
             ticketName: ticketName || '—',
+            modality: [ticket?.modality, ticket?.distance ? `${ticket.distance}${ticket?.distanceUnit ? ` ${ticket.distanceUnit}` : ''}` : null].filter(Boolean).join(' ') || null,
             email: reg.participantEmail ?? user.email,
             cpf: reg.participantCpf ?? user.documentNumber,
             country:
@@ -4417,6 +4418,7 @@ export class OrdersService {
               // Cabeçalho do PDF: categoria (ou "Ingresso avulso") em destaque + nome abaixo.
               ticketCategory: catName || 'Ingresso avulso',
               ticketName: ticketName || '—',
+              modality: [ticket?.modality, ticket?.distance ? `${ticket.distance}${ticket?.distanceUnit ? ` ${ticket.distanceUnit}` : ''}` : null].filter(Boolean).join(' ') || null,
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
               /* Nacionalidade pra decidir label (CPF/Documento) e formatacao
