@@ -3828,6 +3828,7 @@ export class OrdersService {
         orderId,
         cardToken: dto.mpDebit!.token,
         paymentMethodId: dto.mpDebit!.paymentMethodId,
+        paymentMethodType: dto.mpDebit!.paymentMethodType,
         payer: {
           email: user?.email,
           firstName: user?.firstName ?? undefined,

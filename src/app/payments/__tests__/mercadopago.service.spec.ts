@@ -157,28 +157,53 @@ describe('MercadoPagoService — débito', () => {
     expect(result.success).toBe(true);
   });
 
-  it('PRE-PAGO (id cru visa/master/elo) roteia pra /v1/payments classica com 3DS mandatory', async () => {
+  it('PRE-PAGO: envia o payment_type_id que veio do BIN (prepaid_card) na Orders API', async () => {
     const { service, post } = makeService();
-    post.mockResolvedValue({ data: approvedPayment });
+    post.mockResolvedValue({ data: approvedOrder });
 
     const result = await service.createDebitPayment({
       amountInCents: 4590,
       orderId: 'o-prepaid',
       cardToken: 'tok_pp',
-      paymentMethodId: 'visa', // Visa Prepaid — Orders API recusaria (value must be debelo)
+      paymentMethodId: 'visa', // Visa Prepaid
+      paymentMethodType: 'prepaid_card',
       payer: { email: 'a@b.com', cpf: '12345678901' },
       deviceId: 'dev-1',
       idempotencyKey: 'k9',
     });
 
-    expect(post).toHaveBeenCalledWith('/v1/payments', expect.any(Object), expect.any(Object));
-    const [, body, options] = post.mock.calls[0];
-    expect(body.transaction_amount).toBe(45.9);
-    expect(body.payment_method_id).toBe('visa');
-    expect(body.installments).toBe(1);
-    expect(body.three_d_secure_mode).toBe('mandatory');
-    expect(body.payer.identification).toEqual({ type: 'CPF', number: '12345678901' });
-    expect(options.headers['X-Idempotency-Key']).toBe('k9');
+    expect(post).toHaveBeenCalledWith('/v1/orders', expect.any(Object), expect.any(Object));
+    const [, body] = post.mock.calls[0];
+    expect(body.transactions.payments[0].payment_method).toMatchObject({ id: 'visa', type: 'prepaid_card' });
+    expect(result.success).toBe(true);
+  });
+
+  it('fallback: Orders API recusa formato (property_value 400) -> tenta /v1/payments classica', async () => {
+    const { service, post } = makeService();
+    post
+      .mockRejectedValueOnce({
+        response: {
+          status: 400,
+          data: { errors: [{ code: 'property_value', message: 'Invalid value for property', details: ["'$.transactions.payments[0].payment_method.id' - value must be 'debelo'"] }] },
+        },
+      })
+      .mockResolvedValueOnce({ data: approvedPayment });
+
+    const result = await service.createDebitPayment({
+      amountInCents: 4590,
+      orderId: 'o-fb',
+      cardToken: 'tok_fb',
+      paymentMethodId: 'visa',
+      paymentMethodType: 'prepaid_card',
+      payer: { email: 'a@b.com', cpf: '12345678901' },
+      idempotencyKey: 'k10',
+    });
+
+    expect(post).toHaveBeenNthCalledWith(1, '/v1/orders', expect.any(Object), expect.any(Object));
+    expect(post).toHaveBeenNthCalledWith(2, '/v1/payments', expect.any(Object), expect.any(Object));
+    const [, classicBody] = post.mock.calls[1];
+    expect(classicBody.payment_method_id).toBe('visa');
+    expect(classicBody.three_d_secure_mode).toBe('mandatory');
     expect(result.success).toBe(true);
   });
 
