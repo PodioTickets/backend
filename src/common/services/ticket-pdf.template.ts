@@ -448,6 +448,24 @@ function modalityIconDataUri(modality?: string | null): string | null {
   }
 }
 
+/* Logo do cabeçalho como data-URI PNG (lido com `fs`, memoizado 1×/processo).
+ * O @react-pdf REJEITA caminho de arquivo local no <Image> ("Only absolute URLs
+ * are supported") — mesma restrição dos ícones de modalidade. Embutir como
+ * data-URI garante o logo em qualquer ambiente. Fail-open → null (sem logo). */
+let logoUriCache: string | null | undefined;
+function logoDataUri(): string | null {
+  if (logoUriCache !== undefined) return logoUriCache;
+  try {
+    const buf = fs.readFileSync(
+      path.join(__dirname, '..', 'assets', 'logo-podioticket.png'),
+    );
+    logoUriCache = `data:image/png;base64,${buf.toString('base64')}`;
+  } catch {
+    logoUriCache = null;
+  }
+  return logoUriCache;
+}
+
 /* Card-resumo do evento: chip verde + nome + 4 campos (2 por linha). */
 const EventCard = ({ event }: { event: TicketPdfTemplateData['event'] }) =>
   e(
@@ -569,13 +587,18 @@ const IngressoSection = ({ reg }: { reg: TicketPdfRegistrationWithQr }) =>
 
 /* Card de produto (Figma): imagem 100×100 + nome + "Tamanho: X" à direita.
  * Sem preço nem badge Incluso/Adicional (decisão de produto: igual ao design).
- * `flex 1` p/ dividir a linha com o card irmão (2 por linha via `twoCol`). */
+ *
+ * IMPORTANTE: NÃO usar `flex: 1` aqui. A célula do `twoCol` é uma COLUNA, então
+ * `flex: 1` (= flexBasis 0) COLAPSA a ALTURA do card e a imagem de 100px vaza
+ * pra fora. A largura das 2 colunas já vem do `flex: 1` da CÉLULA; o card só
+ * estica na largura (cross-axis da coluna = `stretch` por padrão) e tem
+ * ALTURA = conteúdo. `width: '100%'` garante a largura cheia. */
 const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
   e(
     View,
     {
       style: {
-        flex: 1,
+        width: '100%',
         minWidth: 0,
         flexDirection: 'row',
         gap: 12,
@@ -587,31 +610,34 @@ const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
         borderRadius: 8,
       },
     },
-    /* Imagem 100×100 — safeImageUrl valida https:// para prevenir SSRF */
-    safeImageUrl(product.imageUrl)
-      ? e(Image, {
-          src: safeImageUrl(product.imageUrl) as string,
-          style: {
-            width: 100,
-            height: 100,
-            borderRadius: 8,
-            borderWidth: 1,
-            borderColor: C.gray6,
-            borderStyle: 'solid',
-            objectFit: 'cover',
-          },
-        })
-      : e(View, {
-          style: {
-            width: 100,
-            height: 100,
-            borderRadius: 8,
-            backgroundColor: C.gray6,
-            borderWidth: 1,
-            borderColor: C.gray6,
-            borderStyle: 'solid',
-          },
-        }),
+    /* Imagem 100×100 — safeImageUrl valida https:// para prevenir SSRF.
+     * A <Image> fica DENTRO de um box fixo com `overflow: hidden`: no
+     * @react-pdf o `objectFit: cover` numa Image de proporção != 1:1 não
+     * recorta de forma confiável e a imagem vaza pra fora do card. O wrapper
+     * de tamanho fixo (com borda/raio) faz o clip; a Image preenche 100%.
+     * `flexShrink: 0` impede que a linha flex esprema o box. */
+    e(
+      View,
+      {
+        style: {
+          width: 100,
+          height: 100,
+          flexShrink: 0,
+          borderRadius: 8,
+          borderWidth: 1,
+          borderColor: C.gray6,
+          borderStyle: 'solid',
+          backgroundColor: C.gray6,
+          overflow: 'hidden',
+        },
+      },
+      safeImageUrl(product.imageUrl)
+        ? e(Image, {
+            src: safeImageUrl(product.imageUrl) as string,
+            style: { width: '100%', height: '100%', objectFit: 'cover' },
+          })
+        : null,
+    ),
     e(
       View,
       {
@@ -697,10 +723,14 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
         View,
         { style: { gap: 16, width: '100%' } },
         e(Text, { style: T.h20 }, 'Produtos do kit'),
-        twoCol(
-          reg.products,
-          (p: TicketPdfProduct) => e(ProductCard, { product: p }),
-          { rowGap: 16, colGap: 16 },
+        // Coluna ÚNICA: 1 produto por linha (full-width). Em 2 colunas o card
+        // quebrava (largura insuficiente p/ imagem 100 + nome + tamanho).
+        e(
+          View,
+          { style: { gap: 16, width: '100%' } },
+          ...reg.products.map((p: TicketPdfProduct, i: number) =>
+            e(ProductCard, { key: i, product: p }),
+          ),
         ),
       ),
     );
@@ -844,7 +874,8 @@ function estimatePageHeight(data: TicketPdfTemplateData): number {
 
     if (reg.products.length > 0) {
       c += 32 + 1;
-      c += 22 + 16 + Math.ceil(reg.products.length / 2) * 130; // cards img100 + padding
+      // Coluna única: 1 card por linha (img 100 + padding 12*2 = 124) + gap 16.
+      c += 22 + 16 + reg.products.length * (124 + 16);
     }
 
     if (reg.questionAnswers.length > 0) {
@@ -889,10 +920,12 @@ export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) => 
               alignItems: 'center',
             },
           },
-          e(Image, {
-            src: path.join(__dirname, '..', 'assets', 'logo-podioticket.png'),
-            style: { width: 200, height: 34 },
-          }),
+          logoDataUri()
+            ? e(Image, {
+                src: logoDataUri() as string,
+                style: { width: 200, height: 34 },
+              })
+            : e(View, { style: { width: 200, height: 34 } }),
           e(
             View,
             { style: { alignItems: 'flex-end', gap: 16 } },
