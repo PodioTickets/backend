@@ -12,6 +12,7 @@ import { Throttle } from '@nestjs/throttler';
 import { PaymentsService } from './payments.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CieloService } from './cielo.service';
+import { MercadoPagoService } from './mercadopago.service';
 import { PaymentsWebhookService } from './payments-webhook.service';
 
 @ApiTags('Payments')
@@ -20,6 +21,7 @@ export class PaymentsController {
   constructor(
     private readonly paymentsService: PaymentsService,
     private readonly cieloService: CieloService,
+    private readonly mercadoPagoService: MercadoPagoService,
     private readonly webhookService: PaymentsWebhookService,
   ) { }
 
@@ -44,6 +46,50 @@ export class PaymentsController {
     if (!event) return { received: false, error: 'Invalid signature' };
     await this.webhookService.handleWebhook(event);
     return { received: true };
+  }
+
+  @Post('mp-webhook')
+  @Throttle({ short: { limit: 60, ttl: 60000 } })
+  @ApiOperation({
+    summary: 'Mercado Pago webhook endpoint',
+    description: 'Recebe notificações do MP (topic payment) para o cartão de débito. Assinatura validada via x-signature (HMAC).',
+  })
+  @ApiHeader({ name: 'x-signature', description: 'Assinatura HMAC do MP (ts=...,v1=...)' })
+  @ApiResponse({ status: 200, description: 'Webhook received successfully' })
+  async handleMpWebhook(
+    @Headers('x-signature') xSignature: string,
+    @Headers('x-request-id') xRequestId: string,
+    @Body() body: any,
+    @Query('data.id') dataIdQuery: string,
+    @Query('type') typeQuery: string,
+  ) {
+    // MP manda o id no body (data.id) e/ou na query string (data.id).
+    const type = body?.type ?? typeQuery;
+    const dataId = String(body?.data?.id ?? dataIdQuery ?? '');
+    if (type !== 'payment' || !dataId) {
+      return { received: true, ignored: true };
+    }
+    const valid = this.mercadoPagoService.verifyWebhookSignature({ xSignature, xRequestId, dataId });
+    if (!valid) {
+      return { received: false, error: 'Invalid signature' };
+    }
+    await this.webhookService.handleMpWebhook(dataId);
+    return { received: true };
+  }
+
+  @Get('order/:orderId/mp-debit-status')
+  @UseGuards(JwtAuthGuard)
+  @Throttle({ short: { limit: 20, ttl: 60000 } })
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Poll Mercado Pago debit payment status',
+    description: 'Consulta o MP em tempo real após o challenge 3DS do débito. Chamar a cada 3-5s enquanto o iframe/aguardo estiver aberto.',
+  })
+  @ApiParam({ name: 'orderId', description: 'Order UUID' })
+  @ApiResponse({ status: 200, description: 'Returns current payment status' })
+  @ApiResponse({ status: 404, description: 'Order or payment not found' })
+  pollMpDebitStatus(@Request() req, @Param('orderId') orderId: string) {
+    return this.paymentsService.pollMpDebitStatus(orderId, req.user.id);
   }
 
   @Get('me')

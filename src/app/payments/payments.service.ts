@@ -2,6 +2,7 @@ import { Injectable, NotFoundException, BadRequestException, Logger } from '@nes
 import { PrismaService } from '../../prisma/prisma.service';
 import { PaymentStatus, PaymentMethod, RegistrationStatus } from '@prisma/client';
 import { CieloService } from './cielo.service';
+import { MercadoPagoService } from './mercadopago.service';
 import { PaymentGateway } from './payment.gateway';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
@@ -23,6 +24,7 @@ export class PaymentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cieloService: CieloService,
+    private readonly mercadoPagoService: MercadoPagoService,
     private readonly gateway: PaymentGateway,
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
@@ -905,6 +907,115 @@ export class PaymentsService {
         .catch((err: any) => this.logger.warn('Falha ao enviar email de confirmação:', err));
 
       this.logger.log(`PIX confirmed via polling for order ${orderId}`);
+    }
+    return { status: PaymentStatus.PAID, paid: true };
+  }
+
+  /**
+   * Polling do DÉBITO via Mercado Pago — chamado pelo front após o challenge 3DS
+   * (fallback do webhook, mesma corrida benigna do pollPixStatus). Consulta o MP
+   * em tempo real e, se aprovado, confirma via finalize compartilhado.
+   */
+  async pollMpDebitStatus(orderId: string, userId: string): Promise<{ status: PaymentStatus; paid: boolean }> {
+    const prismaRead = this.prisma.getReadClient();
+    const prismaWrite = this.prisma.getWriteClient();
+
+    const order = await prismaRead.order.findFirst({
+      where: { id: orderId, userId },
+      select: {
+        id: true,
+        payment: {
+          select: { id: true, transactionId: true, status: true, method: true, metadata: true },
+        },
+      },
+    });
+
+    if (!order) throw new NotFoundException('Order not found');
+    if (!order.payment) throw new NotFoundException('Payment not found');
+
+    const payment = order.payment;
+
+    if (payment.status === PaymentStatus.PAID) {
+      return { status: PaymentStatus.PAID, paid: true };
+    }
+
+    const isMpDebit =
+      payment.method === PaymentMethod.DEBIT_CARD &&
+      (payment.metadata as any)?.gateway === 'MERCADOPAGO';
+    if (!isMpDebit || !payment.transactionId) {
+      return { status: payment.status as PaymentStatus, paid: false };
+    }
+
+    const mpPayment = await this.mercadoPagoService.getPayment(payment.transactionId);
+    if (!mpPayment.mpPaymentId) {
+      return { status: payment.status as PaymentStatus, paid: false };
+    }
+
+    const newStatus = this.mercadoPagoService.mapMpStatusToPaymentStatus(mpPayment.mpStatus);
+
+    // Recusa/cancelamento pós-challenge: marca FAILED pra o front encerrar o
+    // aguardo (updateMany idempotente — o webhook pode ter aplicado antes).
+    if (newStatus === PaymentStatus.FAILED) {
+      await prismaWrite.payment.updateMany({
+        where: { id: payment.id, status: PaymentStatus.PENDING },
+        data: { status: PaymentStatus.FAILED },
+      });
+      return { status: PaymentStatus.FAILED, paid: false };
+    }
+
+    if (newStatus !== PaymentStatus.PAID) {
+      return { status: newStatus ?? (payment.status as PaymentStatus), paid: false };
+    }
+
+    // Confirmação atômica — MESMA fonte de verdade do webhook (guard updateMany +
+    // finalize compartilhado); espelho fiel do pollPixStatus.
+    let orphanCancelledOrder = false;
+    let confirmedHere = false;
+    try {
+      await prismaWrite.$transaction(async (tx) => {
+        const updated = await tx.payment.updateMany({
+          where: { id: payment.id, status: { not: PaymentStatus.PAID } },
+          data: { status: PaymentStatus.PAID, paymentDate: new Date() },
+        });
+
+        if (updated.count === 0) return; // webhook venceu a corrida
+
+        await tx.payment.update({
+          where: { id: payment.id },
+          data: {
+            metadata: {
+              ...(payment.metadata as object),
+              mpStatus: mpPayment.mpStatus,
+              mpStatusDetail: mpPayment.statusDetail,
+              confirmedViaPolling: true,
+              confirmedAt: new Date().toISOString(),
+            } as any,
+          },
+        });
+
+        const { finalized, orderStatus } = await this.orderFinalization.confirmAndFinalizeOrder(tx, orderId);
+        if (!finalized && orderStatus === 'CANCELLED') orphanCancelledOrder = true;
+        if (finalized) confirmedHere = true;
+      }, { timeout: 30000, maxWait: 10000 });
+    } catch (err: unknown) {
+      if (err instanceof OrderFinalizationAbortError) {
+        this.logger.error(`Polling MP débito: finalize abortado (${err.code}) para order ${err.orderId} — compensando com estorno automático`);
+        await this.compensation.compensateOrphanPayment(err.orderId, err.code);
+        return { status: PaymentStatus.REFUNDED, paid: false };
+      }
+      throw err;
+    }
+
+    if (orphanCancelledOrder) {
+      await this.compensation.compensateOrphanPayment(orderId, 'PAID_AFTER_CANCELLATION');
+      return { status: PaymentStatus.REFUNDED, paid: false };
+    }
+
+    if (confirmedHere) {
+      this.gateway.emitPaymentConfirmed(orderId);
+      this.sendConfirmationEmailForOrder(orderId)
+        .catch((err: any) => this.logger.warn('Falha ao enviar email de confirmação:', err));
+      this.logger.log(`MP debit confirmed via polling for order ${orderId}`);
     }
     return { status: PaymentStatus.PAID, paid: true };
   }
