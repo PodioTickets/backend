@@ -244,8 +244,9 @@ export class MercadoPagoService {
       description: params.description ?? `Pedido ${params.orderId}`,
       statement_descriptor: this.statementDescriptor,
       capture: true,
-      three_d_secure_mode:
-        this.configService.get<string>('MP_3DS_MODE') === 'optional' ? 'optional' : 'mandatory',
+      // PRÉ-PAGO não suporta 3DS: mandatory aqui gerava `internal_error` no MP.
+      // optional deixa o risco decidir (com CPF do titular + device fingerprint).
+      three_d_secure_mode: 'optional',
       ...(params.notificationUrl && { notification_url: params.notificationUrl }),
     };
 
