@@ -146,6 +146,12 @@ export class MercadoPagoService {
       ...(params.notificationUrl && { notification_url: params.notificationUrl }),
     };
 
+    // Diagnóstico (mascarado): confirma se identification foi incluída no body
+    // enviado ao MP (payer_doc null na resposta = risco recusa).
+    this.logger.log(
+      `[MP-debit] payment body: identification=${body.payer?.identification ? 'INCLUIDA' : 'AUSENTE'} method=${params.paymentMethodId} device=${params.deviceId ? 'sim' : 'nao'}`,
+    );
+
     try {
       const response = await this.client.post('/v1/payments', body, {
         headers: {
