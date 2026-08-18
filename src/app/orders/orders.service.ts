@@ -108,7 +108,7 @@ const ORDER_INCLUDE = {
   // Nada disso é exposto no payload — orderShape retorna apenas eventId.
   // acceptedPaymentMethods é a whitelist configurada na tela financeira do evento,
   // validada no pay() antes de chamar o gateway.
-  event: { select: { participantFeePercent: true, organizerFeePercent: true, eventDate: true, acceptedPaymentMethods: true } },
+  event: { select: { name: true, participantFeePercent: true, organizerFeePercent: true, eventDate: true, acceptedPaymentMethods: true } },
 } as const;
 
 /**
@@ -3708,7 +3708,9 @@ export class OrdersService {
     // 6.8 Prepare payment data
     const user = await r.user.findUnique({
       where: { id: userId },
-      select: { firstName: true, lastName: true, email: true },
+      // phone/createdAt alimentam o additional_info do MP (checklist oficial de
+      // aprovação: dados do comprador reduzem recusa por risco).
+      select: { firstName: true, lastName: true, email: true, phone: true, createdAt: true },
     });
 
     // Identidade enviada ao Cielo (antifraude). Aceita CPF formatado/legacy
@@ -3823,12 +3825,45 @@ export class OrdersService {
       this.logger.log(
         `[MP-debit] order=${orderId} holderCpf=${dto.mpDebit?.holderCpf ? `presente(len ${dto.mpDebit.holderCpf.length})` : 'AUSENTE'} firstCpf=${firstCpf ? 'presente' : 'ausente'}`,
       );
+
+      // additional_info — pilar 2 do checklist de aprovação do MP (o 1 é o device):
+      // itens + dados do comprador reduzem cc_rejected_high_risk. Segue o payload
+      // recomendado pro segmento "Tickets e entretenimento" (category_id Tickets +
+      // event_date) com o que já temos no pedido/usuário.
+      const mpEventInfo: any = (order as any).event ?? {};
+      const mpPhoneDigits = String((user as any)?.phone ?? '').replace(/\D/g, '');
+      const mpAdditionalInfo = {
+        items: [
+          {
+            id: String((order as any).eventId ?? orderId),
+            title: `Inscrição — ${mpEventInfo.name ?? 'evento'}`.slice(0, 250),
+            description: `Pedido ${orderId}`,
+            category_id: 'Tickets',
+            quantity: 1,
+            unit_price: Number((finalTotal / 100).toFixed(2)),
+            ...(mpEventInfo.eventDate && {
+              event_date: new Date(mpEventInfo.eventDate).toISOString(),
+            }),
+          },
+        ],
+        payer: {
+          ...(user?.firstName && { first_name: user.firstName }),
+          ...(user?.lastName && { last_name: user.lastName }),
+          ...(mpPhoneDigits.length >= 10 && {
+            phone: { area_code: mpPhoneDigits.slice(0, 2), number: mpPhoneDigits.slice(2) },
+          }),
+          ...((user as any)?.createdAt && {
+            registration_date: new Date((user as any).createdAt).toISOString(),
+          }),
+        },
+      };
       const mpResult = await this.mercadoPagoService.createDebitPayment({
         amountInCents: finalTotal,
         orderId,
         cardToken: dto.mpDebit!.token,
         paymentMethodId: dto.mpDebit!.paymentMethodId,
         paymentMethodType: dto.mpDebit!.paymentMethodType,
+        additionalInfo: mpAdditionalInfo,
         payer: {
           email: user?.email,
           firstName: user?.firstName ?? undefined,

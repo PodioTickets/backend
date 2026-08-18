@@ -112,6 +112,8 @@ export class MercadoPagoService {
     /** payment_type_id do BIN lookup (debit_card | prepaid_card) — vai como veio. */
     paymentMethodType?: 'debit_card' | 'prepaid_card';
     payer: { email?: string; firstName?: string; lastName?: string; cpf?: string };
+    /** additional_info do checklist de aprovação (items + payer) — só a rota clássica usa. */
+    additionalInfo?: Record<string, any>;
     deviceId?: string;
     idempotencyKey: string;
     notificationUrl?: string;
@@ -222,6 +224,7 @@ export class MercadoPagoService {
     cardToken: string;
     paymentMethodId: string;
     payer: { email?: string; firstName?: string; lastName?: string; cpf?: string };
+    additionalInfo?: Record<string, any>;
     deviceId?: string;
     idempotencyKey: string;
     notificationUrl?: string;
@@ -247,6 +250,9 @@ export class MercadoPagoService {
       // PRÉ-PAGO não suporta 3DS: mandatory aqui gerava `internal_error` no MP.
       // optional deixa o risco decidir (com CPF do titular + device fingerprint).
       three_d_secure_mode: 'optional',
+      // Pilar 2 do checklist de aprovação: items + dados do comprador (o plugin
+      // oficial WooCommerce do MP envia sempre; ausência pesa no high_risk).
+      ...(params.additionalInfo && { additional_info: params.additionalInfo }),
       ...(params.notificationUrl && { notification_url: params.notificationUrl }),
     };
 

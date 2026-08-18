@@ -199,6 +199,7 @@ describe('MercadoPagoService — débito', () => {
       paymentMethodId: 'visa',
       paymentMethodType: 'prepaid_card',
       payer: { email: 'a@b.com', cpf: '12345678901' },
+      additionalInfo: { items: [{ id: 'ev1', title: 'Inscricao', category_id: 'Tickets', quantity: 1, unit_price: 45.9 }] },
       idempotencyKey: 'k10',
     });
 
@@ -206,6 +207,7 @@ describe('MercadoPagoService — débito', () => {
     expect(post).toHaveBeenNthCalledWith(2, '/v1/payments', expect.any(Object), expect.any(Object));
     const [, classicBody] = post.mock.calls[1];
     expect(classicBody.payment_method_id).toBe('visa');
+    expect(classicBody.additional_info.items[0].category_id).toBe('Tickets');
     expect(classicBody.three_d_secure_mode).toBe('optional'); // prepaid nao suporta 3DS (mandatory dava internal_error)
     expect(result.success).toBe(true);
   });
