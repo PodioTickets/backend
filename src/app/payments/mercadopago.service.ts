@@ -141,8 +141,14 @@ export class MercadoPagoService {
       description: params.description ?? `Pedido ${params.orderId}`,
       statement_descriptor: this.statementDescriptor,
       capture: true,
-      // 3DS a critério do risco do MP; challenge chega como pending_challenge.
-      three_d_secure_mode: 'optional',
+      // 3DS SEMPRE (mandatory): com 'optional' o risco do MP recusava direto
+      // (cc_rejected_high_risk) sem nem desafiar — app nova, sem histórico.
+      // Com mandatory o MP devolve pending_challenge e o BANCO EMISSOR
+      // autentica (MpChallengeModal já cuida do iframe); a aprovação passa a
+      // depender do emissor, não do risco frio do MP. Débito no BR exige 3DS
+      // na prática. Override por env MP_3DS_MODE se precisar voltar.
+      three_d_secure_mode:
+        this.configService.get<string>('MP_3DS_MODE') === 'optional' ? 'optional' : 'mandatory',
       ...(params.notificationUrl && { notification_url: params.notificationUrl }),
     };
 

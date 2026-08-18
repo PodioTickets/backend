@@ -8,7 +8,7 @@
  *
  *   1. Body do POST /v1/payments do débito: valor convertido de CENTAVOS para
  *      reais decimais, installments=1, payment_method_id de débito, payer com
- *      CPF opcional, external_reference = orderId, three_d_secure_mode=optional
+ *      CPF opcional, external_reference = orderId, three_d_secure_mode=mandatory (default; MP_3DS_MODE=optional faz opt-out)
  *      e headers X-Idempotency-Key / X-meli-session-id (device).
  *   2. Recusa de payment_method_id que NÃO é débito (proteção contra cobrar
  *      crédito por engano).
@@ -87,7 +87,7 @@ describe('MercadoPagoService — débito', () => {
     expect(body.payer.email).toBe('a@b.com');
     expect(body.payer.identification).toEqual({ type: 'CPF', number: '12345678901' });
     expect(body.external_reference).toBe('order-uuid-1');
-    expect(body.three_d_secure_mode).toBe('optional');
+    expect(body.three_d_secure_mode).toBe('mandatory');
     expect(body.capture).toBe(true);
     expect(body.notification_url).toContain('/mp-webhook');
     expect(options.headers['X-Idempotency-Key']).toBe('idem-1');
