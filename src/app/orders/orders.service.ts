@@ -912,9 +912,10 @@ export class OrdersService {
       // abriu — a regra canônica nunca devolve um lote FUTURO como ativo (lote
       // encerrado cai em fallback/esgotado). `eventWindowInstant` (+3h) evita
       // rejeitar 3h cedo no Brasil.
-      // Cortesia IGNORA janela/estoque do lote (organizador pode inscrever com o
-      // lote não iniciado ou esgotado). O decremento em 1.8 vira incondicional
-      // (pode ficar negativo) para a cortesia — ver branch lá.
+      // Cortesia IGNORA a janela do lote NÃO INICIADO (organizador pode inscrever
+      // antes de o lote por tempo abrir) e o teto do evento, mas RESPEITA o lote
+      // ESGOTADO (availableQuantity) — mesma validação do comprador (decisão do
+      // usuário). O decremento em 1.8 é atômico/guardado inclusive pra cortesia.
       if (!isCourtesy) {
         if (
           batch.triggerType !== 'AFTER_PREVIOUS_SOLD_OUT' &&
@@ -926,27 +927,30 @@ export class OrdersService {
             `Lote ainda não iniciado para o ingresso "${ticket.name}"`,
           );
         }
-        // Lote encerrado (janela BY_TIME fechada) e sem fallback elegível → esgotado.
-        if (activeStatus === 'SOLD_OUT') {
-          throw new AppConflictException(
-            'BATCH_SOLD_OUT',
-            `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
-          );
-        }
+      }
 
-        // Fix #37: pre-check via write client (não réplica) para evitar leitura defasada
-        // que permitiria oversell em janelas de replicação. O UPDATE atômico dentro da
-        // transação ainda é a proteção real; este pre-check serve ao UX (falha cedo).
-        const batchFromWrite = await w.ticketBatch.findUnique({
-          where: { id: batch.id },
-          select: { availableQuantity: true },
-        });
-        if (!batchFromWrite || batchFromWrite.availableQuantity < item.quantity) {
-          throw new AppConflictException(
-            'BATCH_SOLD_OUT',
-            `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
-          );
-        }
+      // Lote encerrado (janela BY_TIME fechada) e sem fallback elegível → esgotado.
+      // Aplica TAMBÉM à cortesia: organizador não fura estoque de lote esgotado.
+      if (activeStatus === 'SOLD_OUT') {
+        throw new AppConflictException(
+          'BATCH_SOLD_OUT',
+          `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
+        );
+      }
+
+      // Fix #37: pre-check via write client (não réplica) para evitar leitura defasada
+      // que permitiria oversell em janelas de replicação. O UPDATE atômico dentro da
+      // transação ainda é a proteção real; este pre-check serve ao UX (falha cedo).
+      // Vale tanto pro comprador quanto pra cortesia (ambos respeitam o estoque).
+      const batchFromWrite = await w.ticketBatch.findUnique({
+        where: { id: batch.id },
+        select: { availableQuantity: true },
+      });
+      if (!batchFromWrite || batchFromWrite.availableQuantity < item.quantity) {
+        throw new AppConflictException(
+          'BATCH_SOLD_OUT',
+          `Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`,
+        );
       }
 
       batchInfos.push({
@@ -1052,17 +1056,10 @@ export class OrdersService {
       //   1) availableQuantity >= quantity_solicitada  (counter atômico)
       //   2) quantity - vendas_reais >= quantity_solicitada  (fonte de verdade)
       for (const info of batchInfos) {
-        // Cortesia: decrementa SEM guard (decisão do usuário — pode ficar NEGATIVO
-        // quando o lote está esgotado; a cortesia conta como vaga dada e o estorno
-        // devolve o estoque normalmente via cancelOrderAndRestoreStock).
-        if (isCourtesy) {
-          await tx.$executeRaw`
-            UPDATE "TicketBatch"
-            SET "availableQuantity" = "availableQuantity" - ${info.quantity}
-            WHERE id = ${info.batchId}::uuid
-          `;
-          continue;
-        }
+        // Decremento atômico GUARDADO — vale TAMBÉM pra cortesia (decisão do
+        // usuário: cortesia respeita o estoque do lote, não fura nem fica
+        // negativo). 0 linhas afetadas → lote esgotado → rollback. O estorno
+        // devolve o estoque via cancelOrderAndRestoreStock, igual ao comprador.
         const rows: any[] = await tx.$queryRaw`
           UPDATE "TicketBatch" tb
           SET "availableQuantity" = tb."availableQuantity" - ${info.quantity}
