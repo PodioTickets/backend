@@ -848,46 +848,99 @@ const TicketBrand = () =>
 /* Altura aproximada da página única (scroll infinito). Superestima de
  * propósito (buffer generoso) — sobra vira espaço em branco no rodapé, o que é
  * preferível a cortar conteúdo. Escala com nº de campos/produtos/perguntas. */
+/* Altura aproximada da PÁGINA ÚNICA. É crítico NUNCA subestimar: como o doc é
+ * uma página só (sem quebra), se a altura ficar menor que o conteúdo o @react-pdf
+ * empurra o resto pra uma 2ª página e CORTA. Por isso contamos a quebra de linha
+ * dos textos longos e superestimamos com folga — o excedente vira branco no
+ * rodapé (aceitável), nunca corte. Página maior NUNCA cria 2ª página. */
 function estimatePageHeight(data: TicketPdfTemplateData): number {
-  let h = 44 + 44; // padding vertical (topo + rodapé)
+  // Linhas aproximadas de um texto numa coluna de `colW` px. Fator 0.62 =
+  // largura média de caractere ~ fontSize*0.62 (conservador → superestima).
+  const lines = (text: string | null | undefined, colW: number, fs: number) => {
+    const len = String(text ?? '').length;
+    const cpl = Math.max(6, Math.floor(colW / (fs * 0.62)));
+    return Math.max(1, Math.ceil(len / cpl));
+  };
+  // Altura de um campo "label + valor" (InfoField): py(16*2) + gap 15 + linhas.
+  const fieldH = (label: string, value: string, colW: number, valFs: number) =>
+    32 + 15 + lines(label, colW, 16) * 21 + lines(value, colW, valFs) * (valFs * 1.35);
+
+  let h = 88; // padding vertical da página (44 topo + 44 rodapé)
   h += 58 + 36; // header + gap
   h += 1 + 36; // divisória + gap
   h += 64 + 36; // título + subtítulo + gap
 
-  // Card do evento: chip + nome + divisória + 2 linhas de campos.
-  h += 32 + 44 + 20 + 1 + 20 + (2 * 55 + 24);
+  // ---- Card do evento: chip + nome + divisória + 2 linhas de campos (2-col) ----
+  // Inner do card (padding 16): 507-32=475; colGap 12 → cada coluna ~231.
+  const evColW = 231;
+  const evRow1 = Math.max(
+    fieldH('Data', fmtDate(data.event.date), evColW, 18),
+    fieldH('Organização', data.event.organization, evColW, 18),
+  );
+  const evRow2 = Math.max(
+    fieldH('Local do evento', data.event.location, evColW, 18),
+    fieldH('Participantes', 'x atletas', evColW, 18),
+  );
+  h += 32 + 44 + 20 + 1 + 20 + evRow1 + evRow2 + 24;
   h += 24; // gap até o 1º participante
 
   for (const reg of data.registrations) {
     let c = 40; // padding do card (20*2)
 
-    // Ingresso: título + gap + max(QR box, coluna esquerda).
-    const leftCol = 55 + (reg.modality ? 20 + 20 : 0); // caption+nome (+ modalidade)
+    // Ingresso: título + gap + max(QR box 116, coluna esquerda [nome + modalidade]).
+    const leftCol = lines(reg.ticketName, 300, 20) * 27 + 24 + (reg.modality ? 24 : 0);
     c += 22 + 24 + Math.max(116, leftCol);
 
-    // Informações do participante (sempre ≥ "Nome").
-    const infoCount =
-      1 +
-      [reg.dateOfBirth, reg.gender, reg.cpf, reg.email, reg.phone].filter(Boolean).length;
-    c += 32 + 1; // gap entre seções + divisória
-    c += 22 + 16 + Math.ceil(infoCount / 2) * 90; // título + gap + linhas (py16)
-
-    if (reg.products.length > 0) {
-      c += 32 + 1;
-      // Coluna única: 1 card por linha (img 100 + padding 12*2 = 124) + gap 16.
-      c += 22 + 16 + reg.products.length * (124 + 16);
+    // Informações do participante (2-col, colGap 8 → coluna ~229).
+    const infoColW = 229;
+    const infoFields: Array<[string, string]> = [['Nome', reg.participantName]];
+    if (reg.dateOfBirth) infoFields.push(['Data de nascimento', '00/00/0000']);
+    if (reg.gender) infoFields.push(['Sexo', 'Masculino']);
+    if (reg.cpf) infoFields.push(['Documento', reg.cpf]);
+    if (reg.email) infoFields.push(['Email', reg.email]);
+    if (reg.phone) infoFields.push(['Telefone', reg.phone]);
+    c += 32 + 1 + 22 + 16; // gap+divisória + título + gap
+    for (let i = 0; i < infoFields.length; i += 2) {
+      const a = infoFields[i];
+      const b = infoFields[i + 1];
+      c += Math.max(
+        fieldH(a[0], a[1], infoColW, 18),
+        b ? fieldH(b[0], b[1], infoColW, 18) : 0,
+      );
     }
 
+    // Produtos (COLUNA ÚNICA). Card = max(img 100, coluna de texto) + padding 24,
+    // + gap 16. Coluna de texto ~355 (467 − 12 gap − 100 img).
+    if (reg.products.length > 0) {
+      c += 32 + 1 + 22 + 16;
+      for (const p of reg.products) {
+        const textH = lines(p.name, 355, 16) * 22 + 8 + 24;
+        c += Math.max(124, textH + 24) + 16;
+      }
+    }
+
+    // Perguntas (2-col, coluna ~229). Label = pergunta, valor = resposta —
+    // ambos podem ser longos (line-aware).
     if (reg.questionAnswers.length > 0) {
-      c += 32 + 1;
-      c += 20 + 12 + Math.ceil(reg.questionAnswers.length / 2) * 95;
+      c += 32 + 1 + 20 + 12;
+      const qs = reg.questionAnswers;
+      for (let i = 0; i < qs.length; i += 2) {
+        const a = qs[i];
+        const b = qs[i + 1];
+        c += Math.max(
+          fieldH(a.question, a.answer, 229, 16),
+          b ? fieldH(b.question, b.answer, 229, 16) : 0,
+        );
+      }
     }
 
     h += c + 24; // altura do card + gap
   }
 
-  h += 300; // buffer de segurança
-  return Math.max(842, h);
+  // Margem de segurança: +6% + 250px. Superestimar só adiciona branco no rodapé,
+  // nunca corta. Teto 14400 = limite físico de página do PDF.
+  h = h * 1.06 + 250;
+  return Math.min(14400, Math.max(842, h));
 }
 
 export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) => {
