@@ -105,10 +105,23 @@ export class MercadoPagoService {
     if (!this.enabled) {
       return { success: false, error: 'Mercado Pago is not configured (MP_ACCESS_TOKEN missing)' };
     }
-    // Aceita só métodos de débito (debvisa, debmaster, debelo, debcabal...).
-    // Um payment_method_id de crédito aqui cobraria como crédito silenciosamente.
+    // Aceita métodos de débito (debvisa, debmaster, debelo...) e PRÉ-PAGOS da
+    // conta (elo/visa/master — ex.: Elo Débito Virtual e os cartões de teste do
+    // MP), que processam à vista igual débito. Como o id de pré-pago COLIDE com
+    // o de crédito, ids não-`deb*` são validados contra a lista real de métodos
+    // da conta (cache 1h); API indisponível → recusa (fail-closed, comportamento
+    // antigo). Um payment_method_id de crédito puro segue rejeitado.
     if (!/^deb/.test(params.paymentMethodId)) {
-      return { success: false, error: `payment_method_id '${params.paymentMethodId}' não é de cartão de débito` };
+      let prepaidOk = false;
+      try {
+        const ids = await this.loadDebitCapableMethodIds();
+        prepaidOk = ids.has(params.paymentMethodId);
+      } catch {
+        prepaidOk = false;
+      }
+      if (!prepaidOk) {
+        return { success: false, error: `payment_method_id '${params.paymentMethodId}' não é de cartão de débito` };
+      }
     }
 
     const body: Record<string, any> = {
@@ -311,7 +324,36 @@ export class MercadoPagoService {
       debmaster: 'Master',
       debelo: 'Elo',
       debcabal: 'Cabal',
+      // Pré-pagos (processam como débito à vista) usam o id "cru" da bandeira.
+      visa: 'Visa',
+      master: 'Master',
+      elo: 'Elo',
     };
     return paymentMethodId ? (map[paymentMethodId] ?? paymentMethodId) : undefined;
+  }
+
+  // ── Métodos débito/pré-pago da conta (cache 1h) ────────────────────────────
+  // Fonte da validação de ids não-`deb*` no createDebitPayment: só aceitamos um
+  // id "cru" (elo/visa/master) se a CONTA tiver a entrada prepaid_card/debit_card
+  // correspondente ativa — evita whitelist hardcoded que dessincroniza do MP.
+  private debitMethodIdsCache: { ids: Set<string>; expiresAt: number } | null = null;
+
+  private async loadDebitCapableMethodIds(): Promise<Set<string>> {
+    const now = Date.now();
+    if (this.debitMethodIdsCache && now < this.debitMethodIdsCache.expiresAt) {
+      return this.debitMethodIdsCache.ids;
+    }
+    const { data } = await this.client.get('/v1/payment_methods');
+    const ids = new Set<string>(
+      (Array.isArray(data) ? data : [])
+        .filter(
+          (m: any) =>
+            m?.status === 'active' &&
+            (m?.payment_type_id === 'debit_card' || m?.payment_type_id === 'prepaid_card'),
+        )
+        .map((m: any) => String(m.id)),
+    );
+    this.debitMethodIdsCache = { ids, expiresAt: now + 60 * 60 * 1000 };
+    return ids;
   }
 }
