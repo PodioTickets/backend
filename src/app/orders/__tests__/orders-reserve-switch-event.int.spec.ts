@@ -32,6 +32,7 @@ describe('OrdersService.reserve — troca de evento cancela pendências (integra
     service = new OrdersService(
       prisma,
       {} as any, // Cielo
+      { enabled: false } as any, // MercadoPagoService (débito MP desligado no teste)
       { checkRateLimit: async () => true } as any, // Redis (rate limit sempre OK)
       {} as any, // Email
       {} as any, // TicketPdf

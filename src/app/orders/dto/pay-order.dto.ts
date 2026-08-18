@@ -89,6 +89,28 @@ export class ThreeDsAuthDto {
   referenceId?: string;
 }
 
+export class MpDebitDto {
+  @ApiProperty({ description: 'Card token gerado no browser via MercadoPago.js V2' })
+  @IsString()
+  @IsNotEmpty()
+  token: string;
+
+  @ApiProperty({ description: 'payment_method_id de débito do MP (debvisa, debmaster, debelo...)' })
+  @IsString()
+  @Matches(/^deb[a-z]+$/, { message: 'paymentMethodId deve ser um método de débito do Mercado Pago' })
+  paymentMethodId: string;
+
+  @ApiPropertyOptional({ description: 'Device fingerprint (MP_DEVICE_SESSION_ID) — melhora aprovação' })
+  @IsOptional()
+  @IsString()
+  deviceId?: string;
+
+  @ApiPropertyOptional({ description: 'Nome impresso no cartão (exibição no recibo)' })
+  @IsOptional()
+  @IsString()
+  holderName?: string;
+}
+
 export class PayOrderDto {
   @IsEnum(PaymentMethod)
   method: PaymentMethod;
@@ -103,11 +125,19 @@ export class PayOrderDto {
   @Type(() => CardTokenDto)
   cardToken?: CardTokenDto;
 
-  @ApiPropertyOptional({ description: '3DS authentication result — required for DEBIT_CARD' })
+  @ApiPropertyOptional({ description: '3DS authentication result — required for DEBIT_CARD (fluxo legado Cielo)' })
   @IsOptional()
   @ValidateNested()
   @Type(() => ThreeDsAuthDto)
   threeDs?: ThreeDsAuthDto;
+
+  @ApiPropertyOptional({
+    description: 'Débito via Mercado Pago: card token + payment_method_id. Quando o MP está habilitado, substitui card/threeDs no DEBIT_CARD.',
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => MpDebitDto)
+  mpDebit?: MpDebitDto;
 
   @IsOptional()
   @IsString()

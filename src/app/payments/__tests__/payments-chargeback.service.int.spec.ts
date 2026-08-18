@@ -78,6 +78,10 @@ describe('PaymentsChargebackService (integração, banco real)', () => {
   // Telemetria no-op: o alvo do teste são os efeitos no banco, não o log de atividade.
   const activityStub = { record: () => {} } as any;
 
+  // MercadoPagoService entrou no constructor (dispatch do débito MP no cron) —
+  // stub inerte: todos os cenários daqui usam pagamentos Cielo (sem gateway=MERCADOPAGO).
+  const mpStub = { getPayment: async () => ({ mpPaymentId: undefined }) } as any;
+
   jest.setTimeout(30000); // throttle interno de 400ms/pagamento + I/O real
 
   beforeAll(async () => {
@@ -247,7 +251,7 @@ describe('PaymentsChargebackService (integração, banco real)', () => {
     });
 
     const cielo = makeCieloStub({ [txId]: 11 }); // 11 = Refunded → chargeback
-    const service = new PaymentsChargebackService(prisma, cielo, orderFinalization, activityStub);
+    const service = new PaymentsChargebackService(prisma, cielo, mpStub, orderFinalization, activityStub);
 
     await service.checkChargebacks();
 
@@ -306,7 +310,7 @@ describe('PaymentsChargebackService (integração, banco real)', () => {
     });
 
     const cielo = makeCieloStub({ [txId]: 10 }); // 10 = Voided
-    const service = new PaymentsChargebackService(prisma, cielo, orderFinalization, activityStub);
+    const service = new PaymentsChargebackService(prisma, cielo, mpStub, orderFinalization, activityStub);
 
     await service.checkChargebacks();
 
@@ -337,7 +341,7 @@ describe('PaymentsChargebackService (integração, banco real)', () => {
     await prisma.getWriteClient().order.update({ where: { id: orderId }, data: { voucherId } });
 
     const cielo = makeCieloStub({ [txId]: 2 }); // 2 = PaymentConfirmed → NÃO é reversão
-    const service = new PaymentsChargebackService(prisma, cielo, orderFinalization, activityStub);
+    const service = new PaymentsChargebackService(prisma, cielo, mpStub, orderFinalization, activityStub);
 
     await service.checkChargebacks();
 
@@ -385,7 +389,7 @@ describe('PaymentsChargebackService (integração, banco real)', () => {
     });
 
     const cielo = makeCieloStub({ [txId]: 11 }); // mesmo que dissesse chargeback, deve ser pulado
-    const service = new PaymentsChargebackService(prisma, cielo, orderFinalization, activityStub);
+    const service = new PaymentsChargebackService(prisma, cielo, mpStub, orderFinalization, activityStub);
 
     await service.checkChargebacks();
 
@@ -420,7 +424,7 @@ describe('PaymentsChargebackService (integração, banco real)', () => {
     });
 
     const cielo = makeCieloStub({ [txCB]: 11, [txOk]: 2 });
-    const service = new PaymentsChargebackService(prisma, cielo, orderFinalization, activityStub);
+    const service = new PaymentsChargebackService(prisma, cielo, mpStub, orderFinalization, activityStub);
 
     await service.checkChargebacks();
 

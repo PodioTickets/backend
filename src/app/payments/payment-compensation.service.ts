@@ -6,6 +6,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from './cielo.service';
+import { MercadoPagoService } from './mercadopago.service';
 import { UserActivityService } from '../../common/services/user-activity.service';
 import { releaseVoucherByOrder } from '../../common/utils/voucher-reservation.util';
 
@@ -47,6 +48,7 @@ export class PaymentCompensationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cieloService: CieloService,
+    private readonly mercadoPagoService: MercadoPagoService,
     private readonly activity: UserActivityService,
   ) {}
 
@@ -88,7 +90,18 @@ export class PaymentCompensationService {
     let refundOk = !cieloPaymentId;
     if (cieloPaymentId) {
       try {
-        const res = await this.cieloService.cancelPayment(cieloPaymentId);
+        // Dispatch por gateway: débito MP estorna via refund do Mercado Pago
+        // (pagamento capturado não tem void no MP); resto segue na Cielo.
+        const isMpPayment = (meta as any)?.gateway === 'MERCADOPAGO';
+        const res = isMpPayment
+          ? await (async () => {
+              const mpRes = await this.mercadoPagoService.refundPayment(cieloPaymentId);
+              return {
+                success: mpRes.mpStatus === 'refunded' || mpRes.success,
+                error: mpRes.error,
+              };
+            })()
+          : await this.cieloService.cancelPayment(cieloPaymentId);
         refundOk = !!res?.success;
         if (!refundOk) {
           this.logger.error(
