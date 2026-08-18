@@ -95,9 +95,16 @@ export class MpDebitDto {
   @IsNotEmpty()
   token: string;
 
-  @ApiProperty({ description: 'payment_method_id de débito do MP (debvisa, debmaster, debelo...)' })
+  @ApiProperty({
+    description:
+      'payment_method_id de débito/pré-pago do MP (debvisa, debmaster, debelo, elo, visa, master...)',
+  })
   @IsString()
-  @Matches(/^deb[a-z]+$/, { message: 'paymentMethodId deve ser um método de débito do Mercado Pago' })
+  // Só valida a FORMA (id minúsculo do MP). A validação SEMÂNTICA — se o id é
+  // realmente débito/pré-pago — fica no MercadoPagoService.createDebitPayment,
+  // que confere contra a lista de métodos ATIVOS da conta (fail-closed). Ids de
+  // pré-pago são "crus" (elo/visa/master) e não passavam no antigo /^deb[a-z]+$/.
+  @Matches(/^[a-z][a-z0-9_]{1,31}$/, { message: 'paymentMethodId deve ser um método de débito do Mercado Pago' })
   paymentMethodId: string;
 
   @ApiPropertyOptional({ description: 'Device fingerprint (MP_DEVICE_SESSION_ID) — melhora aprovação' })
