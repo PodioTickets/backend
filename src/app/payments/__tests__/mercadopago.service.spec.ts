@@ -50,6 +50,28 @@ const approvedPayment = {
   card: { last_four_digits: '1234', cardholder: { name: 'FULANO SILVA' } },
 };
 
+// Resposta da ORDERS API (fluxo atual do debito). approvedPayment continua nos
+// testes de refund/getPayment por id numerico (branch legada /v1/payments).
+const approvedOrder = {
+  id: 'ORD01ABC',
+  status: 'processed',
+  status_detail: 'accredited',
+  transactions: {
+    payments: [
+      {
+        id: 'PAY01',
+        status: 'processed',
+        status_detail: 'accredited',
+        payment_method: {
+          id: 'visa',
+          type: 'debit_card',
+          card: { last_four_digits: '1234', cardholder: { name: 'FULANO SILVA' } },
+        },
+      },
+    ],
+  },
+};
+
 describe('MercadoPagoService — débito', () => {
   it('enabled reflete a presença de MP_ACCESS_TOKEN (fallback Cielo sem token)', () => {
     expect(makeService().service.enabled).toBe(true);
@@ -62,46 +84,46 @@ describe('MercadoPagoService — débito', () => {
     expect(makeService({ MP_ACCESS_TOKEN: 'APP_USR-live' }).service.sandboxMode).toBe(false);
   });
 
-  it('monta o body do débito: centavos→reais, installments=1, payer CPF, 3DS optional, headers', async () => {
+  it('monta a ORDER de debito: reais em string, brand normalizada + type debit_card, 3DS config, headers', async () => {
     const { service, post } = makeService();
-    post.mockResolvedValue({ data: approvedPayment });
+    post.mockResolvedValue({ data: approvedOrder });
 
     const result = await service.createDebitPayment({
       amountInCents: 15750, // R$ 157,50
       orderId: 'order-uuid-1',
       cardToken: 'tok_abc',
-      paymentMethodId: 'debvisa',
+      paymentMethodId: 'debvisa', // id legado e normalizado pra bandeira
       payer: { email: 'a@b.com', firstName: 'Fulano', lastName: 'Silva', cpf: '12345678901' },
       deviceId: 'device-123',
       idempotencyKey: 'idem-1',
-      notificationUrl: 'https://api.example.com/api/v1/payments/mp-webhook',
     });
 
-    expect(post).toHaveBeenCalledWith('/v1/payments', expect.any(Object), expect.any(Object));
+    expect(post).toHaveBeenCalledWith('/v1/orders', expect.any(Object), expect.any(Object));
     const [, body, options] = post.mock.calls[0];
 
-    expect(body.transaction_amount).toBe(157.5); // reais decimais, nunca centavos
-    expect(body.token).toBe('tok_abc');
-    expect(body.installments).toBe(1); // débito é sempre à vista
-    expect(body.payment_method_id).toBe('debvisa');
+    expect(body.total_amount).toBe('157.50'); // reais decimais em STRING (contrato da Orders API)
+    expect(body.transactions.payments[0].amount).toBe('157.50');
+    const pm = body.transactions.payments[0].payment_method;
+    expect(pm.id).toBe('visa'); // debvisa -> visa (bandeira)
+    expect(pm.type).toBe('debit_card'); // debito EXPLICITO — cartao multiplo funciona
+    expect(pm.token).toBe('tok_abc');
+    expect(pm.installments).toBe(1);
     expect(body.payer.email).toBe('a@b.com');
     expect(body.payer.identification).toEqual({ type: 'CPF', number: '12345678901' });
     expect(body.external_reference).toBe('order-uuid-1');
-    expect(body.three_d_secure_mode).toBe('mandatory');
-    expect(body.capture).toBe(true);
-    expect(body.notification_url).toContain('/mp-webhook');
+    expect(body.config.online.transaction_security.validation).toBe('on_fraud_risk');
     expect(options.headers['X-Idempotency-Key']).toBe('idem-1');
     expect(options.headers['X-meli-session-id']).toBe('device-123');
 
     expect(result.success).toBe(true);
-    expect(result.mpPaymentId).toBe('12345678901');
+    expect(result.mpPaymentId).toBe('ORD01ABC');
     expect(result.cardBrand).toBe('Visa');
     expect(result.last4Digits).toBe('1234');
   });
 
   it('sem CPF: payer vai sem identification (participante estrangeiro)', async () => {
     const { service, post } = makeService();
-    post.mockResolvedValue({ data: approvedPayment });
+    post.mockResolvedValue({ data: approvedOrder });
 
     await service.createDebitPayment({
       amountInCents: 1000,
@@ -116,53 +138,44 @@ describe('MercadoPagoService — débito', () => {
     expect(body.payer.identification).toBeUndefined();
   });
 
-  it('recusa payment_method_id que não é débito (não deixa cobrar como crédito)', async () => {
-    const { service, post } = makeService();
+  it('id de bandeira "cru" (visa) vai direto — type debit_card explicito impede cobrar como credito', async () => {
+    const { service, post, get } = makeService();
+    post.mockResolvedValue({ data: approvedOrder });
+
     const result = await service.createDebitPayment({
       amountInCents: 1000,
       orderId: 'o1',
       cardToken: 't',
-      paymentMethodId: 'visa', // crédito!
+      paymentMethodId: 'visa',
       payer: {},
       idempotencyKey: 'k',
     });
-    expect(result.success).toBe(false);
-    expect(post).not.toHaveBeenCalled();
-  });
 
-  it('aceita id PRE-PAGO listado na conta (ex.: elo dos cartoes de teste) como debito', async () => {
-    const { service, post, get } = makeService();
-    get.mockResolvedValue({
-      data: [
-        { id: 'elo', payment_type_id: 'prepaid_card', status: 'active' },
-        { id: 'debelo', payment_type_id: 'debit_card', status: 'active' },
-        { id: 'visa', payment_type_id: 'credit_card', status: 'active' },
-      ],
-    });
-    post.mockResolvedValue({ data: approvedPayment });
-
-    const result = await service.createDebitPayment({
-      amountInCents: 1000,
-      orderId: 'o-prepaid',
-      cardToken: 't',
-      paymentMethodId: 'elo',
-      payer: {},
-      idempotencyKey: 'k2',
-    });
-    expect(get).toHaveBeenCalledWith('/v1/payment_methods');
+    const [, body] = post.mock.calls[0];
+    expect(body.transactions.payments[0].payment_method).toMatchObject({ id: 'visa', type: 'debit_card' });
+    expect(get).not.toHaveBeenCalled(); // sem lookup de metodos — type e explicito
     expect(result.success).toBe(true);
-    expect(post).toHaveBeenCalled();
   });
 
-  it('pending_challenge → devolve challenge {externalResourceUrl, creq}', async () => {
+  it('action_required/pending_challenge → challenge {url, creq vazio} (iframe direto)', async () => {
     const { service, post } = makeService();
     post.mockResolvedValue({
       data: {
-        id: 555,
-        status: 'pending',
-        status_detail: 'pending_challenge',
-        payment_method_id: 'debmaster',
-        three_ds_info: { external_resource_url: 'https://acs.bank/3ds', creq: 'creq-token' },
+        id: 'ORD555',
+        status: 'action_required',
+        transactions: {
+          payments: [
+            {
+              status: 'action_required',
+              status_detail: 'pending_challenge',
+              payment_method: {
+                id: 'master',
+                type: 'debit_card',
+                transaction_security: { url: 'https://mp.example/3ds/challenge' },
+              },
+            },
+          ],
+        },
       },
     });
 
@@ -170,21 +183,30 @@ describe('MercadoPagoService — débito', () => {
       amountInCents: 1000,
       orderId: 'o1',
       cardToken: 't',
-      paymentMethodId: 'debmaster',
+      paymentMethodId: 'master',
       payer: {},
       idempotencyKey: 'k',
     });
 
     expect(result.success).toBe(false);
-    expect(result.challenge).toEqual({ externalResourceUrl: 'https://acs.bank/3ds', creq: 'creq-token' });
-    expect(result.mpPaymentId).toBe('555');
+    expect(result.mpStatus).toBe('pending');
+    expect(result.challenge).toEqual({ externalResourceUrl: 'https://mp.example/3ds/challenge', creq: '' });
+    expect(result.mpPaymentId).toBe('ORD555');
     expect(result.cardBrand).toBe('Master');
   });
 
   it('rejected → success=false com statusDetail preservado', async () => {
     const { service, post } = makeService();
     post.mockResolvedValue({
-      data: { id: 7, status: 'rejected', status_detail: 'cc_rejected_insufficient_amount', payment_method_id: 'debvisa' },
+      data: {
+        id: 'ORD7',
+        status: 'failed',
+        transactions: {
+          payments: [
+            { status: 'failed', status_detail: 'cc_rejected_insufficient_amount', payment_method: { id: 'visa', type: 'debit_card' } },
+          ],
+        },
+      },
     });
 
     const result = await service.createDebitPayment({
@@ -197,6 +219,7 @@ describe('MercadoPagoService — débito', () => {
     });
 
     expect(result.success).toBe(false);
+    expect(result.mpStatus).toBe('rejected');
     expect(result.statusDetail).toBe('cc_rejected_insufficient_amount');
     expect(service.mapRejectionMessage(result.statusDetail)).toContain('Saldo insuficiente');
   });

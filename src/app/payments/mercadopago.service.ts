@@ -23,7 +23,11 @@ export interface MpPaymentResult {
   cardBrand?: string;
   last4Digits?: string;
   holder?: string;
-  /** Desafio 3DS do MP — quando presente, o front deve renderizar o iframe. */
+  /**
+   * Desafio 3DS do MP — quando presente, o front deve renderizar o iframe.
+   * Orders API: `creq` vem VAZIO (a URL é autocontida — iframe com src direto).
+   * Legado /v1/payments: URL + creq (form POST pro ACS).
+   */
   challenge?: { externalResourceUrl: string; creq: string };
   error?: string;
 }
@@ -88,8 +92,17 @@ export class MercadoPagoService {
    * Cria pagamento de DÉBITO no MP a partir do card token gerado no browser
    * (MercadoPago.js V2 — o PAN nunca chega ao nosso backend neste fluxo).
    *
+   * Usa a **Orders API** (`POST /v1/orders`) — no Brasil, débito de cartão
+   * MÚLTIPLO (Visa/Master crédito+débito no mesmo plástico) só existe nela:
+   * envia-se o id da BANDEIRA (`master`/`visa`/`elo`) + `type: "debit_card"`.
+   * A `/v1/payments` clássica não tem esse conceito (débito BR = só `debelo`),
+   * e era por isso que cartões múltiplos caíam em "não tem função débito".
+   *
+   * O 3DS vem via `config.online.transaction_security`; o challenge retorna
+   * como URL para iframe (`transaction_security.url`), sem creq.
+   *
    * `amountInCents` segue a convenção interna (centavos); o MP fala em reais
-   * decimais, a conversão acontece aqui e SÓ aqui.
+   * decimais em STRING, a conversão acontece aqui e SÓ aqui.
    */
   async createDebitPayment(params: {
     amountInCents: number;
@@ -105,61 +118,55 @@ export class MercadoPagoService {
     if (!this.enabled) {
       return { success: false, error: 'Mercado Pago is not configured (MP_ACCESS_TOKEN missing)' };
     }
-    // Aceita métodos de débito (debvisa, debmaster, debelo...) e PRÉ-PAGOS da
-    // conta (elo/visa/master — ex.: Elo Débito Virtual e os cartões de teste do
-    // MP), que processam à vista igual débito. Como o id de pré-pago COLIDE com
-    // o de crédito, ids não-`deb*` são validados contra a lista real de métodos
-    // da conta (cache 1h); API indisponível → recusa (fail-closed, comportamento
-    // antigo). Um payment_method_id de crédito puro segue rejeitado.
-    if (!/^deb/.test(params.paymentMethodId)) {
-      let prepaidOk = false;
-      try {
-        const ids = await this.loadDebitCapableMethodIds();
-        prepaidOk = ids.has(params.paymentMethodId);
-      } catch {
-        prepaidOk = false;
-      }
-      if (!prepaidOk) {
-        return { success: false, error: `payment_method_id '${params.paymentMethodId}' não é de cartão de débito` };
-      }
-    }
+
+    // Normaliza ids legados de débito p/ o id de bandeira da Orders API
+    // (debvisa→visa, debmaster→master, debelo→elo). Não há risco de "cobrar
+    // como crédito silenciosamente": o type debit_card é EXPLÍCITO no body.
+    const brandId = params.paymentMethodId.replace(/^deb/, '');
+    const amount = (params.amountInCents / 100).toFixed(2);
 
     const body: Record<string, any> = {
-      transaction_amount: Number((params.amountInCents / 100).toFixed(2)),
-      token: params.cardToken,
-      installments: 1,
-      payment_method_id: params.paymentMethodId,
+      type: 'online',
+      processing_mode: 'automatic',
+      external_reference: params.orderId,
+      total_amount: amount,
       payer: {
         email: params.payer.email || undefined,
-        first_name: params.payer.firstName || undefined,
-        last_name: params.payer.lastName || undefined,
+        ...(params.payer.firstName && { first_name: params.payer.firstName }),
+        ...(params.payer.lastName && { last_name: params.payer.lastName }),
         ...(params.payer.cpf && {
           identification: { type: 'CPF', number: params.payer.cpf },
         }),
       },
-      external_reference: params.orderId,
-      description: params.description ?? `Pedido ${params.orderId}`,
-      statement_descriptor: this.statementDescriptor,
-      capture: true,
-      // 3DS SEMPRE (mandatory): com 'optional' o risco do MP recusava direto
-      // (cc_rejected_high_risk) sem nem desafiar — app nova, sem histórico.
-      // Com mandatory o MP devolve pending_challenge e o BANCO EMISSOR
-      // autentica (MpChallengeModal já cuida do iframe); a aprovação passa a
-      // depender do emissor, não do risco frio do MP. Débito no BR exige 3DS
-      // na prática. Override por env MP_3DS_MODE se precisar voltar.
-      three_d_secure_mode:
-        this.configService.get<string>('MP_3DS_MODE') === 'optional' ? 'optional' : 'mandatory',
-      ...(params.notificationUrl && { notification_url: params.notificationUrl }),
+      transactions: {
+        payments: [
+          {
+            amount,
+            payment_method: {
+              id: brandId,
+              type: 'debit_card',
+              token: params.cardToken,
+              installments: 1,
+            },
+          },
+        ],
+      },
+      // 3DS conforme risco, com liability shift pro emissor — o challenge chega
+      // como transaction_security.url (iframe direto no MpChallengeModal).
+      config: {
+        online: {
+          transaction_security: { validation: 'on_fraud_risk', liability_shift: 'required' },
+        },
+      },
     };
 
-    // Diagnóstico (mascarado): confirma se identification foi incluída no body
-    // enviado ao MP (payer_doc null na resposta = risco recusa).
+    // Diagnóstico (mascarado): confirma se identification foi incluída no body.
     this.logger.log(
-      `[MP-debit] payment body: identification=${body.payer?.identification ? 'INCLUIDA' : 'AUSENTE'} method=${params.paymentMethodId} device=${params.deviceId ? 'sim' : 'nao'}`,
+      `[MP-debit] orders body: identification=${body.payer?.identification ? 'INCLUIDA' : 'AUSENTE'} brand=${brandId} device=${params.deviceId ? 'sim' : 'nao'}`,
     );
 
     try {
-      const response = await this.client.post('/v1/payments', body, {
+      const response = await this.client.post('/v1/orders', body, {
         headers: {
           // Idempotência exigida pelo MP; reusa a key do checkout (escopada
           // por user+order via Redis) para retry seguro do mesmo pagamento.
@@ -167,20 +174,30 @@ export class MercadoPagoService {
           ...(params.deviceId && { 'X-meli-session-id': params.deviceId }),
         },
       });
-      return this.toResult(response.data);
+      return this.toOrderResult(response.data);
     } catch (err: any) {
-      const apiMessage = err?.response?.data?.message ?? err.message;
+      const apiMessage =
+        err?.response?.data?.errors?.[0]?.message ?? err?.response?.data?.message ?? err.message;
       this.logger.error(
-        `MP createDebitPayment falhou (order ${params.orderId}): ${apiMessage}`,
+        `MP createDebitPayment (orders) falhou (order ${params.orderId}): ${apiMessage}`,
         err?.response?.data ? JSON.stringify(err.response.data).slice(0, 500) : undefined,
       );
       return { success: false, error: apiMessage };
     }
   }
 
-  /** Consulta o estado real de um pagamento (anti-forjamento do webhook e polling). */
+  /** Ids da Orders API são alfanuméricos (ORD...); os da /v1/payments, numéricos. */
+  private isOrderId(id: string): boolean {
+    return !/^\d+$/.test(id);
+  }
+
+  /** Consulta o estado real de um pagamento/order (anti-forjamento do webhook e polling). */
   async getPayment(mpPaymentId: string): Promise<MpPaymentResult> {
     try {
+      if (this.isOrderId(mpPaymentId)) {
+        const response = await this.client.get(`/v1/orders/${mpPaymentId}`);
+        return this.toOrderResult(response.data);
+      }
       const response = await this.client.get(`/v1/payments/${mpPaymentId}`);
       return this.toResult(response.data);
     } catch (err: any) {
@@ -197,6 +214,27 @@ export class MercadoPagoService {
    */
   async refundPayment(mpPaymentId: string, amountInCents?: number): Promise<MpPaymentResult> {
     try {
+      if (this.isOrderId(mpPaymentId)) {
+        // Orders API: estorno TOTAL = POST /refund sem body; PARCIAL exige o id
+        // do payment interno da order + amount decimal em string.
+        let body: Record<string, any> | undefined;
+        if (amountInCents != null) {
+          const { data: order } = await this.client.get(`/v1/orders/${mpPaymentId}`);
+          const innerPaymentId = order?.transactions?.payments?.[0]?.id;
+          if (!innerPaymentId) {
+            return { success: false, error: 'Order sem payment interno para estorno parcial' };
+          }
+          body = {
+            transactions: {
+              payments: [{ id: innerPaymentId, amount: (amountInCents / 100).toFixed(2) }],
+            },
+          };
+        }
+        await this.client.post(`/v1/orders/${mpPaymentId}/refund`, body ?? undefined, {
+          headers: { 'X-Idempotency-Key': crypto.randomUUID() },
+        });
+        return await this.getPayment(mpPaymentId);
+      }
       const body =
         amountInCents != null ? { amount: Number((amountInCents / 100).toFixed(2)) } : {};
       await this.client.post(`/v1/payments/${mpPaymentId}/refunds`, body, {
@@ -217,6 +255,12 @@ export class MercadoPagoService {
    */
   async cancelPayment(mpPaymentId: string): Promise<MpPaymentResult> {
     try {
+      if (this.isOrderId(mpPaymentId)) {
+        const response = await this.client.post(`/v1/orders/${mpPaymentId}/cancel`, undefined, {
+          headers: { 'X-Idempotency-Key': crypto.randomUUID() },
+        });
+        return this.toOrderResult(response.data);
+      }
       const response = await this.client.put(`/v1/payments/${mpPaymentId}`, {
         status: 'cancelled',
       });
@@ -344,28 +388,49 @@ export class MercadoPagoService {
     return paymentMethodId ? (map[paymentMethodId] ?? paymentMethodId) : undefined;
   }
 
-  // ── Métodos débito/pré-pago da conta (cache 1h) ────────────────────────────
-  // Fonte da validação de ids não-`deb*` no createDebitPayment: só aceitamos um
-  // id "cru" (elo/visa/master) se a CONTA tiver a entrada prepaid_card/debit_card
-  // correspondente ativa — evita whitelist hardcoded que dessincroniza do MP.
-  private debitMethodIdsCache: { ids: Set<string>; expiresAt: number } | null = null;
+  /**
+   * Normaliza a resposta da ORDERS API num MpPaymentResult (mesmo contrato do
+   * toResult): callers (polling, webhook, refund) não distinguem as duas APIs.
+   *
+   * Mapeamento de status da order → vocabulário de payment (mapMpStatusToPaymentStatus):
+   *   processed → approved · action_required/at_terminal → pending ·
+   *   failed → rejected · canceled/expired → cancelled · refunded → refunded.
+   * O challenge 3DS vem como URL pura (transaction_security.url) — creq vazio
+   * sinaliza ao front "iframe direto, sem form POST".
+   */
+  private toOrderResult(order: any): MpPaymentResult {
+    const pay = order?.transactions?.payments?.[0];
+    const orderStatus: string | undefined = order?.status;
+    const statusDetail: string | undefined = pay?.status_detail ?? order?.status_detail;
+    const challengeUrl: string | undefined = pay?.payment_method?.transaction_security?.url;
 
-  private async loadDebitCapableMethodIds(): Promise<Set<string>> {
-    const now = Date.now();
-    if (this.debitMethodIdsCache && now < this.debitMethodIdsCache.expiresAt) {
-      return this.debitMethodIdsCache.ids;
-    }
-    const { data } = await this.client.get('/v1/payment_methods');
-    const ids = new Set<string>(
-      (Array.isArray(data) ? data : [])
-        .filter(
-          (m: any) =>
-            m?.status === 'active' &&
-            (m?.payment_type_id === 'debit_card' || m?.payment_type_id === 'prepaid_card'),
-        )
-        .map((m: any) => String(m.id)),
-    );
-    this.debitMethodIdsCache = { ids, expiresAt: now + 60 * 60 * 1000 };
-    return ids;
+    const statusMap: Record<string, string> = {
+      processed: 'approved',
+      action_required: 'pending',
+      at_terminal: 'pending',
+      failed: 'rejected',
+      canceled: 'cancelled',
+      expired: 'cancelled',
+      refunded: 'refunded',
+      partially_refunded: 'approved',
+    };
+    const mpStatus = orderStatus ? (statusMap[orderStatus] ?? orderStatus) : undefined;
+
+    const challenge =
+      mpStatus === 'pending' && challengeUrl
+        ? { externalResourceUrl: challengeUrl, creq: '' }
+        : undefined;
+
+    return {
+      success: orderStatus === 'processed',
+      mpPaymentId: order?.id != null ? String(order.id) : undefined,
+      mpStatus,
+      statusDetail,
+      paymentMethodId: pay?.payment_method?.id,
+      cardBrand: this.brandFromMethodId(pay?.payment_method?.id),
+      last4Digits: pay?.payment_method?.card?.last_four_digits ?? undefined,
+      holder: pay?.payment_method?.card?.cardholder?.name ?? undefined,
+      challenge,
+    };
   }
 }
