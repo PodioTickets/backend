@@ -174,7 +174,10 @@ describe('MercadoPagoService — débito', () => {
 
     expect(post).toHaveBeenCalledWith('/v1/orders', expect.any(Object), expect.any(Object));
     const [, body] = post.mock.calls[0];
-    expect(body.transactions.payments[0].payment_method).toMatchObject({ id: 'visa', type: 'prepaid_card' });
+    const pm = body.transactions.payments[0].payment_method;
+    expect(pm).toMatchObject({ id: 'visa', type: 'prepaid_card' });
+    // prepaid nao aceita installments ("additionalProperties 'installments' not allowed")
+    expect(pm.installments).toBeUndefined();
     expect(result.success).toBe(true);
   });
 

@@ -157,7 +157,10 @@ export class MercadoPagoService {
               id: brandId,
               type: methodType,
               token: params.cardToken,
-              installments: 1,
+              // installments só existe p/ debit_card — em prepaid_card a Orders
+              // API recusa ("additionalProperties 'installments' not allowed";
+              // pré-pago é à vista por definição).
+              ...(methodType === 'debit_card' && { installments: 1 }),
             },
           },
         ],
@@ -189,11 +192,11 @@ export class MercadoPagoService {
     } catch (err: any) {
       const data = err?.response?.data;
       const apiMessage = data?.errors?.[0]?.message ?? data?.message ?? err.message;
-      // Fallback: se a Orders API recusar o FORMATO (property_value — ex.: id/type
-      // de pré-pago que ela não aceita), tenta a /v1/payments clássica, que
-      // comprovadamente aceita ids de pré-pago (chegava ao motor de risco).
-      const isFormatRejection =
-        err?.response?.status === 400 && data?.errors?.some((e: any) => e?.code === 'property_value');
+      // Fallback: se a Orders API recusar o FORMATO (qualquer 400 de validação
+      // com array errors — property_value, unsupported_properties etc.), tenta
+      // a /v1/payments clássica, que comprovadamente aceita ids de pré-pago
+      // (chegava ao motor de risco). Recusa de negócio NÃO vem como 400.
+      const isFormatRejection = err?.response?.status === 400 && Array.isArray(data?.errors);
       if (isFormatRejection) {
         this.logger.warn(
           `[MP-debit] Orders API recusou o formato (${JSON.stringify(data?.errors?.[0]?.details ?? []).slice(0, 200)}) — fallback pra /v1/payments clássica`,
