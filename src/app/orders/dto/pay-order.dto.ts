@@ -1,5 +1,6 @@
 import {
   IsEnum,
+  IsIn,
   IsInt,
   IsNotEmpty,
   IsOptional,
@@ -106,6 +107,17 @@ export class MpDebitDto {
   // pré-pago são "crus" (elo/visa/master) e não passavam no antigo /^deb[a-z]+$/.
   @Matches(/^[a-z][a-z0-9_]{1,31}$/, { message: 'paymentMethodId deve ser um método de débito do Mercado Pago' })
   paymentMethodId: string;
+
+  @ApiPropertyOptional({
+    description:
+      'payment_type_id do BIN lookup, repassado à Orders API. SÓ débito/pré-pago — credit_card é rejeitado (cobraria crédito como débito).',
+    enum: ['debit_card', 'prepaid_card'],
+  })
+  @IsOptional()
+  @IsIn(['debit_card', 'prepaid_card'], {
+    message: 'paymentMethodType deve ser debit_card ou prepaid_card',
+  })
+  paymentMethodType?: 'debit_card' | 'prepaid_card';
 
   @ApiPropertyOptional({
     description:

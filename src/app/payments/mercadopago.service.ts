@@ -109,6 +109,8 @@ export class MercadoPagoService {
     orderId: string;
     cardToken: string;
     paymentMethodId: string;
+    /** payment_type_id do BIN lookup (debit_card | prepaid_card) — vai como veio. */
+    paymentMethodType?: 'debit_card' | 'prepaid_card';
     payer: { email?: string; firstName?: string; lastName?: string; cpf?: string };
     deviceId?: string;
     idempotencyKey: string;
@@ -119,17 +121,19 @@ export class MercadoPagoService {
       return { success: false, error: 'Mercado Pago is not configured (MP_ACCESS_TOKEN missing)' };
     }
 
-    // ROTEAMENTO HÍBRIDO por tipo de método:
-    // - `deb*` (debelo — Elo Débito): Orders API, que exige exatamente o id do
-    //   método de débito da conta ("value must be 'debelo'", validação real).
-    // - PRÉ-PAGOS (id cru visa/master/elo, ex.: Visa Prepaid): a Orders API
-    //   recusa em type debit_card; a /v1/payments CLÁSSICA aceita esses ids
-    //   (comprovado: as tentativas chegaram ao motor de risco) → vão por ela,
-    //   com 3DS mandatory.
-    if (!/^deb/.test(params.paymentMethodId)) {
-      return this.createClassicDebitPayment(params);
-    }
+    // id + type vão COMO VIERAM do BIN lookup (a Orders API valida contra a
+    // conta). Sem type informado, infere: deb* = debit_card; id cru
+    // (visa/master/elo) = prepaid_card. `credit_card` NUNCA (o DTO já barra) —
+    // cobraria crédito silenciosamente como débito.
     const brandId = params.paymentMethodId;
+    const methodType: 'debit_card' | 'prepaid_card' =
+      params.paymentMethodType === 'prepaid_card'
+        ? 'prepaid_card'
+        : params.paymentMethodType === 'debit_card'
+          ? 'debit_card'
+          : /^deb/.test(brandId)
+            ? 'debit_card'
+            : 'prepaid_card';
     const amount = (params.amountInCents / 100).toFixed(2);
 
     const body: Record<string, any> = {
@@ -151,7 +155,7 @@ export class MercadoPagoService {
             amount,
             payment_method: {
               id: brandId,
-              type: 'debit_card',
+              type: methodType,
               token: params.cardToken,
               installments: 1,
             },
@@ -169,7 +173,7 @@ export class MercadoPagoService {
 
     // Diagnóstico (mascarado): confirma se identification foi incluída no body.
     this.logger.log(
-      `[MP-debit] orders body: identification=${body.payer?.identification ? 'INCLUIDA' : 'AUSENTE'} brand=${brandId} device=${params.deviceId ? 'sim' : 'nao'}`,
+      `[MP-debit] orders body: identification=${body.payer?.identification ? 'INCLUIDA' : 'AUSENTE'} brand=${brandId} type=${methodType} device=${params.deviceId ? 'sim' : 'nao'}`,
     );
 
     try {
@@ -183,11 +187,22 @@ export class MercadoPagoService {
       });
       return this.toOrderResult(response.data);
     } catch (err: any) {
-      const apiMessage =
-        err?.response?.data?.errors?.[0]?.message ?? err?.response?.data?.message ?? err.message;
+      const data = err?.response?.data;
+      const apiMessage = data?.errors?.[0]?.message ?? data?.message ?? err.message;
+      // Fallback: se a Orders API recusar o FORMATO (property_value — ex.: id/type
+      // de pré-pago que ela não aceita), tenta a /v1/payments clássica, que
+      // comprovadamente aceita ids de pré-pago (chegava ao motor de risco).
+      const isFormatRejection =
+        err?.response?.status === 400 && data?.errors?.some((e: any) => e?.code === 'property_value');
+      if (isFormatRejection) {
+        this.logger.warn(
+          `[MP-debit] Orders API recusou o formato (${JSON.stringify(data?.errors?.[0]?.details ?? []).slice(0, 200)}) — fallback pra /v1/payments clássica`,
+        );
+        return this.createClassicDebitPayment(params);
+      }
       this.logger.error(
         `MP createDebitPayment (orders) falhou (order ${params.orderId}): ${apiMessage}`,
-        err?.response?.data ? JSON.stringify(err.response.data).slice(0, 500) : undefined,
+        data ? JSON.stringify(data).slice(0, 500) : undefined,
       );
       return { success: false, error: apiMessage };
     }
