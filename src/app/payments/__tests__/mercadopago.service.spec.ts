@@ -92,7 +92,7 @@ describe('MercadoPagoService — débito', () => {
       amountInCents: 15750, // R$ 157,50
       orderId: 'order-uuid-1',
       cardToken: 'tok_abc',
-      paymentMethodId: 'debvisa', // id legado e normalizado pra bandeira
+      paymentMethodId: 'debelo', // id vai como veio (Orders API valida contra a conta)
       payer: { email: 'a@b.com', firstName: 'Fulano', lastName: 'Silva', cpf: '12345678901' },
       deviceId: 'device-123',
       idempotencyKey: 'idem-1',
@@ -104,7 +104,7 @@ describe('MercadoPagoService — débito', () => {
     expect(body.total_amount).toBe('157.50'); // reais decimais em STRING (contrato da Orders API)
     expect(body.transactions.payments[0].amount).toBe('157.50');
     const pm = body.transactions.payments[0].payment_method;
-    expect(pm.id).toBe('visa'); // debvisa -> visa (bandeira)
+    expect(pm.id).toBe('debelo'); // sem normalizacao — 'value must be debelo' (validacao real do MP)
     expect(pm.type).toBe('debit_card'); // debito EXPLICITO — cartao multiplo funciona
     expect(pm.token).toBe('tok_abc');
     expect(pm.installments).toBe(1);
@@ -138,7 +138,7 @@ describe('MercadoPagoService — débito', () => {
     expect(body.payer.identification).toBeUndefined();
   });
 
-  it('id de bandeira "cru" (visa) vai direto — type debit_card explicito impede cobrar como credito', async () => {
+  it('payment_method_id passa COMO VEIO (sem normalizacao) + type debit_card sempre explicito', async () => {
     const { service, post, get } = makeService();
     post.mockResolvedValue({ data: approvedOrder });
 
@@ -146,14 +146,14 @@ describe('MercadoPagoService — débito', () => {
       amountInCents: 1000,
       orderId: 'o1',
       cardToken: 't',
-      paymentMethodId: 'visa',
+      paymentMethodId: 'debvisa', // hipotetico — deve ir intacto (a conta/API valida)
       payer: {},
       idempotencyKey: 'k',
     });
 
     const [, body] = post.mock.calls[0];
-    expect(body.transactions.payments[0].payment_method).toMatchObject({ id: 'visa', type: 'debit_card' });
-    expect(get).not.toHaveBeenCalled(); // sem lookup de metodos — type e explicito
+    expect(body.transactions.payments[0].payment_method).toMatchObject({ id: 'debvisa', type: 'debit_card' });
+    expect(get).not.toHaveBeenCalled(); // sem lookup de metodos — a Orders API valida
     expect(result.success).toBe(true);
   });
 
