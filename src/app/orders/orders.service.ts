@@ -3826,7 +3826,10 @@ export class OrdersService {
           email: user?.email,
           firstName: user?.firstName ?? undefined,
           lastName: user?.lastName ?? undefined,
-          cpf: firstCpf,
+          // CPF do TITULAR do cartão (front) > CPF do 1º participante (fallback
+          // legado). Sem identification o MP recusa por risco (payer_doc null
+          // → cc_rejected_high_risk, visto em produção).
+          cpf: dto.mpDebit?.holderCpf || firstCpf,
         },
         deviceId: dto.mpDebit!.deviceId,
         idempotencyKey: idempotencyKey || `order-${orderId}`,

@@ -107,6 +107,15 @@ export class MpDebitDto {
   @Matches(/^[a-z][a-z0-9_]{1,31}$/, { message: 'paymentMethodId deve ser um método de débito do Mercado Pago' })
   paymentMethodId: string;
 
+  @ApiPropertyOptional({
+    description:
+      'CPF do TITULAR do cartão (11 dígitos) — vai no payer.identification do MP. Sem ele o risco recusa (cc_rejected_high_risk).',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{11}$/, { message: 'holderCpf deve ter 11 dígitos' })
+  holderCpf?: string;
+
   @ApiPropertyOptional({ description: 'Device fingerprint (MP_DEVICE_SESSION_ID) — melhora aprovação' })
   @IsOptional()
   @IsString()
