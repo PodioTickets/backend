@@ -119,11 +119,16 @@ export class MercadoPagoService {
       return { success: false, error: 'Mercado Pago is not configured (MP_ACCESS_TOKEN missing)' };
     }
 
-    // O id vai COMO VEIO do lookup por BIN: a Orders API valida contra os
-    // métodos de débito da CONTA — no Brasil, `debelo` (erro real da API:
-    // "value must be 'debelo'"). NÃO normalizar (debelo→elo quebrava o único
-    // débito suportado). Cartão múltiplo Visa/Master não tem método de débito
-    // no MP BR — o front barra antes com mensagem amigável.
+    // ROTEAMENTO HÍBRIDO por tipo de método:
+    // - `deb*` (debelo — Elo Débito): Orders API, que exige exatamente o id do
+    //   método de débito da conta ("value must be 'debelo'", validação real).
+    // - PRÉ-PAGOS (id cru visa/master/elo, ex.: Visa Prepaid): a Orders API
+    //   recusa em type debit_card; a /v1/payments CLÁSSICA aceita esses ids
+    //   (comprovado: as tentativas chegaram ao motor de risco) → vão por ela,
+    //   com 3DS mandatory.
+    if (!/^deb/.test(params.paymentMethodId)) {
+      return this.createClassicDebitPayment(params);
+    }
     const brandId = params.paymentMethodId;
     const amount = (params.amountInCents / 100).toFixed(2);
 
@@ -182,6 +187,66 @@ export class MercadoPagoService {
         err?.response?.data?.errors?.[0]?.message ?? err?.response?.data?.message ?? err.message;
       this.logger.error(
         `MP createDebitPayment (orders) falhou (order ${params.orderId}): ${apiMessage}`,
+        err?.response?.data ? JSON.stringify(err.response.data).slice(0, 500) : undefined,
+      );
+      return { success: false, error: apiMessage };
+    }
+  }
+
+  /**
+   * Caminho CLÁSSICO (/v1/payments) — usado para PRÉ-PAGOS (visa/master/elo),
+   * que a Orders API não aceita em type debit_card. 3DS mandatory: sem ele o
+   * risco recusava direto (cc_rejected_high_risk) sem desafiar.
+   */
+  private async createClassicDebitPayment(params: {
+    amountInCents: number;
+    orderId: string;
+    cardToken: string;
+    paymentMethodId: string;
+    payer: { email?: string; firstName?: string; lastName?: string; cpf?: string };
+    deviceId?: string;
+    idempotencyKey: string;
+    notificationUrl?: string;
+    description?: string;
+  }): Promise<MpPaymentResult> {
+    const body: Record<string, any> = {
+      transaction_amount: Number((params.amountInCents / 100).toFixed(2)),
+      token: params.cardToken,
+      installments: 1,
+      payment_method_id: params.paymentMethodId,
+      payer: {
+        email: params.payer.email || undefined,
+        first_name: params.payer.firstName || undefined,
+        last_name: params.payer.lastName || undefined,
+        ...(params.payer.cpf && {
+          identification: { type: 'CPF', number: params.payer.cpf },
+        }),
+      },
+      external_reference: params.orderId,
+      description: params.description ?? `Pedido ${params.orderId}`,
+      statement_descriptor: this.statementDescriptor,
+      capture: true,
+      three_d_secure_mode:
+        this.configService.get<string>('MP_3DS_MODE') === 'optional' ? 'optional' : 'mandatory',
+      ...(params.notificationUrl && { notification_url: params.notificationUrl }),
+    };
+
+    this.logger.log(
+      `[MP-debit] classic body (pre-pago): identification=${body.payer?.identification ? 'INCLUIDA' : 'AUSENTE'} method=${params.paymentMethodId} device=${params.deviceId ? 'sim' : 'nao'}`,
+    );
+
+    try {
+      const response = await this.client.post('/v1/payments', body, {
+        headers: {
+          'X-Idempotency-Key': params.idempotencyKey,
+          ...(params.deviceId && { 'X-meli-session-id': params.deviceId }),
+        },
+      });
+      return this.toResult(response.data);
+    } catch (err: any) {
+      const apiMessage = err?.response?.data?.message ?? err.message;
+      this.logger.error(
+        `MP createClassicDebitPayment falhou (order ${params.orderId}): ${apiMessage}`,
         err?.response?.data ? JSON.stringify(err.response.data).slice(0, 500) : undefined,
       );
       return { success: false, error: apiMessage };
