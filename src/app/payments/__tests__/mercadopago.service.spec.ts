@@ -130,6 +130,30 @@ describe('MercadoPagoService — débito', () => {
     expect(post).not.toHaveBeenCalled();
   });
 
+  it('aceita id PRE-PAGO listado na conta (ex.: elo dos cartoes de teste) como debito', async () => {
+    const { service, post, get } = makeService();
+    get.mockResolvedValue({
+      data: [
+        { id: 'elo', payment_type_id: 'prepaid_card', status: 'active' },
+        { id: 'debelo', payment_type_id: 'debit_card', status: 'active' },
+        { id: 'visa', payment_type_id: 'credit_card', status: 'active' },
+      ],
+    });
+    post.mockResolvedValue({ data: approvedPayment });
+
+    const result = await service.createDebitPayment({
+      amountInCents: 1000,
+      orderId: 'o-prepaid',
+      cardToken: 't',
+      paymentMethodId: 'elo',
+      payer: {},
+      idempotencyKey: 'k2',
+    });
+    expect(get).toHaveBeenCalledWith('/v1/payment_methods');
+    expect(result.success).toBe(true);
+    expect(post).toHaveBeenCalled();
+  });
+
   it('pending_challenge → devolve challenge {externalResourceUrl, creq}', async () => {
     const { service, post } = makeService();
     post.mockResolvedValue({
