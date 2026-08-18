@@ -3817,6 +3817,12 @@ export class OrdersService {
       };
     } else if (useMpForDebit) {
       const serverUrl = (process.env.SERVER_URL ?? '').replace(/\/$/, '');
+      // Diagnóstico (mascarado): rastreia se o CPF do titular chegou do front e
+      // qual fonte alimenta o payer.identification do MP. payer_doc null no MP
+      // derruba a aprovação — este log fecha se a perda é front ou back.
+      this.logger.log(
+        `[MP-debit] order=${orderId} holderCpf=${dto.mpDebit?.holderCpf ? `presente(len ${dto.mpDebit.holderCpf.length})` : 'AUSENTE'} firstCpf=${firstCpf ? 'presente' : 'ausente'}`,
+      );
       const mpResult = await this.mercadoPagoService.createDebitPayment({
         amountInCents: finalTotal,
         orderId,
