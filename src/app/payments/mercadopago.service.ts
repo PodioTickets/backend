@@ -119,10 +119,12 @@ export class MercadoPagoService {
       return { success: false, error: 'Mercado Pago is not configured (MP_ACCESS_TOKEN missing)' };
     }
 
-    // Normaliza ids legados de débito p/ o id de bandeira da Orders API
-    // (debvisa→visa, debmaster→master, debelo→elo). Não há risco de "cobrar
-    // como crédito silenciosamente": o type debit_card é EXPLÍCITO no body.
-    const brandId = params.paymentMethodId.replace(/^deb/, '');
+    // O id vai COMO VEIO do lookup por BIN: a Orders API valida contra os
+    // métodos de débito da CONTA — no Brasil, `debelo` (erro real da API:
+    // "value must be 'debelo'"). NÃO normalizar (debelo→elo quebrava o único
+    // débito suportado). Cartão múltiplo Visa/Master não tem método de débito
+    // no MP BR — o front barra antes com mensagem amigável.
+    const brandId = params.paymentMethodId;
     const amount = (params.amountInCents / 100).toFixed(2);
 
     const body: Record<string, any> = {
