@@ -19,6 +19,12 @@ import { CieloService } from './cielo.service';
 import { MercadoPagoService } from './mercadopago.service';
 import { OrderFinalizationService } from './order-finalization.service';
 import { UserActivityService } from '../../common/services/user-activity.service';
+import { EmailService } from '../../common/services/email.service';
+import { buildReceiptPdfData } from '../../common/services/receipt-pdf.builder';
+import {
+  formatEventHappensDate,
+  formatEventCardAddress,
+} from '../../common/utils/event-email-format.util';
 import { REFUND_FEE_RATE, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 
 /**
@@ -51,6 +57,7 @@ export class PaymentsRefundService {
     private readonly mercadoPagoService: MercadoPagoService,
     private readonly orderFinalization: OrderFinalizationService,
     private readonly activity: UserActivityService,
+    private readonly email: EmailService,
   ) {}
 
   /**
@@ -357,6 +364,18 @@ export class PaymentsRefundService {
       });
     }
 
+    // ── 5b. Notifica por e-mail cada inscrição estornada (organizador E admin) ──
+    // Best-effort: roda APÓS o estorno já ter sido aplicado + aceito pela Cielo.
+    // Um e-mail por participante DISTINTO do pedido (o estorno é sempre total).
+    // Falha aqui NUNCA quebra o estorno — o dinheiro já foi devolvido.
+    if (applied) {
+      await this.dispatchRefundEmails(order.id).catch((err) => {
+        this.logger.error(
+          `[REFUND] falha ao enviar e-mail(s) de estorno do pedido ${order.id}: ${err?.message ?? err}`,
+        );
+      });
+    }
+
     // ── 6. Telemetria: evento na jornada do COMPRADOR ─────────────────────────
     // Complementa o `order.refund` (COMPLIANCE) gravado pelo controller admin, que fica
     // na jornada do ADMIN. Este aqui aparece no histórico do usuário estornado.
@@ -568,6 +587,114 @@ export class PaymentsRefundService {
         cancelledAt: cancelledAt.toISOString(),
       },
     };
+  }
+
+  /**
+   * Carrega o pedido estornado e envia o e-mail "Estorno concluído" para o e-mail
+   * de CADA inscrição (participante) distinta. Reusa o builder ÚNICO do recibo
+   * (`buildReceiptPdfData`) como fonte da divisão financeira e da lista de
+   * destinatários — evitando recomputar preços de ingresso/produto à mão.
+   *
+   * O resumo é do PEDIDO (estorno é sempre total): ingresso + produtos − desconto
+   * + taxa = total devolvido (= finalAmount, valor que a Cielo devolve ao comprador;
+   * a taxa de estorno de 2% é debitada do REPASSE do organizador, não do comprador).
+   */
+  private async dispatchRefundEmails(orderId: string): Promise<void> {
+    const full = await this.prisma.getReadClient().order.findUnique({
+      where: { id: orderId },
+      include: {
+        reservedTickets: true,
+        coupon: true,
+        voucher: true,
+        payment: true,
+        event: {
+          select: {
+            name: true,
+            eventDate: true,
+            bannerUrl: true,
+            locationName: true,
+            city: true,
+            state: true,
+            organization: { select: { name: true, tradeName: true } },
+          },
+        },
+        registrations: {
+          include: {
+            user: { select: { firstName: true, lastName: true, email: true } },
+            tickets: true,
+            products: true,
+          },
+        },
+      },
+    });
+    if (!full) return;
+
+    const receipt = buildReceiptPdfData(full);
+
+    // Divisão financeira (centavos). `subtotal` (= order.totalAmount, bruto
+    // ingresso+produtos) é a VERDADE; produtos vêm somados das linhas do recibo e
+    // o ingresso é o RESIDUAL (subtotal − produtos). Assim as linhas SEMPRE fecham
+    // com o total (ingresso + produtos − desconto + taxa = finalAmount), sem risco
+    // de arredondamento entre a soma de preços unitários e o bruto congelado.
+    const subtotalCents = receipt.financial.subtotal ?? 0;
+    const productsCents = receipt.registrations.reduce(
+      (sum, r) => sum + r.products.reduce((ps, p) => ps + (p.price ?? 0), 0),
+      0,
+    );
+    const ticketsCents = Math.max(0, subtotalCents - productsCents);
+    const serviceFeeCents = receipt.financial.serviceFee ?? 0;
+    const discountCents = receipt.financial.discount ?? 0;
+    const totalCents = receipt.financial.total ?? 0;
+
+    // Destinatários: e-mail de cada participante, DEDUPLICADO (case-insensitive).
+    const seen = new Set<string>();
+    const recipients: string[] = [];
+    for (const r of receipt.registrations) {
+      const raw = (r.email ?? '').trim();
+      const key = raw.toLowerCase();
+      if (!raw || seen.has(key)) continue;
+      seen.add(key);
+      recipients.push(raw);
+    }
+    if (recipients.length === 0) return;
+
+    const eventName = full.event?.name ?? '';
+    const eventBannerUrl = full.event?.bannerUrl ?? null;
+    const eventDate = formatEventHappensDate(full.event?.eventDate);
+    const eventAddress = formatEventCardAddress(full.event ?? {});
+    const fmt = (cents: number) => this.formatBRL(cents);
+
+    for (const email of recipients) {
+      // Isola cada envio: um destinatário com falha não impede os demais.
+      await this.email
+        .sendRegistrationRefunded({
+          email,
+          eventName,
+          eventBannerUrl,
+          eventDate,
+          eventAddress,
+          totalRefunded: fmt(totalCents),
+          ticketsSubtotal: fmt(ticketsCents),
+          productsSubtotal: productsCents > 0 ? fmt(productsCents) : undefined,
+          serviceFee: fmt(serviceFeeCents),
+          discountLabel:
+            discountCents > 0 ? receipt.financial.discountLabel : undefined,
+          discountValue: discountCents > 0 ? fmt(discountCents) : undefined,
+        })
+        .catch((err) => {
+          this.logger.error(
+            `[REFUND] e-mail de estorno falhou p/ ${email} (pedido ${orderId}): ${err?.message ?? err}`,
+          );
+        });
+    }
+  }
+
+  /** Formata centavos → "R$ 1.234,56" (pt-BR). */
+  private formatBRL(cents: number): string {
+    return new Intl.NumberFormat('pt-BR', {
+      style: 'currency',
+      currency: 'BRL',
+    }).format((cents ?? 0) / 100);
   }
 
   /**
