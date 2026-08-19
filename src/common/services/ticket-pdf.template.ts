@@ -59,7 +59,31 @@ import {
 /* LinearGradient não exporta tipos corretos para gradientUnits/x1/y1/x2/y2 — cast necessário */
 const LinearGradient = LinearGradientBase as any;
 
-Font.registerHyphenationCallback((w) => [w]);
+// react-pdf só quebra texto em espaços. Um e-mail/documento/URL é um token
+// ÚNICO sem espaço: quando é longo, transborda a coluna e invade o campo vizinho
+// (ex.: Email empurrando o Telefone no card do participante). O callback antigo
+// `(w) => [w]` desligava QUALQUER quebra, agravando isso. Aqui deixamos palavras
+// normais intactas (sem hifenização indesejada) e só criamos pontos de quebra em
+// tokens longos sem espaço, preferindo os separadores naturais do e-mail (@ e .)
+// e caindo para blocos de tamanho fixo quando não houver separador. O react-pdf
+// quebra ENTRE os pedaços apenas se precisar, sem inserir hífen visível.
+const MAX_UNBREAKABLE = 18; // ~largura de uma coluna do card de 2 colunas
+Font.registerHyphenationCallback((word) => {
+  if (word.length <= MAX_UNBREAKABLE) return [word];
+  const parts: string[] = [];
+  let buf = '';
+  for (const ch of word) {
+    buf += ch;
+    // Quebra logo APÓS um separador de e-mail/URL, ou quando o bloco já ficou
+    // largo o suficiente para caber sozinho na coluna.
+    if (ch === '@' || ch === '.' || buf.length >= MAX_UNBREAKABLE) {
+      parts.push(buf);
+      buf = '';
+    }
+  }
+  if (buf) parts.push(buf);
+  return parts;
+});
 
 const FP = path.join(process.cwd(), 'node_modules', '@fontsource');
 const dmSans = (w: number) =>

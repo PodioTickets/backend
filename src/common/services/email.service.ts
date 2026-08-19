@@ -406,6 +406,85 @@ export class EmailService {
     this.logger.log(`Registration confirmed email sent to: ${data.email}${attachments.length ? ` (${attachments.length} PDF(s)${data.receiptPdf ? ', incl. comprovante' : ''})` : ''}`);
   }
 
+  /**
+   * Aviso de ESTORNO concluído para o e-mail da INSCRIÇÃO estornada (participante).
+   * Disparado pelo estorno do organizador OU do admin (fonte única no
+   * `PaymentsRefundService.refundOrder`), um e-mail por participante distinto do
+   * pedido. Best-effort no caller — falha de envio nunca reverte o estorno.
+   *
+   * Valores monetários chegam JÁ FORMATADOS ("R$ 189,90") — mesma convenção dos
+   * e-mails de repasse — mantendo o EmailService agnóstico de centavos/locale.
+   * O resumo financeiro é do PEDIDO (o estorno é sempre total): mostra a divisão
+   * ingresso/produtos/desconto/taxa e o total devolvido ao comprador.
+   */
+  async sendRegistrationRefunded(data: {
+    email: string;
+    eventName: string;
+    eventBannerUrl?: string | null;
+    eventDate?: string;
+    eventAddress?: string;
+    /** Total devolvido ao comprador (= finalAmount do pedido), já formatado. */
+    totalRefunded: string;
+    ticketsSubtotal: string;
+    /** Só passado quando há produtos adicionais cobrados (> 0). */
+    productsSubtotal?: string;
+    serviceFee: string;
+    /** Rótulo do desconto (cupom/voucher). Só quando houve desconto (> 0). */
+    discountLabel?: string;
+    /** Valor do desconto, já formatado (sem o sinal "-"). Pareado com discountLabel. */
+    discountValue?: string;
+  }) {
+    const hasProducts = !!data.productsSubtotal;
+    const hasDiscount = !!(data.discountLabel && data.discountValue);
+
+    const html = this.loadTemplate('estorno-inscricao.html', {
+      eventName: this.escapeHtml(data.eventName),
+      /* safeUrl valida https:// — resolveEmailImageUrl reescreve host local → público */
+      eventBannerUrl: this.escapeHtml(this.safeUrl(this.resolveEmailImageUrl(data.eventBannerUrl))),
+      eventDate: this.escapeHtml(data.eventDate ?? ''),
+      eventAddress: this.escapeHtml(data.eventAddress ?? ''),
+      totalRefunded: this.escapeHtml(data.totalRefunded),
+      ticketsSubtotal: this.escapeHtml(data.ticketsSubtotal),
+      productsSubtotal: this.escapeHtml(data.productsSubtotal ?? ''),
+      /* Flags booleanas p/ loadTemplate: 'x' = truthy, '' = falsy. */
+      hasProducts: hasProducts ? 'x' : '',
+      serviceFee: this.escapeHtml(data.serviceFee),
+      discountLabel: this.escapeHtml(data.discountLabel ?? ''),
+      discountValue: this.escapeHtml(data.discountValue ?? ''),
+      hasDiscount: hasDiscount ? 'x' : '',
+    });
+
+    const text = [
+      'Estorno concluído — PódioTicket',
+      '',
+      `O estorno da sua inscrição na ${data.eventName} foi processado, e o valor será devolvido pelo mesmo meio de pagamento utilizado na compra.`,
+      '',
+      `Valor da inscrição: ${data.ticketsSubtotal}`,
+      hasProducts ? `Produtos adicionais: ${data.productsSubtotal}` : null,
+      hasDiscount ? `${data.discountLabel}: -${data.discountValue}` : null,
+      `Taxa de serviço: ${data.serviceFee}`,
+      `Total estornado: ${data.totalRefunded}`,
+      '',
+      'Quando recebo o valor?',
+      'PIX: até 1 dia útil.',
+      'Cartão de crédito: o valor pode aparecer na fatura atual ou na próxima, dependendo do prazo de processamento do banco emissor.',
+      '',
+      'PodioTicket — podioticket.com.br',
+    ]
+      .filter((l) => l !== null)
+      .join('\n');
+
+    await this.send({
+      from: this.from,
+      to: data.email,
+      subject: this.sanitizeHeader(`Estorno concluído — ${data.eventName}`),
+      html,
+      text,
+    });
+
+    this.logger.log(`Refund email sent to: ${data.email} (evento: ${data.eventName})`);
+  }
+
   async sendProductVariationChanged(data: {
     email: string;
     productName: string;
