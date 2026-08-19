@@ -3829,9 +3829,30 @@ export class OrdersService {
       // additional_info — pilar 2 do checklist de aprovação do MP (o 1 é o device):
       // itens + dados do comprador reduzem cc_rejected_high_risk. Segue o payload
       // recomendado pro segmento "Tickets e entretenimento" (category_id Tickets +
-      // event_date) com o que já temos no pedido/usuário.
+      // event_date) com o que já temos no pedido/usuário. Flags de histórico são
+      // COMPUTADAS de verdade (a doc alerta contra preencher com default).
       const mpEventInfo: any = (order as any).event ?? {};
       const mpPhoneDigits = String((user as any)?.phone ?? '').replace(/\D/g, '');
+      const mpPayerPhone =
+        mpPhoneDigits.length >= 10
+          ? { area_code: mpPhoneDigits.slice(0, 2), number: mpPhoneDigits.slice(2) }
+          : undefined;
+      const mpBillingZip = String((order as any).billingPostalCode ?? '').replace(/\D/g, '');
+      const mpPayerAddress = mpBillingZip
+        ? {
+            zip_code: mpBillingZip,
+            ...((order as any).billingStreet && { street_name: (order as any).billingStreet }),
+            ...((order as any).billingNumber && { street_number: (order as any).billingNumber }),
+          }
+        : undefined;
+      const [mpPriorPaidCount, mpLastPaid] = await Promise.all([
+        r.order.count({ where: { userId, status: 'PAID', id: { not: orderId } } }),
+        r.order.findFirst({
+          where: { userId, status: 'PAID', id: { not: orderId } },
+          orderBy: { updatedAt: 'desc' },
+          select: { updatedAt: true },
+        }),
+      ]);
       const mpAdditionalInfo = {
         items: [
           {
@@ -3849,11 +3870,14 @@ export class OrdersService {
         payer: {
           ...(user?.firstName && { first_name: user.firstName }),
           ...(user?.lastName && { last_name: user.lastName }),
-          ...(mpPhoneDigits.length >= 10 && {
-            phone: { area_code: mpPhoneDigits.slice(0, 2), number: mpPhoneDigits.slice(2) },
-          }),
+          ...(mpPayerPhone && { phone: mpPayerPhone }),
           ...((user as any)?.createdAt && {
             registration_date: new Date((user as any).createdAt).toISOString(),
+          }),
+          authentication_type: 'WEB',
+          is_first_purchase_online: mpPriorPaidCount === 0,
+          ...(mpLastPaid?.updatedAt && {
+            last_purchase: new Date(mpLastPaid.updatedAt).toISOString(),
           }),
         },
       };
@@ -3872,6 +3896,10 @@ export class OrdersService {
           // legado). Sem identification o MP recusa por risco (payer_doc null
           // → cc_rejected_high_risk, visto em produção).
           cpf: dto.mpDebit?.holderCpf || firstCpf,
+          // phone/address top-level do payer (checklist de aprovação — item C):
+          // telefone do cadastro e endereço de COBRANÇA já coletado no checkout.
+          phone: mpPayerPhone,
+          address: mpPayerAddress,
         },
         deviceId: dto.mpDebit!.deviceId,
         idempotencyKey: idempotencyKey || `order-${orderId}`,

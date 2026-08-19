@@ -111,7 +111,14 @@ export class MercadoPagoService {
     paymentMethodId: string;
     /** payment_type_id do BIN lookup (debit_card | prepaid_card) — vai como veio. */
     paymentMethodType?: 'debit_card' | 'prepaid_card';
-    payer: { email?: string; firstName?: string; lastName?: string; cpf?: string };
+    payer: {
+      email?: string;
+      firstName?: string;
+      lastName?: string;
+      cpf?: string;
+      phone?: { area_code: string; number: string };
+      address?: { zip_code: string; street_name?: string; street_number?: string };
+    };
     /** additional_info do checklist de aprovação (items + payer) — só a rota clássica usa. */
     additionalInfo?: Record<string, any>;
     deviceId?: string;
@@ -223,7 +230,14 @@ export class MercadoPagoService {
     orderId: string;
     cardToken: string;
     paymentMethodId: string;
-    payer: { email?: string; firstName?: string; lastName?: string; cpf?: string };
+    payer: {
+      email?: string;
+      firstName?: string;
+      lastName?: string;
+      cpf?: string;
+      phone?: { area_code: string; number: string };
+      address?: { zip_code: string; street_name?: string; street_number?: string };
+    };
     additionalInfo?: Record<string, any>;
     deviceId?: string;
     idempotencyKey: string;
@@ -242,6 +256,10 @@ export class MercadoPagoService {
         ...(params.payer.cpf && {
           identification: { type: 'CPF', number: params.payer.cpf },
         }),
+        // Telefone + endereço de cobrança (checklist de aprovação item C —
+        // "match" com o titular pesa no motor de risco).
+        ...(params.payer.phone && { phone: params.payer.phone }),
+        ...(params.payer.address && { address: params.payer.address }),
       },
       external_reference: params.orderId,
       description: params.description ?? `Pedido ${params.orderId}`,
