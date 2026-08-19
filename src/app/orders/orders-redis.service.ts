@@ -121,41 +121,6 @@ export class OrdersRedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Cooldown progressivo pós `cc_rejected_high_risk` no débito MP (recomendação
-   * oficial do MP: hard stop — retentar em rajada REFORÇA o sinal de velocity).
-   * 1ª ocorrência: 30min · 2ª: 4h · 3ª+: 24h. Contador com TTL 24h. Fail-open
-   * sem Redis (mesma postura do resto do service).
-   */
-  async getMpRiskCooldownUntil(userId: string): Promise<number | null> {
-    if (!this.client?.isOpen) return null;
-    try {
-      const raw = await this.client.get(`orders:mprisk:${userId}`);
-      if (!raw) return null;
-      const { until } = JSON.parse(raw as string);
-      return typeof until === 'number' && until > Date.now() ? until : null;
-    } catch {
-      return null;
-    }
-  }
-
-  /** Registra uma recusa de risco do MP e arma/estende o cooldown progressivo. */
-  async registerMpRiskRejection(userId: string): Promise<void> {
-    if (!this.client?.isOpen) return;
-    try {
-      const key = `orders:mprisk:${userId}`;
-      const raw = await this.client.get(key);
-      const prev = raw ? JSON.parse(raw as string) : { count: 0 };
-      const count = (Number(prev.count) || 0) + 1;
-      const waitMs = count === 1 ? 30 * 60_000 : count === 2 ? 4 * 3_600_000 : 24 * 3_600_000;
-      await this.client.set(key, JSON.stringify({ count, until: Date.now() + waitMs }), {
-        EX: 86_400,
-      });
-    } catch {
-      // non-fatal
-    }
-  }
-
-  /**
    * Idempotency: store a response for 24 h.
    */
   async setIdempotencyResult(

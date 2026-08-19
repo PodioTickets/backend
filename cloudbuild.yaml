@@ -1,0 +1,16 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--no-cache'
+      - '-t'
+      - 'southamerica-east1-docker.pkg.dev/project-8175b5c0-deec-49f2-914/podio-images/backend:latest'
+      - '.'
+    env:
+      - 'DOCKER_BUILDKIT=1'
+
+images:
+  - 'southamerica-east1-docker.pkg.dev/project-8175b5c0-deec-49f2-914/podio-images/backend:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

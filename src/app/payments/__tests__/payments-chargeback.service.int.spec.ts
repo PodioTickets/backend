@@ -78,10 +78,6 @@ describe('PaymentsChargebackService (integração, banco real)', () => {
   // Telemetria no-op: o alvo do teste são os efeitos no banco, não o log de atividade.
   const activityStub = { record: () => {} } as any;
 
-  // MercadoPagoService entrou no constructor (dispatch do débito MP no cron) —
-  // stub inerte: todos os cenários daqui usam pagamentos Cielo (sem gateway=MERCADOPAGO).
-  const mpStub = { getPayment: async () => ({ mpPaymentId: undefined }) } as any;
-
   jest.setTimeout(30000); // throttle interno de 400ms/pagamento + I/O real
 
   beforeAll(async () => {

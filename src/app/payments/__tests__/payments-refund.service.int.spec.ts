@@ -83,15 +83,9 @@ describe('PaymentsRefundService (integração, banco real)', () => {
     const activityStub = { record: () => {} } as any;
     const finalization = new OrderFinalizationService(prisma, activityStub);
 
-    // MercadoPagoService entrou no constructor (estorno do débito MP) — stub
-    // inerte: estes cenários estornam pagamentos Cielo (sem gateway=MERCADOPAGO).
-    const mpStub = {
-      refundPayment: async () => ({ success: true, mpStatus: 'refunded' }),
-    } as any;
     service = new PaymentsRefundService(
       prisma,
       cieloMock as unknown as CieloService,
-      mpStub,
       finalization,
       activityStub,
     );

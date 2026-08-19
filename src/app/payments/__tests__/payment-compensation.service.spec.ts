@@ -45,10 +45,7 @@ describe('PaymentCompensationService', () => {
         : jest.fn().mockResolvedValue(over.cancelResult ?? { success: true }),
     };
     const activity: any = { record: jest.fn() };
-    // MercadoPagoService entrou no constructor (débito via MP) — stub inerte:
-    // estes cenários exercitam pagamentos Cielo (metadata sem gateway=MERCADOPAGO).
-    const mp: any = { refundPayment: jest.fn().mockResolvedValue({ success: true, mpStatus: 'refunded' }) };
-    const service = new PaymentCompensationService(prisma, cielo, mp, activity);
+    const service = new PaymentCompensationService(prisma, cielo, activity);
     return { service, w, tx, cielo, activity };
   };
 

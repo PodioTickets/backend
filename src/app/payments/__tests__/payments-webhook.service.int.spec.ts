@@ -126,21 +126,14 @@ describe('PaymentsWebhookService.handleWebhook (integração, banco real)', () =
     const finalization = new OrderFinalizationService(prisma, { record: () => {} } as any); // REAL
     // Compensação REAL (estorno automático) com a MESMA Cielo mockada do cenário —
     // `cancelPayment` resolve sucesso por default; cenários de compensação inspecionam o banco.
-    // MercadoPagoService + PaymentsService entraram no constructor (webhook MP do
-    // débito) — stubs inertes: estes cenários exercitam o webhook da CIELO.
-    const mpStub = { getPayment: async () => ({ mpPaymentId: undefined }) } as any;
-    const paymentsServiceStub = { sendConfirmationEmailForOrder: async () => {} } as any;
     const compensation = new PaymentCompensationService(
       prisma,
       cielo as any,
-      mpStub,
       { record: () => {} } as any,
     );
     const service = new PaymentsWebhookService(
       prisma,
       cielo,
-      mpStub,
-      paymentsServiceStub,
       emailMock,
       pdfMock,
       receiptPdfMock,

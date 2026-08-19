@@ -361,12 +361,17 @@ export class CieloService {
             if (returnUrl) {
               paymentData.ReturnUrl = returnUrl;
             }
-            if (threedsData) {
+            if (threedsData?.cavv) {
               // 3DS via MPI: o frontend já autenticou e envia o resultado. Com
               // ExternalAuthentication válido a Cielo liquida frictionless (sem usar o
-              // redirect do ReturnUrl).
+              // redirect do ReturnUrl). Cavv VAZIO (cartão unenrolled no 3DS) NÃO
+              // manda o node — ExternalAuthentication.Cavv é obrigatório quando o
+              // node existe; sem ele a Cielo cai no fluxo de redirect (ReturnUrl).
               paymentData.ExternalAuthentication = {
                 Cavv: threedsData.cavv,
+                // Eci/Version repassados VERBATIM como o script MPI retornou —
+                // reescrever (ex.: "02"→"2", forçar "2.2.0" quando autenticou
+                // 2.1.0) diverge autenticação×autorização e invalida o CAVV.
                 Eci: threedsData.eci,
                 ...(threedsData.xid && { Xid: threedsData.xid }),
                 Version: threedsData.version ?? '2',

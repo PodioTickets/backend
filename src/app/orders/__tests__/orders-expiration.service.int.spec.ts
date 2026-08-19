@@ -69,7 +69,6 @@ describe('OrdersExpirationService (integração, banco real)', () => {
     const ordersService = new OrdersService(
       prisma,
       {} as any, // CieloService
-      { enabled: false } as any, // MercadoPagoService (débito MP desligado no teste)
       {} as any, // OrdersRedisService
       {} as any, // EmailService
       {} as any, // TicketPdfService

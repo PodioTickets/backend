@@ -19,7 +19,6 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from '../payments/cielo.service';
-import { MercadoPagoService } from '../payments/mercadopago.service';
 import { OrderFinalizationService, OrderFinalizationAbortError } from '../payments/order-finalization.service';
 import { OrdersRedisService } from './orders-redis.service';
 import { ReserveOrderDto } from './dto/reserve-order.dto';
@@ -656,7 +655,6 @@ export class OrdersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cieloService: CieloService,
-    private readonly mercadoPagoService: MercadoPagoService,
     private readonly redisService: OrdersRedisService,
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
@@ -3708,9 +3706,7 @@ export class OrdersService {
     // 6.8 Prepare payment data
     const user = await r.user.findUnique({
       where: { id: userId },
-      // phone/createdAt alimentam o additional_info do MP (checklist oficial de
-      // aprovação: dados do comprador reduzem recusa por risco).
-      select: { firstName: true, lastName: true, email: true, phone: true, createdAt: true },
+      select: { firstName: true, lastName: true, email: true },
     });
 
     // Identidade enviada ao Cielo (antifraude). Aceita CPF formatado/legacy
@@ -3757,57 +3753,31 @@ export class OrdersService {
       }
     }
 
-    // Débito: gateway é o Mercado Pago quando MP_ACCESS_TOKEN está configurado
-    // (decisão de negócio — instabilidade do débito na Cielo). O fluxo Cielo
-    // permanece como fallback/rollback: basta remover a env.
-    const useMpForDebit =
-      dto.method === PaymentMethod.DEBIT_CARD && this.mercadoPagoService.enabled;
-
     if (!isFreeOrder && dto.method === PaymentMethod.DEBIT_CARD) {
-      if (useMpForDebit) {
-        // MP: o cartão foi tokenizado no browser (MercadoPago.js) — o PAN não
-        // trafega por aqui. Só o token + payment_method_id chegam no DTO.
-        if (!dto.mpDebit) {
-          throw new AppUnprocessableException(
-            'MP_DEBIT_TOKEN_REQUIRED',
-            'Débito é processado via Mercado Pago: envie mpDebit {token, paymentMethodId}',
-          );
-        }
-      } else {
-        if (!dto.card) {
-          throw new AppUnprocessableException('CARD_REQUIRED', 'Card data is required for debit card payments');
-        }
-        cardData = {
-          number: dto.card.number,
-          holder: dto.card.name,
-          expiry: dto.card.expiry,
-          cvv: dto.card.cvv,
-          installments: 1,
+      if (!dto.card) {
+        throw new AppUnprocessableException('CARD_REQUIRED', 'Card data is required for debit card payments');
+      }
+      cardData = {
+        number: dto.card.number,
+        holder: dto.card.name,
+        expiry: dto.card.expiry,
+        cvv: dto.card.cvv,
+        installments: 1,
+      };
+      if (dto.threeDs) {
+        threedsData = {
+          cavv: dto.threeDs.cavv,
+          eci: dto.threeDs.eci,
+          xid: dto.threeDs.xid,
+          version: dto.threeDs.version ?? '2',
+          referenceId: dto.threeDs.referenceId,
         };
-        if (dto.threeDs) {
-          threedsData = {
-            cavv: dto.threeDs.cavv,
-            eci: dto.threeDs.eci,
-            xid: dto.threeDs.xid,
-            version: dto.threeDs.version ?? '2',
-            referenceId: dto.threeDs.referenceId,
-          };
-        }
       }
     }
 
     // 6.9 Call gateway (skipped para pedidos grátis — gateways rejeitam amount=0)
-    // `cieloResult` é o shape compartilhado do fluxo (paymentId/cieloStatus/...);
-    // o ramo MP normaliza a resposta do Mercado Pago para o MESMO shape para
-    // reaproveitar 6.10-6.14 (pending, aprovação, finalize) sem duplicação.
     let cieloResult: any;
     let paymentFailed = false;
-    // Desafio 3DS do MP (pending_challenge) — tratado num early-return próprio.
-    let mpChallenge: { externalResourceUrl: string; creq: string } | undefined;
-    // Marcadores de gateway persistidos em Payment.metadata — o webhook MP,
-    // refund, chargeback e compensação despacham por `gateway`.
-    let mpMeta: Record<string, any> | undefined;
-    let mpDebitCardMeta: { brand: string | null; last4Digits: string | null; holder: string | null } | undefined;
     if (isFreeOrder) {
       cieloResult = {
         success: true,
@@ -3817,171 +3787,6 @@ export class OrdersService {
         proofOfSale: null,
         cardBrand: null,
       };
-    } else if (useMpForDebit) {
-      // Hard stop pós cc_rejected_high_risk (recomendação oficial MP): retentar
-      // em rajada reforça o velocity e piora o score. Cooldown progressivo por
-      // usuário (30min → 4h → 24h); orienta alternativa (PIX/crédito).
-      const mpCooldownUntil = await this.redisService.getMpRiskCooldownUntil(userId);
-      if (mpCooldownUntil) {
-        const mins = Math.max(1, Math.ceil((mpCooldownUntil - Date.now()) / 60_000));
-        throw new AppUnprocessableException(
-          'PAYMENT_RETRY_COOLDOWN',
-          `Não conseguimos aprovar com este cartão agora. Por segurança, tente novamente em ${mins} min ou use PIX/crédito.`,
-        );
-      }
-
-      const serverUrl = (process.env.SERVER_URL ?? '').replace(/\/$/, '');
-      // Diagnóstico (mascarado): rastreia se o CPF do titular chegou do front e
-      // qual fonte alimenta o payer.identification do MP. payer_doc null no MP
-      // derruba a aprovação — este log fecha se a perda é front ou back.
-      this.logger.log(
-        `[MP-debit] order=${orderId} holderCpf=${dto.mpDebit?.holderCpf ? `presente(len ${dto.mpDebit.holderCpf.length})` : 'AUSENTE'} firstCpf=${firstCpf ? 'presente' : 'ausente'}`,
-      );
-
-      // additional_info — pilar 2 do checklist de aprovação do MP (o 1 é o device):
-      // itens + dados do comprador reduzem cc_rejected_high_risk. Segue o payload
-      // recomendado pro segmento "Tickets e entretenimento" (category_id Tickets +
-      // event_date) com o que já temos no pedido/usuário. Flags de histórico são
-      // COMPUTADAS de verdade (a doc alerta contra preencher com default).
-      const mpEventInfo: any = (order as any).event ?? {};
-      const mpPhoneDigits = String((user as any)?.phone ?? '').replace(/\D/g, '');
-      const mpPayerPhone =
-        mpPhoneDigits.length >= 10
-          ? { area_code: mpPhoneDigits.slice(0, 2), number: mpPhoneDigits.slice(2) }
-          : undefined;
-      const mpBillingZip = String((order as any).billingPostalCode ?? '').replace(/\D/g, '');
-      const mpPayerAddress = mpBillingZip
-        ? {
-            zip_code: mpBillingZip,
-            ...((order as any).billingStreet && { street_name: (order as any).billingStreet }),
-            ...((order as any).billingNumber && { street_number: (order as any).billingNumber }),
-          }
-        : undefined;
-      const [mpPriorPaidCount, mpLastPaid] = await Promise.all([
-        r.order.count({ where: { userId, status: 'PAID', id: { not: orderId } } }),
-        r.order.findFirst({
-          where: { userId, status: 'PAID', id: { not: orderId } },
-          orderBy: { updatedAt: 'desc' },
-          select: { updatedAt: true },
-        }),
-      ]);
-      const mpAdditionalInfo = {
-        items: [
-          {
-            id: String((order as any).eventId ?? orderId),
-            title: `Inscrição — ${mpEventInfo.name ?? 'evento'}`.slice(0, 250),
-            description: `Pedido ${orderId}`,
-            category_id: 'Tickets',
-            quantity: 1,
-            unit_price: Number((finalTotal / 100).toFixed(2)),
-            ...(mpEventInfo.eventDate && {
-              event_date: new Date(mpEventInfo.eventDate).toISOString(),
-            }),
-          },
-        ],
-        payer: {
-          ...(user?.firstName && { first_name: user.firstName }),
-          ...(user?.lastName && { last_name: user.lastName }),
-          ...(mpPayerPhone && { phone: mpPayerPhone }),
-          ...((user as any)?.createdAt && {
-            registration_date: new Date((user as any).createdAt).toISOString(),
-          }),
-          authentication_type: 'WEB',
-          is_first_purchase_online: mpPriorPaidCount === 0,
-          ...(mpLastPaid?.updatedAt && {
-            last_purchase: new Date(mpLastPaid.updatedAt).toISOString(),
-          }),
-        },
-      };
-      const mpResult = await this.mercadoPagoService.createDebitPayment({
-        amountInCents: finalTotal,
-        orderId,
-        cardToken: dto.mpDebit!.token,
-        paymentMethodId: dto.mpDebit!.paymentMethodId,
-        paymentMethodType: dto.mpDebit!.paymentMethodType,
-        additionalInfo: mpAdditionalInfo,
-        payer: {
-          email: user?.email,
-          firstName: user?.firstName ?? undefined,
-          lastName: user?.lastName ?? undefined,
-          // CPF do TITULAR do cartão (front) > CPF do 1º participante (fallback
-          // legado). Sem identification o MP recusa por risco (payer_doc null
-          // → cc_rejected_high_risk, visto em produção).
-          cpf: dto.mpDebit?.holderCpf || firstCpf,
-          // phone/address top-level do payer (checklist de aprovação — item C):
-          // telefone do cadastro e endereço de COBRANÇA já coletado no checkout.
-          phone: mpPayerPhone,
-          address: mpPayerAddress,
-        },
-        deviceId: dto.mpDebit!.deviceId,
-        idempotencyKey: idempotencyKey || `order-${orderId}`,
-        notificationUrl: serverUrl.startsWith('http')
-          ? `${serverUrl}/api/v1/payments/mp-webhook`
-          : undefined,
-        description: `Pedido ${merchantOrderId}`,
-      });
-
-      mpMeta = {
-        gateway: 'MERCADOPAGO',
-        mpPaymentId: mpResult.mpPaymentId ?? null,
-        mpStatus: mpResult.mpStatus ?? null,
-        mpStatusDetail: mpResult.statusDetail ?? null,
-        mpPaymentMethodId: mpResult.paymentMethodId ?? dto.mpDebit!.paymentMethodId,
-      };
-      mpDebitCardMeta = {
-        brand: mpResult.cardBrand ?? null,
-        last4Digits: mpResult.last4Digits ?? null,
-        holder: mpResult.holder ?? dto.mpDebit!.holderName ?? null,
-      };
-
-      if (mpResult.success) {
-        // approved → segue o fluxo compartilhado como "PaymentConfirmed".
-        cieloResult = {
-          success: true,
-          paymentId: mpResult.mpPaymentId,
-          cieloStatus: 'PaymentConfirmed',
-          authorizationCode: null,
-          proofOfSale: null,
-          cardBrand: mpResult.cardBrand ?? null,
-        };
-      } else if (mpResult.challenge && mpResult.mpPaymentId) {
-        // pending_challenge → early-return próprio logo após o 6.10.
-        mpChallenge = mpResult.challenge;
-        cieloResult = {
-          success: true,
-          paymentId: mpResult.mpPaymentId,
-          cieloStatus: 'Pending',
-          cardBrand: mpResult.cardBrand ?? null,
-        };
-      } else if (
-        mpResult.mpPaymentId &&
-        (mpResult.mpStatus === 'pending' || mpResult.mpStatus === 'in_process')
-      ) {
-        // Análise assíncrona (sem challenge) → cai no 6.11.6 (Payment PENDING,
-        // confirmação via webhook MP) — mesmo contrato do Status 12 da Cielo.
-        cieloResult = {
-          success: true,
-          paymentId: mpResult.mpPaymentId,
-          cieloStatus: 'Pending',
-          cardBrand: mpResult.cardBrand ?? null,
-        };
-      } else {
-        paymentFailed = true;
-        // Recusa por RISCO arma o cooldown progressivo (hard stop recomendado
-        // pelo MP — evita o "martelo" que retroalimenta o high_risk).
-        if (
-          ['cc_rejected_high_risk', 'cc_rejected_blacklist', 'cc_rejected_max_attempts'].includes(
-            mpResult.statusDetail ?? '',
-          )
-        ) {
-          await this.redisService.registerMpRiskRejection(userId);
-        }
-        cieloResult = {
-          success: false,
-          paymentId: mpResult.mpPaymentId ?? null,
-          error: this.mercadoPagoService.mapRejectionMessage(mpResult.statusDetail),
-        };
-      }
     } else {
     try {
       // ReturnUrl é montado para TODO débito (com 3DS via MPI ou sem). A Cielo exige
@@ -4043,80 +3848,6 @@ export class OrdersService {
         message: cieloResult.error || 'Pagamento recusado. Verifique os dados e tente novamente.',
       };
       throw new HttpException(errBody, 402);
-    }
-
-    // 6.10.5 DÉBITO MP: banco exigiu desafio 3DS (pending_challenge). Persistimos
-    // o Payment PENDING (transactionId = id do MP p/ o webhook casar) e devolvemos
-    // o challenge pro front renderizar o iframe. Confirmação chega por webhook MP
-    // ou pelo polling GET /payments/order/:orderId/mp-debit-status.
-    if (mpChallenge && !isFreeOrder) {
-      const newExpiresAt = new Date(Date.now() + RESERVATION_TTL_MINUTES * 60 * 1000);
-
-      await w.$transaction(async (tx: any) => {
-        await tx.order.update({
-          where: { id: orderId },
-          data: {
-            expiresAt: newExpiresAt,
-            discount: couponDiscount + voucherDiscount,
-            serviceFee,
-            participantFeePercent,
-            organizerFeePercent,
-            finalAmount: finalTotal,
-            totalAmount: preDiscountTotal,
-            ...(couponId && { couponId }),
-            ...(voucherId && { voucherId }),
-            updatedAt: new Date(),
-          },
-        });
-        const challengeMeta = {
-          ...mpMeta,
-          debitCard: mpDebitCardMeta,
-          ...discountMeta,
-        };
-        await tx.payment.upsert({
-          where: { orderId },
-          create: {
-            orderId,
-            userId,
-            method: PaymentMethod.DEBIT_CARD,
-            status: PaymentStatus.PENDING,
-            amount: finalTotal,
-            transactionId: cieloResult.paymentId ?? null,
-            metadata: challengeMeta,
-          },
-          update: {
-            method: PaymentMethod.DEBIT_CARD,
-            status: PaymentStatus.PENDING,
-            amount: finalTotal,
-            transactionId: cieloResult.paymentId ?? null,
-            metadata: challengeMeta,
-          },
-        });
-      });
-
-      const body = {
-        orderId,
-        // Vínculo com o evento — consumido pela telemetria de funil (interceptor).
-        eventId: order.eventId,
-        status: 'PENDING',
-        payment: {
-          method: PaymentMethod.DEBIT_CARD,
-          status: 'pending',
-          transactionId: cieloResult.paymentId ?? null,
-          // Front: renderizar iframe com form POST (creq) para concluir o 3DS.
-          challenge: {
-            externalResourceUrl: mpChallenge.externalResourceUrl,
-            creq: mpChallenge.creq,
-          },
-        },
-        expiresAt: newExpiresAt,
-        serverTime: new Date(),
-      };
-
-      if (idempotencyKey) {
-        await this.redisService.setIdempotencyResult(idempotencyKey, 202, body);
-      }
-      return body;
     }
 
     // 6.11 PIX: extend expiry, create PENDING payment, return QR code
@@ -4313,9 +4044,7 @@ export class OrdersService {
 
       // Metadata espelha o shape do finalize (recibo/painel leem brand/last4 daqui).
       const pendingMeta = {
-        ...(useMpForDebit
-          ? { ...mpMeta, debitCard: mpDebitCardMeta }
-          : { cieloPaymentId: cieloResult.paymentId }),
+        cieloPaymentId: cieloResult.paymentId,
         cieloStatus: cieloResult.cieloStatus,
         ...discountMeta,
         ...(dto.card && dto.method === PaymentMethod.CREDIT_CARD && {
@@ -4326,7 +4055,7 @@ export class OrdersService {
             installments: dto.card.installments ?? 1,
           },
         }),
-        ...(dto.card && dto.method === PaymentMethod.DEBIT_CARD && !useMpForDebit && {
+        ...(dto.card && dto.method === PaymentMethod.DEBIT_CARD && {
           debitCard: {
             brand: cieloResult.cardBrand ?? null,
             last4Digits: dto.card.number.replace(/\s/g, '').slice(-4),
@@ -4497,13 +4226,9 @@ export class OrdersService {
         transactionId: cieloResult.paymentId ?? null,
         paymentDate: new Date(),
         metadata: {
-          ...(useMpForDebit
-            ? { ...mpMeta, debitCard: mpDebitCardMeta }
-            : {
-                cieloPaymentId: cieloResult.paymentId,
-                authorizationCode: cieloResult.authorizationCode,
-                proofOfSale: cieloResult.proofOfSale,
-              }),
+          cieloPaymentId: cieloResult.paymentId,
+          authorizationCode: cieloResult.authorizationCode,
+          proofOfSale: cieloResult.proofOfSale,
           cieloStatus: cieloResult.cieloStatus,
           ...discountMeta,
           ...(dto.card && dto.method === PaymentMethod.CREDIT_CARD && {
@@ -4514,7 +4239,7 @@ export class OrdersService {
               installments: dto.card.installments ?? 1,
             },
           }),
-          ...(dto.card && dto.method === PaymentMethod.DEBIT_CARD && !useMpForDebit && {
+          ...(dto.card && dto.method === PaymentMethod.DEBIT_CARD && {
             debitCard: {
               brand: cieloResult.cardBrand ?? null,
               last4Digits: dto.card.number.replace(/\s/g, '').slice(-4),
@@ -4545,11 +4270,7 @@ export class OrdersService {
       // Sem o void, o cliente ficava cobrado sem ingresso e sem estorno.
       if (e instanceof OrderFinalizationAbortError) {
         if (cieloResult.paymentId) {
-          // MP: débito aprovado/capturado não tem void — estorno (refund) direto.
-          const voidPromise = useMpForDebit
-            ? this.mercadoPagoService.refundPayment(cieloResult.paymentId)
-            : this.cieloService.cancelPayment(cieloResult.paymentId);
-          await voidPromise.catch((voidErr: any) => {
+          await this.cieloService.cancelPayment(cieloResult.paymentId).catch((voidErr: any) => {
             this.logger.error(
               `[PAY-ABORT] VOID falhou para payment ${cieloResult.paymentId} (order ${orderId}, ${e.code}): ${voidErr?.message ?? voidErr} — estornar manualmente`,
             );
@@ -4566,10 +4287,7 @@ export class OrdersService {
       if (e instanceof AppConflictException && cieloResult?.paymentId) {
         const resp = (e.getResponse?.() ?? {}) as any;
         if (resp?.code === 'ORDER_NOT_PENDING') {
-          const voidPromise = useMpForDebit
-            ? this.mercadoPagoService.refundPayment(cieloResult.paymentId)
-            : this.cieloService.cancelPayment(cieloResult.paymentId);
-          await voidPromise.catch((voidErr: any) => {
+          await this.cieloService.cancelPayment(cieloResult.paymentId).catch((voidErr: any) => {
             this.logger.error(
               `[PAY-RACE] VOID falhou para captura órfã ${cieloResult.paymentId} (order ${orderId}, ORDER_NOT_PENDING): ${voidErr?.message ?? voidErr} — estornar manualmente no gateway`,
             );
@@ -4611,12 +4329,6 @@ export class OrdersService {
           debitCard: {
             brand: cieloResult.cardBrand ?? null,
             last4Digits: cardData.number.replace(/\s/g, '').slice(-4),
-          },
-        }),
-        ...(useMpForDebit && mpDebitCardMeta && {
-          debitCard: {
-            brand: mpDebitCardMeta.brand,
-            last4Digits: mpDebitCardMeta.last4Digits,
           },
         }),
       },
