@@ -3818,6 +3818,18 @@ export class OrdersService {
         cardBrand: null,
       };
     } else if (useMpForDebit) {
+      // Hard stop pós cc_rejected_high_risk (recomendação oficial MP): retentar
+      // em rajada reforça o velocity e piora o score. Cooldown progressivo por
+      // usuário (30min → 4h → 24h); orienta alternativa (PIX/crédito).
+      const mpCooldownUntil = await this.redisService.getMpRiskCooldownUntil(userId);
+      if (mpCooldownUntil) {
+        const mins = Math.max(1, Math.ceil((mpCooldownUntil - Date.now()) / 60_000));
+        throw new AppUnprocessableException(
+          'PAYMENT_RETRY_COOLDOWN',
+          `Não conseguimos aprovar com este cartão agora. Por segurança, tente novamente em ${mins} min ou use PIX/crédito.`,
+        );
+      }
+
       const serverUrl = (process.env.SERVER_URL ?? '').replace(/\/$/, '');
       // Diagnóstico (mascarado): rastreia se o CPF do titular chegou do front e
       // qual fonte alimenta o payer.identification do MP. payer_doc null no MP
@@ -3955,6 +3967,15 @@ export class OrdersService {
         };
       } else {
         paymentFailed = true;
+        // Recusa por RISCO arma o cooldown progressivo (hard stop recomendado
+        // pelo MP — evita o "martelo" que retroalimenta o high_risk).
+        if (
+          ['cc_rejected_high_risk', 'cc_rejected_blacklist', 'cc_rejected_max_attempts'].includes(
+            mpResult.statusDetail ?? '',
+          )
+        ) {
+          await this.redisService.registerMpRiskRejection(userId);
+        }
         cieloResult = {
           success: false,
           paymentId: mpResult.mpPaymentId ?? null,

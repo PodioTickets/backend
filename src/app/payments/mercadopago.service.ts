@@ -456,8 +456,10 @@ export class MercadoPagoService {
       cc_rejected_call_for_authorize: 'Pagamento não autorizado pelo banco. Entre em contato com o emissor do cartão.',
       cc_rejected_card_disabled: 'Cartão desabilitado. Entre em contato com o emissor.',
       cc_rejected_duplicated_payment: 'Pagamento duplicado detectado. Aguarde alguns instantes.',
-      cc_rejected_high_risk: 'Pagamento recusado pela análise de segurança.',
-      cc_rejected_blacklist: 'Pagamento recusado pela análise de segurança.',
+      cc_rejected_high_risk:
+        'Não conseguimos aprovar com este cartão agora. Por segurança, tente novamente mais tarde ou use PIX/crédito.',
+      cc_rejected_blacklist:
+        'Não conseguimos aprovar com este cartão agora. Por segurança, tente novamente mais tarde ou use PIX/crédito.',
       cc_rejected_max_attempts: 'Limite de tentativas atingido. Tente novamente mais tarde.',
       cc_rejected_other_reason: 'Pagamento recusado pelo emissor do cartão.',
     };
