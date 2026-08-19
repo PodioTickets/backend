@@ -1,8 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from './cielo.service';
-import { MercadoPagoService } from './mercadopago.service';
-import { PaymentsService } from './payments.service';
 import { EmailService } from '../../common/services/email.service';
 import { TicketPdfService } from '../../common/services/ticket-pdf.service';
 import { ReceiptPdfService } from '../../common/services/receipt-pdf.service';
@@ -29,8 +27,6 @@ export class PaymentsWebhookService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cieloService: CieloService,
-    private readonly mercadoPagoService: MercadoPagoService,
-    private readonly paymentsService: PaymentsService,
     private readonly emailService: EmailService,
     private readonly ticketPdfService: TicketPdfService,
     private readonly receiptPdfService: ReceiptPdfService,
@@ -38,121 +34,6 @@ export class PaymentsWebhookService {
     private readonly orderFinalization: OrderFinalizationService,
     private readonly compensation: PaymentCompensationService,
   ) {}
-
-  /**
-   * Webhook do Mercado Pago (topic payment) — DÉBITO apenas.
-   *
-   * Mesma defesa em profundidade do webhook Cielo: o payload só diz "algo mudou
-   * no pagamento X" — o status REAL é consultado na API do MP antes de qualquer
-   * transição (a assinatura x-signature já foi validada no controller).
-   *
-   * Semântica idêntica ao handleWebhook Cielo:
-   *  • intermediários (pending/in_process) → ignorados;
-   *  • refunded/charged_back → delegado ao cron diário de chargeback (Payment
-   *    fica PAID para continuar no filtro do cron);
-   *  • rejected/cancelled → FAILED; approved → PAID + finalize compartilhado.
-   */
-  async handleMpWebhook(mpPaymentId: string) {
-    this.logger.log(`Processing MP webhook: payment ${mpPaymentId}`);
-
-    const mpPayment = await this.mercadoPagoService.getPayment(mpPaymentId);
-    if (!mpPayment.mpPaymentId) {
-      this.logger.warn(`MP webhook: getPayment(${mpPaymentId}) falhou — payload pode ser forjado, abortando.`);
-      return;
-    }
-    const paymentStatus = this.mercadoPagoService.mapMpStatusToPaymentStatus(mpPayment.mpStatus);
-    if (!paymentStatus) {
-      this.logger.warn(`MP webhook: status desconhecido '${mpPayment.mpStatus}' para ${mpPaymentId} — ignorado`);
-      return;
-    }
-
-    if (paymentStatus === PaymentStatus.PENDING) {
-      this.logger.log(`MP webhook ignorado (status intermediário ${mpPayment.mpStatus}) para ${mpPaymentId}`);
-      return;
-    }
-
-    // Reversão: mesmo contrato da Cielo — quem processa é o cron de chargeback
-    // (varre Payments PAID); rebaixar aqui tiraria o payment do filtro do cron.
-    if (paymentStatus === PaymentStatus.REFUNDED) {
-      this.logger.log(`MP webhook reversão (${mpPayment.mpStatus}) para ${mpPaymentId} — deixado para o cron de chargeback.`);
-      return;
-    }
-
-    let confirmedOrderId: string | null = null;
-    let orphanCancelledOrderId: string | null = null;
-
-    try {
-      await this.prisma.$transaction(async (prisma) => {
-        const updated = await prisma.payment.updateMany({
-          where: {
-            transactionId: mpPaymentId,
-            status: {
-              notIn:
-                paymentStatus === PaymentStatus.PAID
-                  ? [paymentStatus, PaymentStatus.REFUNDED]
-                  : [paymentStatus],
-            },
-          },
-          data: {
-            status: paymentStatus,
-            paymentDate: paymentStatus === PaymentStatus.PAID ? new Date() : undefined,
-          },
-        });
-
-        if (updated.count === 0) {
-          this.logger.log(`MP webhook idempotent: payment ${mpPaymentId} already at status ${paymentStatus}`);
-          return;
-        }
-
-        const fresh = await prisma.payment.findFirst({ where: { transactionId: mpPaymentId } });
-        if (!fresh) return;
-
-        await prisma.payment.update({
-          where: { id: fresh.id },
-          data: {
-            metadata: {
-              ...(fresh.metadata as object),
-              mpStatus: mpPayment.mpStatus,
-              mpStatusDetail: mpPayment.statusDetail,
-              webhookProcessedAt: new Date().toISOString(),
-            } as any,
-          },
-        });
-
-        if (paymentStatus === PaymentStatus.PAID) {
-          const { finalized, orderStatus } = await this.orderFinalization.confirmAndFinalizeOrder(prisma, fresh.orderId);
-          if (!finalized) {
-            this.logger.warn(`MP webhook: Order ${fresh.orderId} não estava PENDING ao confirmar PAID — efeitos ignorados`);
-            if (orderStatus === 'CANCELLED') orphanCancelledOrderId = fresh.orderId;
-            return;
-          }
-          confirmedOrderId = fresh.orderId;
-        }
-
-        this.logger.log(`Payment ${fresh.id} updated via MP webhook to status ${paymentStatus}`);
-      }, { timeout: 30000, maxWait: 10000 });
-    } catch (err: unknown) {
-      if (err instanceof OrderFinalizationAbortError) {
-        this.logger.error(`MP webhook: finalize abortado (${err.code}) para order ${err.orderId} — compensando com estorno automático`);
-        await this.compensation.compensateOrphanPayment(err.orderId, err.code);
-        return;
-      }
-      throw err;
-    }
-
-    if (orphanCancelledOrderId) {
-      await this.compensation.compensateOrphanPayment(orphanCancelledOrderId, 'PAID_AFTER_CANCELLATION');
-      return;
-    }
-
-    if (confirmedOrderId) {
-      this.gateway.emitPaymentConfirmed(confirmedOrderId);
-      // E-mail de confirmação + PDFs — mesmo helper do polling PIX (fire-and-forget).
-      this.paymentsService
-        .sendConfirmationEmailForOrder(confirmedOrderId)
-        .catch((err: any) => this.logger.warn(`MP webhook: falha ao enviar email de confirmação: ${err?.message}`));
-    }
-  }
 
   async handleWebhook(event: CieloWebhookEvent) {
     this.logger.log(`Processing Cielo webhook: PaymentId ${event.PaymentId}, Status ${event.Status}`);

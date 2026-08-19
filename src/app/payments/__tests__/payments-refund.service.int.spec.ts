@@ -83,6 +83,7 @@ describe('PaymentsRefundService (integração, banco real)', () => {
     const activityStub = { record: () => {} } as any;
     const finalization = new OrderFinalizationService(prisma, activityStub);
 
+<<<<<<< HEAD
     // MercadoPagoService entrou no constructor (estorno do débito MP) — stub
     // inerte: estes cenários estornam pagamentos Cielo (sem gateway=MERCADOPAGO).
     const mpStub = {
@@ -91,10 +92,11 @@ describe('PaymentsRefundService (integração, banco real)', () => {
     // EmailService no-op: o alvo destes testes são os efeitos no banco, não o
     // e-mail de estorno (best-effort, disparado fora da transação).
     const emailStub = { sendRegistrationRefunded: async () => {} } as any;
+=======
+>>>>>>> 2664d905e18d0cef2837117bb2c657595105d959
     service = new PaymentsRefundService(
       prisma,
       cieloMock as unknown as CieloService,
-      mpStub,
       finalization,
       activityStub,
       emailStub,

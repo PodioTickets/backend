@@ -61,7 +61,7 @@ describe('OrdersService.getOrderDetails — contrato de pricing/ticket.unitPrice
       productVariation: { findMany: jest.fn().mockResolvedValue([]) },
     };
     const prisma: any = { getReadClient: () => client, getWriteClient: () => client };
-    return new OrdersService(prisma, {} as any, { enabled: false } as any /* MercadoPagoService: débito segue mock Cielo */, {} as any, {} as any, {} as any, {} as any, {} as any, { record: () => {} } as any);
+    return new OrdersService(prisma, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, { record: () => {} } as any);
   };
 
   it('REGRESSÃO LGPD: snapshot ANTIGO com organization.{email,phone} → contato NÃO sai na resposta', async () => {
@@ -93,7 +93,7 @@ describe('OrdersService.getOrderDetails — contrato de pricing/ticket.unitPrice
       productVariation: { findMany: jest.fn().mockResolvedValue([]) },
     };
     const prisma: any = { getReadClient: () => client, getWriteClient: () => client };
-    const svc = new OrdersService(prisma, {} as any, { enabled: false } as any /* MercadoPagoService: débito segue mock Cielo */, {} as any, {} as any, {} as any, {} as any, {} as any, { record: () => {} } as any);
+    const svc = new OrdersService(prisma, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, { record: () => {} } as any);
 
     const res = await svc.getOrderDetails(USER, 'order-1');
     // `event` é irmão de `order` dentro de `data` (não filho de `order`).
@@ -161,7 +161,7 @@ describe('OrdersService.getOrderDetails — contrato de pricing/ticket.unitPrice
       productVariation: { findMany: jest.fn().mockResolvedValue([]) },
     };
     const prisma: any = { getReadClient: () => client, getWriteClient: () => client };
-    return new OrdersService(prisma, {} as any, { enabled: false } as any /* MercadoPagoService: débito segue mock Cielo */, {} as any, {} as any, {} as any, {} as any, {} as any, { record: () => {} } as any);
+    return new OrdersService(prisma, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, { record: () => {} } as any);
   };
 
   it('pedido GRÁTIS pago (finalAmount=0, serviceFee=0) → pricing.total = 0 (confia no congelado, não recalcula)', async () => {

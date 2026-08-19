@@ -16,7 +16,6 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from './cielo.service';
-import { MercadoPagoService } from './mercadopago.service';
 import { OrderFinalizationService } from './order-finalization.service';
 import { UserActivityService } from '../../common/services/user-activity.service';
 import { EmailService } from '../../common/services/email.service';
@@ -54,7 +53,6 @@ export class PaymentsRefundService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cieloService: CieloService,
-    private readonly mercadoPagoService: MercadoPagoService,
     private readonly orderFinalization: OrderFinalizationService,
     private readonly activity: UserActivityService,
     private readonly email: EmailService,
@@ -267,22 +265,7 @@ export class PaymentsRefundService {
     let isPending = false;
 
     if (applied) {
-      // Dispatch por gateway: débito processado no Mercado Pago estorna via
-      // POST /refunds do MP; todo o resto segue no void/refund da Cielo. O
-      // resultado é normalizado pro shape {success, cieloStatus, error} usado abaixo.
-      const isMpPayment = (meta as any)?.gateway === 'MERCADOPAGO';
-      const gatewayCancel = async () => {
-        if (isMpPayment) {
-          const mpResult = await this.mercadoPagoService.refundPayment(cieloPaymentId);
-          return {
-            success: mpResult.mpStatus === 'refunded' || mpResult.success,
-            cieloStatus: mpResult.mpStatus ?? 'MP_REFUND_FAILED',
-            error: mpResult.error,
-          };
-        }
-        return this.cieloService.cancelPayment(cieloPaymentId);
-      };
-      const cieloResult = await gatewayCancel().catch(async (cieloError) => {
+      const cieloResult = await this.cieloService.cancelPayment(cieloPaymentId).catch(async (cieloError) => {
         this.logger.error('COMPENSAÇÃO NECESSÁRIA: tx Prisma OK mas Cielo falhou', {
           orderId: order.id,
           cieloPaymentId,
