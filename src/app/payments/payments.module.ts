@@ -3,7 +3,6 @@ import { PaymentsService } from './payments.service';
 import { PaymentsController } from './payments.controller';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { CieloService } from './cielo.service';
-import { MercadoPagoService } from './mercadopago.service';
 import { PaymentsWebhookService } from './payments-webhook.service';
 import { PaymentsChargebackService } from './payments-chargeback.service';
 import { PaymentsRefundService } from './payments-refund.service';
@@ -24,7 +23,6 @@ import { CommonModule } from '../../common/common.module';
   providers: [
     PaymentsService,
     CieloService,
-    MercadoPagoService,
     PaymentsWebhookService,
     PaymentsChargebackService,
     PaymentsRefundService,
@@ -35,7 +33,7 @@ import { CommonModule } from '../../common/common.module';
     TicketPdfService,
     ReceiptPdfService,
   ],
-  exports: [PaymentsService, CieloService, MercadoPagoService, PaymentsRefundService, OrderFinalizationService, PaymentCompensationService],
+  exports: [PaymentsService, CieloService, PaymentsRefundService, OrderFinalizationService, PaymentCompensationService],
 })
 export class PaymentsModule {}
 

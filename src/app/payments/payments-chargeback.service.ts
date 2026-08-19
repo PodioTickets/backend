@@ -7,7 +7,6 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CieloService } from './cielo.service';
-import { MercadoPagoService } from './mercadopago.service';
 import { OrderFinalizationService } from './order-finalization.service';
 import { UserActivityService } from '../../common/services/user-activity.service';
 import { CronTimeout } from '../../common/decorators/cron-timeout.decorator';
@@ -31,7 +30,6 @@ export class PaymentsChargebackService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cieloService: CieloService,
-    private readonly mercadoPagoService: MercadoPagoService,
     private readonly orderFinalization: OrderFinalizationService,
     private readonly activity: UserActivityService,
   ) {}
@@ -91,25 +89,14 @@ export class PaymentsChargebackService {
       if (!cieloPaymentId) continue;
 
       try {
-        // Dispatch por gateway: débito MP reconcilia na API do Mercado Pago;
-        // refunded/charged_back equivalem ao Status 11 (Refunded) da Cielo.
-        if (meta?.gateway === 'MERCADOPAGO') {
-          const mpData = await this.mercadoPagoService.getPayment(cieloPaymentId);
-          if (!mpData.mpPaymentId) continue;
-          if (mpData.mpStatus !== 'refunded' && mpData.mpStatus !== 'charged_back') continue;
+        const cieloData = await this.cieloService.getPayment(cieloPaymentId);
+        if (!cieloData) continue;
 
-          await this.processReversal(payment, 11, meta);
-          detected++;
-        } else {
-          const cieloData = await this.cieloService.getPayment(cieloPaymentId);
-          if (!cieloData) continue;
+        const cieloStatus = cieloData.Payment.Status;
+        if (!REVERSAL_STATUSES.has(cieloStatus)) continue;
 
-          const cieloStatus = cieloData.Payment.Status;
-          if (!REVERSAL_STATUSES.has(cieloStatus)) continue;
-
-          await this.processReversal(payment, cieloStatus, meta);
-          detected++;
-        }
+        await this.processReversal(payment, cieloStatus, meta);
+        detected++;
       } catch (err: any) {
         this.logger.warn(`Erro ao consultar gateway para payment ${payment.id}: ${err.message}`);
       }
