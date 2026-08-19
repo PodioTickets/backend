@@ -208,7 +208,8 @@ describe('MercadoPagoService — débito', () => {
     const [, classicBody] = post.mock.calls[1];
     expect(classicBody.payment_method_id).toBe('visa');
     expect(classicBody.additional_info.items[0].category_id).toBe('Tickets');
-    expect(classicBody.three_d_secure_mode).toBe('optional'); // prepaid nao suporta 3DS (mandatory dava internal_error)
+    expect(classicBody.three_d_secure_mode).toBe('optional'); // mandatory nao existe no Payments API (dava internal_error)
+    expect(classicBody.binary_mode).toBe(false); // permite pending_challenge (guia 3DS oficial)
     expect(result.success).toBe(true);
   });
 
