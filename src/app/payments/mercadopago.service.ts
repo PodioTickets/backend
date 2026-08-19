@@ -247,9 +247,13 @@ export class MercadoPagoService {
       description: params.description ?? `Pedido ${params.orderId}`,
       statement_descriptor: this.statementDescriptor,
       capture: true,
-      // PRÉ-PAGO não suporta 3DS: mandatory aqui gerava `internal_error` no MP.
-      // optional deixa o risco decidir (com CPF do titular + device fingerprint).
+      // 3DS no Payments API: só not_supported/optional existem (mandatory gerava
+      // `internal_error`). optional deixa risco/emissor decidirem o challenge.
       three_d_secure_mode: 'optional',
+      // OBRIGATÓRIO junto do 3DS optional (guia oficial): binary_mode false
+      // permite o pagamento ficar `pending` aguardando o challenge — binary_mode
+      // true mataria o fluxo de autenticação (recusa imediata).
+      binary_mode: false,
       // Pilar 2 do checklist de aprovação: items + dados do comprador (o plugin
       // oficial WooCommerce do MP envia sempre; ausência pesa no high_risk).
       ...(params.additionalInfo && { additional_info: params.additionalInfo }),
