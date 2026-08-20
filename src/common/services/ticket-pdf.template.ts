@@ -67,7 +67,14 @@ const LinearGradient = LinearGradientBase as any;
 // tokens longos sem espaço, preferindo os separadores naturais do e-mail (@ e .)
 // e caindo para blocos de tamanho fixo quando não houver separador. O react-pdf
 // quebra ENTRE os pedaços apenas se precisar, sem inserir hífen visível.
-const MAX_UNBREAKABLE = 18; // ~largura de uma coluna do card de 2 colunas
+// Máx. de caracteres por PEDAÇO sem quebra. A coluna do card de 2 colunas tem
+// ~229pt; a 18px Manrope SemiBold, caracteres largos (@, m, w ≈ 0.75em) fazem um
+// bloco de 18 já beirar/estourar a coluna → o e-mail ainda transbordava pro
+// Telefone. 13 garante que o pior caso (13×18×0.75 ≈ 176pt) caiba com folga,
+// forçando o e-mail longo a quebrar em 2 linhas dentro da própria coluna.
+const MAX_UNBREAKABLE = 13;
+// Separadores naturais de e-mail/URL onde a quebra fica "limpa" (logo APÓS eles).
+const BREAK_AFTER = new Set(['@', '.', '_', '-', '+']);
 Font.registerHyphenationCallback((word) => {
   if (word.length <= MAX_UNBREAKABLE) return [word];
   const parts: string[] = [];
@@ -76,7 +83,7 @@ Font.registerHyphenationCallback((word) => {
     buf += ch;
     // Quebra logo APÓS um separador de e-mail/URL, ou quando o bloco já ficou
     // largo o suficiente para caber sozinho na coluna.
-    if (ch === '@' || ch === '.' || buf.length >= MAX_UNBREAKABLE) {
+    if (BREAK_AFTER.has(ch) || buf.length >= MAX_UNBREAKABLE) {
       parts.push(buf);
       buf = '';
     }
