@@ -734,16 +734,39 @@ const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
 
   sections.push(e(IngressoSection, { reg }));
 
+  // Email e Telefone saem do grid de 2 colunas e viram LINHAS INTEIRAS: com a
+  // largura total do card, um e-mail longo quebra em 2+ linhas SEM invadir o
+  // campo ao lado (o bug era o e-mail transbordando pro Telefone quando os dois
+  // dividiam a mesma linha de 2 colunas). A quebra de token sem espaço continua
+  // garantida pelo hyphenation callback do topo (MAX_UNBREAKABLE). react-pdf não
+  // suporta `word-break: break-all` — full-width + callback é o equivalente.
+  const CONTACT_LABELS = new Set(['Email', 'Telefone']);
+  const gridFields = infoFields.filter((f) => !CONTACT_LABELS.has(f.label));
+  const contactFields = infoFields.filter((f) => CONTACT_LABELS.has(f.label));
+
   sections.push(
     e(
       View,
       { style: { gap: 16, width: '100%' } },
       e(Text, { style: T.h20 }, 'Informações do participante'),
-      twoCol(
-        infoFields,
-        (f: { label: string; value: string }) =>
-          e(InfoField, { label: f.label, value: f.value, dark: true, strong: true, py: 16, gap: 15 }),
-        { rowGap: 0, colGap: 8 },
+      e(
+        View,
+        { style: { width: '100%' } },
+        // Nome / Data de nascimento / Sexo / CPF seguem em 2 colunas (valores curtos).
+        twoCol(
+          gridFields,
+          (f: { label: string; value: string }) =>
+            e(InfoField, { label: f.label, value: f.value, dark: true, strong: true, py: 16, gap: 15 }),
+          { rowGap: 0, colGap: 8 },
+        ),
+        // Email e Telefone: 1 por linha, largura total (mesmo ritmo vertical via py).
+        ...contactFields.map((f, i) =>
+          e(
+            View,
+            { key: `contact-${i}`, style: { width: '100%' } },
+            e(InfoField, { label: f.label, value: f.value, dark: true, strong: true, py: 16, gap: 15 }),
+          ),
+        ),
       ),
     ),
   );
@@ -922,23 +945,28 @@ function estimatePageHeight(data: TicketPdfTemplateData): number {
     const leftCol = lines(reg.ticketName, 300, 20) * 27 + 24 + (reg.modality ? 24 : 0);
     c += 22 + 24 + Math.max(116, leftCol);
 
-    // Informações do participante (2-col, colGap 8 → coluna ~229).
+    // Informações do participante: grid 2-col (Nome/Data/Sexo/CPF, coluna ~229)
+    // + Email/Telefone em LINHAS INTEIRAS (espelha o render). Email/Telefone são
+    // SOMADOS (2 linhas separadas), não pareados — senão a altura subestima e o
+    // conteúdo estoura pra 2ª página.
     const infoColW = 229;
-    const infoFields: Array<[string, string]> = [['Nome', reg.participantName]];
-    if (reg.dateOfBirth) infoFields.push(['Data de nascimento', '00/00/0000']);
-    if (reg.gender) infoFields.push(['Sexo', 'Masculino']);
-    if (reg.cpf) infoFields.push(['Documento', reg.cpf]);
-    if (reg.email) infoFields.push(['Email', reg.email]);
-    if (reg.phone) infoFields.push(['Telefone', reg.phone]);
+    const gridInfo: Array<[string, string]> = [['Nome', reg.participantName]];
+    if (reg.dateOfBirth) gridInfo.push(['Data de nascimento', '00/00/0000']);
+    if (reg.gender) gridInfo.push(['Sexo', 'Masculino']);
+    if (reg.cpf) gridInfo.push(['Documento', reg.cpf]);
     c += 32 + 1 + 22 + 16; // gap+divisória + título + gap
-    for (let i = 0; i < infoFields.length; i += 2) {
-      const a = infoFields[i];
-      const b = infoFields[i + 1];
+    for (let i = 0; i < gridInfo.length; i += 2) {
+      const a = gridInfo[i];
+      const b = gridInfo[i + 1];
       c += Math.max(
         fieldH(a[0], a[1], infoColW, 18),
         b ? fieldH(b[0], b[1], infoColW, 18) : 0,
       );
     }
+    // Email + Telefone: full-width (~467), 1 por linha → somados.
+    const contactColW = 467;
+    if (reg.email) c += fieldH('Email', reg.email, contactColW, 18);
+    if (reg.phone) c += fieldH('Telefone', reg.phone, contactColW, 18);
 
     // Produtos (COLUNA ÚNICA). Card = max(img 100, coluna de texto) + padding 24,
     // + gap 16. Coluna de texto ~355 (467 − 12 gap − 100 img).
