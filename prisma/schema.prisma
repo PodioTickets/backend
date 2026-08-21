@@ -1330,3 +1330,31 @@ model UserActivityLog {
   /// Usado pelo cron de retenção (DELETE WHERE occurredAt < N).
   @@index([occurredAt])
 }
+
+/// Cache GLOBAL de geocoding (bairro/cidade/UF → lat/lng). Compartilhado entre
+/// todos os organizadores; cada local é geocodificado UMA vez (Nominatim/OSM) por
+/// um worker com throttle (GeoService). Alimenta o mapa de calor do dashboard.
+enum GeoStatus {
+  PENDING
+  RESOLVED
+  NOT_FOUND
+}
+
+model GeoCache {
+  id           String    @id @default(uuid()) @db.Uuid
+  /// Chave normalizada (sem acento/caixa): "bairro|cidade|uf".
+  key          String    @unique
+  neighborhood String?
+  city         String
+  state        String?
+  lat          Float?
+  lng          Float?
+  status       GeoStatus @default(PENDING)
+  /// Tentativas de geocoding (para desistir após N e marcar NOT_FOUND).
+  attempts     Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  /// O worker busca PENDING mais antigos primeiro.
+  @@index([status, createdAt])
+}

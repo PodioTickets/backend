@@ -5,6 +5,7 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { CacheRedisService } from '../../../common/services/cache-redis.service';
 import { OrganizerMemberAccessService } from '../../organizations/organizer-member-access.service';
 import { TicketsService } from '../../tickets/tickets.service';
+import { GeoService } from '../../../common/services/geo.service';
 import { DashboardOverviewQueryDto } from './dto/overview.dto';
 import { DashboardRankingsQueryDto } from './dto/rankings.dto';
 import { DashboardSecondaryQueryDto } from './dto/secondary.dto';
@@ -80,6 +81,7 @@ export class DashboardService {
     private readonly cache: CacheRedisService,
     private readonly organizerMemberAccess: OrganizerMemberAccessService,
     private readonly ticketsService: TicketsService,
+    private readonly geo: GeoService,
   ) {}
 
   // ============================================================
@@ -302,33 +304,54 @@ export class DashboardService {
     const period = query.period ?? DashboardPeriod.GERAL;
     const ticketIds = query.ticketIds ?? null;
 
-    const cacheKey = this.buildCacheKey('secondary', eventId, { period, ticketIds });
-    const cached = await this.cache.getJson<unknown>(cacheKey);
-    if (cached) return cached;
-
-    const dateRange = calculateDateRange(period);
-
-    const [topCities, salesHeatmap, mostAnsweredQuestions, purchaseLocations] =
-      await Promise.all([
-        this.queryTopCities(eventId, dateRange, ticketIds),
-        this.queryHeatmap(eventId, dateRange, ticketIds),
-        this.buildMostAnsweredQuestions(eventId),
-        this.queryPurchasesByLocation(eventId, dateRange, ticketIds),
-      ]);
-
-    const response = {
-      message: 'Dashboard secondary fetched successfully',
-      data: {
-        topCities,
-        salesHeatmap,
-        mostAnsweredQuestions,
-        // Mapa de calor geográfico (compras por cidade/UF do billing).
-        purchaseLocations,
-      },
+    // Cacheamos SÓ as agregações pesadas (SQL). As coordenadas do geocoding NÃO
+    // entram no cache — são resolvidas FRESCAS a cada request (lookup barato por
+    // índice em GeoCache). Assim o polling do front vê o mapa preencher em tempo
+    // real conforme o worker geocodifica, sem esperar o TTL de 60s expirar.
+    type SecondaryBase = {
+      topCities: Awaited<ReturnType<DashboardService['queryTopCities']>>;
+      salesHeatmap: Awaited<ReturnType<DashboardService['queryHeatmap']>>;
+      mostAnsweredQuestions: Awaited<ReturnType<DashboardService['buildMostAnsweredQuestions']>>;
+      purchaseLocationsRaw: Awaited<ReturnType<DashboardService['queryPurchasesByLocation']>>;
     };
 
-    await this.cache.setJson(cacheKey, response, CACHE_TTL_SECONDARY);
-    return response;
+    const cacheKey = this.buildCacheKey('secondary', eventId, { period, ticketIds });
+    let base = await this.cache.getJson<SecondaryBase>(cacheKey);
+    if (!base) {
+      const dateRange = calculateDateRange(period);
+      const [topCities, salesHeatmap, mostAnsweredQuestions, purchaseLocationsRaw] =
+        await Promise.all([
+          this.queryTopCities(eventId, dateRange, ticketIds),
+          this.queryHeatmap(eventId, dateRange, ticketIds),
+          this.buildMostAnsweredQuestions(eventId),
+          this.queryPurchasesByLocation(eventId, dateRange, ticketIds),
+        ]);
+      base = { topCities, salesHeatmap, mostAnsweredQuestions, purchaseLocationsRaw };
+      await this.cache.setJson(cacheKey, base, CACHE_TTL_SECONDARY);
+    }
+
+    // Coordenadas SEMPRE frescas: enfileira locais novos (PENDING) e anexa lat/lng
+    // do cache global. `geocodingPending` = quantos bairros ainda serão resolvidos
+    // pelo worker (NOT_FOUND não conta) → o front faz polling só enquanto > 0.
+    const geo = await this.geo.resolveMany(base.purchaseLocationsRaw);
+    const purchaseLocations = base.purchaseLocationsRaw.map((l, i) => ({
+      ...l,
+      ...(geo[i].coord ? { lat: geo[i].coord!.lat, lng: geo[i].coord!.lng } : {}),
+    }));
+    const geocodingPending = geo.filter((g) => g.pending).length;
+
+    return {
+      message: 'Dashboard secondary fetched successfully',
+      data: {
+        topCities: base.topCities,
+        salesHeatmap: base.salesHeatmap,
+        mostAnsweredQuestions: base.mostAnsweredQuestions,
+        // Mapa de calor geográfico (compras por bairro/cidade/UF do billing + lat/lng).
+        purchaseLocations,
+        /** Nº de bairros ainda aguardando geocoding no worker (0 = mapa completo). */
+        geocodingPending,
+      },
+    };
   }
 
   // ============================================================

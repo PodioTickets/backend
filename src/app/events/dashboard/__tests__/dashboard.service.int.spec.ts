@@ -71,6 +71,11 @@ const ticketsServiceStub: any = {
   findAll: async () => ({ data: { tickets: [], pagination: { total: 0 } } }),
 };
 
+// GeoService: sem geocoding no teste — devolve coords nulas (locais "pendentes").
+const geoServiceStub: any = {
+  resolveMany: async (locs: any[]) => locs.map(() => null),
+};
+
 describe('DashboardService (integração, banco real)', () => {
   let prisma: PrismaService;
   let service: DashboardService;
@@ -79,7 +84,7 @@ describe('DashboardService (integração, banco real)', () => {
     prisma = createTestPrisma();
     await prisma.$connect();
     const access = new OrganizerMemberAccessService(prisma);
-    service = new DashboardService(prisma, cacheStub, access, ticketsServiceStub);
+    service = new DashboardService(prisma, cacheStub, access, ticketsServiceStub, geoServiceStub);
   });
 
   afterAll(async () => {
