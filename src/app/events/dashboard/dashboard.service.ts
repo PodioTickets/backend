@@ -57,6 +57,11 @@ interface CityRow {
   state: string | null;
   participants: bigint;
 }
+interface PurchaseLocationRow {
+  city: string;
+  state: string | null;
+  purchases: bigint;
+}
 interface HeatmapRow {
   dow: number;
   hour: number;
@@ -302,11 +307,13 @@ export class DashboardService {
 
     const dateRange = calculateDateRange(period);
 
-    const [topCities, salesHeatmap, mostAnsweredQuestions] = await Promise.all([
-      this.queryTopCities(eventId, dateRange, ticketIds),
-      this.queryHeatmap(eventId, dateRange, ticketIds),
-      this.buildMostAnsweredQuestions(eventId),
-    ]);
+    const [topCities, salesHeatmap, mostAnsweredQuestions, purchaseLocations] =
+      await Promise.all([
+        this.queryTopCities(eventId, dateRange, ticketIds),
+        this.queryHeatmap(eventId, dateRange, ticketIds),
+        this.buildMostAnsweredQuestions(eventId),
+        this.queryPurchasesByLocation(eventId, dateRange, ticketIds),
+      ]);
 
     const response = {
       message: 'Dashboard secondary fetched successfully',
@@ -314,6 +321,8 @@ export class DashboardService {
         topCities,
         salesHeatmap,
         mostAnsweredQuestions,
+        // Mapa de calor geográfico (compras por cidade/UF do billing).
+        purchaseLocations,
       },
     };
 
@@ -660,6 +669,59 @@ export class DashboardService {
     return Array.from(merged.values())
       .sort((a, b) => b.participants - a.participants)
       .slice(0, 2);
+  }
+
+  /**
+   * Compras por LOCAL — 1 por PEDIDO pago, agrupado pelo endereço de COBRANÇA
+   * (`Order.billingCity` / `Order.billingStateUf`). Fonte da localização da
+   * compra: o billing é obrigatório pra pagar (checkout barra pagamento sem
+   * cidade/CEP/rua), então todo pedido pago tem `billingCity` e reflete o
+   * endereço daquela compra específica — diferente de `queryTopCities`, que usa
+   * o espelho em `User.city` (última compra do usuário, sobrescrevível).
+   *
+   * Alimenta o mapa de calor geográfico do dashboard. Coalesce case/acentos em
+   * JS (sem depender da extensão `unaccent`), igual a `queryTopCities`. Retorna
+   * até 500 locais distintos (teto defensivo — o front geocodifica cada um).
+   */
+  private async queryPurchasesByLocation(
+    eventId: string,
+    dateRange: DateRange,
+    ticketIds: string[] | null,
+  ): Promise<{ city: string; state?: string; purchases: number }[]> {
+    const rows = await this.prisma.getReadClient().$queryRaw<PurchaseLocationRow[]>(Prisma.sql`
+      SELECT
+        BTRIM(o."billingCity") AS city,
+        BTRIM(o."billingStateUf") AS state,
+        COUNT(*)::bigint AS purchases
+      FROM "Order" o
+      INNER JOIN "Payment" p ON p."orderId" = o.id
+      WHERE o."eventId" = ${eventId}::uuid
+        AND p.status = 'PAID'::"PaymentStatus"
+        AND o."billingCity" IS NOT NULL
+        AND BTRIM(o."billingCity") <> ''
+        ${this.sqlDateFilter(dateRange, 'o')}
+        ${this.sqlTicketIdsExistsFilter(ticketIds, eventId)}
+      GROUP BY BTRIM(o."billingCity"), BTRIM(o."billingStateUf");
+    `);
+
+    const normalize = (s: string) =>
+      s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+    const merged = new Map<string, { city: string; state?: string; purchases: number }>();
+    for (const r of rows) {
+      const state = r.state || undefined;
+      const key = `${normalize(r.city)}|${state ? normalize(state) : ''}`;
+      const existing = merged.get(key);
+      if (existing) {
+        existing.purchases += Number(r.purchases);
+      } else {
+        merged.set(key, { city: r.city, state, purchases: Number(r.purchases) });
+      }
+    }
+
+    return Array.from(merged.values())
+      .sort((a, b) => b.purchases - a.purchases)
+      .slice(0, 500);
   }
 
   /**

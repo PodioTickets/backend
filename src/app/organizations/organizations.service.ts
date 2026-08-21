@@ -388,25 +388,6 @@ export class OrganizationsService {
         if (existingUserByEmail) {
           throw new ConflictException('User with this email already exists');
         }
-
-        // Verificar se CPF já existe (se fornecido)
-        if (createDto.ownerDocumentNumber) {
-          const documentNumberClean = this.cleanDocumentNumber(createDto.ownerDocumentNumber);
-          if (documentNumberClean) {
-            const existingUserByCpf = await prismaRead.user.findUnique({
-              where: {
-                documentNumberClean_accountType: {
-                  documentNumberClean,
-                  accountType: 'ORGANIZER',
-                },
-              },
-            });
-
-            if (existingUserByCpf) {
-              throw new ConflictException('User with this document number already exists');
-            }
-          }
-        }
       } else {
         // Caminho "promover usuário existente"
         const user = await prismaRead.user.findUnique({
@@ -437,9 +418,6 @@ export class OrganizationsService {
       if (provisionOwner) {
         if (!createDto.userId) {
           const hashedPassword = await bcrypt.hash(createDto.ownerPassword!, 12);
-          const documentNumberClean = createDto.ownerDocumentNumber
-            ? this.cleanDocumentNumber(createDto.ownerDocumentNumber)
-            : null;
 
           const newUser = await tx.user.create({
             data: {
@@ -449,8 +427,9 @@ export class OrganizationsService {
               firstName: createDto.ownerFirstName!,
               lastName: createDto.ownerLastName!,
               phone: createDto.ownerPhone,
-              documentNumber: createDto.ownerDocumentNumber,
-              documentNumberClean,
+              // Consistente com o auto-cadastro (`signupOrganizer`): o CPF do responsável
+              // fica SÓ na organização (`ownerDocument`), nunca no documento da CONTA
+              // ORGANIZER. Nada depende deste campo no login (só e-mail).
             },
           });
 
@@ -661,24 +640,6 @@ export class OrganizationsService {
       );
     }
 
-    // Unicidade do CPF do responsável na conta ORGANIZER.
-    if (ownerDocumentClean) {
-      const existingUserByDoc = await prismaRead.user.findUnique({
-        where: {
-          documentNumberClean_accountType: {
-            documentNumberClean: ownerDocumentClean,
-            accountType: 'ORGANIZER',
-          },
-        },
-        select: { id: true },
-      });
-      if (existingUserByDoc) {
-        throw new ConflictException(
-          'Já existe uma conta de organizador com este CPF.',
-        );
-      }
-    }
-
     // Unicidade do documento da organização (@unique).
     if (orgDocumentClean) {
       const existingOrg = await prismaRead.organization.findUnique({
@@ -734,9 +695,10 @@ export class OrganizationsService {
           firstName,
           lastName,
           phone: dto.phone || dto.whatsapp,
-          documentType: 'CPF',
-          documentNumber: dto.ownerDocument,
-          documentNumberClean: ownerDocumentClean,
+          // O CPF do responsável NÃO é gravado no documento da CONTA — ele pertence
+          // apenas à organização (`ownerDocument`, abaixo). Vale para PF e PJ: o CPF
+          // pessoal do responsável não deve virar a identidade/login da conta ORGANIZER.
+          // (A tela de login de organizador é só por e-mail; nada depende deste campo.)
           // O wizard exige aceite dos contratos antes de criar a conta.
           acceptedTerms: true,
           acceptedPrivacyPolicy: true,
