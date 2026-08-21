@@ -270,6 +270,7 @@ export class PaymentsWebhookService {
               // Cabeçalho do PDF: categoria (ou "Ingresso avulso") em destaque + nome abaixo.
               ticketCategory: catName || 'Ingresso avulso',
               ticketName: ticketName || '—',
+              modality: [ticket?.modality, ticket?.distance ? `${ticket.distance}${ticket?.distanceUnit ? ` ${ticket.distanceUnit}` : ''}` : null].filter(Boolean).join(' ') || null,
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
               /* Nacionalidade. Prioridade:
@@ -326,15 +327,19 @@ export class PaymentsWebhookService {
         const buyerEmail: string | undefined = buyerUser?.email;
 
         // Gerar PDF individual por participante (sequencial — yoga-layout)
-        type IndividualPdf = { pdf: Buffer | undefined; participantEmail: string | undefined; participantName: string };
+        // `isGift` = a inscrição é para OUTRA pessoa (presente). Fonte da verdade =
+        // `invitedById` gravado no finalize (null quando o CPF é do próprio
+        // comprador, mesmo que ele use outro e-mail). NÃO derivar de e-mail.
+        type IndividualPdf = { pdf: Buffer | undefined; participantEmail: string | undefined; participantName: string; isGift: boolean };
         const individualPdfs: IndividualPdf[] = [];
         for (const [idx, reg] of regs.entries()) {
           const participantEmail: string | undefined = reg.participantEmail ?? reg.user?.email;
           const participantName: string = (reg.participantName
             ?? `${reg.user?.firstName ?? ''} ${reg.user?.lastName ?? ''}`.trim())
             || 'Participante';
+          const isGift = reg.invitedById != null;
           const regEntry = ticketPdfData.registrations[idx];
-          if (!regEntry) { individualPdfs.push({ pdf: undefined, participantEmail, participantName }); continue; }
+          if (!regEntry) { individualPdfs.push({ pdf: undefined, participantEmail, participantName, isGift }); continue; }
           const singlePdfData = {
             ...ticketPdfData,
             event: { ...ticketPdfData.event, participantCount: 1 },
@@ -342,7 +347,7 @@ export class PaymentsWebhookService {
           };
           const pdf = await this.ticketPdfService.generateTicketPdf(singlePdfData)
             .catch((e: any) => { this.logger.warn(`PDF falhou para ${participantName}:`, e?.message); return undefined; });
-          individualPdfs.push({ pdf, participantEmail, participantName });
+          individualPdfs.push({ pdf, participantEmail, participantName, isGift });
         }
 
         // Envios SMTP em paralelo
@@ -370,7 +375,9 @@ export class PaymentsWebhookService {
           );
         }
 
-        // Participantes não-compradores recebem apenas seu próprio ingresso
+        // Participante com e-mail diferente do comprador recebe seu próprio
+        // ingresso. Estilo "presente" (invitedByName) SÓ quando é de outra pessoa
+        // (`isGift`) — mesmo CPF do comprador com outro e-mail NÃO é presente.
         const invitedByFullName = `${buyerUser?.firstName ?? ''} ${buyerUser?.lastName ?? ''}`.trim();
         for (const p of individualPdfs) {
           if (!p.participantEmail || p.participantEmail === buyerEmail) continue;
@@ -379,7 +386,7 @@ export class PaymentsWebhookService {
               email: p.participantEmail,
               firstName: p.participantName.split(' ')[0] || 'Participante',
               eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
-              invitedByName: invitedByFullName || undefined,
+              invitedByName: p.isGift ? (invitedByFullName || undefined) : undefined,
               ticketPdfs: p.pdf ? [{ buffer: p.pdf, participantName: p.participantName }] : [],
             }).catch((err: any) => this.logger.warn(`Email participante ${p.participantEmail} falhou:`, err)),
           );
@@ -569,6 +576,7 @@ export class PaymentsWebhookService {
               // Cabeçalho do PDF: categoria (ou "Ingresso avulso") em destaque + nome abaixo.
               ticketCategory: catName || 'Ingresso avulso',
               ticketName: ticketName || '—',
+              modality: [ticket?.modality, ticket?.distance ? `${ticket.distance}${ticket?.distanceUnit ? ` ${ticket.distanceUnit}` : ''}` : null].filter(Boolean).join(' ') || null,
               email: reg.participantEmail ?? user.email,
               cpf: reg.participantCpf ?? user.documentNumber,
               /* País do participante: usado pelo template do PDF para decidir
@@ -628,15 +636,18 @@ export class PaymentsWebhookService {
         const buyerEmail: string | undefined = buyerUser?.email;
 
         // Gerar PDF individual por participante (sequencial — yoga-layout)
-        type IndividualPdf3ds = { pdf: Buffer | undefined; participantEmail: string | undefined; participantName: string };
+        // `isGift`: presente = inscrição para OUTRA pessoa (`invitedById` != null,
+        // gravado no finalize). Mesmo CPF do comprador com outro e-mail NÃO é presente.
+        type IndividualPdf3ds = { pdf: Buffer | undefined; participantEmail: string | undefined; participantName: string; isGift: boolean };
         const individualPdfs3ds: IndividualPdf3ds[] = [];
         for (const [idx, reg] of regs.entries()) {
           const participantEmail: string | undefined = reg.participantEmail ?? reg.user?.email;
           const participantName: string = (reg.participantName
             ?? `${reg.user?.firstName ?? ''} ${reg.user?.lastName ?? ''}`.trim())
             || 'Participante';
+          const isGift = reg.invitedById != null;
           const regEntry = ticketPdfData.registrations[idx];
-          if (!regEntry) { individualPdfs3ds.push({ pdf: undefined, participantEmail, participantName }); continue; }
+          if (!regEntry) { individualPdfs3ds.push({ pdf: undefined, participantEmail, participantName, isGift }); continue; }
           const singlePdfData = {
             ...ticketPdfData,
             event: { ...ticketPdfData.event, participantCount: 1 },
@@ -644,7 +655,7 @@ export class PaymentsWebhookService {
           };
           const pdf = await this.ticketPdfService.generateTicketPdf(singlePdfData)
             .catch((e: any) => { this.logger.warn(`3DS PDF falhou para ${participantName}:`, e?.message); return undefined; });
-          individualPdfs3ds.push({ pdf, participantEmail, participantName });
+          individualPdfs3ds.push({ pdf, participantEmail, participantName, isGift });
         }
 
         // Envios SMTP em paralelo
@@ -672,7 +683,8 @@ export class PaymentsWebhookService {
           );
         }
 
-        // Participantes não-compradores recebem apenas seu próprio ingresso
+        // Participante com e-mail diferente recebe seu ingresso; "presente"
+        // (invitedByName) SÓ quando é de outra pessoa (`isGift`).
         const invitedByFullName3ds = `${buyerUser?.firstName ?? ''} ${buyerUser?.lastName ?? ''}`.trim();
         for (const p of individualPdfs3ds) {
           if (!p.participantEmail || p.participantEmail === buyerEmail) continue;
@@ -681,7 +693,7 @@ export class PaymentsWebhookService {
               email: p.participantEmail,
               firstName: p.participantName.split(' ')[0] || 'Participante',
               eventName, eventLocation, eventDate, eventAddress, eventBannerUrl,
-              invitedByName: invitedByFullName3ds || undefined,
+              invitedByName: p.isGift ? (invitedByFullName3ds || undefined) : undefined,
               ticketPdfs: p.pdf ? [{ buffer: p.pdf, participantName: p.participantName }] : [],
             }).catch((err: any) => this.logger.warn(`3DS participant email failed for ${p.participantEmail}:`, err)),
           );

@@ -14,6 +14,7 @@ import {
   getComparisonBounds,
   percentChange,
   eachBrtDayKeys,
+  eachBrtHourKeys,
   lastSixBrtMonthKeys,
   DateRange,
 } from './dashboard-period.util';
@@ -55,6 +56,11 @@ interface CityRow {
   city: string;
   state: string | null;
   participants: bigint;
+}
+interface PurchaseLocationRow {
+  city: string;
+  state: string | null;
+  purchases: bigint;
 }
 interface HeatmapRow {
   dow: number;
@@ -301,11 +307,13 @@ export class DashboardService {
 
     const dateRange = calculateDateRange(period);
 
-    const [topCities, salesHeatmap, mostAnsweredQuestions] = await Promise.all([
-      this.queryTopCities(eventId, dateRange, ticketIds),
-      this.queryHeatmap(eventId, dateRange, ticketIds),
-      this.buildMostAnsweredQuestions(eventId),
-    ]);
+    const [topCities, salesHeatmap, mostAnsweredQuestions, purchaseLocations] =
+      await Promise.all([
+        this.queryTopCities(eventId, dateRange, ticketIds),
+        this.queryHeatmap(eventId, dateRange, ticketIds),
+        this.buildMostAnsweredQuestions(eventId),
+        this.queryPurchasesByLocation(eventId, dateRange, ticketIds),
+      ]);
 
     const response = {
       message: 'Dashboard secondary fetched successfully',
@@ -313,6 +321,8 @@ export class DashboardService {
         topCities,
         salesHeatmap,
         mostAnsweredQuestions,
+        // Mapa de calor geográfico (compras por cidade/UF do billing).
+        purchaseLocations,
       },
     };
 
@@ -415,14 +425,7 @@ export class DashboardService {
     ticketIds: string[] | null,
     organizerFeeRate: number,
   ): Promise<OrderBucketRow[]> {
-    // Bucket por DIA/MÊS CIVIL DE BRASÍLIA (não UTC). `createdAt` é timestamp sem
-    // tz (valores UTC): `AT TIME ZONE 'UTC'` o torna o instante real; `AT TIME
-    // ZONE 'America/Sao_Paulo'` volta pro wall-clock BRT. Sem isso, vendas após
-    // 21h BRT caíam no dia UTC seguinte e "hoje" (BRT) ficava zerado.
-    const bucketExpr =
-      period === DashboardPeriod.GERAL
-        ? Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM')`
-        : Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD')`;
+    const bucketExpr = this.chartBucketExpr(period);
 
     const effectiveRange = this.effectiveChartRange(period, dateRange);
 
@@ -475,11 +478,7 @@ export class DashboardService {
     dateRange: DateRange,
     ticketIds: string[] | null,
   ): Promise<RegBucketRow[]> {
-    // Bucket por dia/mês civil de Brasília — ver nota em queryChartOrderBuckets.
-    const bucketExpr =
-      period === DashboardPeriod.GERAL
-        ? Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM')`
-        : Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD')`;
+    const bucketExpr = this.chartBucketExpr(period);
 
     const effectiveRange = this.effectiveChartRange(period, dateRange);
 
@@ -673,6 +672,59 @@ export class DashboardService {
   }
 
   /**
+   * Compras por LOCAL — 1 por PEDIDO pago, agrupado pelo endereço de COBRANÇA
+   * (`Order.billingCity` / `Order.billingStateUf`). Fonte da localização da
+   * compra: o billing é obrigatório pra pagar (checkout barra pagamento sem
+   * cidade/CEP/rua), então todo pedido pago tem `billingCity` e reflete o
+   * endereço daquela compra específica — diferente de `queryTopCities`, que usa
+   * o espelho em `User.city` (última compra do usuário, sobrescrevível).
+   *
+   * Alimenta o mapa de calor geográfico do dashboard. Coalesce case/acentos em
+   * JS (sem depender da extensão `unaccent`), igual a `queryTopCities`. Retorna
+   * até 500 locais distintos (teto defensivo — o front geocodifica cada um).
+   */
+  private async queryPurchasesByLocation(
+    eventId: string,
+    dateRange: DateRange,
+    ticketIds: string[] | null,
+  ): Promise<{ city: string; state?: string; purchases: number }[]> {
+    const rows = await this.prisma.getReadClient().$queryRaw<PurchaseLocationRow[]>(Prisma.sql`
+      SELECT
+        BTRIM(o."billingCity") AS city,
+        BTRIM(o."billingStateUf") AS state,
+        COUNT(*)::bigint AS purchases
+      FROM "Order" o
+      INNER JOIN "Payment" p ON p."orderId" = o.id
+      WHERE o."eventId" = ${eventId}::uuid
+        AND p.status = 'PAID'::"PaymentStatus"
+        AND o."billingCity" IS NOT NULL
+        AND BTRIM(o."billingCity") <> ''
+        ${this.sqlDateFilter(dateRange, 'o')}
+        ${this.sqlTicketIdsExistsFilter(ticketIds, eventId)}
+      GROUP BY BTRIM(o."billingCity"), BTRIM(o."billingStateUf");
+    `);
+
+    const normalize = (s: string) =>
+      s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+    const merged = new Map<string, { city: string; state?: string; purchases: number }>();
+    for (const r of rows) {
+      const state = r.state || undefined;
+      const key = `${normalize(r.city)}|${state ? normalize(state) : ''}`;
+      const existing = merged.get(key);
+      if (existing) {
+        existing.purchases += Number(r.purchases);
+      } else {
+        merged.set(key, { city: r.city, state, purchases: Number(r.purchases) });
+      }
+    }
+
+    return Array.from(merged.values())
+      .sort((a, b) => b.purchases - a.purchases)
+      .slice(0, 500);
+  }
+
+  /**
    * Heatmap de vendas — registrations PAID+CONFIRMED agrupadas por dia da
    * semana (0=Dom...6=Sáb) e hora (0..23) do `Order.createdAt`.
    */
@@ -720,6 +772,24 @@ export class DashboardService {
     return { start, end: now };
   }
 
+  /**
+   * Expressão SQL do bucket do chart por período, em BRT (America/Sao_Paulo).
+   * `createdAt` é timestamp sem tz (UTC): `AT TIME ZONE 'UTC'` → instante real;
+   * `AT TIME ZONE 'America/Sao_Paulo'` → wall-clock BRT. Sem isso, vendas após 21h
+   * BRT caíam no bucket UTC seguinte e "hoje" (BRT) ficava zerado.
+   * - GERAL: mês (`YYYY-MM`). LAST_24H ("Hoje"): HORA (`YYYY-MM-DD HH24:00`) — o
+   *   chart cobre o dia inteiro por hora. Demais: dia (`YYYY-MM-DD`).
+   */
+  private chartBucketExpr(period: DashboardPeriod) {
+    if (period === DashboardPeriod.GERAL) {
+      return Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM')`;
+    }
+    if (period === DashboardPeriod.LAST_24H) {
+      return Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD HH24:00')`;
+    }
+    return Prisma.sql`to_char(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD')`;
+  }
+
   private assembleChartData(
     period: DashboardPeriod,
     dateRange: DateRange,
@@ -730,7 +800,9 @@ export class DashboardService {
       period === DashboardPeriod.GERAL
         ? lastSixBrtMonthKeys()
         : dateRange.start && dateRange.end
-          ? eachBrtDayKeys(dateRange.start, dateRange.end)
+          ? period === DashboardPeriod.LAST_24H
+            ? eachBrtHourKeys(dateRange.start, dateRange.end)
+            : eachBrtDayKeys(dateRange.start, dateRange.end)
           : [];
 
     const labels = this.formatLabels(period, keys);
@@ -772,6 +844,10 @@ export class DashboardService {
         const [year, month] = k.split('-');
         return `${monthNames[parseInt(month, 10) - 1]}/${year.slice(-2)}`;
       });
+    }
+    // "Hoje" (LAST_24H): chave `YYYY-MM-DD HH:00` → rótulo de hora "HHh".
+    if (period === DashboardPeriod.LAST_24H) {
+      return keys.map((k) => `${k.slice(11, 13)}h`);
     }
     return keys.map((k) => {
       const [y, m, d] = k.split('-').map(Number);

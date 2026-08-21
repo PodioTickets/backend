@@ -98,7 +98,7 @@ export class PaymentsChargebackService {
         await this.processReversal(payment, cieloStatus, meta);
         detected++;
       } catch (err: any) {
-        this.logger.warn(`Erro ao consultar Braspag para payment ${payment.id}: ${err.message}`);
+        this.logger.warn(`Erro ao consultar gateway para payment ${payment.id}: ${err.message}`);
       }
 
       // Throttle para não extrapolar o rate limit da Braspag

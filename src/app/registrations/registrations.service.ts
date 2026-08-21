@@ -3,7 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { CreateRegistrationDto, CreateRegistrationWithInvitedUserDto } from './dto/create-registration.dto';
 import { FilterRegistrationsDto, RegistrationFilterStatus } from './dto/filter-registrations.dto';
 import { UpdateRegistrationParticipantDto } from './dto/update-registration-participant.dto';
-import { DocumentType, Prisma, RegistrationStatus, PaymentStatus } from '@prisma/client';
+import { AccountType, DocumentType, Prisma, RegistrationStatus, PaymentStatus } from '@prisma/client';
 import { OrganizerMemberAccessService } from '../organizations/organizer-member-access.service';
 import { eventWindowInstant } from '../../common/utils/brt-date.util';
 // QR Code é gerado dinamicamente no frontend/backend usando o payload salvo em qrCode
@@ -228,28 +228,47 @@ export class RegistrationsService {
     } | null = null;
 
     if (invitedUser) {
-      const existingUser = await prismaRead.user.findFirst({
-        where: { email: invitedUser.email },
-        select: { id: true },
+      // invitedUser pode trazer documentType opcional (DTO atualizado);
+      // ausência cai no inferDocumentType (CPF se for 11 dígitos).
+      const doc = resolveDocument({
+        documentType: (invitedUser as any).documentType,
+        documentNumber: invitedUser.documentNumber,
       });
-      if (existingUser) {
-        registrationUserId = existingUser.id;
-      } else {
-        registrationUserId = null;
-        // invitedUser pode trazer documentType opcional (DTO atualizado);
-        // ausência cai no inferDocumentType (CPF se for 11 dígitos).
-        const doc = resolveDocument({
-          documentType: (invitedUser as any).documentType,
-          documentNumber: invitedUser.documentNumber,
-        });
-        guestSnapshot = {
-          name: `${invitedUser.firstName} ${invitedUser.lastName}`,
-          email: invitedUser.email,
-          documentType: doc.type,
-          documentNumber: doc.number,
-          documentNumberClean: doc.clean,
-        };
-      }
+
+      // Resolve a conta do convidado apenas entre contas de COMPRADOR (accountType USER):
+      // o mesmo e-mail/documento pode coexistir como ORGANIZER (@@unique por
+      // [campo, accountType]) e um findFirst SEM escopo "adotava" a conta de organizador,
+      // fazendo a inscrição herdar os dados PESSOAIS do organizador. Identidade canônica =
+      // documento; e-mail é fallback.
+      const matchedUser =
+        (doc.clean
+          ? await prismaRead.user.findUnique({
+              where: {
+                documentNumberClean_accountType: {
+                  documentNumberClean: doc.clean,
+                  accountType: AccountType.USER,
+                },
+              },
+              select: { id: true },
+            })
+          : null) ??
+        (await prismaRead.user.findUnique({
+          where: {
+            email_accountType: { email: invitedUser.email, accountType: AccountType.USER },
+          },
+          select: { id: true },
+        }));
+
+      registrationUserId = matchedUser?.id ?? null;
+
+      // Snapshot SEMPRE a partir dos dados informados — nunca depende da conta vinculada.
+      guestSnapshot = {
+        name: `${invitedUser.firstName} ${invitedUser.lastName}`,
+        email: invitedUser.email,
+        documentType: doc.type,
+        documentNumber: doc.number,
+        documentNumberClean: doc.clean,
+      };
     } else if (invitedUserId) {
       registrationUserId = invitedUserId;
     }
@@ -1208,6 +1227,20 @@ export class RegistrationsService {
     // ingresso não tem categoria) e o nome do ingresso abaixo.
     const ticketCategory = categoryName || 'Ingresso avulso';
     const ticketName = baseTicketName || '—';
+    // Modalidade/distância exibida no bloco "Ingresso" do PDF (ex.: "Corrida 5 KM",
+    // "0.3 Km"). Combina o rótulo da modalidade com a distância. Trata os 2 shapes:
+    //   - findOne (snapshot): `ticket.distance` (nº) + `ticket.distanceUnit` separados;
+    //   - findOneLive: `ticket.distance` já vem combinado ("0.3 Km"), sem unit.
+    // Modalidade: escalar `ticket.modality` com fallback p/ a relação `modalities`.
+    const modalityName =
+      reg?.ticket?.modality ?? reg?.modalities?.[0]?.modality?.name ?? null;
+    const distanceRaw = reg?.ticket?.distance;
+    const distanceStr = distanceRaw
+      ? reg?.ticket?.distanceUnit
+        ? `${distanceRaw} ${reg.ticket.distanceUnit}`
+        : `${distanceRaw}`
+      : null;
+    const modality = [modalityName, distanceStr].filter(Boolean).join(' ') || null;
 
     // Produtos: snapshot traz os campos no topo (name/images/selectedVariation/
     // unitPrice); o legado (findOneLive) aninha em product/variation. Detecta
@@ -1276,6 +1309,7 @@ export class RegistrationsService {
       participantName,
       ticketCategory,
       ticketName,
+      modality,
       email: snapshotParticipant?.email ?? user?.email ?? undefined,
       cpf:
         snapshotParticipant?.documentNumber ?? user?.documentNumber ?? undefined,

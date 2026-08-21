@@ -103,7 +103,7 @@ export class PayOrderDto {
   @Type(() => CardTokenDto)
   cardToken?: CardTokenDto;
 
-  @ApiPropertyOptional({ description: '3DS authentication result — required for DEBIT_CARD' })
+  @ApiPropertyOptional({ description: '3DS authentication result — required for DEBIT_CARD (Cielo)' })
   @IsOptional()
   @ValidateNested()
   @Type(() => ThreeDsAuthDto)

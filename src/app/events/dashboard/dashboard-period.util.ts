@@ -168,6 +168,37 @@ export function eachBrtDayKeys(from: Date, to: Date): string[] {
 }
 
 /**
+ * Chaves `YYYY-MM-DD HH:00` de cada HORA do(s) dia(s) civil(is) de Brasília no
+ * intervalo — do início (00:00) do dia BRT de `from` ao fim (23:00) do dia BRT de
+ * `to`. Usado pelo período "Hoje" (LAST_24H) para o chart cobrir o dia INTEIRO por
+ * hora (00h→23h) em vez de um único ponto diário. Casa com o bucket horário BRT do
+ * SQL (`... 'YYYY-MM-DD HH24:00'`). Cap em 1000 horas contra range inválido.
+ */
+export function eachBrtHourKeys(from: Date, to: Date): string[] {
+  const f = new Date(from.getTime() - BRT_OFFSET_MS);
+  const tEnd = new Date(to.getTime() - BRT_OFFSET_MS);
+  const keys: string[] = [];
+  let t = Date.UTC(f.getUTCFullYear(), f.getUTCMonth(), f.getUTCDate(), 0);
+  const endT = Date.UTC(
+    tEnd.getUTCFullYear(),
+    tEnd.getUTCMonth(),
+    tEnd.getUTCDate(),
+    23,
+  );
+  while (t <= endT) {
+    const d = new Date(t);
+    const yyyy = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    const hh = String(d.getUTCHours()).padStart(2, '0');
+    keys.push(`${yyyy}-${mm}-${dd} ${hh}:00`);
+    t += 60 * 60 * 1000;
+    if (keys.length > 1000) break;
+  }
+  return keys;
+}
+
+/**
  * Últimos 6 meses calendário DE BRASÍLIA (chave `YYYY-MM`). Variante BRT de
  * `lastSixMonthKeys` — casa com o bucket mensal BRT do SQL no período `GERAL`.
  */

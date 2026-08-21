@@ -23,6 +23,12 @@ export interface TicketPdfRegistration {
    */
   ticketCategory?: string;
   ticketName: string;
+  /**
+   * Modalidade/distância do ingresso (ex.: "Corrida de rua", "3K Caminhada",
+   * "0.3 Km"). Escalar `Ticket.modality`. Exibida no bloco "Ingresso" do PDF
+   * com ícone, ao lado do nome do ingresso. Ausente/nula → linha omitida.
+   */
+  modality?: string | null;
   email?: string;
   cpf?: string;
   /**

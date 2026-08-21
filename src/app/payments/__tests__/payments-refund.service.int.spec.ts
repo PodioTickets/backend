@@ -83,11 +83,15 @@ describe('PaymentsRefundService (integração, banco real)', () => {
     const activityStub = { record: () => {} } as any;
     const finalization = new OrderFinalizationService(prisma, activityStub);
 
+    // EmailService no-op: o alvo destes testes são os efeitos no banco, não o
+    // e-mail de estorno (best-effort, disparado fora da transação).
+    const emailStub = { sendRegistrationRefunded: async () => {} } as any;
     service = new PaymentsRefundService(
       prisma,
       cieloMock as unknown as CieloService,
       finalization,
       activityStub,
+      emailStub,
     );
   });
 

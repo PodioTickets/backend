@@ -59,7 +59,38 @@ import {
 /* LinearGradient não exporta tipos corretos para gradientUnits/x1/y1/x2/y2 — cast necessário */
 const LinearGradient = LinearGradientBase as any;
 
-Font.registerHyphenationCallback((w) => [w]);
+// react-pdf só quebra texto em espaços. Um e-mail/documento/URL é um token
+// ÚNICO sem espaço: quando é longo, transborda a coluna e invade o campo vizinho
+// (ex.: Email empurrando o Telefone no card do participante). O callback antigo
+// `(w) => [w]` desligava QUALQUER quebra, agravando isso. Aqui deixamos palavras
+// normais intactas (sem hifenização indesejada) e só criamos pontos de quebra em
+// tokens longos sem espaço, preferindo os separadores naturais do e-mail (@ e .)
+// e caindo para blocos de tamanho fixo quando não houver separador. O react-pdf
+// quebra ENTRE os pedaços apenas se precisar, sem inserir hífen visível.
+// Máx. de caracteres por PEDAÇO sem quebra. A coluna do card de 2 colunas tem
+// ~229pt; a 18px Manrope SemiBold, caracteres largos (@, m, w ≈ 0.75em) fazem um
+// bloco de 18 já beirar/estourar a coluna → o e-mail ainda transbordava pro
+// Telefone. 13 garante que o pior caso (13×18×0.75 ≈ 176pt) caiba com folga,
+// forçando o e-mail longo a quebrar em 2 linhas dentro da própria coluna.
+const MAX_UNBREAKABLE = 13;
+// Separadores naturais de e-mail/URL onde a quebra fica "limpa" (logo APÓS eles).
+const BREAK_AFTER = new Set(['@', '.', '_', '-', '+']);
+Font.registerHyphenationCallback((word) => {
+  if (word.length <= MAX_UNBREAKABLE) return [word];
+  const parts: string[] = [];
+  let buf = '';
+  for (const ch of word) {
+    buf += ch;
+    // Quebra logo APÓS um separador de e-mail/URL, ou quando o bloco já ficou
+    // largo o suficiente para caber sozinho na coluna.
+    if (BREAK_AFTER.has(ch) || buf.length >= MAX_UNBREAKABLE) {
+      parts.push(buf);
+      buf = '';
+    }
+  }
+  if (buf) parts.push(buf);
+  return parts;
+});
 
 const FP = path.join(process.cwd(), 'node_modules', '@fontsource');
 const dmSans = (w: number) =>
@@ -80,6 +111,7 @@ Font.register({
 Font.register({
   family: 'Manrope',
   fonts: [
+    { src: manrope(600), fontWeight: 600 },
     { src: manrope(700), fontWeight: 700 },
     { src: manrope(800), fontWeight: 800 },
   ],
@@ -123,10 +155,6 @@ function fmtDateTime(d: Date): string {
   const hh = parts.find((p) => p.type === 'hour')?.value ?? '00';
   const mm = parts.find((p) => p.type === 'minute')?.value ?? '00';
   return `${date} · ${hh}h${mm}`;
-}
-
-function fmtCurrency(cents: number): string {
-  return (cents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
 
 function fmtCPF(cpf: string): string {
@@ -324,131 +352,351 @@ function safeImageUrl(url: string | null | undefined): string | null {
 const HR = () =>
   React.createElement(View, { style: { height: 1, backgroundColor: C.gray6 } });
 
-/* Campo de informação: label 16px + value 16px 500, ambos gray12 */
-const FieldItem = ({ label, value }: { label: string; value: string }) =>
-  React.createElement(
+const e = React.createElement;
+
+/* Tokens de tipografia do Figma (node 6512:127745). Manrope p/ títulos,
+ * DM Sans p/ corpo. `lineHeight` é multiplicador no react-pdf. */
+const T = {
+  h24: { fontFamily: 'Manrope', fontWeight: 700, fontSize: 24, lineHeight: 1.1, color: C.gray12 },
+  h20: { fontFamily: 'Manrope', fontWeight: 600, fontSize: 20, lineHeight: 1.1, color: C.gray12 },
+  h18b: { fontFamily: 'Manrope', fontWeight: 700, fontSize: 18, lineHeight: 1.1, color: C.gray12 },
+  h18: { fontFamily: 'Manrope', fontWeight: 600, fontSize: 18, lineHeight: 1.1, color: C.gray12 },
+  h16: { fontFamily: 'Manrope', fontWeight: 600, fontSize: 16, lineHeight: 1.1, color: C.gray12 },
+  label: { fontFamily: 'DM Sans', fontWeight: 400, fontSize: 16, lineHeight: 1.3, color: C.gray11 },
+  labelDark: { fontFamily: 'DM Sans', fontWeight: 400, fontSize: 16, lineHeight: 1.3, color: C.gray12 },
+  med20: { fontFamily: 'DM Sans', fontWeight: 500, fontSize: 20, lineHeight: 1.3, color: C.gray12 },
+  med18: { fontFamily: 'DM Sans', fontWeight: 500, fontSize: 18, lineHeight: 1.3, color: C.gray12 },
+  med16: { fontFamily: 'DM Sans', fontWeight: 500, fontSize: 16, lineHeight: 1.3, color: C.gray12 },
+  sb16: { fontFamily: 'DM Sans', fontWeight: 600, fontSize: 16, lineHeight: 1.3, color: C.gray12 },
+};
+
+/* Campo label + valor.
+ *  - `dark`   → label em gray12 (bloco do participante); senão gray11 (evento/perguntas).
+ *  - `strong` → valor em Manrope SemiBold 18 (participante/evento); senão DM Sans Medium 16 (perguntas). */
+const InfoField = ({
+  label,
+  value,
+  dark,
+  strong,
+  py = 0,
+  gap = 12,
+}: {
+  label: string;
+  value: string;
+  dark?: boolean;
+  strong?: boolean;
+  py?: number;
+  gap?: number;
+}) =>
+  e(
     View,
-    { style: { paddingVertical: 8, gap: 12 } },
-    React.createElement(
-      Text,
-      { style: { fontFamily: 'DM Sans', fontSize: 16, fontWeight: 400, color: C.gray12 } },
-      label,
-    ),
-    React.createElement(
-      Text,
-      { style: { fontFamily: 'DM Sans', fontSize: 16, fontWeight: 500, color: C.gray12 } },
-      value || '—',
-    ),
+    { style: { gap, minWidth: 0, paddingVertical: py } },
+    e(Text, { style: dark ? T.labelDark : T.label }, label),
+    e(Text, { style: strong ? T.h18 : T.med16 }, value || '—'),
   );
 
-/* Card de produto: full width, 1 por linha, imagem 100×100 à esquerda, conteúdo à direita */
-const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
-  React.createElement(
+/* Distribui itens em linhas de 2 colunas (flex 1 cada). `fillLast` insere um
+ * espaçador quando a última linha tem 1 item — mantém-o com meia largura
+ * (usado em campos/perguntas; produtos ocupam a linha inteira quando sozinhos). */
+function twoCol(
+  items: any[],
+  render: (it: any, i: number) => any,
+  opts?: { rowGap?: number; colGap?: number; fillLast?: boolean },
+) {
+  const rowGap = opts?.rowGap ?? 0;
+  const colGap = opts?.colGap ?? 12;
+  const rows: any[] = [];
+  for (let i = 0; i < items.length; i += 2) {
+    const pair = items.slice(i, i + 2);
+    const cells: any[] = pair.map((it, j) =>
+      e(View, { key: j, style: { flex: 1, minWidth: 0 } }, render(it, i + j)),
+    );
+    if (pair.length === 1 && opts?.fillLast) {
+      cells.push(e(View, { key: 'spacer', style: { flex: 1 } }));
+    }
+    rows.push(e(View, { key: i, style: { flexDirection: 'row', gap: colGap } }, ...cells));
+  }
+  return e(View, { style: { gap: rowGap } }, ...rows);
+}
+
+/* Ícone de bandeira (chip "Evento") — outline verde sobre fundo green3. */
+const FlagIcon = () =>
+  e(
+    Svg,
+    { width: 24, height: 24, viewBox: '0 0 24 24' },
+    e(Path, {
+      d: 'M6 21V4 M6 5h11l-2.5 3.5L17 12H6',
+      stroke: C.green12,
+      strokeWidth: 2,
+      strokeLinecap: 'round',
+      strokeLinejoin: 'round',
+      fill: 'none',
+    }),
+  );
+
+/* Rótulo de modalidade (Ticket.modality) → arquivo PNG do ícone 3D em
+ * `common/assets/modalities/`. Mesmos ícones do frontend (`modalitiesColumns`).
+ * PNGs pré-convertidos de webp (scripts/convert-modality-icons.ts) — o
+ * @react-pdf NÃO decodifica webp e a conversão em runtime é frágil. */
+const MODALITY_ICON_FILES: Record<string, string> = {
+  corrida: 'Icon3D-corrida-de-rua.png',
+  natacao: 'Icon3D-natacao.png',
+  ciclismo: 'Icon3D-ciclismo.png',
+  triathlon: 'Icon-3D-Triathlon.png',
+  outros: 'Icon3D-outros.png',
+};
+
+// Memoiza o data-URI por arquivo — 5 PNGs estáticos, lidos 1× por processo.
+const modalityIconCache = new Map<string, string | null>();
+
+/* Ícone 3D da modalidade como data-URI PNG, a partir do campo combinado
+ * `modality` ("Corrida 5 KM"): a distância começa por dígito, então cortamos a
+ * partir do 1º número e sobra o rótulo ("Corrida"). Só-distância ("0.3 Km") →
+ * null (sem ícone). Rótulo desconhecido → "outros".
+ *
+ * Embute como data-URI (lê o PNG pré-convertido com `fs`) em vez de passar o
+ * caminho local ao <Image>: o @react-pdf rejeita paths locais ("Only absolute
+ * URLs are supported"), mas aceita data-URI de forma portável. PNG já pronto →
+ * sem `sharp`/webp em runtime. */
+function modalityIconDataUri(modality?: string | null): string | null {
+  if (!modality) return null;
+  const label = modality.replace(/\s*\d.*$/, '').trim();
+  if (!label) return null;
+  const key = label
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '');
+  const file = MODALITY_ICON_FILES[key] ?? MODALITY_ICON_FILES.outros;
+  if (modalityIconCache.has(file)) return modalityIconCache.get(file) ?? null;
+  try {
+    const buf = fs.readFileSync(path.join(__dirname, '..', 'assets', 'modalities', file));
+    const uri = `data:image/png;base64,${buf.toString('base64')}`;
+    modalityIconCache.set(file, uri);
+    return uri;
+  } catch {
+    modalityIconCache.set(file, null); // fail-open: sem ícone, nunca quebra o PDF
+    return null;
+  }
+}
+
+/* Logo do cabeçalho como data-URI PNG (lido com `fs`, memoizado 1×/processo).
+ * O @react-pdf REJEITA caminho de arquivo local no <Image> ("Only absolute URLs
+ * are supported") — mesma restrição dos ícones de modalidade. Embutir como
+ * data-URI garante o logo em qualquer ambiente. Fail-open → null (sem logo). */
+let logoUriCache: string | null | undefined;
+function logoDataUri(): string | null {
+  if (logoUriCache !== undefined) return logoUriCache;
+  try {
+    const buf = fs.readFileSync(
+      path.join(__dirname, '..', 'assets', 'logo-podioticket.png'),
+    );
+    logoUriCache = `data:image/png;base64,${buf.toString('base64')}`;
+  } catch {
+    logoUriCache = null;
+  }
+  return logoUriCache;
+}
+
+/* Card-resumo do evento: chip verde + nome + 4 campos (2 por linha). */
+const EventCard = ({ event }: { event: TicketPdfTemplateData['event'] }) =>
+  e(
     View,
     {
       style: {
-        paddingHorizontal: 16,
-        paddingVertical: 16,
         borderWidth: 1,
         borderColor: C.gray6,
         borderStyle: 'solid',
-        borderRadius: 12,
+        borderRadius: 8,
+        padding: 16,
+        gap: 20,
+        width: '100%',
+      },
+    },
+    e(
+      View,
+      { style: { flexDirection: 'row', alignItems: 'center', gap: 12 } },
+      e(
+        View,
+        {
+          style: {
+            backgroundColor: C.green3,
+            borderRadius: 8,
+            padding: 8,
+            alignItems: 'center',
+            justifyContent: 'center',
+          },
+        },
+        e(FlagIcon, null),
+      ),
+      e(
+        View,
+        { style: { gap: 8, minWidth: 0 } },
+        e(Text, { style: T.label }, 'Evento'),
+        e(Text, { style: T.h18b }, event.name || '—'),
+      ),
+    ),
+    e(HR, null),
+    twoCol(
+      [
+        { label: 'Data', value: fmtDate(event.date) },
+        { label: 'Organização', value: event.organization },
+        { label: 'Local do evento', value: event.location },
+        {
+          label: 'Participantes',
+          value: `${event.participantCount} atleta${event.participantCount !== 1 ? 's' : ''}`,
+        },
+      ],
+      (f: { label: string; value: string }) =>
+        e(InfoField, { label: f.label, value: f.value, strong: true }),
+      { rowGap: 24, colGap: 12 },
+    ),
+  );
+
+/* Bloco "Ingresso": categoria + nome + modalidade (esquerda) e QR (direita). */
+const IngressoSection = ({ reg }: { reg: TicketPdfRegistrationWithQr }) =>
+  e(
+    View,
+    {
+      style: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'flex-start',
+        gap: 16,
+        width: '100%',
+      },
+    },
+    /* Esquerda */
+    e(
+      View,
+      { style: { flex: 1, minWidth: 0, gap: 24 } },
+      e(Text, { style: T.h20 }, 'Ingresso'),
+      e(
+        View,
+        { style: { gap: 20 } },
+        e(
+          View,
+          { style: { gap: 8 } },
+          e(Text, { style: T.label }, reg.ticketCategory || 'Ingresso avulso'),
+          e(Text, { style: T.med20 }, reg.ticketName || '—'),
+        ),
+        reg.modality && String(reg.modality).trim()
+          ? e(
+              View,
+              { style: { flexDirection: 'row', gap: 8, alignItems: 'center' } },
+              // Ícone 3D da modalidade (data-URI PNG, mesmos do frontend); ausente → só o texto.
+              modalityIconDataUri(reg.modality)
+                ? e(Image, {
+                    src: modalityIconDataUri(reg.modality) as string,
+                    style: { width: 24, height: 24 },
+                  })
+                : null,
+              e(Text, { style: T.med18 }, String(reg.modality).trim()),
+            )
+          : null,
+      ),
+    ),
+    /* Direita: QR em caixa gray2 */
+    e(
+      View,
+      { style: { flexShrink: 0 } },
+      e(
+        View,
+        {
+          style: {
+            backgroundColor: C.gray2,
+            borderWidth: 1,
+            borderColor: C.gray6,
+            borderStyle: 'solid',
+            borderRadius: 8,
+            padding: 8,
+          },
+        },
+        e(Image, { src: reg.qrDataUrl, style: { width: 100, height: 100 } }),
+      ),
+    ),
+  );
+
+/* Card de produto (Figma): imagem 100×100 + nome + "Tamanho: X" à direita.
+ * Sem preço nem badge Incluso/Adicional (decisão de produto: igual ao design).
+ *
+ * IMPORTANTE: NÃO usar `flex: 1` aqui. A célula do `twoCol` é uma COLUNA, então
+ * `flex: 1` (= flexBasis 0) COLAPSA a ALTURA do card e a imagem de 100px vaza
+ * pra fora. A largura das 2 colunas já vem do `flex: 1` da CÉLULA; o card só
+ * estica na largura (cross-axis da coluna = `stretch` por padrão) e tem
+ * ALTURA = conteúdo. `width: '100%'` garante a largura cheia. */
+const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
+  e(
+    View,
+    {
+      style: {
+        width: '100%',
+        minWidth: 0,
         flexDirection: 'row',
         gap: 12,
         alignItems: 'center',
-        backgroundColor: C.gray1,
+        padding: 12,
+        borderWidth: 1,
+        borderColor: C.gray6,
+        borderStyle: 'solid',
+        borderRadius: 8,
       },
     },
-    /* Imagem 100×100 — safeImageUrl valida https:// para prevenir SSRF */
-    safeImageUrl(product.imageUrl)
-      ? React.createElement(Image, {
-        src: safeImageUrl(product.imageUrl) as string,
-        style: {
-          width: 100,
-          height: 100,
-          borderRadius: 8,
-          borderWidth: 1,
-          borderColor: C.gray6,
-          borderStyle: 'solid',
-          objectFit: 'fill',
-        },
-      })
-      : React.createElement(View, {
-        style: {
-          width: 100,
-          height: 100,
-          borderRadius: 8,
-          backgroundColor: C.gray6,
-          borderWidth: 1,
-          borderColor: C.gray6,
-          borderStyle: 'solid',
-        },
-      }),
-    /* Coluna de conteúdo: nome+variação em cima, preço+badge embaixo */
-    React.createElement(
+    /* Imagem 100×100 — safeImageUrl valida https:// para prevenir SSRF.
+     * A <Image> fica DENTRO de um box fixo com `overflow: hidden`: no
+     * @react-pdf o `objectFit: cover` numa Image de proporção != 1:1 não
+     * recorta de forma confiável e a imagem vaza pra fora do card. O wrapper
+     * de tamanho fixo (com borda/raio) faz o clip; a Image preenche 100%.
+     * `flexShrink: 0` impede que a linha flex esprema o box. */
+    e(
       View,
-      { style: { flex: 1, alignSelf: 'stretch', justifyContent: 'space-between' } },
-      /* Topo: nome e variação */
-      React.createElement(
-        View,
-        { style: { gap: 16 } },
-        React.createElement(
-          Text,
-          { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 600, color: C.gray12 } },
-          product.name,
-        ),
-        product.variationName
-          ? React.createElement(
+      {
+        style: {
+          width: 100,
+          height: 100,
+          flexShrink: 0,
+          borderRadius: 8,
+          borderWidth: 1,
+          borderColor: C.gray6,
+          borderStyle: 'solid',
+          backgroundColor: C.gray6,
+          overflow: 'hidden',
+        },
+      },
+      safeImageUrl(product.imageUrl)
+        ? e(Image, {
+            src: safeImageUrl(product.imageUrl) as string,
+            style: { width: '100%', height: '100%', objectFit: 'cover' },
+          })
+        : null,
+    ),
+    e(
+      View,
+      {
+        style: {
+          flex: 1,
+          minWidth: 0,
+          alignSelf: 'stretch',
+          justifyContent: 'space-between',
+          paddingVertical: 8,
+          gap: 12,
+        },
+      },
+      e(Text, { style: T.sb16 }, product.name),
+      product.variationName
+        ? e(
             View,
-            { style: { flexDirection: 'row', gap: 4 } },
-            React.createElement(
-              Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 400, color: C.gray12 } },
-              'Tamanho: ',
-            ),
-            React.createElement(
-              Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 600, color: C.gray12 } },
-              product.variationName,
-            ),
-          )
-          : null,
-      ),
-      /* Rodapé: preço à esquerda (só se não incluso), badge à direita */
-      React.createElement(
-        View,
-        { style: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' } },
-        product.isIncluded
-          ? React.createElement(View, { style: { flex: 1 } })
-          : React.createElement(
-            Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 700, color: C.gray12 } },
-            fmtCurrency(product.price),
-          ),
-        React.createElement(
-          View,
-          {
-            style: {
-              paddingHorizontal: 12,
-              paddingVertical: 8,
-              backgroundColor: product.isIncluded ? C.green3 : C.blue3,
-              borderRadius: 8,
-            },
-          },
-          React.createElement(
-            Text,
             {
               style: {
-                fontFamily: 'DM Sans',
-                fontSize: 14,
-                fontWeight: 500,
-                color: product.isIncluded ? C.green12 : C.blue12,
+                flexDirection: 'row',
+                gap: 4,
+                alignItems: 'center',
+                justifyContent: 'flex-end',
               },
             },
-            product.isIncluded ? 'Incluso' : 'Adicional',
-          ),
-        ),
-      ),
+            e(Text, { style: T.labelDark }, 'Tamanho: '),
+            e(Text, { style: T.h16 }, product.variationName),
+          )
+        : null,
     ),
   );
 
@@ -463,169 +711,123 @@ const GENDER_LABELS: Record<string, string> = {
 };
 const fmtGender = (g: string): string => GENDER_LABELS[g.toUpperCase()] ?? g;
 
-/* Card de participante — wrap: false garante que o card não é dividido entre páginas */
+/* Card único do participante (Figma 6512:128371): seções Ingresso →
+ * Informações do participante → Produtos do kit → Perguntas do Organizador,
+ * separadas por dividers. `wrap: false` evita quebra do card entre páginas. */
 const ParticipantCard = ({ reg }: { reg: TicketPdfRegistrationWithQr }) => {
-  const fields = [
-    reg.email ? { label: 'Email', value: reg.email } : null,
+  // Ordem/labels do design. "Nome" agora é campo (não cabeçalho separado).
+  const infoFields = [
+    { label: 'Nome', value: reg.participantName },
+    reg.dateOfBirth ? { label: 'Data de nascimento', value: fmtDate(reg.dateOfBirth) } : null,
+    reg.gender ? { label: 'Sexo', value: fmtGender(reg.gender) } : null,
     reg.cpf
       ? isBR(reg.country, reg.documentType, reg.cpf)
         ? { label: 'CPF', value: fmtCPF(reg.cpf) }
         : { label: 'Documento', value: reg.cpf }
       : null,
-    reg.dateOfBirth ? { label: 'Data de nascimento', value: fmtDate(reg.dateOfBirth) } : null,
+    reg.email ? { label: 'Email', value: reg.email } : null,
     reg.phone ? { label: 'Telefone', value: fmtPhone(reg.phone, reg.country, reg.documentType, reg.cpf) } : null,
-    reg.gender ? { label: 'Sexo', value: fmtGender(reg.gender) } : null,
   ].filter(Boolean) as { label: string; value: string }[];
 
-  return React.createElement(
-    View,
-    {
-      style: {
-        backgroundColor: C.gray1,
-        borderRadius: 12,
-        borderWidth: 1,
-        borderColor: C.gray6,
-        borderStyle: 'solid',
-        marginTop: 16,
-      },
-    },
-    /* Cabeçalho: QR 80×80 + nome/ticket */
-    React.createElement(
+  // Seções presentes, na ordem do design.
+  const sections: any[] = [];
+
+  sections.push(e(IngressoSection, { reg }));
+
+  // Email e Telefone saem do grid de 2 colunas e viram LINHAS INTEIRAS: com a
+  // largura total do card, um e-mail longo quebra em 2+ linhas SEM invadir o
+  // campo ao lado (o bug era o e-mail transbordando pro Telefone quando os dois
+  // dividiam a mesma linha de 2 colunas). A quebra de token sem espaço continua
+  // garantida pelo hyphenation callback do topo (MAX_UNBREAKABLE). react-pdf não
+  // suporta `word-break: break-all` — full-width + callback é o equivalente.
+  const CONTACT_LABELS = new Set(['Email', 'Telefone']);
+  const gridFields = infoFields.filter((f) => !CONTACT_LABELS.has(f.label));
+  const contactFields = infoFields.filter((f) => CONTACT_LABELS.has(f.label));
+
+  sections.push(
+    e(
       View,
-      {
-        style: {
-          padding: 20,
-          borderBottomWidth: 1,
-          borderBottomColor: C.gray6,
-          borderBottomStyle: 'solid',
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: 16,
-        },
-      },
-      // QR com moldura branca (borda + padding), igual ao QR da tela de ingresso
-      // do usuário (RegistrationQRCode). Caixa mantida em 80×80 → não altera o
-      // cálculo de altura do participante; o QR fica embutido (64px) com padding.
-      React.createElement(
+      { style: { gap: 16, width: '100%' } },
+      e(Text, { style: T.h20 }, 'Informações do participante'),
+      e(
         View,
-        {
-          style: {
-            width: 80,
-            height: 80,
-            padding: 8,
-            backgroundColor: '#FFFFFF',
-            borderWidth: 1,
-            borderColor: C.gray6,
-            borderStyle: 'solid',
-            borderRadius: 12,
-            alignItems: 'center',
-            justifyContent: 'center',
-          },
-        },
-        React.createElement(Image, { src: reg.qrDataUrl, style: { width: 64, height: 64 } }),
-      ),
-      React.createElement(
-        View,
-        { style: { gap: 16 } },
-        React.createElement(
-          Text,
-          { style: { fontFamily: 'DM Sans', fontSize: 16, fontWeight: 400, color: C.gray12 } },
-          `Participante ${reg.index}`,
+        { style: { width: '100%' } },
+        // Nome / Data de nascimento / Sexo / CPF seguem em 2 colunas (valores curtos).
+        twoCol(
+          gridFields,
+          (f: { label: string; value: string }) =>
+            e(InfoField, { label: f.label, value: f.value, dark: true, strong: true, py: 16, gap: 15 }),
+          { rowGap: 0, colGap: 8 },
         ),
-        React.createElement(
-          Text,
-          { style: { fontFamily: 'Manrope', fontSize: 18, fontWeight: 700, color: C.gray12 } },
-          reg.participantName,
-        ),
-        React.createElement(
-          View,
-          { style: { gap: 2 } },
-          // Categoria do ingresso (ou "Ingresso avulso") em destaque…
-          React.createElement(
-            Text,
-            { style: { fontFamily: 'Manrope', fontSize: 12, fontWeight: 400, color: C.gray11 } },
-            reg.ticketCategory || 'Ingresso avulso',
-          ),
-          // …e o nome do ingresso abaixo.
-          React.createElement(
-            Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 500, color: C.gray12 } },
-            reg.ticketName,
+        // Email e Telefone: 1 por linha, largura total (mesmo ritmo vertical via py).
+        ...contactFields.map((f, i) =>
+          e(
+            View,
+            { key: `contact-${i}`, style: { width: '100%' } },
+            e(InfoField, { label: f.label, value: f.value, dark: true, strong: true, py: 16, gap: 15 }),
           ),
         ),
       ),
     ),
-    /* Seção: informações do participante */
-    fields.length > 0
-      ? React.createElement(
+  );
+
+  if (reg.products.length > 0) {
+    sections.push(
+      e(
         View,
-        { style: { paddingHorizontal: 20, paddingVertical: 24, gap: 20 } },
-        React.createElement(
-          Text,
-          { style: { fontFamily: 'Manrope', fontSize: 18, fontWeight: 800, color: C.gray12 } },
-          'Informações do participante',
-        ),
-        React.createElement(
+        { style: { gap: 16, width: '100%' } },
+        e(Text, { style: T.h20 }, 'Produtos do kit'),
+        // Coluna ÚNICA: 1 produto por linha (full-width). Em 2 colunas o card
+        // quebrava (largura insuficiente p/ imagem 100 + nome + tamanho).
+        e(
           View,
-          null,
-          ...fields.map((f, i) =>
-            React.createElement(FieldItem, { key: i, label: f.label, value: f.value }),
+          { style: { gap: 16, width: '100%' } },
+          ...reg.products.map((p: TicketPdfProduct, i: number) =>
+            e(ProductCard, { key: i, product: p }),
           ),
         ),
-      )
-      : null,
-    /* Seção: perguntas do organizador */
-    ...(reg.questionAnswers.length > 0
-      ? [
-        React.createElement(
-          View,
-          { style: { marginHorizontal: 16 } },
-          React.createElement(HR, null),
+      ),
+    );
+  }
+
+  if (reg.questionAnswers.length > 0) {
+    sections.push(
+      e(
+        View,
+        { style: { gap: 12, width: '100%' } },
+        e(Text, { style: T.h18 }, 'Perguntas do Organizador'),
+        twoCol(
+          reg.questionAnswers,
+          (qa: { question: string; answer: string }) =>
+            e(InfoField, { label: qa.question, value: qa.answer, py: 16, gap: 15 }),
+          { rowGap: 0, colGap: 8, fillLast: true },
         ),
-        React.createElement(
-          View,
-          { style: { paddingHorizontal: 20, paddingVertical: 24, gap: 20 } },
-          React.createElement(
-            Text,
-            { style: { fontFamily: 'Manrope', fontSize: 18, fontWeight: 800, color: C.gray12 } },
-            'Perguntas do Organizador',
-          ),
-          React.createElement(
-            View,
-            null,
-            ...reg.questionAnswers.map((qa, i) =>
-              React.createElement(FieldItem, { key: i, label: qa.question, value: qa.answer }),
-            ),
-          ),
-        ),
-      ]
-      : []),
-    /* Seção: produtos do kit */
-    ...(reg.products.length > 0
-      ? [
-        React.createElement(
-          View,
-          { style: { marginHorizontal: 16 } },
-          React.createElement(HR, null),
-        ),
-        React.createElement(
-          View,
-          { style: { paddingHorizontal: 20, paddingVertical: 24, gap: 20 } },
-          React.createElement(
-            Text,
-            { style: { fontFamily: 'Manrope', fontSize: 18, fontWeight: 800, color: C.gray12 } },
-            'Produtos do kit',
-          ),
-          React.createElement(
-            View,
-            { style: { flexDirection: 'column', gap: 12 } },
-            ...reg.products.map((p, i) =>
-              React.createElement(ProductCard, { key: i, product: p }),
-            ),
-          ),
-        ),
-      ]
-      : []),
+      ),
+    );
+  }
+
+  // Intercala divisórias entre as seções presentes.
+  const children: any[] = [];
+  sections.forEach((s, i) => {
+    if (i > 0) children.push(e(HR, { key: `hr-${i}` }));
+    children.push(e(View, { key: `s-${i}`, style: { width: '100%' } }, s));
+  });
+
+  return e(
+    View,
+    {
+      wrap: false,
+      style: {
+        borderWidth: 1,
+        borderColor: C.gray6,
+        borderStyle: 'solid',
+        borderRadius: 8,
+        padding: 20,
+        gap: 32,
+        width: '100%',
+      },
+    },
+    ...children,
   );
 };
 
@@ -697,232 +899,183 @@ const TicketBrand = () =>
     }),
   );
 
-/* Calcula altura aproximada para página única (scroll infinito) */
+/* Altura aproximada da página única (scroll infinito). Superestima de
+ * propósito (buffer generoso) — sobra vira espaço em branco no rodapé, o que é
+ * preferível a cortar conteúdo. Escala com nº de campos/produtos/perguntas. */
+/* Altura aproximada da PÁGINA ÚNICA. É crítico NUNCA subestimar: como o doc é
+ * uma página só (sem quebra), se a altura ficar menor que o conteúdo o @react-pdf
+ * empurra o resto pra uma 2ª página e CORTA. Por isso contamos a quebra de linha
+ * dos textos longos e superestimamos com folga — o excedente vira branco no
+ * rodapé (aceitável), nunca corte. Página maior NUNCA cria 2ª página. */
 function estimatePageHeight(data: TicketPdfTemplateData): number {
-  // Cabeçalho fixo: logo + HR + título seção + event card
-  let h = 32 + 60 + 1 + 20 + 18 + 12 + 14 + 16; // header + section title
-  h += 16 + 36 + 8 + 16 + 1 + 20; // event card: icon row + HR + gap
-  h += (14 + 8 + 16) * 2 + 16; // 2 linhas de metadata
-  h += 16; // card padding
+  // Linhas aproximadas de um texto numa coluna de `colW` px. Fator 0.62 =
+  // largura média de caractere ~ fontSize*0.62 (conservador → superestima).
+  const lines = (text: string | null | undefined, colW: number, fs: number) => {
+    const len = String(text ?? '').length;
+    const cpl = Math.max(6, Math.floor(colW / (fs * 0.62)));
+    return Math.max(1, Math.ceil(len / cpl));
+  };
+  // Altura de um campo "label + valor" (InfoField): py(16*2) + gap 15 + linhas.
+  const fieldH = (label: string, value: string, colW: number, valFs: number) =>
+    32 + 15 + lines(label, colW, 16) * 21 + lines(value, colW, valFs) * (valFs * 1.35);
+
+  let h = 88; // padding vertical da página (44 topo + 44 rodapé)
+  h += 58 + 36; // header + gap
+  h += 1 + 36; // divisória + gap
+  h += 64 + 36; // título + subtítulo + gap
+
+  // ---- Card do evento: chip + nome + divisória + 2 linhas de campos (2-col) ----
+  // Inner do card (padding 16): 507-32=475; colGap 12 → cada coluna ~231.
+  const evColW = 231;
+  const evRow1 = Math.max(
+    fieldH('Data', fmtDate(data.event.date), evColW, 18),
+    fieldH('Organização', data.event.organization, evColW, 18),
+  );
+  const evRow2 = Math.max(
+    fieldH('Local do evento', data.event.location, evColW, 18),
+    fieldH('Participantes', 'x atletas', evColW, 18),
+  );
+  h += 32 + 44 + 20 + 1 + 20 + evRow1 + evRow2 + 24;
+  h += 24; // gap até o 1º participante
 
   for (const reg of data.registrations) {
-    h += 16; // marginTop do card
+    let c = 40; // padding do card (20*2)
 
-    // Cabeçalho do participante: QR 80px + padding
-    h += 20 + 80 + 20;
+    // Ingresso: título + gap + max(QR box 116, coluna esquerda [nome + modalidade]).
+    const leftCol = lines(reg.ticketName, 300, 20) * 27 + 24 + (reg.modality ? 24 : 0);
+    c += 22 + 24 + Math.max(116, leftCol);
 
-    // Informações do participante
-    const fieldCount = [reg.email, reg.cpf, reg.dateOfBirth, reg.phone, reg.gender]
-      .filter(Boolean).length;
-    if (fieldCount > 0) {
-      h += 24 + 18 + 20; // padding + título + gap
-      h += fieldCount * (8 + 16 + 12 + 16 + 8); // cada FieldItem
-      h += 24;
+    // Informações do participante: grid 2-col (Nome/Data/Sexo/CPF, coluna ~229)
+    // + Email/Telefone em LINHAS INTEIRAS (espelha o render). Email/Telefone são
+    // SOMADOS (2 linhas separadas), não pareados — senão a altura subestima e o
+    // conteúdo estoura pra 2ª página.
+    const infoColW = 229;
+    const gridInfo: Array<[string, string]> = [['Nome', reg.participantName]];
+    if (reg.dateOfBirth) gridInfo.push(['Data de nascimento', '00/00/0000']);
+    if (reg.gender) gridInfo.push(['Sexo', 'Masculino']);
+    if (reg.cpf) gridInfo.push(['Documento', reg.cpf]);
+    c += 32 + 1 + 22 + 16; // gap+divisória + título + gap
+    for (let i = 0; i < gridInfo.length; i += 2) {
+      const a = gridInfo[i];
+      const b = gridInfo[i + 1];
+      c += Math.max(
+        fieldH(a[0], a[1], infoColW, 18),
+        b ? fieldH(b[0], b[1], infoColW, 18) : 0,
+      );
     }
+    // Email + Telefone: full-width (~467), 1 por linha → somados.
+    const contactColW = 467;
+    if (reg.email) c += fieldH('Email', reg.email, contactColW, 18);
+    if (reg.phone) c += fieldH('Telefone', reg.phone, contactColW, 18);
 
-    // Perguntas
-    if (reg.questionAnswers.length > 0) {
-      h += 1 + 24 + 18 + 20; // HR + padding + título + gap
-      h += reg.questionAnswers.length * (8 + 16 + 12 + 16 + 8);
-      h += 24;
-    }
-
-    // Produtos
+    // Produtos (COLUNA ÚNICA). Card = max(img 100, coluna de texto) + padding 24,
+    // + gap 16. Coluna de texto ~355 (467 − 12 gap − 100 img).
     if (reg.products.length > 0) {
-      h += 1 + 24 + 18 + 20; // HR + padding + título + gap
-      // Cada linha de produto: imagem 100 + padding top/bottom 32 + seção tamanho/badge ~90
-      h += reg.products.length * 132;
-      h += 24;
+      c += 32 + 1 + 22 + 16;
+      for (const p of reg.products) {
+        const textH = lines(p.name, 355, 16) * 22 + 8 + 24;
+        c += Math.max(124, textH + 24) + 16;
+      }
     }
+
+    // Perguntas (2-col, coluna ~229). Label = pergunta, valor = resposta —
+    // ambos podem ser longos (line-aware).
+    if (reg.questionAnswers.length > 0) {
+      c += 32 + 1 + 20 + 12;
+      const qs = reg.questionAnswers;
+      for (let i = 0; i < qs.length; i += 2) {
+        const a = qs[i];
+        const b = qs[i + 1];
+        c += Math.max(
+          fieldH(a.question, a.answer, 229, 16),
+          b ? fieldH(b.question, b.answer, 229, 16) : 0,
+        );
+      }
+    }
+
+    h += c + 24; // altura do card + gap
   }
 
-  h += 32 + 500; // paddingBottom + buffer de segurança generoso
-  return Math.max(842, h);
+  // Margem de segurança: +6% + 250px. Superestimar só adiciona branco no rodapé,
+  // nunca corta. Teto 14400 = limite físico de página do PDF.
+  h = h * 1.06 + 250;
+  return Math.min(14400, Math.max(842, h));
 }
 
 export const TicketPdfDocument = ({ data }: { data: TicketPdfTemplateData }) => {
   const pageHeight = estimatePageHeight(data);
 
-  return React.createElement(
+  return e(
     Document,
     { title: `Ingresso — ${data.event.name}`, author: 'PódioTicket' },
-    React.createElement(
+    e(
       Page,
       {
         size: [595, pageHeight],
         style: {
           fontFamily: 'DM Sans',
-          backgroundColor: C.white,
-          paddingHorizontal: 52,
-          paddingVertical: 32,
+          backgroundColor: C.gray1,
+          paddingHorizontal: 44,
+          paddingVertical: 44,
         },
       },
-      /* Cabeçalho: logo + dados do ingresso */
-      React.createElement(
+      e(
         View,
-        {
-          style: {
-            flexDirection: 'row',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginBottom: 20,
-          },
-        },
-        React.createElement(Image, {
-          src: path.join(__dirname, '..', 'assets', 'logo-podioticket.png'),
-          style: { width: 160, height: 27 },
-        }),
-        React.createElement(
+        { style: { gap: 36 } },
+        /* Cabeçalho: logo + ID/emitido */
+        e(
           View,
-          { style: { alignItems: 'flex-end', gap: 12 } },
-          React.createElement(
+          {
+            style: {
+              flexDirection: 'row',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            },
+          },
+          logoDataUri()
+            ? e(Image, {
+                src: logoDataUri() as string,
+                style: { width: 200, height: 34 },
+              })
+            : e(View, { style: { width: 200, height: 34 } }),
+          e(
             View,
-            { style: { flexDirection: 'row', gap: 4 } },
-            React.createElement(
+            { style: { alignItems: 'flex-end', gap: 16 } },
+            e(
               Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray12 } },
-              'ID da inscrição: ',
-            ),
-            React.createElement(
-              Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 600, color: C.gray12 } },
+              null,
+              e(Text, { style: T.labelDark }, 'ID da inscrição: '),
               // Só o 1º segmento do UUID (visual), igual aos painéis/e-mails.
-              `#${String(data.registrations[0]?.registrationId ?? '').slice(0, 8)}`,
+              e(
+                Text,
+                { style: T.h16 },
+                `#${String(data.registrations[0]?.registrationId ?? '').slice(0, 8)}`,
+              ),
             ),
-          ),
-          React.createElement(
-            Text,
-            { style: { fontFamily: 'DM Sans', fontSize: 11, fontWeight: 400, color: C.gray11 } },
-            `Emitido em ${fmtDateTime(data.issuedAt)}`,
-          ),
-        ),
-      ),
-      React.createElement(HR, null),
-      /* Título da seção */
-      React.createElement(
-        View,
-        { style: { gap: 12, marginTop: 20, marginBottom: 16 } },
-        React.createElement(
-          Text,
-          { style: { fontFamily: 'Manrope', fontSize: 18, fontWeight: 800, color: C.gray12 } },
-          'Detalhes da inscrição',
-        ),
-        React.createElement(
-          Text,
-          { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 400, color: C.gray11 } },
-          'Apresente os QR Codes na retirada do kit ou na entrada do evento',
-        ),
-      ),
-      /* Card resumo do evento */
-      React.createElement(
-        View,
-        {
-          style: {
-            padding: 16,
-            backgroundColor: C.gray2,
-            borderRadius: 8,
-            borderWidth: 1,
-            borderColor: C.gray6,
-            borderStyle: 'solid',
-            gap: 20,
-            marginBottom: 0,
-          },
-        },
-        React.createElement(
-          View,
-          { style: { flexDirection: 'row', alignItems: 'center', gap: 12 } },
-          React.createElement(
-            View,
-            { style: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center' } },
-            React.createElement(
-              Svg,
-              { width: 27, height: 30, viewBox: '0 0 36 36' },
-              React.createElement(Path, {
-                d: 'M4.5 33V21M4.5 21V4.5M4.5 21H10.5M4.5 4.5V3M4.5 4.5H22.5C24.1569 4.5 25.5 5.84315 25.5 7.5V10.5M25.5 10.5H28.5C30.1569 10.5 31.5 11.8431 31.5 13.5V25.5C31.5 27.1569 30.1569 28.5 28.5 28.5H13.5C11.8431 28.5 10.5 27.1569 10.5 25.5V21M25.5 10.5V18C25.5 19.6569 24.1569 21 22.5 21H10.5',
-                stroke: C.gray12,
-                strokeWidth: 2,
-                strokeLinecap: 'round',
-                strokeLinejoin: 'round',
-                fill: 'none',
-              }),
-            ),
-          ),
-          React.createElement(
-            View,
-            { style: { gap: 8 } },
-            React.createElement(
-              Text,
-              { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 400, color: C.gray11 } },
-              'Evento',
-            ),
-            React.createElement(
-              Text,
-              { style: { fontFamily: 'Manrope', fontSize: 16, fontWeight: 700, color: C.gray12 } },
-              data.event.name,
-            ),
+            e(Text, { style: T.label }, `Emitido em ${fmtDateTime(data.issuedAt)}`),
           ),
         ),
-        React.createElement(HR, null),
-        /* Duas linhas de 2 colunas evita bug de altura no yoga-layout com texto longo */
-        React.createElement(
+        e(HR, null),
+        /* Título da seção */
+        e(
           View,
           { style: { gap: 16 } },
-          /* Linha 1: Data + Organização */
-          React.createElement(
-            View,
-            { style: { flexDirection: 'row', gap: 12 } },
-            ...[
-              { label: 'Data', value: fmtDate(data.event.date) },
-              { label: 'Organização', value: data.event.organization },
-            ].map(({ label, value }) =>
-              React.createElement(
-                View,
-                { key: label, style: { flex: 1, minWidth: 0, gap: 8 } },
-                React.createElement(
-                  Text,
-                  { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 400, color: C.gray11 } },
-                  label,
-                ),
-                React.createElement(
-                  Text,
-                  { style: { fontFamily: 'DM Sans', fontSize: 16, fontWeight: 500, color: C.gray12 } },
-                  value,
-                ),
-              ),
-            ),
-          ),
-          /* Linha 2: Local + Participantes */
-          React.createElement(
-            View,
-            { style: { flexDirection: 'row', gap: 12 } },
-            ...[
-              { label: 'Local do evento', value: data.event.location },
-              {
-                label: 'Participantes',
-                value: `${data.event.participantCount} atleta${data.event.participantCount !== 1 ? 's' : ''}`,
-              },
-            ].map(({ label, value }) =>
-              React.createElement(
-                View,
-                { key: label, style: { flex: 1, minWidth: 0, gap: 8 } },
-                React.createElement(
-                  Text,
-                  { style: { fontFamily: 'DM Sans', fontSize: 14, fontWeight: 400, color: C.gray11 } },
-                  label,
-                ),
-                React.createElement(
-                  Text,
-                  { style: { fontFamily: 'DM Sans', fontSize: 16, fontWeight: 500, color: C.gray12 } },
-                  value,
-                ),
-              ),
-            ),
+          e(Text, { style: T.h24 }, 'Detalhes da inscrição'),
+          e(
+            Text,
+            { style: T.label },
+            'Apresente os QR Codes na retirada do kit ou na entrada do evento',
           ),
         ),
-      ),
-      /* Cards de participantes */
-      ...data.registrations.map((reg) =>
-        React.createElement(ParticipantCard, { key: reg.index, reg }),
+        /* Card do evento + cards de participantes */
+        e(
+          View,
+          { style: { gap: 24 } },
+          e(EventCard, { event: data.event }),
+          ...data.registrations.map((reg) =>
+            e(View, { key: reg.index, style: { width: '100%' } }, e(ParticipantCard, { reg })),
+          ),
+        ),
       ),
     ),
   );
