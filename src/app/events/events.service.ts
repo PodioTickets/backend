@@ -4949,7 +4949,6 @@ export class EventsService {
 
     const prismaRead = this.prisma.getReadClient();
     const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
     // Limitar o limit a 100
     const safeLimit = Math.min(limit, 100);
@@ -5028,7 +5027,9 @@ export class EventsService {
       // Se ainda não passou do prazo de retenção, está aguardando liberação
       if (releaseDate > now) {
         const daysUntilRelease = calendarDaysUntil(releaseDate, now);
-        const isReleaseToday = releaseDate.toDateString() === today.toDateString();
+        // "Libera hoje" = 0 dias civis em BRT (mesma âncora do daysUntilRelease/display),
+        // não `toDateString` em UTC — senão o "libera hoje" divergia do dia mostrado.
+        const isReleaseToday = daysUntilRelease === 0;
         const orgBase = Math.max(
           0,
           (order.finalAmount || 0) - (order.serviceFee ?? 0),
