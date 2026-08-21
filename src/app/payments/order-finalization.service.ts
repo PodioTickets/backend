@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import {
+  AccountType,
   DocumentType,
   RegistrationStatus,
   UserActivityCategory,
@@ -447,7 +448,7 @@ export class OrderFinalizationService {
 
         // Resolve participante — nunca cria User fantasma
         let participantUserId: string | null = userId;
-        let guestSnapshot:
+        let participantSnapshot:
           | {
               name: string;
               email: string;
@@ -461,23 +462,51 @@ export class OrderFinalizationService {
           | null = null;
 
         if (pData.email?.toLowerCase() !== buyerUser?.email?.toLowerCase()) {
-          const existingUser = await tx.user.findFirst({ where: { email: pData.email } });
-          if (existingUser) {
-            participantUserId = existingUser.id;
-          } else {
-            const doc = resolveDocument(pData);
-            participantUserId = null;
-            guestSnapshot = {
-              name: pData.name ?? '',
-              email: pData.email ?? '',
-              documentType: doc.type,
-              documentNumber: doc.number,
-              documentNumberClean: doc.clean,
-              phone: pData.phone ?? '',
-              dateOfBirth: pData.birthDate ? new Date(pData.birthDate) : null,
-              gender: pData.gender ?? null,
-            };
-          }
+          const doc = resolveDocument(pData);
+
+          // Resolve a conta do PARTICIPANTE apenas entre contas de COMPRADOR
+          // (accountType USER). O mesmo e-mail/documento pode coexistir como ORGANIZER
+          // — o @@unique do User é por [campo, accountType]. Um findFirst SEM escopo
+          // "adotava" a conta de organizador quando os e-mails coincidiam e a inscrição
+          // herdava os dados PESSOAIS do organizador (bug). Identidade canônica =
+          // documento (CPF/passaporte obrigatório no checkout); e-mail é fallback.
+          const matchedUser =
+            (doc.clean
+              ? await tx.user.findUnique({
+                  where: {
+                    documentNumberClean_accountType: {
+                      documentNumberClean: doc.clean,
+                      accountType: AccountType.USER,
+                    },
+                  },
+                  select: { id: true },
+                })
+              : null) ??
+            (pData.email
+              ? await tx.user.findUnique({
+                  where: {
+                    email_accountType: { email: pData.email, accountType: AccountType.USER },
+                  },
+                  select: { id: true },
+                })
+              : null);
+
+          participantUserId = matchedUser?.id ?? null;
+
+          // Snapshot SEMPRE a partir do que o comprador digitou — nunca depende da conta
+          // vinculada. Garante que a inscrição exiba os dados do PARTICIPANTE mesmo quando
+          // vinculada a uma conta existente (ex.: e-mail reaproveitado por outro USER),
+          // alinhado ao invariante do projeto (identidade = snapshot, não a relação viva).
+          participantSnapshot = {
+            name: pData.name ?? '',
+            email: pData.email ?? '',
+            documentType: doc.type,
+            documentNumber: doc.number,
+            documentNumberClean: doc.clean,
+            phone: pData.phone ?? '',
+            dateOfBirth: pData.birthDate ? new Date(pData.birthDate) : null,
+            gender: pData.gender ?? null,
+          };
         }
 
         const isGuest = participantUserId === null;
@@ -494,22 +523,22 @@ export class OrderFinalizationService {
             rulesAccepted: true,
             emergencyContactName: pData.emergencyContactName?.trim() || null,
             emergencyContactPhone: pData.emergencyPhone?.trim() || null,
-            ...(guestSnapshot && {
-              participantName: guestSnapshot.name,
-              participantEmail: guestSnapshot.email,
+            ...(participantSnapshot && {
+              participantName: participantSnapshot.name,
+              participantEmail: participantSnapshot.email,
               // Legacy: mantido em paralelo durante a transição. Fase E remove.
-              participantCpf: guestSnapshot.documentNumber,
+              participantCpf: participantSnapshot.documentNumber,
               participantCpfClean:
-                guestSnapshot.documentType === DocumentType.CPF
-                  ? guestSnapshot.documentNumberClean
+                participantSnapshot.documentType === DocumentType.CPF
+                  ? participantSnapshot.documentNumberClean
                   : '',
               // Fonte de verdade nova
-              participantDocumentType: guestSnapshot.documentType,
-              participantDocumentNumber: guestSnapshot.documentNumber,
-              participantDocumentNumberClean: guestSnapshot.documentNumberClean,
-              participantPhone: guestSnapshot.phone,
-              participantDateOfBirth: guestSnapshot.dateOfBirth,
-              participantGender: guestSnapshot.gender,
+              participantDocumentType: participantSnapshot.documentType,
+              participantDocumentNumber: participantSnapshot.documentNumber,
+              participantDocumentNumberClean: participantSnapshot.documentNumberClean,
+              participantPhone: participantSnapshot.phone,
+              participantDateOfBirth: participantSnapshot.dateOfBirth,
+              participantGender: participantSnapshot.gender,
             }),
           },
         });
