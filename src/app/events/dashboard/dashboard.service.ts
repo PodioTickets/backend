@@ -58,6 +58,7 @@ interface CityRow {
   participants: bigint;
 }
 interface PurchaseLocationRow {
+  neighborhood: string | null;
   city: string;
   state: string | null;
   purchases: bigint;
@@ -679,17 +680,19 @@ export class DashboardService {
    * endereço daquela compra específica — diferente de `queryTopCities`, que usa
    * o espelho em `User.city` (última compra do usuário, sobrescrevível).
    *
-   * Alimenta o mapa de calor geográfico do dashboard. Coalesce case/acentos em
-   * JS (sem depender da extensão `unaccent`), igual a `queryTopCities`. Retorna
-   * até 500 locais distintos (teto defensivo — o front geocodifica cada um).
+   * Alimenta o mapa de calor geográfico do dashboard. Agrupa por BAIRRO (mais
+   * preciso que só cidade) + cidade + UF; o front geocodifica cada bairro. Coalesce
+   * case/acentos em JS (sem depender da extensão `unaccent`), igual a `queryTopCities`.
+   * Retorna até 500 locais distintos (teto defensivo — o front geocodifica cada um).
    */
   private async queryPurchasesByLocation(
     eventId: string,
     dateRange: DateRange,
     ticketIds: string[] | null,
-  ): Promise<{ city: string; state?: string; purchases: number }[]> {
+  ): Promise<{ neighborhood?: string; city: string; state?: string; purchases: number }[]> {
     const rows = await this.prisma.getReadClient().$queryRaw<PurchaseLocationRow[]>(Prisma.sql`
       SELECT
+        BTRIM(o."billingNeighborhood") AS neighborhood,
         BTRIM(o."billingCity") AS city,
         BTRIM(o."billingStateUf") AS state,
         COUNT(*)::bigint AS purchases
@@ -701,21 +704,25 @@ export class DashboardService {
         AND BTRIM(o."billingCity") <> ''
         ${this.sqlDateFilter(dateRange, 'o')}
         ${this.sqlTicketIdsExistsFilter(ticketIds, eventId)}
-      GROUP BY BTRIM(o."billingCity"), BTRIM(o."billingStateUf");
+      GROUP BY BTRIM(o."billingNeighborhood"), BTRIM(o."billingCity"), BTRIM(o."billingStateUf");
     `);
 
     const normalize = (s: string) =>
       s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
 
-    const merged = new Map<string, { city: string; state?: string; purchases: number }>();
+    const merged = new Map<
+      string,
+      { neighborhood?: string; city: string; state?: string; purchases: number }
+    >();
     for (const r of rows) {
       const state = r.state || undefined;
-      const key = `${normalize(r.city)}|${state ? normalize(state) : ''}`;
+      const neighborhood = r.neighborhood?.trim() || undefined;
+      const key = `${neighborhood ? normalize(neighborhood) : ''}|${normalize(r.city)}|${state ? normalize(state) : ''}`;
       const existing = merged.get(key);
       if (existing) {
         existing.purchases += Number(r.purchases);
       } else {
-        merged.set(key, { city: r.city, state, purchases: Number(r.purchases) });
+        merged.set(key, { neighborhood, city: r.city, state, purchases: Number(r.purchases) });
       }
     }
 
