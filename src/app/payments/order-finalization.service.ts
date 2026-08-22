@@ -429,8 +429,11 @@ export class OrderFinalizationService {
     const createdRegs: any[] = [];
     const buyerUser = await tx.user.findUnique({
       where: { id: userId },
-      select: { email: true },
+      // documentType/documentNumberClean: identidade canônica do comprador para
+      // detectar "compra pra si mesmo com outro e-mail" (mesmo CPF ⇒ NÃO é presente).
+      select: { email: true, documentType: true, documentNumberClean: true },
     });
+    const buyerDocClean = buyerUser?.documentNumberClean ?? '';
 
     const frontendUrl = (process.env.FRONTEND_URL ?? '').replace(/\/$/, '');
 
@@ -492,6 +495,24 @@ export class OrderFinalizationService {
               : null);
 
           participantUserId = matchedUser?.id ?? null;
+
+          // COMPRA PRA SI MESMO com e-mail diferente: se o documento do participante é
+          // o MESMO do comprador, é a própria pessoa → vincula à conta do comprador
+          // (invitedById fica null adiante) e NÃO é presente. Comparação DIRETA contra o
+          // documento do comprador (identidade canônica), não depende do lookup global —
+          // que falhava em contas legadas sem `documentNumberClean`, caindo em "guest" →
+          // presente indevido. Exige mesmo tipo quando ambos conhecidos (evita colisão
+          // CPF×passaporte de mesmo número).
+          const isBuyerBySelfDocument =
+            doc.clean !== '' &&
+            buyerDocClean !== '' &&
+            doc.clean === buyerDocClean &&
+            (buyerUser?.documentType == null ||
+              doc.type == null ||
+              buyerUser.documentType === doc.type);
+          if (isBuyerBySelfDocument) {
+            participantUserId = userId;
+          }
 
           // Snapshot SEMPRE a partir do que o comprador digitou — nunca depende da conta
           // vinculada. Garante que a inscrição exiba os dados do PARTICIPANTE mesmo quando
