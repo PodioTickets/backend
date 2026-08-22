@@ -2773,6 +2773,23 @@ export class EventsService {
     } as const;
   }
 
+  /**
+   * Teto da taxa TOTAL (%) que um evento pode ter, conforme a ORGANIZAÇÃO dona:
+   * quando `customFeeEnabled`, o teto personalizado (`maxTotalFeePercent`) definido
+   * pelo admin; caso contrário, o fixo de 6% (organizador 4 + comprador 2). Fonte
+   * ÚNICA da regra — usada no enforcement autoritativo do organizador e do admin.
+   */
+  private resolveOrgTotalFeeCeiling(org: {
+    customFeeEnabled?: boolean | null;
+    maxTotalFeePercent?: number | null;
+  } | null | undefined): number {
+    const FIXED = DEFAULT_ORGANIZER_FEE_PERCENT + DEFAULT_PARTICIPANT_FEE_PERCENT;
+    if (org?.customFeeEnabled) {
+      return typeof org.maxTotalFeePercent === 'number' ? org.maxTotalFeePercent : FIXED;
+    }
+    return FIXED;
+  }
+
   async getFinancialSettings(userId: string, eventId: string) {
     await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
 
@@ -2817,6 +2834,32 @@ export class EventsService {
     // organizador — afetam só pagamentos futuros e o /pay valida a whitelist.
     const touchesLockedFields =
       data.organizerFeePercent !== undefined || data.participantFeePercent !== undefined;
+
+    // Enforcement AUTORITATIVO do teto da taxa total (por organização). Só quando a
+    // divisão da taxa muda — busca os valores atuais p/ o campo omitido no PATCH e o
+    // teto efetivo da org (personalizado ou 6% fixo). Rejeita se organizador+comprador
+    // ultrapassam o teto (o front é só UX; a verdade é aqui). Epsilon absorve ruído
+    // de ponto flutuante (ex.: 5.999999 vs 6).
+    if (touchesLockedFields) {
+      const current = await prismaWrite.event.findUnique({
+        where: { id: eventId },
+        select: {
+          organizerFeePercent: true,
+          participantFeePercent: true,
+          organization: { select: { customFeeEnabled: true, maxTotalFeePercent: true } },
+        },
+      });
+      if (!current) throw new NotFoundException('Evento não encontrado');
+      const ceiling = this.resolveOrgTotalFeeCeiling(current.organization);
+      const newOrganizer = data.organizerFeePercent ?? current.organizerFeePercent;
+      const newParticipant = data.participantFeePercent ?? current.participantFeePercent;
+      const total = newOrganizer + newParticipant;
+      if (total > ceiling + 0.001) {
+        throw new BadRequestException(
+          `A taxa total (${total.toFixed(2)}%) excede o máximo permitido para esta organização (${ceiling.toFixed(2)}%).`,
+        );
+      }
+    }
 
     if (Object.keys(data).length === 0) {
       // PATCH vazio: no-op — devolve o estado atual sem tocar o banco.

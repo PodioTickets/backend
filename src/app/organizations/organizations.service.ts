@@ -483,6 +483,12 @@ export class OrganizationsService {
             anticipationMonthlyRate: createDto.anticipationMonthlyRate,
           }),
           anticipationEnabled: createDto.anticipationEnabled ?? false,
+          // Taxa de organizador personalizada: desligada por padrão; teto opcional
+          // (senão default do schema = 6%). Só é aplicado quando o toggle está ligado.
+          customFeeEnabled: createDto.customFeeEnabled ?? false,
+          ...(createDto.maxTotalFeePercent != null && {
+            maxTotalFeePercent: createDto.maxTotalFeePercent,
+          }),
         },
       });
 

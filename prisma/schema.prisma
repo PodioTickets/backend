@@ -260,6 +260,17 @@ model Organization {
   /// requestAnticipation (repasse.service): org desligada não antecipa.
   anticipationEnabled Boolean @default(false)
 
+  /// Taxa de organizador PERSONALIZADA habilitada. DESLIGADA por padrão. Quando
+  /// ligada, o organizador pode definir a taxa TOTAL do evento (organizador +
+  /// comprador) até `maxTotalFeePercent` na etapa financeira; quando desligada, o
+  /// teto é o fixo de 6% (DEFAULT_ORGANIZER_FEE_PERCENT + DEFAULT_PARTICIPANT_FEE_PERCENT).
+  /// Vale só para eventos NOVOS — cada evento congela sua taxa no create.
+  customFeeEnabled Boolean @default(false)
+  /// Teto da taxa TOTAL (%) que o organizador pode configurar por evento quando
+  /// `customFeeEnabled`. Escala 0–100. Só é aplicado com o toggle ligado; senão o
+  /// teto efetivo é 6%. Enforcement autoritativo no backend (create/updateFinancialSettings).
+  maxTotalFeePercent Float @default(6)
+
   isActive  Boolean  @default(true)
 
   createdAt DateTime @default(now())

@@ -12,9 +12,11 @@ export class UpdateFinancialSettingsDto {
   @IsOptional()
   @IsNumber()
   @Min(0)
-  // Comissão da plataforma: mesmo teto do create (`@Max(6)`). Sem isso o update
-  // ficava sem limite superior (inconsistente com a criação do evento).
-  @Max(6)
+  // Teto ESTRUTURAL (0–100); o cap REAL da taxa total (organizador+comprador) é por
+  // ORGANIZAÇÃO — 6% fixo, ou o personalizado (maxTotalFeePercent) quando habilitado —
+  // e é enforçado no service (updateFinancialSettings/admin). Um @Max(6) estático aqui
+  // impediria o teto personalizado da org (ex.: organizador absorvendo 8% de um total 10%).
+  @Max(100)
   organizerFeePercent?: number;
 
   @ApiProperty({ description: 'Percentual da taxa repassado ao participante (0.0–100.0). Omitir mantém o valor atual. Travado após a publicação (409).', example: 3.0, minimum: 0, maximum: 100, required: false })
