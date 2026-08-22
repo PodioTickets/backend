@@ -29,6 +29,10 @@ export class OrderFinalizationAbortError extends Error {
   }
 }
 import { resolveDocument } from '../../common/utils/document.util';
+import {
+  decideParticipantIdentity,
+  resolveBuyerDocument,
+} from '../../common/utils/participant-identity.util';
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
 import {
   incrementVariationSold,
@@ -429,11 +433,17 @@ export class OrderFinalizationService {
     const createdRegs: any[] = [];
     const buyerUser = await tx.user.findUnique({
       where: { id: userId },
-      // documentType/documentNumberClean: identidade canônica do comprador para
-      // detectar "compra pra si mesmo com outro e-mail" (mesmo CPF ⇒ NÃO é presente).
-      select: { email: true, documentType: true, documentNumberClean: true },
+      // documento canônico do comprador → detecta "compra pra si mesmo com outro e-mail"
+      // (mesmo CPF ⇒ NÃO é presente). Inclui `documentNumber` porque contas legadas podem
+      // ter só ele (clean nulo pré-backfill) — `resolveBuyerDocument` faz o fallback.
+      select: {
+        email: true,
+        documentType: true,
+        documentNumber: true,
+        documentNumberClean: true,
+      },
     });
-    const buyerDocClean = buyerUser?.documentNumberClean ?? '';
+    const buyerDoc = resolveBuyerDocument(buyerUser ?? {});
 
     const frontendUrl = (process.env.FRONTEND_URL ?? '').replace(/\/$/, '');
 
@@ -494,25 +504,23 @@ export class OrderFinalizationService {
                 })
               : null);
 
-          participantUserId = matchedUser?.id ?? null;
-
-          // COMPRA PRA SI MESMO com e-mail diferente: se o documento do participante é
-          // o MESMO do comprador, é a própria pessoa → vincula à conta do comprador
-          // (invitedById fica null adiante) e NÃO é presente. Comparação DIRETA contra o
-          // documento do comprador (identidade canônica), não depende do lookup global —
-          // que falhava em contas legadas sem `documentNumberClean`, caindo em "guest" →
-          // presente indevido. Exige mesmo tipo quando ambos conhecidos (evita colisão
-          // CPF×passaporte de mesmo número).
-          const isBuyerBySelfDocument =
-            doc.clean !== '' &&
-            buyerDocClean !== '' &&
-            doc.clean === buyerDocClean &&
-            (buyerUser?.documentType == null ||
-              doc.type == null ||
-              buyerUser.documentType === doc.type);
-          if (isBuyerBySelfDocument) {
-            participantUserId = userId;
-          }
+          // Decisão da identidade (fonte única, pura e testável em
+          // participant-identity.util). Regra: documento é canônico → COMPRA PRA SI MESMO
+          // com outro e-mail (mesmo documento do comprador) NÃO é presente; vincula à conta
+          // do comprador. Independe do lookup global (que falha em conta legada sem clean).
+          const identity = decideParticipantIdentity({
+            participantEmail: pData.email,
+            participantDocClean: doc.clean,
+            participantDocType: doc.type,
+            buyer: {
+              userId,
+              email: buyerUser?.email,
+              docClean: buyerDoc.docClean,
+              docType: buyerDoc.docType,
+            },
+            matchedUserId: matchedUser?.id ?? null,
+          });
+          participantUserId = identity.participantUserId;
 
           // Snapshot SEMPRE a partir do que o comprador digitou — nunca depende da conta
           // vinculada. Garante que a inscrição exiba os dados do PARTICIPANTE mesmo quando

@@ -218,6 +218,8 @@ export class AdminOrganizationsService {
           accountHolderDocument: true,
           anticipationMonthlyRate: true,
           anticipationEnabled: true,
+          customFeeEnabled: true,
+          maxTotalFeePercent: true,
           isActive: true,
           createdAt: true,
           updatedAt: true,
