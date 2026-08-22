@@ -29,6 +29,10 @@ export class OrderFinalizationAbortError extends Error {
   }
 }
 import { resolveDocument } from '../../common/utils/document.util';
+import {
+  decideParticipantIdentity,
+  resolveBuyerDocument,
+} from '../../common/utils/participant-identity.util';
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
 import {
   incrementVariationSold,
@@ -429,8 +433,17 @@ export class OrderFinalizationService {
     const createdRegs: any[] = [];
     const buyerUser = await tx.user.findUnique({
       where: { id: userId },
-      select: { email: true },
+      // documento canônico do comprador → detecta "compra pra si mesmo com outro e-mail"
+      // (mesmo CPF ⇒ NÃO é presente). Inclui `documentNumber` porque contas legadas podem
+      // ter só ele (clean nulo pré-backfill) — `resolveBuyerDocument` faz o fallback.
+      select: {
+        email: true,
+        documentType: true,
+        documentNumber: true,
+        documentNumberClean: true,
+      },
     });
+    const buyerDoc = resolveBuyerDocument(buyerUser ?? {});
 
     const frontendUrl = (process.env.FRONTEND_URL ?? '').replace(/\/$/, '');
 
@@ -491,7 +504,23 @@ export class OrderFinalizationService {
                 })
               : null);
 
-          participantUserId = matchedUser?.id ?? null;
+          // Decisão da identidade (fonte única, pura e testável em
+          // participant-identity.util). Regra: documento é canônico → COMPRA PRA SI MESMO
+          // com outro e-mail (mesmo documento do comprador) NÃO é presente; vincula à conta
+          // do comprador. Independe do lookup global (que falha em conta legada sem clean).
+          const identity = decideParticipantIdentity({
+            participantEmail: pData.email,
+            participantDocClean: doc.clean,
+            participantDocType: doc.type,
+            buyer: {
+              userId,
+              email: buyerUser?.email,
+              docClean: buyerDoc.docClean,
+              docType: buyerDoc.docType,
+            },
+            matchedUserId: matchedUser?.id ?? null,
+          });
+          participantUserId = identity.participantUserId;
 
           // Snapshot SEMPRE a partir do que o comprador digitou — nunca depende da conta
           // vinculada. Garante que a inscrição exiba os dados do PARTICIPANTE mesmo quando
@@ -511,13 +540,14 @@ export class OrderFinalizationService {
 
         const isGuest = participantUserId === null;
         const isDifferentUser = participantUserId !== null && participantUserId !== userId;
+        const invitedById = isDifferentUser || isGuest ? userId : null;
 
         const reg = await tx.registration.create({
           data: {
             eventId: order.eventId,
             orderId,
             userId: participantUserId,
-            invitedById: (isDifferentUser || isGuest) ? userId : null,
+            invitedById,
             status: RegistrationStatus.CONFIRMED,
             termsAccepted: true,
             rulesAccepted: true,

@@ -5,6 +5,7 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { CacheRedisService } from '../../../common/services/cache-redis.service';
 import { OrganizerMemberAccessService } from '../../organizations/organizer-member-access.service';
 import { TicketsService } from '../../tickets/tickets.service';
+import { GeoService } from '../../../common/services/geo.service';
 import { DashboardOverviewQueryDto } from './dto/overview.dto';
 import { DashboardRankingsQueryDto } from './dto/rankings.dto';
 import { DashboardSecondaryQueryDto } from './dto/secondary.dto';
@@ -58,6 +59,7 @@ interface CityRow {
   participants: bigint;
 }
 interface PurchaseLocationRow {
+  neighborhood: string | null;
   city: string;
   state: string | null;
   purchases: bigint;
@@ -79,6 +81,7 @@ export class DashboardService {
     private readonly cache: CacheRedisService,
     private readonly organizerMemberAccess: OrganizerMemberAccessService,
     private readonly ticketsService: TicketsService,
+    private readonly geo: GeoService,
   ) {}
 
   // ============================================================
@@ -301,33 +304,54 @@ export class DashboardService {
     const period = query.period ?? DashboardPeriod.GERAL;
     const ticketIds = query.ticketIds ?? null;
 
-    const cacheKey = this.buildCacheKey('secondary', eventId, { period, ticketIds });
-    const cached = await this.cache.getJson<unknown>(cacheKey);
-    if (cached) return cached;
-
-    const dateRange = calculateDateRange(period);
-
-    const [topCities, salesHeatmap, mostAnsweredQuestions, purchaseLocations] =
-      await Promise.all([
-        this.queryTopCities(eventId, dateRange, ticketIds),
-        this.queryHeatmap(eventId, dateRange, ticketIds),
-        this.buildMostAnsweredQuestions(eventId),
-        this.queryPurchasesByLocation(eventId, dateRange, ticketIds),
-      ]);
-
-    const response = {
-      message: 'Dashboard secondary fetched successfully',
-      data: {
-        topCities,
-        salesHeatmap,
-        mostAnsweredQuestions,
-        // Mapa de calor geográfico (compras por cidade/UF do billing).
-        purchaseLocations,
-      },
+    // Cacheamos SÓ as agregações pesadas (SQL). As coordenadas do geocoding NÃO
+    // entram no cache — são resolvidas FRESCAS a cada request (lookup barato por
+    // índice em GeoCache). Assim o polling do front vê o mapa preencher em tempo
+    // real conforme o worker geocodifica, sem esperar o TTL de 60s expirar.
+    type SecondaryBase = {
+      topCities: Awaited<ReturnType<DashboardService['queryTopCities']>>;
+      salesHeatmap: Awaited<ReturnType<DashboardService['queryHeatmap']>>;
+      mostAnsweredQuestions: Awaited<ReturnType<DashboardService['buildMostAnsweredQuestions']>>;
+      purchaseLocationsRaw: Awaited<ReturnType<DashboardService['queryPurchasesByLocation']>>;
     };
 
-    await this.cache.setJson(cacheKey, response, CACHE_TTL_SECONDARY);
-    return response;
+    const cacheKey = this.buildCacheKey('secondary', eventId, { period, ticketIds });
+    let base = await this.cache.getJson<SecondaryBase>(cacheKey);
+    if (!base) {
+      const dateRange = calculateDateRange(period);
+      const [topCities, salesHeatmap, mostAnsweredQuestions, purchaseLocationsRaw] =
+        await Promise.all([
+          this.queryTopCities(eventId, dateRange, ticketIds),
+          this.queryHeatmap(eventId, dateRange, ticketIds),
+          this.buildMostAnsweredQuestions(eventId),
+          this.queryPurchasesByLocation(eventId, dateRange, ticketIds),
+        ]);
+      base = { topCities, salesHeatmap, mostAnsweredQuestions, purchaseLocationsRaw };
+      await this.cache.setJson(cacheKey, base, CACHE_TTL_SECONDARY);
+    }
+
+    // Coordenadas SEMPRE frescas: enfileira locais novos (PENDING) e anexa lat/lng
+    // do cache global. `geocodingPending` = quantos bairros ainda serão resolvidos
+    // pelo worker (NOT_FOUND não conta) → o front faz polling só enquanto > 0.
+    const geo = await this.geo.resolveMany(base.purchaseLocationsRaw);
+    const purchaseLocations = base.purchaseLocationsRaw.map((l, i) => ({
+      ...l,
+      ...(geo[i].coord ? { lat: geo[i].coord!.lat, lng: geo[i].coord!.lng } : {}),
+    }));
+    const geocodingPending = geo.filter((g) => g.pending).length;
+
+    return {
+      message: 'Dashboard secondary fetched successfully',
+      data: {
+        topCities: base.topCities,
+        salesHeatmap: base.salesHeatmap,
+        mostAnsweredQuestions: base.mostAnsweredQuestions,
+        // Mapa de calor geográfico (compras por bairro/cidade/UF do billing + lat/lng).
+        purchaseLocations,
+        /** Nº de bairros ainda aguardando geocoding no worker (0 = mapa completo). */
+        geocodingPending,
+      },
+    };
   }
 
   // ============================================================
@@ -679,17 +703,19 @@ export class DashboardService {
    * endereço daquela compra específica — diferente de `queryTopCities`, que usa
    * o espelho em `User.city` (última compra do usuário, sobrescrevível).
    *
-   * Alimenta o mapa de calor geográfico do dashboard. Coalesce case/acentos em
-   * JS (sem depender da extensão `unaccent`), igual a `queryTopCities`. Retorna
-   * até 500 locais distintos (teto defensivo — o front geocodifica cada um).
+   * Alimenta o mapa de calor geográfico do dashboard. Agrupa por BAIRRO (mais
+   * preciso que só cidade) + cidade + UF; o front geocodifica cada bairro. Coalesce
+   * case/acentos em JS (sem depender da extensão `unaccent`), igual a `queryTopCities`.
+   * Retorna até 500 locais distintos (teto defensivo — o front geocodifica cada um).
    */
   private async queryPurchasesByLocation(
     eventId: string,
     dateRange: DateRange,
     ticketIds: string[] | null,
-  ): Promise<{ city: string; state?: string; purchases: number }[]> {
+  ): Promise<{ neighborhood?: string; city: string; state?: string; purchases: number }[]> {
     const rows = await this.prisma.getReadClient().$queryRaw<PurchaseLocationRow[]>(Prisma.sql`
       SELECT
+        BTRIM(o."billingNeighborhood") AS neighborhood,
         BTRIM(o."billingCity") AS city,
         BTRIM(o."billingStateUf") AS state,
         COUNT(*)::bigint AS purchases
@@ -701,21 +727,25 @@ export class DashboardService {
         AND BTRIM(o."billingCity") <> ''
         ${this.sqlDateFilter(dateRange, 'o')}
         ${this.sqlTicketIdsExistsFilter(ticketIds, eventId)}
-      GROUP BY BTRIM(o."billingCity"), BTRIM(o."billingStateUf");
+      GROUP BY BTRIM(o."billingNeighborhood"), BTRIM(o."billingCity"), BTRIM(o."billingStateUf");
     `);
 
     const normalize = (s: string) =>
       s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
 
-    const merged = new Map<string, { city: string; state?: string; purchases: number }>();
+    const merged = new Map<
+      string,
+      { neighborhood?: string; city: string; state?: string; purchases: number }
+    >();
     for (const r of rows) {
       const state = r.state || undefined;
-      const key = `${normalize(r.city)}|${state ? normalize(state) : ''}`;
+      const neighborhood = r.neighborhood?.trim() || undefined;
+      const key = `${neighborhood ? normalize(neighborhood) : ''}|${normalize(r.city)}|${state ? normalize(state) : ''}`;
       const existing = merged.get(key);
       if (existing) {
         existing.purchases += Number(r.purchases);
       } else {
-        merged.set(key, { city: r.city, state, purchases: Number(r.purchases) });
+        merged.set(key, { neighborhood, city: r.city, state, purchases: Number(r.purchases) });
       }
     }
 

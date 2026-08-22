@@ -49,23 +49,31 @@ function getReleaseDate(paymentDate: Date, method: string): Date {
   return addDays(paymentDate, RETENTION_DAYS[method] ?? 31);
 }
 
+// Brasília = UTC−3 fixo (sem horário de verão desde 2019). A liberação/retenção é um
+// conceito de CALENDÁRIO BRASILEIRO, então ancoramos os dias civis em BRT — não em UTC.
+const BRT_OFFSET_MS = 3 * 60 * 60 * 1000;
+
+/** Meia-noite do dia civil de um INSTANTE no fuso de Brasília, como epoch (ms). */
+function brtCivilDayMs(instant: Date): number {
+  const brt = new Date(instant.getTime() - BRT_OFFSET_MS);
+  return Date.UTC(brt.getUTCFullYear(), brt.getUTCMonth(), brt.getUTCDate());
+}
+
 /**
  * Dias (INTEIROS de calendário) de hoje até a liberação, contados por DIA CIVIL em
- * UTC — a MESMA base do display (`formatDateBR` no front exibe a data de liberação
- * em UTC). Assim a taxa de antecipação bate EXATAMENTE com a data mostrada na lista
- * "Aguardando liberação" (ex.: liberação 20/08 e hoje 11/08 → 9 dias). Antes usávamos
- * `Math.ceil` da diferença de timestamps, que arredondava a fração (9,x) pra CIMA (→10)
- * e divergia da data exibida — além de oscilar conforme a hora do dia. Como ambos os
- * extremos são meia-noite UTC, a divisão é sempre inteira.
+ * BRASÍLIA — a MESMA base do display (o front passa a exibir a data de liberação com
+ * `formatDateBRT`). `releaseDate` e `now` derivam de INSTANTES reais (dataPagamento +
+ * retenção) no servidor em UTC; contar por dia civil UTC deslocava tudo pro Brasil:
+ *   (a) o dia exibido subia 1 para pagamentos feitos à noite (BRT), quando o dia civil
+ *       UTC já virou (ex.: venda 20/08 23:30 BRT = 21/08 02:30 UTC → mostrava 21/09);
+ *   (b) a contagem "hoje" virava o dia seguinte às 21:00 BRT (00:00 UTC), então o
+ *       nº de dias — e o custo `gross×taxa×dias/30` — CAÍA 1 no fim da tarde/noite,
+ *       fazendo a conta do modal oscilar conforme a hora em que era aberto.
+ * Ancorando ambos em BRT (−3h antes de extrair Y/M/D) a taxa bate com a data mostrada
+ * e não depende mais da hora. Ambos os extremos são meia-noite → divisão sempre inteira.
  */
 export function calendarDaysUntil(releaseDate: Date, now: Date): number {
-  const rel = Date.UTC(
-    releaseDate.getUTCFullYear(),
-    releaseDate.getUTCMonth(),
-    releaseDate.getUTCDate(),
-  );
-  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-  return Math.round((rel - today) / 86400000);
+  return Math.round((brtCivilDayMs(releaseDate) - brtCivilDayMs(now)) / 86400000);
 }
 
 /**

@@ -53,6 +53,9 @@ class UpdateOrganizationBodyDto implements UpdateOrganizationDto {
   // Antecipação: taxa mensal em fração (0.1 = 10%) e liga/desliga do recurso da org.
   @IsOptional() @IsNumber() @Min(0) @Max(1) anticipationMonthlyRate?: number;
   @IsOptional() @IsBoolean() @Transform(({ value }) => value === 'true' || value === true) anticipationEnabled?: boolean;
+  // Taxa de organizador personalizada: liga/desliga + teto da taxa TOTAL (%) por evento (0–100).
+  @IsOptional() @IsBoolean() @Transform(({ value }) => value === 'true' || value === true) customFeeEnabled?: boolean;
+  @IsOptional() @IsNumber() @Min(0) @Max(100) maxTotalFeePercent?: number;
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => PixKeyItemDto) pixKeys?: PixKeyItemDto[];
 }
 

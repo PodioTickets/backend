@@ -260,6 +260,17 @@ model Organization {
   /// requestAnticipation (repasse.service): org desligada não antecipa.
   anticipationEnabled Boolean @default(false)
 
+  /// Taxa de organizador PERSONALIZADA habilitada. DESLIGADA por padrão. Quando
+  /// ligada, o organizador pode definir a taxa TOTAL do evento (organizador +
+  /// comprador) até `maxTotalFeePercent` na etapa financeira; quando desligada, o
+  /// teto é o fixo de 6% (DEFAULT_ORGANIZER_FEE_PERCENT + DEFAULT_PARTICIPANT_FEE_PERCENT).
+  /// Vale só para eventos NOVOS — cada evento congela sua taxa no create.
+  customFeeEnabled Boolean @default(false)
+  /// Teto da taxa TOTAL (%) que o organizador pode configurar por evento quando
+  /// `customFeeEnabled`. Escala 0–100. Só é aplicado com o toggle ligado; senão o
+  /// teto efetivo é 6%. Enforcement autoritativo no backend (create/updateFinancialSettings).
+  maxTotalFeePercent Float @default(6)
+
   isActive  Boolean  @default(true)
 
   createdAt DateTime @default(now())
@@ -1329,4 +1340,32 @@ model UserActivityLog {
   @@index([action, occurredAt])
   /// Usado pelo cron de retenção (DELETE WHERE occurredAt < N).
   @@index([occurredAt])
+}
+
+/// Cache GLOBAL de geocoding (bairro/cidade/UF → lat/lng). Compartilhado entre
+/// todos os organizadores; cada local é geocodificado UMA vez (Nominatim/OSM) por
+/// um worker com throttle (GeoService). Alimenta o mapa de calor do dashboard.
+enum GeoStatus {
+  PENDING
+  RESOLVED
+  NOT_FOUND
+}
+
+model GeoCache {
+  id           String    @id @default(uuid()) @db.Uuid
+  /// Chave normalizada (sem acento/caixa): "bairro|cidade|uf".
+  key          String    @unique
+  neighborhood String?
+  city         String
+  state        String?
+  lat          Float?
+  lng          Float?
+  status       GeoStatus @default(PENDING)
+  /// Tentativas de geocoding (para desistir após N e marcar NOT_FOUND).
+  attempts     Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  /// O worker busca PENDING mais antigos primeiro.
+  @@index([status, createdAt])
 }

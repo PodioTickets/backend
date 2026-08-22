@@ -15,6 +15,8 @@ import { UserActivityService } from './services/user-activity.service';
 import { UserActivityCleanupService } from './services/user-activity-cleanup.service';
 import { TrackActivityInterceptor } from './interceptors/track-activity.interceptor';
 import { OrganizationAuditService } from './services/organization-audit.service';
+import { GeoService } from './services/geo.service';
+import { GeoGateway } from './gateways/geo.gateway';
 
 @Module({
   imports: [ConfigModule],
@@ -33,6 +35,8 @@ import { OrganizationAuditService } from './services/organization-audit.service'
     UserActivityCleanupService,
     TrackActivityInterceptor,
     OrganizationAuditService,
+    GeoService,
+    GeoGateway,
   ],
   exports: [
     RequestOriginGuard,
@@ -46,6 +50,7 @@ import { OrganizationAuditService } from './services/organization-audit.service'
     UserActivityService,
     TrackActivityInterceptor,
     OrganizationAuditService,
+    GeoService,
   ],
 })
 export class CommonModule {}

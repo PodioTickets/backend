@@ -75,27 +75,37 @@ describe('computeAnticipationCost', () => {
   });
 });
 
-describe('calendarDaysUntil', () => {
-  // Conta por DIA CIVIL (UTC) — bate com a data mostrada na lista, não com o ceil
-  // da fração de dia. Ex.: hoje 11/08, liberação 20/08 → 9 (não 10).
-  it('conta dias de calendário, ignorando a hora do dia (9, não 10)', () => {
-    const now = new Date('2026-08-11T10:00:00Z');
-    // Liberação 9 dias e 4h à frente: o ceil daria 10; o dia civil dá 9.
+describe('calendarDaysUntil (âncora BRT = UTC-3)', () => {
+  // Conta por DIA CIVIL de BRASÍLIA — bate com a data exibida (`formatDateBRT`) e com
+  // o custo da antecipação; não é o ceil da fração nem o dia civil UTC. Como release e
+  // now são instantes reais, contar em UTC deslocava tudo pro Brasil (dia +1 à noite e
+  // custo oscilando por hora). Ex.: hoje 11/08 BRT, liberação 20/08 BRT → 9.
+  it('conta dias de calendário em BRT, ignorando a hora do dia (9, não 10)', () => {
+    const now = new Date('2026-08-11T13:00:00Z'); // 10:00 BRT, 11/08
+    // Liberação 9 dias à frente (11:30 BRT do 20/08): o ceil daria 10; o dia civil dá 9.
     expect(calendarDaysUntil(new Date('2026-08-20T14:30:00Z'), now)).toBe(9);
-    // Mesmo dia civil de liberação, hora diferente → ainda 9.
-    expect(calendarDaysUntil(new Date('2026-08-20T00:00:01Z'), now)).toBe(9);
-    expect(calendarDaysUntil(new Date('2026-08-20T23:59:59Z'), now)).toBe(9);
+    // Mesmo dia civil BRT (manhã e noite do 20/08) → ainda 9.
+    expect(calendarDaysUntil(new Date('2026-08-20T12:00:00Z'), now)).toBe(9); // 09:00 BRT 20/08
+    expect(calendarDaysUntil(new Date('2026-08-21T02:00:00Z'), now)).toBe(9); // 23:00 BRT 20/08
   });
 
-  it('estável quanto à hora de "agora" (não oscila durante o dia)', () => {
-    const rel = new Date('2026-08-20T14:30:00Z');
-    expect(calendarDaysUntil(rel, new Date('2026-08-11T00:00:00Z'))).toBe(9);
-    expect(calendarDaysUntil(rel, new Date('2026-08-11T23:59:59Z'))).toBe(9);
+  it('instante à noite no Brasil cai no dia civil BRT correto (não sobe pro dia UTC)', () => {
+    const now = new Date('2026-08-11T13:00:00Z'); // 10:00 BRT 11/08
+    // 00:00:01Z do dia 20 = 21:00:01 BRT do dia 19 → dia civil 19/08 → 8 dias (não 9).
+    // É exatamente o off-by-one que UTC causava: em UTC daria 9.
+    expect(calendarDaysUntil(new Date('2026-08-20T00:00:01Z'), now)).toBe(8);
   });
 
-  it('libera hoje → 0; ontem → negativo', () => {
-    const now = new Date('2026-08-11T10:00:00Z');
-    expect(calendarDaysUntil(new Date('2026-08-11T23:00:00Z'), now)).toBe(0);
-    expect(calendarDaysUntil(new Date('2026-08-10T09:00:00Z'), now)).toBe(-1);
+  it('estável dentro do MESMO dia civil BRT (não oscila durante o dia)', () => {
+    const rel = new Date('2026-08-20T14:30:00Z'); // 11:30 BRT 20/08
+    // Início e fim do dia civil BRT 11/08 (00:00 → 03:00Z; 23:59:59 → 02:59:59Z do 12).
+    expect(calendarDaysUntil(rel, new Date('2026-08-11T03:00:00Z'))).toBe(9);
+    expect(calendarDaysUntil(rel, new Date('2026-08-12T02:59:59Z'))).toBe(9);
+  });
+
+  it('libera hoje (BRT) → 0; ontem → negativo', () => {
+    const now = new Date('2026-08-11T13:00:00Z'); // 10:00 BRT 11/08
+    expect(calendarDaysUntil(new Date('2026-08-12T01:00:00Z'), now)).toBe(0); // 22:00 BRT 11/08
+    expect(calendarDaysUntil(new Date('2026-08-10T20:00:00Z'), now)).toBe(-1); // 17:00 BRT 10/08
   });
 });

@@ -135,6 +135,18 @@ export class CreateOrganizationDto {
   @IsBoolean()
   anticipationEnabled?: boolean;
 
+  /// Taxa de organizador personalizada habilitada. Desligada por padrão.
+  @IsOptional()
+  @IsBoolean()
+  customFeeEnabled?: boolean;
+
+  /// Teto da taxa TOTAL (%) por evento quando `customFeeEnabled` (escala 0–100).
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  maxTotalFeePercent?: number;
+
   // Endereço
   @IsOptional()
   @IsString()
@@ -512,6 +524,18 @@ export class UpdateOrganizationDto {
   @IsOptional()
   @IsBoolean()
   anticipationEnabled?: boolean;
+
+  /// Liga/desliga a taxa de organizador personalizada (teto por evento vem de maxTotalFeePercent).
+  @IsOptional()
+  @IsBoolean()
+  customFeeEnabled?: boolean;
+
+  /// Teto da taxa TOTAL (%) por evento quando `customFeeEnabled` (escala 0–100).
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  maxTotalFeePercent?: number;
 
   // Chaves PIX — substituição completa quando enviadas (mesma semântica do admin).
   // Permite o próprio organizador gerir suas chaves pela tela de Configurações.
