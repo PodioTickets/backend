@@ -540,13 +540,14 @@ export class OrderFinalizationService {
 
         const isGuest = participantUserId === null;
         const isDifferentUser = participantUserId !== null && participantUserId !== userId;
+        const invitedById = isDifferentUser || isGuest ? userId : null;
 
         const reg = await tx.registration.create({
           data: {
             eventId: order.eventId,
             orderId,
             userId: participantUserId,
-            invitedById: (isDifferentUser || isGuest) ? userId : null,
+            invitedById,
             status: RegistrationStatus.CONFIRMED,
             termsAccepted: true,
             rulesAccepted: true,
