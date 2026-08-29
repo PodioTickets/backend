@@ -2563,12 +2563,18 @@ export class OrganizationsService {
     }
     const userSearch = query.userSearch?.trim();
     if (userSearch) {
+      // Token-AND: "João Silva" casa quando CADA token bate em algum campo do
+      // ator. Com OR isolado por campo, o nome completo (que é o que a lista
+      // exibe) nunca casava — nenhum campo contém firstName + lastName juntos.
+      const tokens = userSearch.split(/\s+/).filter(Boolean).slice(0, 5);
       where.actor = {
-        OR: [
-          { firstName: { contains: userSearch, mode: 'insensitive' } },
-          { lastName: { contains: userSearch, mode: 'insensitive' } },
-          { email: { contains: userSearch, mode: 'insensitive' } },
-        ],
+        AND: tokens.map((tok) => ({
+          OR: [
+            { firstName: { contains: tok, mode: 'insensitive' as const } },
+            { lastName: { contains: tok, mode: 'insensitive' as const } },
+            { email: { contains: tok, mode: 'insensitive' as const } },
+          ],
+        })),
       };
     }
     const [items, total] = await Promise.all([

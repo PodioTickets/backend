@@ -1,0 +1,9 @@
+allowBuilds:
+  '@nestjs/core': false
+  '@prisma/client': false
+  '@prisma/engines': false
+  '@scarf/scarf': false
+  '@swc/core': false
+  prisma: false
+  sharp: false
+  unrs-resolver: false
