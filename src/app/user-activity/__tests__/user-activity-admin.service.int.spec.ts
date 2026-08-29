@@ -27,6 +27,8 @@
  *      maiúsculas/minúsculas.
  *    • Busca por dados do usuário (userSearch): casa por nome/sobrenome/email e
  *      EXCLUI registros anônimos (sem usuário).
+ *    • Busca por nome completo ("Fulano de Teste"): cada palavra precisa casar
+ *      com algum campo do usuário — nome + sobrenome juntos funcionam.
  *    • Paginação: respeita página e limite, e o total reflete TODOS os registros
  *      que casam com o filtro (não só os da página).
  *    • Registro anônimo (sem userId) volta com user = null.
@@ -242,6 +244,33 @@ describe('UserActivityAdminService (integração, banco real)', () => {
     expect(res.data.items).toHaveLength(1);
     expect(res.data.items[0].action).toBe('do-fulano');
     expect(res.data.items[0].userId).toBe(userId);
+  });
+
+  it('busca por nome completo (userSearch com várias palavras)', async () => {
+    // seedUser cria firstName "Fulano" + lastName "de Teste" → o admin
+    // digita o nome como vê na lista, "Fulano de Teste".
+    const userId = await seedUser(prisma, 'USER');
+    await seedLog({ userId, action: 'do-fulano' });
+    await seedLog({ action: 'anonimo' });
+
+    const res = await service.listAsAdmin(
+      query({ userSearch: 'Fulano de Teste' })
+    );
+
+    expect(res.data.items).toHaveLength(1);
+    expect(res.data.items[0].userId).toBe(userId);
+  });
+
+  it('não casa quando alguma palavra do userSearch não bate', async () => {
+    const userId = await seedUser(prisma, 'USER');
+    await seedLog({ userId, action: 'do-fulano' });
+
+    const res = await service.listAsAdmin(
+      query({ userSearch: 'Fulano Inexistente' })
+    );
+
+    expect(res.data.items).toHaveLength(0);
+    expect(res.data.pagination.total).toBe(0);
   });
 
   it('respeita paginação (page/limit) e total reflete TODOS os que casam', async () => {

@@ -45,7 +45,7 @@ export class AdminUserActivityListQueryDto {
 
   @ApiPropertyOptional({
     description:
-      'Substring case-insensitive em firstName/lastName/email do usuário. Eventos anônimos (sem userId) são excluídos quando informado.',
+      'Busca case-insensitive em firstName/lastName/email do usuário. Cada palavra do termo precisa casar com algum desses campos, então o nome completo ("Fulano de Teste") funciona. Eventos anônimos (sem userId) são excluídos quando informado.',
   })
   @IsOptional()
   @IsString()
