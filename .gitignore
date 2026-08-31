@@ -52,3 +52,6 @@ CLAUDE.md
 # Briefings/docs locais — nunca versionar
 BRIEFING-PAGAMENTO-REPASSE.md
 BRIEFING-*.md
+
+# Compose local (Postgres em container) — nunca versionar
+docker-compose.override.yml

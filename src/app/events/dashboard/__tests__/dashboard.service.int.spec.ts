@@ -40,8 +40,9 @@
  *      fórmula não depende da config viva do evento. Usamos valores redondos.
  *    - O acesso é liberado via usuário ADMIN (seedUser default), que faz bypass
  *      na checagem de organização (assertCanAccessEvent).
- *    - `seedUser` não preenche cidade/estado; quando o cenário precisa de
- *      cidade (topCities), atualizamos o User diretamente.
+ *    - A seção geográfica (topCities + mapa) sai do endereço de COBRANÇA do
+ *      pedido, então os cenários preenchem `billing*` no seedOrder — o cadastro
+ *      do User não influencia.
  */
 import { PrismaService } from '../../../../prisma/prisma.service';
 import { DashboardService } from '../dashboard.service';
@@ -73,7 +74,7 @@ const ticketsServiceStub: any = {
 
 // GeoService: sem geocoding no teste — devolve coords nulas (locais "pendentes").
 const geoServiceStub: any = {
-  resolveMany: async (locs: any[]) => locs.map(() => null),
+  resolveMany: async (locs: any[]) => locs.map(() => ({ coord: null, pending: true })),
 };
 
 describe('DashboardService (integração, banco real)', () => {
@@ -151,6 +152,9 @@ describe('DashboardService (integração, banco real)', () => {
     participants?: { userId: string }[];
     createdAt?: Date;
     totalAmount?: number;
+    billingNeighborhood?: string;
+    billingCity?: string;
+    billingStateUf?: string;
   }) {
     const createdAt = opts.createdAt ?? new Date('2026-05-15T13:00:00.000Z');
     const order = await db().order.create({
@@ -162,6 +166,9 @@ describe('DashboardService (integração, banco real)', () => {
         finalAmount: opts.finalAmount,
         organizerFeePercent: opts.organizerFeePercent,
         status: (opts.orderStatus ?? 'PAID') as any,
+        billingNeighborhood: opts.billingNeighborhood ?? null,
+        billingCity: opts.billingCity ?? null,
+        billingStateUf: opts.billingStateUf ?? null,
         createdAt,
       },
       select: { id: true },
@@ -584,49 +591,75 @@ describe('DashboardService (integração, banco real)', () => {
   // SECONDARY
   // =========================================================================
   describe('getSecondary', () => {
-    it('topCities agrupa por cidade normalizada (ignora acento/caixa) e ordena por participantes', async () => {
+    it('topCities soma os bairros do billing e conta 1 por PEDIDO pago (mesma base do mapa)', async () => {
       const { adminUserId, eventId } = await seedOrgUserEvent(prisma);
       const { ticketId, batchId } = await seedTicketWithBatch(eventId);
+      const acompanhante = await seedUser(prisma, 'USER');
 
-      // 3 participantes em São Paulo (com variação de acento/caixa) + 1 no Rio.
-      const sp1 = await seedUser(prisma, 'USER');
-      const sp2 = await seedUser(prisma, 'USER');
-      const sp3 = await seedUser(prisma, 'USER');
-      const rio = await seedUser(prisma, 'USER');
-      await db().user.update({ where: { id: sp1 }, data: { city: 'São Paulo', state: 'SP' } });
-      await db().user.update({ where: { id: sp2 }, data: { city: 'sao paulo', state: 'sp' } });
-      await db().user.update({ where: { id: sp3 }, data: { city: 'SAO PAULO', state: 'SP' } });
-      await db().user.update({ where: { id: rio }, data: { city: 'Rio de Janeiro', state: 'RJ' } });
-
-      // Cada participante em seu próprio pedido pago+confirmado.
-      for (const userId of [sp1, sp2, sp3, rio]) {
+      // SP: 3 pedidos pagos em 2 bairros, variando acento/caixa na cidade. O 3º
+      // leva 2 ingressos — continua valendo 1 compra (a unidade é o PEDIDO).
+      const pedidosSp = [
+        { neighborhood: 'Moema', city: 'São Paulo', uf: 'SP', participants: undefined as any },
+        { neighborhood: 'Pinheiros', city: 'sao paulo', uf: 'sp', participants: undefined as any },
+        {
+          neighborhood: 'Moema',
+          city: 'SAO PAULO',
+          uf: 'SP',
+          participants: [{ userId: adminUserId }, { userId: acompanhante }],
+        },
+      ];
+      for (const p of pedidosSp) {
         await seedOrder({
           eventId,
-          buyerUserId: userId,
+          buyerUserId: adminUserId,
           ticketId,
           batchId,
           finalAmount: 5000,
           serviceFee: 0,
           organizerFeePercent: 0,
-          participants: [{ userId }],
+          billingNeighborhood: p.neighborhood,
+          billingCity: p.city,
+          billingStateUf: p.uf,
+          participants: p.participants,
         });
       }
+      // Rio: 1 pedido pago.
+      await seedOrder({
+        eventId,
+        buyerUserId: adminUserId,
+        ticketId,
+        batchId,
+        finalAmount: 5000,
+        serviceFee: 0,
+        organizerFeePercent: 0,
+        billingNeighborhood: 'Copacabana',
+        billingCity: 'Rio de Janeiro',
+        billingStateUf: 'RJ',
+      });
 
       const res: any = await service.getSecondary(adminUserId, eventId, {
         period: DashboardPeriod.GERAL,
       } as any);
 
-      const cities = res.data.topCities;
-      expect(cities.length).toBeGreaterThanOrEqual(1);
-      // São Paulo consolidado em 1 entrada com 3 participantes, no topo.
-      expect(cities[0].participants).toBe(3);
-      const spEntry = cities[0];
       const norm = (s: string) =>
         s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
-      expect(norm(spEntry.city)).toBe('sao paulo');
-      // Rio aparece com 1 participante.
+      const cities = res.data.topCities;
+
+      // São Paulo consolidada em 1 entrada com 3 COMPRAS (não 4 inscrições).
+      expect(cities[0].purchases).toBe(3);
+      expect(norm(cities[0].city)).toBe('sao paulo');
       const rioEntry = cities.find((c: any) => c.city.includes('Rio'));
-      expect(rioEntry?.participants).toBe(1);
+      expect(rioEntry?.purchases).toBe(1);
+
+      // Card e mapa saem da mesma agregação: o número da cidade é exatamente a
+      // soma dos bairros dela no mapa.
+      const spNoMapa = res.data.purchaseLocations
+        .filter((l: any) => norm(l.city) === 'sao paulo')
+        .reduce((acc: number, l: any) => acc + l.purchases, 0);
+      expect(spNoMapa).toBe(cities[0].purchases);
+      // Os 2 bairros de SP continuam separados no mapa (2 em Moema, 1 em Pinheiros).
+      const moema = res.data.purchaseLocations.find((l: any) => l.neighborhood === 'Moema');
+      expect(moema?.purchases).toBe(2);
     });
 
     it('salesHeatmap conta vendas pagas+confirmadas por dia-da-semana e hora do pedido', async () => {
