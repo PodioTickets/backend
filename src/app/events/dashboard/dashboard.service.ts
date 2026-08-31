@@ -53,11 +53,6 @@ interface TicketRankingRow {
   quantity: bigint;
   total_net: bigint;
 }
-interface CityRow {
-  city: string;
-  state: string | null;
-  participants: bigint;
-}
 interface PurchaseLocationRow {
   neighborhood: string | null;
   city: string;
@@ -73,6 +68,47 @@ interface HeatmapRow {
 const CACHE_TTL_OVERVIEW = 30;
 const CACHE_TTL_RANKINGS = 30;
 const CACHE_TTL_SECONDARY = 60;
+
+/** Quantas cidades o card "Cidade com mais vendas" exibe. */
+const TOP_CITIES_LIMIT = 2;
+/**
+ * Teto de locais enviados ao geocoding/mapa (cada um vira um lookup + item de
+ * fila no worker). Os locais além do teto continuam somando no total das
+ * cidades — só não viram ponto no mapa.
+ */
+const MAP_LOCATIONS_LIMIT = 500;
+/** Teto defensivo da agregação por bairro (protege o payload do cache). */
+const MAX_LOCATION_ROWS = 5000;
+
+/** Normalização de cidade/UF (caixa + acento) — MESMA regra no card e no mapa. */
+const normalizeGeoText = (s: string) =>
+  s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+/**
+ * Top cidades do card do dashboard — derivadas da MESMA lista que alimenta o
+ * mapa de calor (compras por bairro do endereço de COBRANÇA, 1 por pedido pago).
+ * Somar os bairros aqui é o que garante que card e mapa não divirjam: antes o
+ * card vinha de outra query (1 por INSCRIÇÃO, sobre o espelho `User.city`), então
+ * todo pedido com mais de um ingresso — ou com billing diferente do cadastro —
+ * abria uma diferença entre o número do card e o do mapa.
+ */
+function buildTopCities(
+  locations: { city: string; state?: string; purchases: number }[],
+): { city: string; state?: string; purchases: number }[] {
+  const merged = new Map<string, { city: string; state?: string; purchases: number }>();
+  for (const l of locations) {
+    const key = `${normalizeGeoText(l.city)}|${l.state ? normalizeGeoText(l.state) : ''}`;
+    const existing = merged.get(key);
+    if (existing) {
+      existing.purchases += l.purchases;
+    } else {
+      merged.set(key, { city: l.city, state: l.state, purchases: l.purchases });
+    }
+  }
+  return Array.from(merged.values())
+    .sort((a, b) => b.purchases - a.purchases)
+    .slice(0, TOP_CITIES_LIMIT);
+}
 
 @Injectable()
 export class DashboardService {
@@ -309,7 +345,6 @@ export class DashboardService {
     // índice em GeoCache). Assim o polling do front vê o mapa preencher em tempo
     // real conforme o worker geocodifica, sem esperar o TTL de 60s expirar.
     type SecondaryBase = {
-      topCities: Awaited<ReturnType<DashboardService['queryTopCities']>>;
       salesHeatmap: Awaited<ReturnType<DashboardService['queryHeatmap']>>;
       mostAnsweredQuestions: Awaited<ReturnType<DashboardService['buildMostAnsweredQuestions']>>;
       purchaseLocationsRaw: Awaited<ReturnType<DashboardService['queryPurchasesByLocation']>>;
@@ -319,22 +354,25 @@ export class DashboardService {
     let base = await this.cache.getJson<SecondaryBase>(cacheKey);
     if (!base) {
       const dateRange = calculateDateRange(period);
-      const [topCities, salesHeatmap, mostAnsweredQuestions, purchaseLocationsRaw] =
-        await Promise.all([
-          this.queryTopCities(eventId, dateRange, ticketIds),
-          this.queryHeatmap(eventId, dateRange, ticketIds),
-          this.buildMostAnsweredQuestions(eventId),
-          this.queryPurchasesByLocation(eventId, dateRange, ticketIds),
-        ]);
-      base = { topCities, salesHeatmap, mostAnsweredQuestions, purchaseLocationsRaw };
+      const [salesHeatmap, mostAnsweredQuestions, purchaseLocationsRaw] = await Promise.all([
+        this.queryHeatmap(eventId, dateRange, ticketIds),
+        this.buildMostAnsweredQuestions(eventId),
+        this.queryPurchasesByLocation(eventId, dateRange, ticketIds),
+      ]);
+      base = { salesHeatmap, mostAnsweredQuestions, purchaseLocationsRaw };
       await this.cache.setJson(cacheKey, base, CACHE_TTL_SECONDARY);
     }
+
+    // Card de cidades e mapa saem da MESMA agregação → o número do card é
+    // exatamente a soma dos bairros daquela cidade no mapa.
+    const topCities = buildTopCities(base.purchaseLocationsRaw);
 
     // Coordenadas SEMPRE frescas: enfileira locais novos (PENDING) e anexa lat/lng
     // do cache global. `geocodingPending` = quantos bairros ainda serão resolvidos
     // pelo worker (NOT_FOUND não conta) → o front faz polling só enquanto > 0.
-    const geo = await this.geo.resolveMany(base.purchaseLocationsRaw);
-    const purchaseLocations = base.purchaseLocationsRaw.map((l, i) => ({
+    const locationsForMap = base.purchaseLocationsRaw.slice(0, MAP_LOCATIONS_LIMIT);
+    const geo = await this.geo.resolveMany(locationsForMap);
+    const purchaseLocations = locationsForMap.map((l, i) => ({
       ...l,
       ...(geo[i].coord ? { lat: geo[i].coord!.lat, lng: geo[i].coord!.lng } : {}),
     }));
@@ -343,7 +381,7 @@ export class DashboardService {
     return {
       message: 'Dashboard secondary fetched successfully',
       data: {
-        topCities: base.topCities,
+        topCities,
         salesHeatmap: base.salesHeatmap,
         mostAnsweredQuestions: base.mostAnsweredQuestions,
         // Mapa de calor geográfico (compras por bairro/cidade/UF do billing + lat/lng).
@@ -643,70 +681,20 @@ export class DashboardService {
   }
 
   /**
-   * Top cidades — participantes (1 por registration paga+confirmada) agrupados
-   * por (lower(unaccent(city)), lower(unaccent(state))) pra evitar duplicar
-   * "São Paulo" vs "sao paulo". Retorna o casing da PRIMEIRA ocorrência.
-   *
-   * Requer extensão `unaccent` no Postgres. Caímos pra normalização em JS
-   * se a extensão não estiver disponível (catch + fallback).
-   */
-  private async queryTopCities(
-    eventId: string,
-    dateRange: DateRange,
-    ticketIds: string[] | null,
-  ): Promise<{ city: string; state?: string; participants: number }[]> {
-    const rows = await this.prisma.getReadClient().$queryRaw<CityRow[]>(Prisma.sql`
-      SELECT
-        BTRIM(u.city) AS city,
-        BTRIM(u.state) AS state,
-        COUNT(*)::bigint AS participants
-      FROM "Registration" r
-      INNER JOIN "Order" o ON o.id = r."orderId"
-      INNER JOIN "Payment" p ON p."orderId" = o.id
-      INNER JOIN "User" u ON u.id = r."userId"
-      WHERE r."eventId" = ${eventId}::uuid
-        AND r.status = 'CONFIRMED'::"RegistrationStatus"
-        AND p.status = 'PAID'::"PaymentStatus"
-        AND u.city IS NOT NULL
-        AND BTRIM(u.city) <> ''
-        ${this.sqlDateFilter(dateRange, 'o')}
-        ${this.sqlTicketIdsFilter(ticketIds, 'r')}
-      GROUP BY BTRIM(u.city), BTRIM(u.state);
-    `);
-
-    // Coalesce case/acentos no app (sem depender de extensão Postgres `unaccent`).
-    const normalize = (s: string) =>
-      s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
-
-    const merged = new Map<string, { city: string; state?: string; participants: number }>();
-    for (const r of rows) {
-      const state = r.state || undefined;
-      const key = `${normalize(r.city)}|${state ? normalize(state) : ''}`;
-      const existing = merged.get(key);
-      if (existing) {
-        existing.participants += Number(r.participants);
-      } else {
-        merged.set(key, { city: r.city, state, participants: Number(r.participants) });
-      }
-    }
-
-    return Array.from(merged.values())
-      .sort((a, b) => b.participants - a.participants)
-      .slice(0, 2);
-  }
-
-  /**
    * Compras por LOCAL — 1 por PEDIDO pago, agrupado pelo endereço de COBRANÇA
    * (`Order.billingCity` / `Order.billingStateUf`). Fonte da localização da
    * compra: o billing é obrigatório pra pagar (checkout barra pagamento sem
    * cidade/CEP/rua), então todo pedido pago tem `billingCity` e reflete o
-   * endereço daquela compra específica — diferente de `queryTopCities`, que usa
-   * o espelho em `User.city` (última compra do usuário, sobrescrevível).
+   * endereço daquela compra específica — e não o espelho em `User.city` (última
+   * compra do usuário, sobrescrevível).
    *
-   * Alimenta o mapa de calor geográfico do dashboard. Agrupa por BAIRRO (mais
-   * preciso que só cidade) + cidade + UF; o front geocodifica cada bairro. Coalesce
-   * case/acentos em JS (sem depender da extensão `unaccent`), igual a `queryTopCities`.
-   * Retorna até 500 locais distintos (teto defensivo — o front geocodifica cada um).
+   * Fonte ÚNICA da seção geográfica do dashboard: o mapa de calor plota estes
+   * pontos e o card "Cidade com mais vendas" é a soma deles por cidade
+   * (`buildTopCities`) — mesma unidade, mesmo endereço, mesmo filtro de status.
+   * Agrupa por BAIRRO (mais preciso que só cidade) + cidade + UF; o geocoding
+   * roda por bairro. Coalesce caixa/acentos em JS (sem depender da extensão
+   * `unaccent` do Postgres). Ordenado por volume desc — quem corta pro mapa é o
+   * `MAP_LOCATIONS_LIMIT` em `getSecondary`, já com o total das cidades somado.
    */
   private async queryPurchasesByLocation(
     eventId: string,
@@ -730,9 +718,6 @@ export class DashboardService {
       GROUP BY BTRIM(o."billingNeighborhood"), BTRIM(o."billingCity"), BTRIM(o."billingStateUf");
     `);
 
-    const normalize = (s: string) =>
-      s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
-
     const merged = new Map<
       string,
       { neighborhood?: string; city: string; state?: string; purchases: number }
@@ -740,7 +725,7 @@ export class DashboardService {
     for (const r of rows) {
       const state = r.state || undefined;
       const neighborhood = r.neighborhood?.trim() || undefined;
-      const key = `${neighborhood ? normalize(neighborhood) : ''}|${normalize(r.city)}|${state ? normalize(state) : ''}`;
+      const key = `${neighborhood ? normalizeGeoText(neighborhood) : ''}|${normalizeGeoText(r.city)}|${state ? normalizeGeoText(state) : ''}`;
       const existing = merged.get(key);
       if (existing) {
         existing.purchases += Number(r.purchases);
@@ -751,7 +736,7 @@ export class DashboardService {
 
     return Array.from(merged.values())
       .sort((a, b) => b.purchases - a.purchases)
-      .slice(0, 500);
+      .slice(0, MAX_LOCATION_ROWS);
   }
 
   /**

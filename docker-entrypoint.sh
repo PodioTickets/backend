@@ -1,9 +1,14 @@
 #!/bin/sh
 set -e
 
-echo "⏳ Aguardando Postgres..."
+# Host/porta do banco: por padrão o Cloud SQL de homologação.
+# Em ambiente local, o docker-compose.override.yml define POSTGRES_HOST=postgres.
+DB_WAIT_HOST="${POSTGRES_HOST:-34.95.198.14}"
+DB_WAIT_PORT="${POSTGRES_PORT:-5432}"
 
-until pg_isready -h 34.95.198.14 -p 5432 -U "$POSTGRES_USER"; do
+echo "⏳ Aguardando Postgres em ${DB_WAIT_HOST}:${DB_WAIT_PORT}..."
+
+until pg_isready -h "$DB_WAIT_HOST" -p "$DB_WAIT_PORT" -U "$POSTGRES_USER"; do
   sleep 2
 done
 
