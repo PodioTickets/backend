@@ -39,6 +39,36 @@ describe('buildOrganizerNotificationRecipients', () => {
     ).toEqual(['dono@pessoal.com']);
   });
 
+  it('inclui TODOS os owners quando a organização tem mais de um', () => {
+    expect(
+      buildOrganizerNotificationRecipients([
+        'contato@org.com',
+        'dono1@pessoal.com',
+        'dono2@pessoal.com',
+      ]),
+    ).toEqual(['contato@org.com', 'dono1@pessoal.com', 'dono2@pessoal.com']);
+  });
+
+  it('com vários owners, só o repetido é descartado', () => {
+    // Caso real: o contato da org é o e-mail de um dos donos.
+    expect(
+      buildOrganizerNotificationRecipients([
+        'contato@org.com',
+        'contato@org.com',
+        'dono2@pessoal.com',
+      ]),
+    ).toEqual(['contato@org.com', 'dono2@pessoal.com']);
+  });
+
+  it('preserva a ordem: organização primeiro, depois os owners', () => {
+    expect(
+      buildOrganizerNotificationRecipients([
+        'contato@org.com',
+        'dono1@pessoal.com',
+      ])[0],
+    ).toBe('contato@org.com');
+  });
+
   it('sem nenhum e-mail utilizável devolve lista vazia', () => {
     expect(buildOrganizerNotificationRecipients([null, undefined, ''])).toEqual(
       [],

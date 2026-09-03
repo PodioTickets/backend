@@ -6,7 +6,11 @@ import {
   withPastEventsAsCompleted as markPastEventsCompleted,
   pastEventDateCutoff,
 } from '../../common/utils/event-status.util';
-import { formatEventCardAddress } from '../../common/utils/event-email-format.util';
+import {
+  formatBrtInstant,
+  formatEventCardAddress,
+  formatEventDateWithWeekday,
+} from '../../common/utils/event-email-format.util';
 import { buildOrganizerNotificationRecipients } from '../../common/utils/notification-recipients.util';
 
 export interface AdminEventsQuery {
@@ -393,10 +397,11 @@ export class AdminEventsService {
             email: true,
             name: true,
             tradeName: true,
+            /* TODOS os owners: a organização pode ter mais de um e todos
+               precisam ser avisados. Sem `take`, de propósito. */
             members: {
               where: { role: 'OWNER' },
               select: { user: { select: { email: true } } },
-              take: 1,
             },
           },
         },
@@ -422,26 +427,22 @@ export class AdminEventsService {
     this.logger.log(`Admin ${adminUserId} aprovou evento ${eventId} (${event.name}) — status REVISION → PUBLISHED`);
 
     // Notifica organizador por e-mail (fire-and-forget — falha não bloqueia resposta).
-    // Contato da org primeiro; fallback pro e-mail do dono — senão orgs sem
-    // e-mail de contato nunca recebiam o aviso de aprovação/publicação.
-    const organizerEmail =
-      event.organization?.email || event.organization?.members?.[0]?.user?.email;
-    if (organizerEmail) {
-      const weekdays = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
-      const eventDt = new Date(event.eventDate);
-      const eventDateFormatted = `${eventDt.toLocaleDateString('pt-BR')} · ${weekdays[eventDt.getDay()]}`;
+    // Contato da ORGANIZAÇÃO + TODOS os owners, deduplicados.
+    const recipientEmails = buildOrganizerNotificationRecipients([
+      event.organization?.email,
+      ...(event.organization?.members ?? []).map((m) => m.user?.email),
+    ]);
+    if (recipientEmails.length > 0) {
+      const eventDateFormatted = formatEventDateWithWeekday(event.eventDate);
       // Endereço do card = Local, Cidade, Estado (igual ao card da home).
       const eventLocation = formatEventCardAddress(event);
-
-      const submittedHH = String(now.getHours()).padStart(2, '0');
-      const submittedMM = String(now.getMinutes()).padStart(2, '0');
-      const submittedAtFormatted = `${now.toLocaleDateString('pt-BR')} · ${submittedHH}h${submittedMM}`;
+      const submittedAtFormatted = formatBrtInstant(now);
 
       const organizerName = event.organization?.tradeName ?? event.organization?.name ?? '';
 
       this.emailService
         .sendEventApproved({
-          recipientEmail: organizerEmail,
+          recipientEmails,
           organizerName,
           eventName: event.name,
           // Imagem do e-mail = BANNER do evento (logoUrl descontinuado).
@@ -481,10 +482,11 @@ export class AdminEventsService {
             email: true,
             name: true,
             tradeName: true,
+            /* TODOS os owners: a organização pode ter mais de um e todos
+               precisam ser avisados. Sem `take`, de propósito. */
             members: {
               where: { role: 'OWNER' },
               select: { user: { select: { email: true } } },
-              take: 1,
             },
           },
         },
@@ -529,18 +531,13 @@ export class AdminEventsService {
     // helper deduplica e sai um único e-mail com um único destinatário.
     const recipientEmails = buildOrganizerNotificationRecipients([
       event.organization?.email,
-      event.organization?.members?.[0]?.user?.email,
+      ...(event.organization?.members ?? []).map((m) => m.user?.email),
     ]);
     if (recipientEmails.length > 0) {
-      const weekdays = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
-      const eventDt = new Date(event.eventDate);
-      const eventDateFormatted = `${eventDt.toLocaleDateString('pt-BR')} · ${weekdays[eventDt.getDay()]}`;
+      const eventDateFormatted = formatEventDateWithWeekday(event.eventDate);
       // Endereço do card = Local, Cidade, Estado (igual ao card da home).
       const eventLocation = formatEventCardAddress(event);
-
-      const reviewedHH = String(now.getHours()).padStart(2, '0');
-      const reviewedMM = String(now.getMinutes()).padStart(2, '0');
-      const reviewedAtFormatted = `${now.toLocaleDateString('pt-BR')} · ${reviewedHH}h${reviewedMM}`;
+      const reviewedAtFormatted = formatBrtInstant(now);
 
       const organizerName = event.organization?.tradeName ?? event.organization?.name ?? '';
 

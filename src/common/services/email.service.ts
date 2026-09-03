@@ -1034,7 +1034,12 @@ export class EmailService {
   }
 
   async sendEventApproved(data: {
-    recipientEmail: string;
+    /**
+     * Contato da organização + TODOS os owners, já deduplicados
+     * (`buildOrganizerNotificationRecipients`). UM e-mail com todos no `to`,
+     * não um envio por destinatário.
+     */
+    recipientEmails: string[];
     organizerName?: string;
     eventName: string;
     eventBannerUrl: string;
@@ -1064,13 +1069,13 @@ export class EmailService {
 
     await this.send({
       from: this.from,
-      to: data.recipientEmail,
+      to: data.recipientEmails,
       subject: `Seu evento foi aprovado — ${data.eventName}`,
       html,
       text,
     });
 
-    this.logger.log(`Email de evento aprovado enviado para: ${data.recipientEmail} (evento: ${data.eventName})`);
+    this.logger.log(`Email de evento aprovado enviado para: ${data.recipientEmails.join(', ')} (evento: ${data.eventName})`);
   }
 
   async sendEventChangesRequested(data: {
