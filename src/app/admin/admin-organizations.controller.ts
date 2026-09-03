@@ -6,7 +6,8 @@ import {
   ApiTags, ApiOperation, ApiBearerAuth,
   ApiQuery, ApiParam, ApiResponse, ApiBody,
 } from '@nestjs/swagger';
-import { IsArray, IsBoolean, IsNumber, IsOptional, IsString, Max, Min, ValidateNested } from 'class-validator';
+import { IsArray, IsBoolean, IsEnum, IsNumber, IsOptional, IsString, Max, Min, ValidateNested } from 'class-validator';
+import { OrganizationAdvisor } from '@prisma/client';
 import { Transform, Type } from 'class-transformer';
 import { AdminOrganizationsService, UpdateOrganizationDto } from './admin-organizations.service';
 import { OrganizationsService } from '../organizations/organizations.service';
@@ -55,6 +56,7 @@ class UpdateOrganizationBodyDto implements UpdateOrganizationDto {
   @IsOptional() @IsBoolean() @Transform(({ value }) => value === 'true' || value === true) anticipationEnabled?: boolean;
   // Taxa de organizador personalizada: liga/desliga + teto da taxa TOTAL (%) por evento (0–100).
   @IsOptional() @IsBoolean() @Transform(({ value }) => value === 'true' || value === true) customFeeEnabled?: boolean;
+  @IsOptional() @IsEnum(OrganizationAdvisor) advisor?: OrganizationAdvisor;
   @IsOptional() @IsNumber() @Min(0) @Max(100) maxTotalFeePercent?: number;
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => PixKeyItemDto) pixKeys?: PixKeyItemDto[];
 }

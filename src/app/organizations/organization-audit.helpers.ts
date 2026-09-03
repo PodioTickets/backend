@@ -40,6 +40,7 @@ export const ORGANIZATION_UPDATE_FIELD_LABELS: Record<string, string> = {
   accountHolderDocument: 'documento do titular',
   anticipationMonthlyRate: 'taxa mensal de antecipação',
   anticipationEnabled: 'antecipação habilitada',
+  advisor: 'assessor responsável',
   pixKeys: 'chaves PIX',
 };
 
