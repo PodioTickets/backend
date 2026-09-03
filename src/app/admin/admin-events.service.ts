@@ -460,6 +460,111 @@ export class AdminEventsService {
     };
   }
 
+  /**
+   * Recusa evento em revisão: REVISION → CHANGES_REQUESTED, grava o motivo e
+   * notifica o organizador por e-mail (fire-and-forget, igual ao approve).
+   *
+   * O `financialSettingsLockedAt` continua setado: quem destrava é a volta para
+   * DRAFT (`EventsService.revertToDraft`), quando o organizador de fato decide
+   * editar. Assim um evento parado em CHANGES_REQUESTED não fica com a taxa
+   * editável pelas costas da auditoria.
+   */
+  async rejectEvent(adminUserId: string, eventId: string, reason: string) {
+    const prismaWrite = this.prisma.getWriteClient();
+
+    const event = await prismaWrite.event.findUnique({
+      where: { id: eventId },
+      include: {
+        organization: {
+          select: {
+            email: true,
+            name: true,
+            tradeName: true,
+            members: {
+              where: { role: 'OWNER' },
+              select: { user: { select: { email: true } } },
+              take: 1,
+            },
+          },
+        },
+      },
+    });
+
+    if (!event) throw new NotFoundException('Evento não encontrado');
+    if (event.status !== EventStatus.REVISION) {
+      throw new BadRequestException('Somente eventos em revisão podem ser recusados');
+    }
+
+    const now = new Date();
+    const trimmedReason = reason.trim();
+
+    const updatedEvent = await prismaWrite.event.update({
+      where: { id: eventId },
+      data: {
+        status: EventStatus.CHANGES_REQUESTED,
+        rejectionReason: trimmedReason,
+        rejectedAt: now,
+        rejectedById: adminUserId,
+      },
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        rejectionReason: true,
+        rejectedAt: true,
+        updatedAt: true,
+      },
+    });
+
+    // Motivo NÃO entra no log: é texto livre do admin e pode citar dados do
+    // organizador. Fica só no banco, lido pela própria tela.
+    this.logger.log(
+      `Admin ${adminUserId} recusou evento ${eventId} (${event.name}) — status REVISION → CHANGES_REQUESTED`,
+    );
+
+    // Notifica organizador por e-mail (fire-and-forget — falha não bloqueia a
+    // resposta). Contato da org primeiro, com fallback pro e-mail do dono:
+    // mesma regra do `approveEvent`.
+    const organizerEmail =
+      event.organization?.email || event.organization?.members?.[0]?.user?.email;
+    if (organizerEmail) {
+      const weekdays = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
+      const eventDt = new Date(event.eventDate);
+      const eventDateFormatted = `${eventDt.toLocaleDateString('pt-BR')} · ${weekdays[eventDt.getDay()]}`;
+      // Endereço do card = Local, Cidade, Estado (igual ao card da home).
+      const eventLocation = formatEventCardAddress(event);
+
+      const reviewedHH = String(now.getHours()).padStart(2, '0');
+      const reviewedMM = String(now.getMinutes()).padStart(2, '0');
+      const reviewedAtFormatted = `${now.toLocaleDateString('pt-BR')} · ${reviewedHH}h${reviewedMM}`;
+
+      const organizerName = event.organization?.tradeName ?? event.organization?.name ?? '';
+
+      this.emailService
+        .sendEventChangesRequested({
+          recipientEmail: organizerEmail,
+          organizerName,
+          eventName: event.name,
+          // Imagem do e-mail = BANNER do evento (logoUrl descontinuado).
+          eventBannerUrl: event.bannerUrl ?? '',
+          eventDate: eventDateFormatted,
+          eventLocation,
+          reviewedAt: reviewedAtFormatted,
+          reason: trimmedReason,
+        })
+        .catch((err) =>
+          this.logger.warn(
+            `Falha ao enviar e-mail de ajustes solicitados (eventId=${eventId}): ${err?.message ?? err}`,
+          ),
+        );
+    }
+
+    return {
+      message: 'Event rejected successfully',
+      data: { event: updatedEvent },
+    };
+  }
+
   async updateFinancialSettings(
     eventId: string,
     dto: {

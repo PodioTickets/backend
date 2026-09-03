@@ -1388,6 +1388,10 @@ export class EventsService {
           eventDate: true,
           registrationEndDate: true,
           status: true,
+          // Motivo da recusa do admin: a lista "Meus eventos" abre o modal com
+          // ele direto, sem um GET extra por card.
+          rejectionReason: true,
+          rejectedAt: true,
           createdAt: true,
           updatedAt: true,
           kitSelectionDisplay: true,
@@ -3004,6 +3008,71 @@ export class EventsService {
 
     return {
       message: 'Event submitted for review successfully',
+      data: { event: updatedEvent },
+    };
+  }
+
+  /**
+   * "Fazer ajustes": CHANGES_REQUESTED → DRAFT, devolvendo o evento ao wizard de
+   * criação. Destrava o financeiro (`financialSettingsLockedAt`), que o
+   * `publish` havia travado ao enviar para revisão — sem isso o organizador
+   * voltaria ao rascunho com a etapa de pagamento bloqueada.
+   *
+   * `rejectionReason`/`rejectedAt` são preservados de propósito: viram histórico
+   * da última recusa e mantêm o modal do motivo consultável.
+   */
+  async revertToDraft(userId: string, eventId: string, clientIp?: string | null) {
+    await this.verifyOrganizerAccess(userId, eventId, 'edit_event');
+
+    const prismaWrite = this.prisma.getWriteClient();
+    const prismaRead = this.prisma.getReadClient();
+
+    const event = await prismaRead.event.findUnique({
+      where: { id: eventId },
+      select: { id: true, name: true, status: true, organizationId: true },
+    });
+
+    if (!event) throw new NotFoundException('Evento não encontrado');
+
+    // Idempotente: já em DRAFT devolve sucesso em vez de 400 — o organizador
+    // pode ter clicado em "Fazer ajustes" duas vezes ou ter a lista defasada.
+    if (event.status === EventStatus.DRAFT) {
+      const current = await prismaRead.event.findUnique({ where: { id: eventId } });
+      return {
+        message: 'Event already in draft',
+        data: { event: current },
+      };
+    }
+
+    if (event.status !== EventStatus.CHANGES_REQUESTED) {
+      throw new BadRequestException(
+        'Somente eventos com ajustes solicitados podem voltar para rascunho',
+      );
+    }
+
+    const updatedEvent = await prismaWrite.event.update({
+      where: { id: eventId },
+      data: {
+        status: EventStatus.DRAFT,
+        financialSettingsLockedAt: null,
+      },
+    });
+
+    this.invalidateEventCacheById(eventId);
+
+    await this.organizationsService.recordOrganizationAuditLog({
+      organizationId: event.organizationId,
+      actorUserId: userId,
+      ip: clientIp ?? null,
+      action: `Retomou a edição do evento "${event.name}" após ajustes solicitados`,
+      metadata: {
+        kind: 'EVENT_REVERT_TO_DRAFT',
+        eventId,
+      } as Prisma.InputJsonValue,
+    });
+
+    return {
+      message: 'Event reverted to draft successfully',
       data: { event: updatedEvent },
     };
   }
