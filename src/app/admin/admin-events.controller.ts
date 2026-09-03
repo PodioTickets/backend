@@ -9,6 +9,7 @@ import {
 import {
   IsEnum, IsISO8601, IsNumber, IsNumberString, IsOptional,
   IsString, IsUUID, IsIn, IsInt, Min, Max, IsArray, ArrayNotEmpty,
+  MinLength, MaxLength,
 } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { EventStatus } from '@prisma/client';
@@ -27,6 +28,19 @@ class AdminUpdateFinancialSettingsDto {
   // Taxas Podio↔organizador por evento (frações 0–1: 0.10 = 10%, 0.02 = 2%).
   @IsOptional() @IsNumber() @Min(0) @Max(1) retentionRate?: number;
   @IsOptional() @IsNumber() @Min(0) @Max(1) refundFeeRate?: number;
+}
+
+class RejectEventDto {
+  /**
+   * Motivo da recusa, exibido ao organizador em "Meus eventos". Mínimo de 10
+   * caracteres para barrar "não"/"ok": sem um motivo útil ele não sabe o que
+   * corrigir e reenvia o mesmo evento. Teto de 1000 protege a coluna e o e-mail.
+   */
+  @IsString()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @MinLength(10, { message: 'Descreva o motivo com pelo menos 10 caracteres' })
+  @MaxLength(1000)
+  reason!: string;
 }
 
 class ReorderFeaturedDto {
@@ -232,6 +246,41 @@ export class AdminEventsController {
     @Req() req: any,
   ) {
     return this.adminEventsService.approveEvent(req.user.id, eventId);
+  }
+
+  @Post('events/:eventId/reject')
+  @ApiOperation({
+    summary:
+      '[Admin] Recusa evento em revisão → CHANGES_REQUESTED, grava o motivo e notifica o organizador',
+  })
+  @ApiParam({ name: 'eventId', type: String, description: 'UUID do evento' })
+  @ApiResponse({
+    status: 201,
+    description: 'Evento devolvido ao organizador com o motivo',
+    schema: {
+      example: {
+        message: 'Event rejected successfully',
+        data: {
+          event: {
+            id: 'evt-uuid',
+            name: 'Corrida das Pedras 2026',
+            status: 'CHANGES_REQUESTED',
+            rejectionReason: 'O banner está fora da proporção mínima exigida.',
+            rejectedAt: '2026-09-02T14:30:00.000Z',
+            updatedAt: '2026-09-02T14:30:00.000Z',
+          },
+        },
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Evento não está em status REVISION, ou motivo inválido' })
+  @ApiResponse({ status: 404, description: 'Evento não encontrado' })
+  rejectEvent(
+    @Param('eventId', ParseUUIDPipe) eventId: string,
+    @Body() dto: RejectEventDto,
+    @Req() req: any,
+  ) {
+    return this.adminEventsService.rejectEvent(req.user.id, eventId, dto.reason);
   }
 
   @Patch('events/:eventId/financial-settings')

@@ -556,6 +556,24 @@ export class EventsController {
     return this.eventsService.publish(req.user.id, eventId, clientIp(req));
   }
 
+  @Post(':eventId/revert-to-draft')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Retomar edição após ajustes solicitados',
+    description:
+      'Volta o evento de CHANGES_REQUESTED para DRAFT e destrava as configurações financeiras, devolvendo-o ao wizard de criação. Idempotente: evento já em DRAFT retorna 200.',
+  })
+  @ApiParam({ name: 'eventId', description: 'Event UUID' })
+  @ApiResponse({ status: 201, description: 'Evento voltou para rascunho' })
+  @ApiResponse({ status: 400, description: 'Evento não está com ajustes solicitados' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Apenas membros da organização do evento' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  revertToDraft(@Request() req, @Param('eventId') eventId: string) {
+    return this.eventsService.revertToDraft(req.user.id, eventId, clientIp(req));
+  }
+
   @Post(':eventId/suspend')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
