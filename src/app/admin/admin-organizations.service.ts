@@ -4,7 +4,7 @@ import {
   ConflictException,
   BadRequestException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { OrganizationAdvisor, Prisma } from '@prisma/client';
 import {
   effectivePermissionsForMember,
   grantedPermissionKeys,
@@ -220,6 +220,7 @@ export class AdminOrganizationsService {
           anticipationEnabled: true,
           customFeeEnabled: true,
           maxTotalFeePercent: true,
+          advisor: true,
           isActive: true,
           createdAt: true,
           updatedAt: true,
@@ -436,4 +437,5 @@ export interface UpdateOrganizationDto {
   isActive?: boolean;
   anticipationMonthlyRate?: number;
   anticipationEnabled?: boolean;
+  advisor?: OrganizationAdvisor;
 }
