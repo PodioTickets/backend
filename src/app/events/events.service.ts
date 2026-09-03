@@ -46,6 +46,7 @@ import { TicketsService } from '../tickets/tickets.service';
 import { resolveActiveBatch, type BatchWithSold } from '../tickets/batch-active.util';
 import { computeRegistrationPaidValues } from './export-paid-value.util';
 import { formatEventCardAddress } from '../../common/utils/event-email-format.util';
+import { buildOrganizerNotificationRecipients } from '../../common/utils/notification-recipients.util';
 import { TicketCategoriesService } from '../ticket-categories/ticket-categories.service';
 import { EmailService } from '../../common/services/email.service';
 import { RepasseService, RETENTION_DAYS, calendarDaysUntil, loadAnticipatedByUnit } from '../repasse/repasse.service';
@@ -1498,6 +1499,9 @@ export class EventsService {
     tiktok: true,
     website: true,
     regulationUrl: true,
+    // Flag do organizador: o checkout precisa dela para exigir (ou não) o
+    // contato de emergência de cada participante.
+    emergencyContactRequired: true,
     eventDate: true,
     registrationStartDate: true,
     registrationEndDate: true,
@@ -2932,6 +2936,16 @@ export class EventsService {
       where: { id: eventId },
       include: {
         tickets: { where: { isActive: true }, select: { id: true } },
+        organization: {
+          select: {
+            email: true,
+            members: {
+              where: { role: 'OWNER' },
+              select: { user: { select: { email: true } } },
+              take: 1,
+            },
+          },
+        },
       },
     });
 
@@ -2975,13 +2989,16 @@ export class EventsService {
       } as Prisma.InputJsonValue,
     });
 
-    // Buscar e-mail e nome do organizador para notificação
-    const organizer = await prismaRead.user.findUnique({
-      where: { id: userId },
-      select: { email: true, firstName: true },
-    });
+    // Notificação de "evento em análise": vai para o contato da ORGANIZAÇÃO
+    // **e** para o e-mail do DONO — não um como fallback do outro. Quando os
+    // dois são o mesmo endereço, o helper deduplica e sai um único e-mail.
+    // Mesma regra do e-mail de ajustes solicitados (`rejectEvent`).
+    const recipientEmails = buildOrganizerNotificationRecipients([
+      event.organization?.email,
+      event.organization?.members?.[0]?.user?.email,
+    ]);
 
-    if (organizer?.email) {
+    if (recipientEmails.length > 0) {
       const weekdays = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
       const eventDt = new Date(event.eventDate);
       const eventDateFormatted = `${eventDt.toLocaleDateString('pt-BR')} · ${weekdays[eventDt.getDay()]}`;
@@ -2993,7 +3010,7 @@ export class EventsService {
 
       this.emailService
         .sendEventUnderReview({
-          recipientEmail: organizer.email,
+          recipientEmails,
           eventName: event.name,
           // Imagem do e-mail = BANNER do evento (logoUrl descontinuado).
           eventBannerUrl: event.bannerUrl ?? '',

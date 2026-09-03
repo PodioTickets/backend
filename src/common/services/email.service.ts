@@ -990,7 +990,12 @@ export class EmailService {
   }
 
   async sendEventUnderReview(data: {
-    recipientEmail: string;
+    /**
+     * Contato da organização + dono, já deduplicados
+     * (`buildOrganizerNotificationRecipients`). UM e-mail com os dois no `to`,
+     * não um envio por destinatário.
+     */
+    recipientEmails: string[];
     eventName: string;
     eventBannerUrl: string;
     eventDate: string;
@@ -1019,13 +1024,13 @@ export class EmailService {
 
     await this.send({
       from: this.from,
-      to: data.recipientEmail,
+      to: data.recipientEmails,
       subject: `Seu evento está em análise — ${data.eventName}`,
       html,
       text,
     });
 
-    this.logger.log(`Email de evento em análise enviado para: ${data.recipientEmail} (evento: ${data.eventName})`);
+    this.logger.log(`Email de evento em análise enviado para: ${data.recipientEmails.join(', ')} (evento: ${data.eventName})`);
   }
 
   async sendEventApproved(data: {
@@ -1069,7 +1074,12 @@ export class EmailService {
   }
 
   async sendEventChangesRequested(data: {
-    recipientEmail: string;
+    /**
+     * Contato da organização + dono, já deduplicados
+     * (`buildOrganizerNotificationRecipients`). UM e-mail com os dois no `to`,
+     * não um envio por destinatário.
+     */
+    recipientEmails: string[];
     organizerName?: string;
     eventName: string;
     eventBannerUrl: string;
@@ -1109,14 +1119,14 @@ export class EmailService {
 
     await this.send({
       from: this.from,
-      to: data.recipientEmail,
+      to: data.recipientEmails,
       subject: `Seu evento precisa de ajustes — ${data.eventName}`,
       html,
       text,
     });
 
     this.logger.log(
-      `Email de ajustes solicitados enviado para: ${data.recipientEmail} (evento: ${data.eventName})`,
+      `Email de ajustes solicitados enviado para: ${data.recipientEmails.join(', ')} (evento: ${data.eventName})`,
     );
   }
 

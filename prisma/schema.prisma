@@ -434,6 +434,9 @@ model Event {
   tiktok                String?
   website               String?
   regulationUrl         String? // URL do PDF do regulamento
+  /// Quando true, o checkout EXIGE contato de emergência (nome + telefone) de
+  /// cada participante. Default false = o participante escolhe se informa.
+  emergencyContactRequired Boolean @default(false)
   eventDate             DateTime
   registrationStartDate DateTime
   registrationEndDate   DateTime
