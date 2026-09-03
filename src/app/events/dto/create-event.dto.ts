@@ -105,6 +105,14 @@ export class CreateEventDto {
   @IsString()
   regulationUrl?: string;
 
+  /**
+   * Exige contato de emergência (nome + telefone) de cada participante no
+   * checkout. Opcional no DTO: ausente = não mexe no valor atual.
+   */
+  @IsOptional()
+  @IsBoolean()
+  emergencyContactRequired?: boolean;
+
   @IsDateString()
   eventDate: string;
 
@@ -223,6 +231,14 @@ export class UpdateEventDto {
   @IsOptional()
   @IsString()
   regulationUrl?: string;
+
+  /**
+   * Exige contato de emergência (nome + telefone) de cada participante no
+   * checkout. Opcional no DTO: ausente = não mexe no valor atual.
+   */
+  @IsOptional()
+  @IsBoolean()
+  emergencyContactRequired?: boolean;
 
   @IsOptional()
   @IsDateString()

@@ -7,6 +7,7 @@ import {
   pastEventDateCutoff,
 } from '../../common/utils/event-status.util';
 import { formatEventCardAddress } from '../../common/utils/event-email-format.util';
+import { buildOrganizerNotificationRecipients } from '../../common/utils/notification-recipients.util';
 
 export interface AdminEventsQuery {
   page: number;
@@ -523,11 +524,14 @@ export class AdminEventsService {
     );
 
     // Notifica organizador por e-mail (fire-and-forget — falha não bloqueia a
-    // resposta). Contato da org primeiro, com fallback pro e-mail do dono:
-    // mesma regra do `approveEvent`.
-    const organizerEmail =
-      event.organization?.email || event.organization?.members?.[0]?.user?.email;
-    if (organizerEmail) {
+    // resposta). Vai para o contato da ORGANIZAÇÃO **e** para o e-mail do DONO
+    // — não um como fallback do outro. Quando os dois são o mesmo endereço, o
+    // helper deduplica e sai um único e-mail com um único destinatário.
+    const recipientEmails = buildOrganizerNotificationRecipients([
+      event.organization?.email,
+      event.organization?.members?.[0]?.user?.email,
+    ]);
+    if (recipientEmails.length > 0) {
       const weekdays = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
       const eventDt = new Date(event.eventDate);
       const eventDateFormatted = `${eventDt.toLocaleDateString('pt-BR')} · ${weekdays[eventDt.getDay()]}`;
@@ -542,7 +546,7 @@ export class AdminEventsService {
 
       this.emailService
         .sendEventChangesRequested({
-          recipientEmail: organizerEmail,
+          recipientEmails,
           organizerName,
           eventName: event.name,
           // Imagem do e-mail = BANNER do evento (logoUrl descontinuado).
