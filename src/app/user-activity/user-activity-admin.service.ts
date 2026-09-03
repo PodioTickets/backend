@@ -92,12 +92,20 @@ export class UserActivityAdminService {
     if (userSearch) {
       // Quando filtra por user, exclui anônimos (sem `userId`). Mesmo
       // padrão do `listAuditLogsAsAdmin` da Organization.
+      //
+      // O termo é quebrado em palavras e cada uma precisa casar com ALGUM
+      // dos campos (AND de ORs): sem isso, "Fulano de Teste" nunca casa,
+      // porque nenhum campo isolado contém o nome completo — o admin digita
+      // o nome como aparece na lista (`fullName`), não só o primeiro nome.
+      const terms = userSearch.split(/\s+/).filter(Boolean).slice(0, 5);
       where.user = {
-        OR: [
-          { firstName: { contains: userSearch, mode: 'insensitive' } },
-          { lastName: { contains: userSearch, mode: 'insensitive' } },
-          { email: { contains: userSearch, mode: 'insensitive' } },
-        ],
+        AND: terms.map((term) => ({
+          OR: [
+            { firstName: { contains: term, mode: 'insensitive' as const } },
+            { lastName: { contains: term, mode: 'insensitive' as const } },
+            { email: { contains: term, mode: 'insensitive' as const } },
+          ],
+        })),
       };
     }
 

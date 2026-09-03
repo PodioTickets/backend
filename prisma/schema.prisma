@@ -38,6 +38,10 @@ enum Language {
 enum EventStatus {
   DRAFT
   REVISION
+  /// Admin recusou o evento em revisão: volta ao organizador como "Ajustes
+  /// solicitados", com o motivo em `Event.rejectionReason`. Sai deste estado
+  /// voltando para DRAFT (POST /events/:id/revert-to-draft).
+  CHANGES_REQUESTED
   PUBLISHED
   SUSPENDED
   CANCELLED
@@ -474,6 +478,15 @@ model Event {
   acceptedPaymentMethods      PaymentMethod[] @default([PIX, DEBIT_CARD, CREDIT_CARD])
   /// Preenchido ao publicar o evento. Após essa data as configurações financeiras ficam bloqueadas.
   financialSettingsLockedAt   DateTime?
+
+  /// Motivo da ÚLTIMA recusa do admin (status CHANGES_REQUESTED), exibido ao
+  /// organizador em "Meus eventos". NÃO é limpo quando o evento volta para
+  /// DRAFT: serve de histórico e mantém o modal do motivo reabrível.
+  rejectionReason             String?   @map("rejection_reason")
+  rejectedAt                  DateTime? @map("rejected_at")
+  /// Admin que recusou. UUID solto (sem relation) de propósito: é dado de
+  /// auditoria, e uma FK obrigaria a manter a linha do admin viva para sempre.
+  rejectedById                String?   @map("rejected_by_id") @db.Uuid
 
   organization       Organization                    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   topics             EventTopic[]

@@ -1068,6 +1068,58 @@ export class EmailService {
     this.logger.log(`Email de evento aprovado enviado para: ${data.recipientEmail} (evento: ${data.eventName})`);
   }
 
+  async sendEventChangesRequested(data: {
+    recipientEmail: string;
+    organizerName?: string;
+    eventName: string;
+    eventBannerUrl: string;
+    eventDate: string;
+    eventLocation: string;
+    /** Quando o admin concluiu a análise (já formatado em pt-BR). */
+    reviewedAt: string;
+    /** Texto livre escrito pelo admin — entra escapado no HTML. */
+    reason: string;
+  }): Promise<void> {
+    const html = this.loadTemplate('evento-ajustes-solicitados.html', {
+      organizerName: this.escapeHtml(data.organizerName ?? ''),
+      eventName: this.escapeHtml(data.eventName),
+      /* safeUrl valida esquema https:// — previne javascript: em atributo src da imagem */
+      eventBannerUrl: this.escapeHtml(this.safeUrl(this.resolveEmailImageUrl(data.eventBannerUrl))),
+      eventDate: this.escapeHtml(data.eventDate),
+      eventLocation: this.escapeHtml(data.eventLocation),
+      reviewedAt: this.escapeHtml(data.reviewedAt),
+      // Escapa PRIMEIRO e só então troca as quebras por <br> — inverter a ordem
+      // faria o próprio <br> ser escapado e aparecer como texto no e-mail.
+      reason: this.escapeHtml(data.reason).replace(/\r?\n/g, '<br>'),
+    });
+
+    const text = [
+      `Seu evento precisa de ajustes — PódioTicket`,
+      '',
+      `Evento: ${data.eventName}`,
+      `Data: ${data.eventDate}`,
+      `Local: ${data.eventLocation}`,
+      `Analisado em: ${data.reviewedAt}`,
+      '',
+      'O que precisa ser ajustado:',
+      data.reason,
+      '',
+      'Corrija o evento em "Meus eventos" e reenvie para análise.',
+    ].join('\n');
+
+    await this.send({
+      from: this.from,
+      to: data.recipientEmail,
+      subject: `Seu evento precisa de ajustes — ${data.eventName}`,
+      html,
+      text,
+    });
+
+    this.logger.log(
+      `Email de ajustes solicitados enviado para: ${data.recipientEmail} (evento: ${data.eventName})`,
+    );
+  }
+
   /** Garante que URL tenha protocolo — sem ele o href vira relativo e não funciona */
   private normalizeUrl(url: string): string {
     const trimmed = url.trim();
