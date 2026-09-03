@@ -1,12 +1,16 @@
 /**
  * Destinatários das notificações de evento do organizador.
  *
- * As notificações de auditoria (evento em análise, ajustes solicitados) vão
- * para o e-mail de contato da ORGANIZAÇÃO **e** para o e-mail do MEMBRO DONO
- * (role OWNER) — não é um fallback entre os dois: quem cadastrou um contato
- * institucional continua querendo que o dono saiba.
+ * As notificações de auditoria (evento em análise, aprovado, ajustes
+ * solicitados) vão para o e-mail de contato da ORGANIZAÇÃO **e** para o de
+ * TODOS os membros com role OWNER — não é um fallback entre eles: quem
+ * cadastrou um contato institucional continua querendo que os donos saibam.
  *
- * Na prática os dois são quase sempre o mesmo endereço. A deduplicação compara
+ * São vários owners mesmo: o schema tem `@@unique([organizationId, userId])`,
+ * que só impede o mesmo usuário entrar duas vezes — nada limita a organização a
+ * um único OWNER. Consultar com `take: 1` elegia um em silêncio.
+ *
+ * Na prática costumam ser o mesmo endereço. A deduplicação compara
  * em minúsculas e sem espaços das pontas: sem isso "Contato@x.com" e
  * "contato@x.com" entrariam como dois destinatários no SendGrid e a mesma
  * pessoa receberia o aviso duas vezes.

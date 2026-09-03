@@ -45,7 +45,11 @@ import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
 import { TicketsService } from '../tickets/tickets.service';
 import { resolveActiveBatch, type BatchWithSold } from '../tickets/batch-active.util';
 import { computeRegistrationPaidValues } from './export-paid-value.util';
-import { formatEventCardAddress } from '../../common/utils/event-email-format.util';
+import {
+  formatBrtInstant,
+  formatEventCardAddress,
+  formatEventDateWithWeekday,
+} from '../../common/utils/event-email-format.util';
 import { buildOrganizerNotificationRecipients } from '../../common/utils/notification-recipients.util';
 import { TicketCategoriesService } from '../ticket-categories/ticket-categories.service';
 import { EmailService } from '../../common/services/email.service';
@@ -2939,10 +2943,11 @@ export class EventsService {
         organization: {
           select: {
             email: true,
+            /* TODOS os owners: a organização pode ter mais de um e todos
+               precisam ser avisados. Sem `take`, de propósito. */
             members: {
               where: { role: 'OWNER' },
               select: { user: { select: { email: true } } },
-              take: 1,
             },
           },
         },
@@ -2995,16 +3000,12 @@ export class EventsService {
     // Mesma regra do e-mail de ajustes solicitados (`rejectEvent`).
     const recipientEmails = buildOrganizerNotificationRecipients([
       event.organization?.email,
-      event.organization?.members?.[0]?.user?.email,
+      ...(event.organization?.members ?? []).map((m) => m.user?.email),
     ]);
 
     if (recipientEmails.length > 0) {
-      const weekdays = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
-      const eventDt = new Date(event.eventDate);
-      const eventDateFormatted = `${eventDt.toLocaleDateString('pt-BR')} · ${weekdays[eventDt.getDay()]}`;
-      const submittedHH = String(submittedAt.getHours()).padStart(2, '0');
-      const submittedMM = String(submittedAt.getMinutes()).padStart(2, '0');
-      const submittedAtFormatted = `${submittedAt.toLocaleDateString('pt-BR')} · ${submittedHH}h${submittedMM}`;
+      const eventDateFormatted = formatEventDateWithWeekday(event.eventDate);
+      const submittedAtFormatted = formatBrtInstant(submittedAt);
       // Endereço do card = Local, Cidade, Estado (igual ao card da home).
       const eventLocation = formatEventCardAddress(event);
 
