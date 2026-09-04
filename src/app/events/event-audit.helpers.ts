@@ -24,6 +24,7 @@ export const EVENT_UPDATE_FIELD_LABELS: Record<string, string> = {
   longitude: 'longitude do local',
   locationName: 'nome do local',
   regulationUrl: 'regulamento',
+  emergencyContactRequired: 'contato de emergência obrigatório',
   eventDate: 'data do evento',
   registrationStartDate: 'início das inscrições',
   registrationEndDate: 'fim das inscrições',

@@ -45,7 +45,12 @@ import { UpdateEventAdsTrackingDto } from './dto/event-ads-tracking.dto';
 import { TicketsService } from '../tickets/tickets.service';
 import { resolveActiveBatch, type BatchWithSold } from '../tickets/batch-active.util';
 import { computeRegistrationPaidValues } from './export-paid-value.util';
-import { formatEventCardAddress } from '../../common/utils/event-email-format.util';
+import {
+  formatBrtInstant,
+  formatEventCardAddress,
+  formatEventDateWithWeekday,
+} from '../../common/utils/event-email-format.util';
+import { buildOrganizerNotificationRecipients } from '../../common/utils/notification-recipients.util';
 import { TicketCategoriesService } from '../ticket-categories/ticket-categories.service';
 import { EmailService } from '../../common/services/email.service';
 import { RepasseService, RETENTION_DAYS, calendarDaysUntil, loadAnticipatedByUnit } from '../repasse/repasse.service';
@@ -1498,6 +1503,9 @@ export class EventsService {
     tiktok: true,
     website: true,
     regulationUrl: true,
+    // Flag do organizador: o checkout precisa dela para exigir (ou não) o
+    // contato de emergência de cada participante.
+    emergencyContactRequired: true,
     eventDate: true,
     registrationStartDate: true,
     registrationEndDate: true,
@@ -2932,6 +2940,17 @@ export class EventsService {
       where: { id: eventId },
       include: {
         tickets: { where: { isActive: true }, select: { id: true } },
+        organization: {
+          select: {
+            email: true,
+            /* TODOS os owners: a organização pode ter mais de um e todos
+               precisam ser avisados. Sem `take`, de propósito. */
+            members: {
+              where: { role: 'OWNER' },
+              select: { user: { select: { email: true } } },
+            },
+          },
+        },
       },
     });
 
@@ -2975,25 +2994,24 @@ export class EventsService {
       } as Prisma.InputJsonValue,
     });
 
-    // Buscar e-mail e nome do organizador para notificação
-    const organizer = await prismaRead.user.findUnique({
-      where: { id: userId },
-      select: { email: true, firstName: true },
-    });
+    // Notificação de "evento em análise": vai para o contato da ORGANIZAÇÃO
+    // **e** para o e-mail do DONO — não um como fallback do outro. Quando os
+    // dois são o mesmo endereço, o helper deduplica e sai um único e-mail.
+    // Mesma regra do e-mail de ajustes solicitados (`rejectEvent`).
+    const recipientEmails = buildOrganizerNotificationRecipients([
+      event.organization?.email,
+      ...(event.organization?.members ?? []).map((m) => m.user?.email),
+    ]);
 
-    if (organizer?.email) {
-      const weekdays = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
-      const eventDt = new Date(event.eventDate);
-      const eventDateFormatted = `${eventDt.toLocaleDateString('pt-BR')} · ${weekdays[eventDt.getDay()]}`;
-      const submittedHH = String(submittedAt.getHours()).padStart(2, '0');
-      const submittedMM = String(submittedAt.getMinutes()).padStart(2, '0');
-      const submittedAtFormatted = `${submittedAt.toLocaleDateString('pt-BR')} · ${submittedHH}h${submittedMM}`;
+    if (recipientEmails.length > 0) {
+      const eventDateFormatted = formatEventDateWithWeekday(event.eventDate);
+      const submittedAtFormatted = formatBrtInstant(submittedAt);
       // Endereço do card = Local, Cidade, Estado (igual ao card da home).
       const eventLocation = formatEventCardAddress(event);
 
       this.emailService
         .sendEventUnderReview({
-          recipientEmail: organizer.email,
+          recipientEmails,
           eventName: event.name,
           // Imagem do e-mail = BANNER do evento (logoUrl descontinuado).
           eventBannerUrl: event.bannerUrl ?? '',

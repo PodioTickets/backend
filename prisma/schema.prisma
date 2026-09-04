@@ -221,6 +221,13 @@ model User {
   @@index([accountType])
 }
 
+/// Assessores da PódioTicket. Os dados de exibição (nome, foto, WhatsApp)
+/// ficam no front (`src/lib/organizerAdvisors.ts`); aqui guardamos só QUEM é.
+enum OrganizationAdvisor {
+  GUARIM
+  LUCAS_SANTOS
+}
+
 model Organization {
   id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name        String // Razão social
@@ -274,6 +281,12 @@ model Organization {
   /// `customFeeEnabled`. Escala 0–100. Só é aplicado com o toggle ligado; senão o
   /// teto efetivo é 6%. Enforcement autoritativo no backend (create/updateFinancialSettings).
   maxTotalFeePercent Float @default(6)
+
+  /// Assessor responsável por esta organização. Define nome, foto e WhatsApp do
+  /// widget flutuante de suporte no painel do organizador. Enum (e não FK): são
+  /// pessoas fixas do time, e os dados de exibição vivem no front junto do asset
+  /// da foto — uma tabela de 2 linhas só somaria join sem ganho.
+  advisor OrganizationAdvisor @default(GUARIM)
 
   isActive  Boolean  @default(true)
 
@@ -434,6 +447,9 @@ model Event {
   tiktok                String?
   website               String?
   regulationUrl         String? // URL do PDF do regulamento
+  /// Quando true, o checkout EXIGE contato de emergência (nome + telefone) de
+  /// cada participante. Default false = o participante escolhe se informa.
+  emergencyContactRequired Boolean @default(false)
   eventDate             DateTime
   registrationStartDate DateTime
   registrationEndDate   DateTime
