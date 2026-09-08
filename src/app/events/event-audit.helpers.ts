@@ -25,6 +25,7 @@ export const EVENT_UPDATE_FIELD_LABELS: Record<string, string> = {
   locationName: 'nome do local',
   regulationUrl: 'regulamento',
   emergencyContactRequired: 'contato de emergência obrigatório',
+  allowMultipleTicketsPerCpf: 'mais de um ingresso por CPF',
   eventDate: 'data do evento',
   registrationStartDate: 'início das inscrições',
   registrationEndDate: 'fim das inscrições',

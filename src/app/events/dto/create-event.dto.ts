@@ -113,6 +113,14 @@ export class CreateEventDto {
   @IsBoolean()
   emergencyContactRequired?: boolean;
 
+  /**
+   * Permite que o MESMO documento leve mais de um ingresso neste evento.
+   * Opcional no DTO: ausente = não mexe no valor atual.
+   */
+  @IsOptional()
+  @IsBoolean()
+  allowMultipleTicketsPerCpf?: boolean;
+
   @IsDateString()
   eventDate: string;
 
@@ -239,6 +247,14 @@ export class UpdateEventDto {
   @IsOptional()
   @IsBoolean()
   emergencyContactRequired?: boolean;
+
+  /**
+   * Permite que o MESMO documento leve mais de um ingresso neste evento.
+   * Opcional no DTO: ausente = não mexe no valor atual.
+   */
+  @IsOptional()
+  @IsBoolean()
+  allowMultipleTicketsPerCpf?: boolean;
 
   @IsOptional()
   @IsDateString()

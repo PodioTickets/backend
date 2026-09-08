@@ -1506,6 +1506,8 @@ export class EventsService {
     // Flag do organizador: o checkout precisa dela para exigir (ou não) o
     // contato de emergência de cada participante.
     emergencyContactRequired: true,
+    // Idem: o checkout precisa saber se pode repetir o mesmo documento no evento.
+    allowMultipleTicketsPerCpf: true,
     eventDate: true,
     registrationStartDate: true,
     registrationEndDate: true,
