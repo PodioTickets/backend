@@ -42,6 +42,15 @@ import {
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
 import { eventWindowInstant } from '../../common/utils/brt-date.util';
 import { resolveActiveBatch } from '../tickets/batch-active.util';
+import {
+  ONE_TICKET_PER_DOCUMENT_ERROR,
+  alreadyRegisteredMessage,
+  collectParticipantDocuments,
+  distinctDocuments,
+  findAlreadyRegisteredSlots,
+  findRepeatedDocumentSlots,
+  repeatedInOrderMessage,
+} from '../../common/utils/participant-document-uniqueness.util';
 import { formatEventHappensDate, formatEventCardAddress } from '../../common/utils/event-email-format.util';
 import {
   holdsStock,
@@ -83,8 +92,13 @@ class AppConflictException extends ConflictException {
 }
 
 class AppUnprocessableException extends UnprocessableEntityException {
-  constructor(code: string, message: string) {
-    super({ code, message });
+  /**
+   * `extra` entra no corpo do erro ao lado de `code`/`message`. Usado pela regra
+   * de 1 ingresso por CPF para dizer QUAIS slots violaram — sem isso o checkout
+   * só conseguiria mostrar um toast genérico em vez de marcar o card errado.
+   */
+  constructor(code: string, message: string, extra?: Record<string, unknown>) {
+    super({ code, message, ...(extra ?? {}) });
   }
 }
 
@@ -107,7 +121,9 @@ const ORDER_INCLUDE = {
   // Nada disso é exposto no payload — orderShape retorna apenas eventId.
   // acceptedPaymentMethods é a whitelist configurada na tela financeira do evento,
   // validada no pay() antes de chamar o gateway.
-  event: { select: { name: true, participantFeePercent: true, organizerFeePercent: true, eventDate: true, acceptedPaymentMethods: true } },
+  // allowMultipleTicketsPerCpf governa a regra de 1 ingresso por documento —
+  // lida no patchParticipants, junto do pedido, para não custar uma query extra.
+  event: { select: { name: true, participantFeePercent: true, organizerFeePercent: true, eventDate: true, acceptedPaymentMethods: true, allowMultipleTicketsPerCpf: true } },
 } as const;
 
 /**
@@ -1502,7 +1518,13 @@ export class OrdersService {
 
       const invitedByFullName = `${emailBuyer?.firstName ?? ''} ${emailBuyer?.lastName ?? ''}`.trim();
       for (const p of individualPdfs) {
-        if (!p.participantEmail || p.participantEmail === buyerEmail) continue;
+        // Comparação NORMALIZADA (trim + lowercase). Desde 2026-09-07 o snapshot também
+        // é gravado na compra PRA SI MESMO, com o e-mail exatamente como foi digitado.
+        // Um `===` cru deixaria passar "Joao@X.com" vs "joao@x.com" e o comprador
+        // receberia o e-mail de participante DUPLICADO. O envio segue com a caixa
+        // original (RFC 5321: local-part é case-sensitive) — só a COMPARAÇÃO normaliza.
+        const pEmail = p.participantEmail?.trim().toLowerCase();
+        if (!pEmail || pEmail === buyerEmail?.trim().toLowerCase()) continue;
         await this.emailService.sendRegistrationConfirmed({
           email: p.participantEmail,
           firstName: p.participantName.split(' ')[0] || 'Participante',
@@ -2526,6 +2548,11 @@ export class OrdersService {
         `Número de participantes (${participants.length}) excede os ingressos reservados (${totalReserved}).`,
       );
     }
+
+    // 1 ingresso por CPF (quando o evento não permite mais de um). Roda ANTES do
+    // update: o pedido só grava `pendingParticipants` se a regra passar, senão o
+    // comprador avançaria e só esbarraria na finalização, depois de pagar.
+    await this.assertOneTicketPerDocument(order, participants);
 
     // Completa com slots VAZIOS até o total reservado (mantém os N slots; vazios = provisórios).
     const filledParticipants = [...participants];
@@ -4530,7 +4557,13 @@ export class OrdersService {
         // Participantes não-compradores recebem apenas seu próprio ingresso
         const invitedByFullName = `${emailBuyer?.firstName ?? ''} ${emailBuyer?.lastName ?? ''}`.trim();
         for (const p of individualPdfs) {
-          if (!p.participantEmail || p.participantEmail === buyerEmail) continue;
+          // Comparação NORMALIZADA (trim + lowercase). Desde 2026-09-07 o snapshot também
+          // é gravado na compra PRA SI MESMO, com o e-mail exatamente como foi digitado.
+          // Um `===` cru deixaria passar "Joao@X.com" vs "joao@x.com" e o comprador
+          // receberia o e-mail de participante DUPLICADO. O envio segue com a caixa
+          // original (RFC 5321: local-part é case-sensitive) — só a COMPARAÇÃO normaliza.
+          const pEmail = p.participantEmail?.trim().toLowerCase();
+          if (!pEmail || pEmail === buyerEmail?.trim().toLowerCase()) continue;
           await this.emailService.sendRegistrationConfirmed({
             email: p.participantEmail,
             firstName: p.participantName.split(' ')[0] || 'Participante',
@@ -4754,6 +4787,79 @@ export class OrdersService {
         'Pedido não está mais pendente e não pode ser alterado',
       );
     }
+  }
+
+  /**
+   * Regra "1 ingresso por CPF" — vale quando `Event.allowMultipleTicketsPerCpf`
+   * está DESLIGADO (default). Duas violações, mesmo código de erro:
+   *
+   *  1. o documento repete dentro do PRÓPRIO pedido, inclusive entre ingressos
+   *     de tipos diferentes (o checkout só barrava ingressos IGUAIS até agora);
+   *  2. o documento já tem inscrição no evento, vinda de um pedido anterior.
+   *
+   * A consulta exclui o próprio pedido: o `reserve` cria registrations
+   * placeholder para os slots, e sem esse filtro o pedido colidiria consigo
+   * mesmo assim que o comprador reenviasse os participantes.
+   *
+   * `status: { not: CANCELLED }` segue a mesma convenção de `maxParticipants`.
+   * Na prática só pega inscrição FINALIZADA: o documento do participante só é
+   * gravado na Registration na finalização — até lá ele vive no
+   * `pendingParticipants` do pedido. Ou seja, carrinho abandonado de outra
+   * pessoa não trava o CPF.
+   *
+   * `participantCpfClean` entra no OR por causa das inscrições antigas, criadas
+   * antes de `participantDocumentNumberClean` virar fonte de verdade.
+   *
+   * Isto é o gate AMIGÁVEL (erro cedo, com os slots). O gate autoritativo é o da
+   * finalização, dentro da transação — só ele fecha a corrida entre dois pedidos
+   * pagos ao mesmo tempo.
+   */
+  private async assertOneTicketPerDocument(
+    order: any,
+    participants: any[],
+  ): Promise<void> {
+    if (order.event?.allowMultipleTicketsPerCpf) return;
+
+    const docs = collectParticipantDocuments(participants);
+    if (docs.length === 0) return;
+
+    const repeated = findRepeatedDocumentSlots(docs);
+    if (repeated.length > 0) {
+      throw new AppUnprocessableException(
+        ONE_TICKET_PER_DOCUMENT_ERROR,
+        repeatedInOrderMessage(),
+        { slots: repeated.map((r) => r.slot) },
+      );
+    }
+
+    const clean = distinctDocuments(docs);
+    const w: any = this.prisma.getWriteClient();
+    const existing = await w.registration.findMany({
+      where: {
+        eventId: order.eventId,
+        orderId: { not: order.id },
+        status: { not: RegistrationStatus.CANCELLED },
+        OR: [
+          { participantDocumentNumberClean: { in: clean } },
+          { participantCpfClean: { in: clean } },
+        ],
+      },
+      select: { participantDocumentNumberClean: true, participantCpfClean: true },
+    });
+    if (existing.length === 0) return;
+
+    const taken = existing.flatMap((reg: any) => [
+      reg.participantDocumentNumberClean,
+      reg.participantCpfClean,
+    ]);
+    const blocked = findAlreadyRegisteredSlots(docs, taken);
+    if (blocked.length === 0) return;
+
+    throw new AppUnprocessableException(
+      ONE_TICKET_PER_DOCUMENT_ERROR,
+      alreadyRegisteredMessage(),
+      { slots: blocked.map((b) => b.slot) },
+    );
   }
 
   /**

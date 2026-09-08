@@ -16,11 +16,15 @@ import { releaseVoucherByOrder } from '../../common/utils/voucher-reservation.ut
  *  - VOUCHER_CONSUMED: finalize abortou — o voucher do pedido foi consumido por outro pedido
  *    entre a captura e a confirmação (reserva vencida "roubada").
  *  - EMPTY_PARTICIPANTS: finalize abortou — pedido sem participantes no momento da confirmação.
+ *  - ONE_TICKET_PER_DOCUMENT: finalize abortou — o evento só permite um ingresso por CPF e o
+ *    documento já tinha inscrição (ou repetia dentro do próprio pedido) na hora da confirmação.
+ *    Alcançável por corrida: dois pedidos passam pelo checkout e são pagos ao mesmo tempo.
  */
 export type CompensationReason =
   | 'PAID_AFTER_CANCELLATION'
   | 'VOUCHER_CONSUMED'
-  | 'EMPTY_PARTICIPANTS';
+  | 'EMPTY_PARTICIPANTS'
+  | 'ONE_TICKET_PER_DOCUMENT';
 
 /**
  * Compensação automática de pagamentos órfãos (capturados sem entrega possível).
