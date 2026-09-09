@@ -450,6 +450,12 @@ model Event {
   /// Quando true, o checkout EXIGE contato de emergência (nome + telefone) de
   /// cada participante. Default false = o participante escolhe se informa.
   emergencyContactRequired Boolean @default(false)
+  /// Quando true, o MESMO documento (CPF/passaporte) pode levar mais de um
+  /// ingresso neste evento. Default false = 1 ingresso por documento no evento
+  /// INTEIRO — validado no PATCH /participants (erro amigável) e de novo na
+  /// finalização, dentro da transação: aquele é o gate autoritativo contra a
+  /// corrida entre dois pedidos pagos ao mesmo tempo.
+  allowMultipleTicketsPerCpf Boolean @default(false)
   eventDate             DateTime
   registrationStartDate DateTime
   registrationEndDate   DateTime

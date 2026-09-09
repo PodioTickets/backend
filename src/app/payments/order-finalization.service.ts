@@ -20,7 +20,10 @@ import { UserActivityService } from '../../common/services/user-activity.service
  */
 export class OrderFinalizationAbortError extends Error {
   constructor(
-    public readonly code: 'VOUCHER_CONSUMED' | 'EMPTY_PARTICIPANTS',
+    public readonly code:
+      | 'VOUCHER_CONSUMED'
+      | 'EMPTY_PARTICIPANTS'
+      | 'ONE_TICKET_PER_DOCUMENT',
     public readonly orderId: string,
     public readonly friendlyMessage: string,
   ) {
@@ -41,6 +44,13 @@ import {
 } from '../../common/utils/product-stock.util';
 import { computeCouponCoveredUnits } from '../../common/utils/coupon-eligibility.util';
 import { tryConsumeVoucher } from '../../common/utils/voucher-reservation.util';
+import {
+  ONE_TICKET_PER_DOCUMENT_ERROR,
+  collectParticipantDocuments,
+  distinctDocuments,
+  findAlreadyRegisteredSlots,
+  findRepeatedDocumentSlots,
+} from '../../common/utils/participant-document-uniqueness.util';
 
 /**
  * Casa um item de `pendingProducts` com um SLOT (participante↔ingresso) na materialização
@@ -429,6 +439,63 @@ export class OrderFinalizationService {
       where: { orderId, status: RegistrationStatus.PENDING },
     });
 
+    // ── 1 ingresso por CPF — gate AUTORITATIVO ────────────────────────────────
+    // O patchParticipants já barra no checkout, mas ele roda FORA de transação:
+    // dois pedidos com o mesmo documento passam lá e chegam aqui juntos. Este é o
+    // único ponto que fecha a corrida, porque roda DENTRO da transação da
+    // finalização e enxerga as inscrições que a outra acabou de criar.
+    //
+    // Violação aqui = ABORT (rollback + estorno automático pelo caller, mesmo
+    // caminho do EMPTY_PARTICIPANTS). Gravar a inscrição duplicada seria pior:
+    // o organizador ficaria com dois ingressos no mesmo CPF num evento que não
+    // permite, e sem trilha de como aconteceu.
+    //
+    // Os placeholders PENDING deste pedido já foram apagados logo acima, então a
+    // consulta não corre risco de casar com ele mesmo — o filtro por `orderId`
+    // fica como garantia caso essa ordem mude.
+    if (!snapshotEvent?.allowMultipleTicketsPerCpf) {
+      const docs = collectParticipantDocuments(participants);
+      const repeated = findRepeatedDocumentSlots(docs);
+      if (repeated.length > 0) {
+        throw new OrderFinalizationAbortError(
+          ONE_TICKET_PER_DOCUMENT_ERROR,
+          orderId,
+          `Pedido com o mesmo documento em mais de um ingresso (slots ${repeated
+            .map((r) => r.slot)
+            .join(', ')}) num evento que permite apenas um ingresso por CPF.`,
+        );
+      }
+      const clean = distinctDocuments(docs);
+      if (clean.length > 0) {
+        const existing = await tx.registration.findMany({
+          where: {
+            eventId: order.eventId,
+            orderId: { not: orderId },
+            status: { not: RegistrationStatus.CANCELLED },
+            OR: [
+              { participantDocumentNumberClean: { in: clean } },
+              { participantCpfClean: { in: clean } },
+            ],
+          },
+          select: { participantDocumentNumberClean: true, participantCpfClean: true },
+        });
+        const taken = existing.flatMap((reg: any) => [
+          reg.participantDocumentNumberClean,
+          reg.participantCpfClean,
+        ]);
+        const blocked = findAlreadyRegisteredSlots(docs, taken);
+        if (blocked.length > 0) {
+          throw new OrderFinalizationAbortError(
+            ONE_TICKET_PER_DOCUMENT_ERROR,
+            orderId,
+            `Documento já inscrito neste evento (slots ${blocked
+              .map((b) => b.slot)
+              .join(', ')}) num evento que permite apenas um ingresso por CPF.`,
+          );
+        }
+      }
+    }
+
     // Cria Registrations a partir de pendingParticipants
     const createdRegs: any[] = [];
     const buyerUser = await tx.user.findUnique({
@@ -461,21 +528,12 @@ export class OrderFinalizationService {
 
         // Resolve participante — nunca cria User fantasma
         let participantUserId: string | null = userId;
-        let participantSnapshot:
-          | {
-              name: string;
-              email: string;
-              documentType: DocumentType | null;
-              documentNumber: string;
-              documentNumberClean: string;
-              phone: string;
-              dateOfBirth: Date | null;
-              gender: string | null;
-            }
-          | null = null;
+        // Documento resolvido FORA do ramo: `resolveDocument` e puro (retorna vazio
+        // em input vazio) e o snapshot abaixo precisa dele em TODOS os casos,
+        // inclusive quando o participante e o proprio comprador.
+        const doc = resolveDocument(pData);
 
         if (pData.email?.toLowerCase() !== buyerUser?.email?.toLowerCase()) {
-          const doc = resolveDocument(pData);
 
           // Resolve a conta do PARTICIPANTE apenas entre contas de COMPRADOR
           // (accountType USER). O mesmo e-mail/documento pode coexistir como ORGANIZER
@@ -521,22 +579,30 @@ export class OrderFinalizationService {
             matchedUserId: matchedUser?.id ?? null,
           });
           participantUserId = identity.participantUserId;
-
-          // Snapshot SEMPRE a partir do que o comprador digitou — nunca depende da conta
-          // vinculada. Garante que a inscrição exiba os dados do PARTICIPANTE mesmo quando
-          // vinculada a uma conta existente (ex.: e-mail reaproveitado por outro USER),
-          // alinhado ao invariante do projeto (identidade = snapshot, não a relação viva).
-          participantSnapshot = {
-            name: pData.name ?? '',
-            email: pData.email ?? '',
-            documentType: doc.type,
-            documentNumber: doc.number,
-            documentNumberClean: doc.clean,
-            phone: pData.phone ?? '',
-            dateOfBirth: pData.birthDate ? new Date(pData.birthDate) : null,
-            gender: pData.gender ?? null,
-          };
         }
+
+        // Snapshot SEMPRE a partir do que o comprador digitou — nunca depende da conta
+        // vinculada. Garante que a inscrição exiba os dados do PARTICIPANTE mesmo quando
+        // vinculada a uma conta existente (ex.: e-mail reaproveitado por outro USER),
+        // alinhado ao invariante do projeto (identidade = snapshot, não a relação viva).
+        //
+        // 2026-09-07: o snapshot ficava DENTRO do ramo "e-mail diferente do comprador",
+        // então comprar para SI MESMO gravava participantName/Email/Cpf/Phone… NULOS e as
+        // telas caíam no fallback pela conta viva — quebrando o invariante acima, sumindo
+        // da busca do organizador (que filtra por participantEmail/participantCpf) e
+        // fazendo a inscrição mudar sozinha quando o usuário editava o perfil depois.
+        // Agora vale para TODO slot; a identidade (participantUserId/invitedById) segue
+        // decidida só no ramo acima, então compra pra si NÃO vira presente.
+        const participantSnapshot = {
+          name: pData.name ?? '',
+          email: pData.email ?? '',
+          documentType: doc.type,
+          documentNumber: doc.number,
+          documentNumberClean: doc.clean,
+          phone: pData.phone ?? '',
+          dateOfBirth: pData.birthDate ? new Date(pData.birthDate) : null,
+          gender: pData.gender ?? null,
+        };
 
         const isGuest = participantUserId === null;
         const isDifferentUser = participantUserId !== null && participantUserId !== userId;
@@ -553,23 +619,21 @@ export class OrderFinalizationService {
             rulesAccepted: true,
             emergencyContactName: pData.emergencyContactName?.trim() || null,
             emergencyContactPhone: pData.emergencyPhone?.trim() || null,
-            ...(participantSnapshot && {
-              participantName: participantSnapshot.name,
-              participantEmail: participantSnapshot.email,
-              // Legacy: mantido em paralelo durante a transição. Fase E remove.
-              participantCpf: participantSnapshot.documentNumber,
-              participantCpfClean:
-                participantSnapshot.documentType === DocumentType.CPF
-                  ? participantSnapshot.documentNumberClean
-                  : '',
-              // Fonte de verdade nova
-              participantDocumentType: participantSnapshot.documentType,
-              participantDocumentNumber: participantSnapshot.documentNumber,
-              participantDocumentNumberClean: participantSnapshot.documentNumberClean,
-              participantPhone: participantSnapshot.phone,
-              participantDateOfBirth: participantSnapshot.dateOfBirth,
-              participantGender: participantSnapshot.gender,
-            }),
+            participantName: participantSnapshot.name,
+            participantEmail: participantSnapshot.email,
+            // Legacy: mantido em paralelo durante a transição. Fase E remove.
+            participantCpf: participantSnapshot.documentNumber,
+            participantCpfClean:
+              participantSnapshot.documentType === DocumentType.CPF
+                ? participantSnapshot.documentNumberClean
+                : '',
+            // Fonte de verdade nova
+            participantDocumentType: participantSnapshot.documentType,
+            participantDocumentNumber: participantSnapshot.documentNumber,
+            participantDocumentNumberClean: participantSnapshot.documentNumberClean,
+            participantPhone: participantSnapshot.phone,
+            participantDateOfBirth: participantSnapshot.dateOfBirth,
+            participantGender: participantSnapshot.gender,
           },
         });
 
