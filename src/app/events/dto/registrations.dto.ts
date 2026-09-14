@@ -18,7 +18,7 @@ export class RegistrationsQueryDto {
 
   @IsOptional()
   @IsString()
-  status?: RegistrationStatus | 'CHARGEBACK' | 'REFUNDED';
+  status?: RegistrationStatus | 'CHARGEBACK' | 'REFUNDED' | 'VOUCHER';
 
   @IsOptional()
   @IsString()

@@ -23,6 +23,31 @@ describe('EventsService.applyRegistrationStatusFilter', () => {
     expect(targetRefundType).toBeNull();
   });
 
+  const voucherOrder = {
+    OR: [{ isCourtesy: true }, { voucherId: { not: null }, finalAmount: 0 }],
+  };
+
+  it('"COMPLETED" (Pago) exclui cortesia e voucher que zerou o pedido — esses têm o filtro "Voucher"', () => {
+    const { where } = apply('COMPLETED');
+    expect(where.order.NOT).toEqual(voucherOrder);
+    expect(where.order.OR).toBeUndefined();
+  });
+
+  it('"VOUCHER" → mesma base do Pago + (cortesia OU voucher com pedido R$0)', () => {
+    const { where, targetRefundType } = apply('VOUCHER');
+    expect(where.status).toEqual({ in: [RegistrationStatus.CONFIRMED, RegistrationStatus.COMPLETED] });
+    expect(where.order.payment.status).toBe(PaymentStatus.PAID);
+    expect(where.order.OR).toEqual(voucherOrder.OR);
+    expect(where.order.NOT).toBeUndefined();
+    expect(targetRefundType).toBeNull();
+  });
+
+  it('"VOUCHER" preserva filtro de data já presente em where.order', () => {
+    const where: any = { eventId: 'e', order: { createdAt: { gte: 'x' } } };
+    (svc as any).applyRegistrationStatusFilter(where, 'VOUCHER');
+    expect(where.order.createdAt).toEqual({ gte: 'x' });
+  });
+
   it('"CONFIRMED" → where.status = CONFIRMED', () => {
     const { where } = apply('CONFIRMED');
     expect(where.status).toBe('CONFIRMED');
