@@ -51,6 +51,7 @@ import {
   formatEventDateWithWeekday,
 } from '../../common/utils/event-email-format.util';
 import { buildOrganizerNotificationRecipients } from '../../common/utils/notification-recipients.util';
+import { findEventCreatorMemberEmail } from '../../common/utils/event-creator-email.util';
 import { TicketCategoriesService } from '../ticket-categories/ticket-categories.service';
 import { EmailService } from '../../common/services/email.service';
 import { RepasseService, RETENTION_DAYS, calendarDaysUntil, loadAnticipatedByUnit } from '../repasse/repasse.service';
@@ -3000,9 +3001,17 @@ export class EventsService {
     // **e** para o e-mail do DONO — não um como fallback do outro. Quando os
     // dois são o mesmo endereço, o helper deduplica e sai um único e-mail.
     // Mesma regra do e-mail de ajustes solicitados (`rejectEvent`).
+    // + o colaborador que está criando o evento (write client: o log de envio
+    // acabou de ser gravado e a réplica pode não tê-lo ainda).
+    const creatorEmail = await findEventCreatorMemberEmail(prismaWrite, {
+      organizationId: event.organizationId,
+      eventId,
+      eventCreatedAt: event.createdAt,
+    });
     const recipientEmails = buildOrganizerNotificationRecipients([
       event.organization?.email,
       ...(event.organization?.members ?? []).map((m) => m.user?.email),
+      creatorEmail,
     ]);
 
     if (recipientEmails.length > 0) {
@@ -4178,62 +4187,13 @@ export class EventsService {
     let filterByPaymentMetadata = false;
     let targetRefundType: 'CHARGEBACK' | 'REFUND' | null = null;
 
+    // Mesma função do export: antes esta lista tinha uma CÓPIA da lógica, e qualquer
+    // status novo (ex.: VOUCHER) teria que ser lembrado nos dois lugares.
     if (status) {
-      if (status === 'CHARGEBACK') {
-        // Filtrar por pagamentos REFUNDED com refundType CHARGEBACK no metadata
-        where.order = {
-          ...where.order,
-          payment: {
-            status: PaymentStatus.REFUNDED,
-          },
-        };
+      const res = this.applyRegistrationStatusFilter(where, status);
+      if (res.targetRefundType) {
         filterByPaymentMetadata = true;
-        targetRefundType = 'CHARGEBACK';
-      } else if (status === 'REFUNDED') {
-        // Filtrar por pagamentos REFUNDED com refundType REFUND no metadata (ou sem refundType)
-        where.order = {
-          ...where.order,
-          payment: {
-            status: PaymentStatus.REFUNDED,
-          },
-        };
-        filterByPaymentMetadata = true;
-        targetRefundType = 'REFUND';
-      } else {
-        // Status normal de registro (PENDING, CONFIRMED, CANCELLED, COMPLETED)
-        const validStatuses = ['CONFIRMED', 'CANCELLED', 'COMPLETED'];
-        if (validStatuses.includes(status)) {
-          if (status === 'COMPLETED') {
-            // "COMPLETED" from the frontend means "paid" — registrations with a successful
-            // payment. Both CONFIRMED (paid, event upcoming) and COMPLETED (paid, attended)
-            // are considered paid; filter by payment.status = PAID instead of registration status.
-            where.status = { in: [RegistrationStatus.CONFIRMED, RegistrationStatus.COMPLETED] } as any;
-            where.order = {
-              ...where.order,
-              payment: {
-                status: PaymentStatus.PAID,
-              },
-            };
-          } else {
-            where.status = status as RegistrationStatus;
-
-            // Exclude REFUNDED registrations from CANCELLED view.
-            // When payment is null the nested filter evaluates false, so NOT(false) = true
-            // correctly includes registrations with no payment record.
-            if (status === 'CANCELLED') {
-              if (!where.AND) where.AND = [];
-              where.AND.push({
-                NOT: {
-                  order: {
-                    payment: {
-                      status: PaymentStatus.REFUNDED,
-                    },
-                  },
-                },
-              });
-            }
-          }
-        }
+        targetRefundType = res.targetRefundType;
       }
     }
 
@@ -5603,6 +5563,7 @@ export class EventsService {
    * `status IN [CONFIRMED, COMPLETED]` + `payment PAID`. Usar o valor cru (`where.status =
    * 'COMPLETED'`) perdia todas as CONFIRMED (pagas com evento futuro). CHARGEBACK/REFUNDED
    * filtram por `payment REFUNDED` + metadata (o chamador pós-filtra via `targetRefundType`).
+   * `"VOUCHER"` = pago + (cortesia OU voucher com pedido R$0); "Pago" exclui esses.
    * Retorna `targetRefundType` quando o chamador precisa refinar por metadata do pagamento.
    */
   private applyRegistrationStatusFilter(
@@ -5614,11 +5575,22 @@ export class EventsService {
       where.order = { ...where.order, payment: { status: PaymentStatus.REFUNDED } };
       return { targetRefundType: status === 'CHARGEBACK' ? 'CHARGEBACK' : 'REFUND' };
     }
-    if (status === 'COMPLETED') {
+    if (status === 'COMPLETED' || status === 'VOUCHER') {
+      // "Pago" e "Voucher" partem da mesma base (pago de verdade) e se separam pela
+      // regra do selo da linha (`isVoucherRegistration` no front): cortesia do painel
+      // OU voucher que zerou o pedido. Pedido gratuito é gravado como PAID de R$0, então
+      // sem o NOT as linhas "Voucher" apareciam também no filtro "Pago".
       where.status = {
         in: [RegistrationStatus.CONFIRMED, RegistrationStatus.COMPLETED],
       } as any;
-      where.order = { ...where.order, payment: { status: PaymentStatus.PAID } };
+      const voucherOrder = {
+        OR: [{ isCourtesy: true }, { voucherId: { not: null }, finalAmount: 0 }],
+      };
+      where.order = {
+        ...where.order,
+        payment: { status: PaymentStatus.PAID },
+        ...(status === 'VOUCHER' ? voucherOrder : { NOT: voucherOrder }),
+      };
     } else if (status === 'CONFIRMED' || status === 'CANCELLED') {
       where.status = status as RegistrationStatus;
       if (status === 'CANCELLED') {
