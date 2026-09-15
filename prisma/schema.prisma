@@ -871,7 +871,10 @@ model Order {
   /// { id, firstName, lastName, email, phone, documentNumber, avatarUrl }.
   buyerSnapshot       Json?
 
-  user            User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Restrict (era Cascade): a cortesia do painel grava o COLABORADOR como dono do
+  // pedido, e excluir a conta dele apagava as inscrições que ele criou. Conta com
+  // pedido não é hard-deletada — ver common/utils/remove-user-account.util.ts.
+  user            User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
   event           Event                @relation(fields: [eventId], references: [id], onDelete: Cascade)
   coupon          Coupon?              @relation(fields: [couponId], references: [id], onDelete: SetNull)
   voucher         Voucher?             @relation(fields: [voucherId], references: [id], onDelete: SetNull)
@@ -902,7 +905,8 @@ model Payment {
   updatedAt     DateTime      @updatedAt
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Restrict pelo mesmo motivo do `Order.user`.
+  user  User  @relation(fields: [userId], references: [id], onDelete: Restrict)
 
   @@index([userId])
   @@index([status])

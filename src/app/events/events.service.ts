@@ -1712,6 +1712,7 @@ export class EventsService {
 
     // Organizador/admin → payload COMPLETO (catálogo aninhado + organização inteira).
     // Demais → contrato público enxuto (sem catálogo, organização enxuta, sem owner/perguntas).
+    let result: any;
     if (userId) {
       const base = await prismaRead.event.findUnique({
         where: { slug },
@@ -1719,11 +1720,15 @@ export class EventsService {
       });
       if (!base) throw new NotFoundException('Evento não encontrado');
       if (await this.isOrganizerCallerForEvent(userId, base.organizationId, base.id)) {
-        return this.buildPrivilegedEventBySlug(slug);
+        result = await this.buildPrivilegedEventBySlug(slug);
       }
     }
+    result ??= await this.buildPublicEventBySlug(slug);
 
-    return this.buildPublicEventBySlug(slug);
+    // "Agora" do servidor: a página pública decide abertura/encerramento das inscrições
+    // e as contagens por ele, nunca pelo relógio do dispositivo. Rota é @NoCache.
+    result.data.serverTime = new Date().toISOString();
+    return result;
   }
 
   /**
@@ -5947,6 +5952,9 @@ export class EventsService {
           // sem taxa de serviço). Centavos; 0 preservado (pedido grátis).
           paidPerTicket: paidByRegId.get(reg.id) ?? null,
           purchaseDate: order.createdAt ?? null,
+          // Regra "Voucher" do export (status + forma de pagamento) — ver isVoucherOrder.
+          isCourtesy: order.isCourtesy ?? false,
+          voucherId: order.voucherId ?? null,
           billingAddress,
           payment: order.payment
             ? {
@@ -6097,6 +6105,9 @@ export class EventsService {
             order.finalAmount != null ? this.normalizeToCents(order.finalAmount) : null,
           paidPerTicket: paidByRegId.get(reg.id) ?? null,
           purchaseDate: order.createdAt ?? null,
+          // Regra "Voucher" do export (status + forma de pagamento) — ver isVoucherOrder.
+          isCourtesy: order.isCourtesy ?? false,
+          voucherId: order.voucherId ?? null,
           billingAddress,
           payment: order.payment
             ? {

@@ -15,6 +15,7 @@ import {
   cleanDocumentNumber as cleanDoc,
   inferDocumentType,
 } from '../../common/utils/document.util';
+import { removeUserAccountPreservingHistory } from '../../common/utils/remove-user-account.util';
 import * as bcrypt from 'bcryptjs';
 
 @Injectable()
@@ -362,10 +363,11 @@ export class UserService {
 
   async remove(id: string) {
     const prismaWrite = this.prisma.getWriteClient();
-    
-    await prismaWrite.user.delete({
-      where: { id },
-    });
+
+    // Hard-delete apagaria em cascata os pedidos/inscrições da conta.
+    await prismaWrite.$transaction((tx) =>
+      removeUserAccountPreservingHistory(tx, id),
+    );
     return {
       message: 'User removed successfully',
     };

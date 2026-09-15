@@ -7,6 +7,13 @@ import {
   NotFoundException,
   ConflictException,
 } from '@nestjs/common';
+import { removeUserAccountPreservingHistory } from '../../../common/utils/remove-user-account.util';
+
+jest.mock('../../../common/utils/remove-user-account.util', () => ({
+  removeUserAccountPreservingHistory: jest.fn(),
+}));
+const mockRemoveUserAccount = removeUserAccountPreservingHistory as jest.Mock;
+
 describe('UserService', () => {
   let service: UserService;
   let prisma: PrismaService;
@@ -437,15 +444,16 @@ describe('UserService', () => {
   describe('remove', () => {
     const userId = 'user-id';
 
-    it('should delete user successfully', async () => {
-      mockPrismaService.user.delete.mockResolvedValue({ id: userId });
+    it('should remove user through the history-preserving helper', async () => {
+      (mockPrismaService as any).$transaction = jest.fn((fn: any) => fn(mockPrismaService));
+      mockRemoveUserAccount.mockResolvedValue('deleted');
 
       const result = await service.remove(userId);
 
       expect(result).toHaveProperty('message', 'User removed successfully');
-      expect(mockPrismaService.user.delete).toHaveBeenCalledWith({
-        where: { id: userId },
-      });
+      // Nunca hard-delete direto: apagaria em cascata os pedidos/inscrições.
+      expect(mockPrismaService.user.delete).not.toHaveBeenCalled();
+      expect(mockRemoveUserAccount).toHaveBeenCalledWith(mockPrismaService, userId);
     });
   });
 
