@@ -67,6 +67,18 @@ function formatCurrency(cents: number | null | undefined): string {
 }
 
 /**
+ * Pedido "Voucher": cortesia do painel OU voucher que zerou o pedido. ESPELHA
+ * `isVoucherRegistration` (frontend/src/lib/registrations.ts) e o filtro VOUCHER de
+ * `EventsService.applyRegistrationStatusFilter` — os três mudam juntos. Voucher com
+ * valor debitado (ex.: produto pago) continua "Pago".
+ */
+function isVoucherOrder(order: any): boolean {
+  if (!order) return false;
+  if (order.isCourtesy) return true;
+  return order.voucherId != null && (order.finalAmount ?? 0) === 0;
+}
+
+/**
  * Status exibido no export — ESPELHA a lista de inscrições (RegistrationRow):
  * Pago / Cancelado / Estornado / Chargeback / Pendente. Estorno e chargeback rebaixam a
  * inscrição p/ CANCELLED e marcam o Payment como REFUNDED; o tipo (REFUND vs CHARGEBACK)
@@ -86,7 +98,7 @@ function formatStatus(reg: any): string {
   // inscrição cancelada. Espelha a precedência da lista (RegistrationRow).
   if (reg.status === 'CANCELLED') return 'Cancelado';
   if (reg.status === 'CONFIRMED' || reg.status === 'COMPLETED' || pStatus === 'PAID') {
-    return 'Pago';
+    return isVoucherOrder(reg.order) ? 'Voucher' : 'Pago';
   }
   if (pStatus === 'FAILED') return 'Cancelado';
   return 'Pendente';
@@ -277,6 +289,8 @@ function extractField(reg: any, field: ExportField): string {
       // Pedido gratuito (total cobrado = 0) não tem forma de pagamento real: o
       // gateway pode ter registrado PIX/cartão no fluxo, mas nada foi cobrado.
       // Exibe "Gratuito" (espelha o modal, que esconde o método em pedido grátis).
+      // Cortesia/voucher vêm antes: também são R$0, mas o organizador precisa distinguir.
+      if (isVoucherOrder(order)) return 'Voucher';
       if (order.finalAmount === 0) return 'Gratuito';
       return formatPaymentMethod(payment.method);
     case 'valorPago':
