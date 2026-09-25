@@ -12,6 +12,7 @@ import {
   formatEventDateWithWeekday,
 } from '../../common/utils/event-email-format.util';
 import { buildOrganizerNotificationRecipients } from '../../common/utils/notification-recipients.util';
+import { findEventCreatorMemberEmail } from '../../common/utils/event-creator-email.util';
 
 export interface AdminEventsQuery {
   page: number;
@@ -427,10 +428,17 @@ export class AdminEventsService {
     this.logger.log(`Admin ${adminUserId} aprovou evento ${eventId} (${event.name}) — status REVISION → PUBLISHED`);
 
     // Notifica organizador por e-mail (fire-and-forget — falha não bloqueia resposta).
-    // Contato da ORGANIZAÇÃO + TODOS os owners, deduplicados.
+    // Contato da ORGANIZAÇÃO + TODOS os owners + colaborador que criou o evento,
+    // deduplicados.
+    const creatorEmail = await findEventCreatorMemberEmail(prismaWrite, {
+      organizationId: event.organizationId,
+      eventId,
+      eventCreatedAt: event.createdAt,
+    });
     const recipientEmails = buildOrganizerNotificationRecipients([
       event.organization?.email,
       ...(event.organization?.members ?? []).map((m) => m.user?.email),
+      creatorEmail,
     ]);
     if (recipientEmails.length > 0) {
       const eventDateFormatted = formatEventDateWithWeekday(event.eventDate);
@@ -529,9 +537,16 @@ export class AdminEventsService {
     // resposta). Vai para o contato da ORGANIZAÇÃO **e** para o e-mail do DONO
     // — não um como fallback do outro. Quando os dois são o mesmo endereço, o
     // helper deduplica e sai um único e-mail com um único destinatário.
+    // + o colaborador que criou o evento (`findEventCreatorMemberEmail`).
+    const creatorEmail = await findEventCreatorMemberEmail(prismaWrite, {
+      organizationId: event.organizationId,
+      eventId,
+      eventCreatedAt: event.createdAt,
+    });
     const recipientEmails = buildOrganizerNotificationRecipients([
       event.organization?.email,
       ...(event.organization?.members ?? []).map((m) => m.user?.email),
+      creatorEmail,
     ]);
     if (recipientEmails.length > 0) {
       const eventDateFormatted = formatEventDateWithWeekday(event.eventDate);

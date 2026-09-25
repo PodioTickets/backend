@@ -18,6 +18,7 @@ import { OrganizationMemberRole } from '@prisma/client';
 import { MFAService } from '../../common/services/mfa.service';
 import { brtDayStartUtc, brtDayEndUtc } from '../../common/utils/brt-date.util';
 import { isValidCpfOrCnpj } from '../../common/utils/document-validation.util';
+import { removeUserAccountPreservingHistory } from '../../common/utils/remove-user-account.util';
 import * as bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import {
@@ -1642,14 +1643,12 @@ export class OrganizationsService {
       },
     });
 
-    // Remover membro e deletar usuário em uma única transação.
+    // Remover membro e a conta em uma única transação.
     //
-    // Membro com SAQUES registrados (EventWithdrawal.requestedById) NÃO pode ter
-    // o User deletado: o histórico de saque é registro financeiro — apagá-lo em
-    // cascata fazia o valor já pago "voltar" ao saldo do repasse (calculado
-    // subtraindo essas linhas) e permitia sacar o mesmo dinheiro de novo. O FK
-    // agora é Restrict no schema; aqui removemos só o vínculo e mantemos a
-    // conta (desativada) como âncora do histórico financeiro.
+    // A conta NÃO pode ser hard-deletada quando tem histórico: as inscrições de
+    // cortesia que o colaborador criou são pedidos em nome dele, e o cascade de
+    // `Order.userId` as apagava. Saques/antecipações são registro financeiro.
+    // Ver `removeUserAccountPreservingHistory`.
     await prismaWrite.$transaction(async (tx: any) => {
       await tx.organizationMember.delete({
         where: {
@@ -1660,19 +1659,7 @@ export class OrganizationsService {
         },
       });
 
-      const withdrawals = await tx.eventWithdrawal.count({
-        where: { requestedById: memberUserId },
-      });
-      if (withdrawals > 0) {
-        await tx.user.update({
-          where: { id: memberUserId },
-          data: { isActive: false },
-        });
-      } else {
-        await tx.user.delete({
-          where: { id: memberUserId },
-        });
-      }
+      await removeUserAccountPreservingHistory(tx, memberUserId);
     });
 
     return {
@@ -2978,14 +2965,7 @@ export class OrganizationsService {
       throw new NotFoundException('Member not found');
     }
 
-    // Remover membro e deletar usuário em uma única transação.
-    //
-    // Membro com SAQUES registrados (EventWithdrawal.requestedById) NÃO pode ter
-    // o User deletado: o histórico de saque é registro financeiro — apagá-lo em
-    // cascata fazia o valor já pago "voltar" ao saldo do repasse (calculado
-    // subtraindo essas linhas) e permitia sacar o mesmo dinheiro de novo. O FK
-    // agora é Restrict no schema; aqui removemos só o vínculo e mantemos a
-    // conta (desativada) como âncora do histórico financeiro.
+    // Mesma regra do `removeMember`: sem hard-delete de conta com histórico.
     await prismaWrite.$transaction(async (tx: any) => {
       await tx.organizationMember.delete({
         where: {
@@ -2996,19 +2976,7 @@ export class OrganizationsService {
         },
       });
 
-      const withdrawals = await tx.eventWithdrawal.count({
-        where: { requestedById: memberUserId },
-      });
-      if (withdrawals > 0) {
-        await tx.user.update({
-          where: { id: memberUserId },
-          data: { isActive: false },
-        });
-      } else {
-        await tx.user.delete({
-          where: { id: memberUserId },
-        });
-      }
+      await removeUserAccountPreservingHistory(tx, memberUserId);
     });
 
     return {

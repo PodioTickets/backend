@@ -69,6 +69,32 @@ describe('ExportRegistrationsService — coluna fixa de ID da inscrição', () =
     expect(metodoCell({ id: 'x', order: { finalAmount: 0, payment: { method: 'PIX' } } })).toBe('Gratuito');
   });
 
+  // ── Voucher: cortesia OU voucher que zerou o pedido (espelha o selo da lista) ─
+  const paid = { status: 'PAID', method: 'FREE' };
+
+  it('voucher que zerou o pedido → status "Voucher" e forma de pagamento "Voucher"', () => {
+    const r = { id: 'x', status: 'CONFIRMED', order: { finalAmount: 0, voucherId: 'v1', payment: paid } };
+    expect(statusCell(r)).toBe('Voucher');
+    expect(metodoCell(r)).toBe('Voucher');
+  });
+
+  it('cortesia do painel → "Voucher" nas duas colunas', () => {
+    const r = { id: 'x', status: 'CONFIRMED', order: { finalAmount: 0, isCourtesy: true, payment: paid } };
+    expect(statusCell(r)).toBe('Voucher');
+    expect(metodoCell(r)).toBe('Voucher');
+  });
+
+  it('voucher com valor debitado (finalAmount > 0) continua "Pago" / método real', () => {
+    const r = { id: 'x', status: 'CONFIRMED', order: { finalAmount: 1500, voucherId: 'v1', payment: { status: 'PAID', method: 'PIX' } } };
+    expect(statusCell(r)).toBe('Pago');
+    expect(metodoCell(r)).toBe('Pix');
+  });
+
+  it('voucher cancelado mantém o estado terminal "Cancelado"', () => {
+    const r = { id: 'x', status: 'CANCELLED', order: { finalAmount: 0, voucherId: 'v1', payment: paid } };
+    expect(statusCell(r)).toBe('Cancelado');
+  });
+
   // ── Data da compra: BRT (America/Sao_Paulo) COM hora, igual ao modal ─────────
   const dataCompraCell = (r: any) => txtLines([r], ['dataPagamento'])[2].split(',').pop();
 
