@@ -6,6 +6,7 @@ import { CacheRedisService } from '../../../common/services/cache-redis.service'
 import { OrganizerMemberAccessService } from '../../organizations/organizer-member-access.service';
 import { TicketsService } from '../../tickets/tickets.service';
 import { GeoService } from '../../../common/services/geo.service';
+import { RepasseService } from '../../repasse/repasse.service';
 import { DashboardOverviewQueryDto } from './dto/overview.dto';
 import { DashboardRankingsQueryDto } from './dto/rankings.dto';
 import { DashboardSecondaryQueryDto } from './dto/secondary.dto';
@@ -118,6 +119,7 @@ export class DashboardService {
     private readonly organizerMemberAccess: OrganizerMemberAccessService,
     private readonly ticketsService: TicketsService,
     private readonly geo: GeoService,
+    private readonly repasseService: RepasseService,
   ) {}
 
   // ============================================================
@@ -151,6 +153,7 @@ export class DashboardService {
       prevRegs,
       orderBuckets,
       regBuckets,
+      financial,
     ] = await Promise.all([
       this.queryMetricsAggregate(eventId, dateRange, ticketIds, organizerFeeRate),
       this.queryRegCounts(eventId, dateRange, ticketIds),
@@ -175,14 +178,28 @@ export class DashboardService {
           } as RegCountsRow),
       this.queryChartOrderBuckets(eventId, period, dateRange, ticketIds, organizerFeeRate),
       this.queryChartRegBuckets(eventId, period, dateRange, ticketIds),
+      period === DashboardPeriod.GERAL && !ticketIds?.length
+        ? this.repasseService.computeBreakdownForEvent(eventId)
+        : Promise.resolve(null),
     ]);
 
-    const netRevenue = Number(currentAgg.net_revenue);
+    // "Geral" sem filtro de ingresso = total do evento → mesma soma dos cards da aba
+    // Financeiro (Saldo + Aguardando liberação + Parcelados + Total já repassado), que
+    // já desconta taxa de estorno e deságio de antecipação. Demais filtros seguem o SQL.
+    const salesNet = Number(currentAgg.net_revenue);
+    const netRevenue = financial
+      ? financial.breakdown.saldoParaSaque +
+        financial.breakdown.aguardandoLiberacao +
+        financial.breakdown.valorRetido +
+        financial.breakdown.parceladosAReceber +
+        financial.completedWithdrawalsTotal
+      : salesNet;
     const orderCount = Number(currentAgg.order_count);
     const totalRegistrations = Number(currentRegs.paid_regs);
     const cancellations = Number(currentRegs.cancelled_regs);
     const refunds = Number(currentRegs.refunded_regs);
-    const averageTicket = orderCount > 0 ? netRevenue / orderCount : 0;
+    // Ticket médio é métrica de VENDA: fica no líquido por pedido, sem taxas de estorno.
+    const averageTicket = orderCount > 0 ? salesNet / orderCount : 0;
 
     const prevNetRevenue = Number(prevAgg.net_revenue);
     const prevOrderCount = Number(prevAgg.order_count);

@@ -137,6 +137,10 @@ export class AdminEventsService {
       // "Concluído" = data já passou, seja qual for o status cru — é exatamente o
       // conjunto que a lista rotula assim.
       eventDateFilter.lt = completedCutoff;
+      // ...exceto rascunho, que segue "Rascunho" com a data passada (event-status.util).
+      where.status = { not: EventStatus.DRAFT };
+    } else if (status === EventStatus.DRAFT) {
+      where.status = status;
     } else if (status) {
       where.status = status;
       // Evento com data passada aparece como "Concluído", nunca no status cru.

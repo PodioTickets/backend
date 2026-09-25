@@ -1352,8 +1352,12 @@ export class EventsService {
     // COMPLETED), então filtrar `status = COMPLETED` devolvia lista vazia e os
     // demais status devolviam eventos que a tela rotula como "Concluído".
     // Mesma correção da lista do admin — fonte única em `event-status.util`.
+    // Rascunho nunca vira "Concluído": fica fora de COMPLETED e não leva o corte de data.
     if (status === EventStatus.COMPLETED) {
       eventDateFilter.lt = pastEventDateCutoff();
+      where.status = { not: EventStatus.DRAFT };
+    } else if (status === EventStatus.DRAFT) {
+      where.status = status;
     } else if (status) {
       where.status = status;
       const cutoff = pastEventDateCutoff();
