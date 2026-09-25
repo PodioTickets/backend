@@ -77,6 +77,12 @@ const geoServiceStub: any = {
   resolveMany: async (locs: any[]) => locs.map(() => ({ coord: null, pending: true })),
 };
 
+// RepasseService: `null` = sem breakdown → a receita líquida do GERAL cai no SQL do
+// dashboard, que é o que esta suíte confere. A soma do repasse tem specs próprias.
+const repasseServiceStub: any = {
+  computeBreakdownForEvent: async () => null,
+};
+
 describe('DashboardService (integração, banco real)', () => {
   let prisma: PrismaService;
   let service: DashboardService;
@@ -85,7 +91,7 @@ describe('DashboardService (integração, banco real)', () => {
     prisma = createTestPrisma();
     await prisma.$connect();
     const access = new OrganizerMemberAccessService(prisma);
-    service = new DashboardService(prisma, cacheStub, access, ticketsServiceStub, geoServiceStub);
+    service = new DashboardService(prisma, cacheStub, access, ticketsServiceStub, geoServiceStub, repasseServiceStub);
   });
 
   afterAll(async () => {

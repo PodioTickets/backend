@@ -64,11 +64,15 @@ export function publicSearchPastEventCutoff(now: Date = new Date()): Date {
 /**
  * Mapeia uma lista de eventos sobrescrevendo o status para COMPLETED quando a data
  * já passou (ver `isEventDatePast`). Não muta os itens originais.
+ * RASCUNHO continua rascunho mesmo com a data passada: nunca foi publicado, então
+ * não "aconteceu". Os filtros de status (organizador e admin) seguem a mesma regra.
  */
 export function withPastEventsAsCompleted<
   T extends { eventDate: Date; status: EventStatus },
 >(events: T[], now: Date = new Date()): T[] {
   return events.map((e) =>
-    isEventDatePast(e.eventDate, now) ? { ...e, status: EventStatus.COMPLETED } : e,
+    e.status !== EventStatus.DRAFT && isEventDatePast(e.eventDate, now)
+      ? { ...e, status: EventStatus.COMPLETED }
+      : e,
   ) as T[];
 }
