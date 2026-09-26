@@ -54,6 +54,12 @@ describe('event-status.util (evento concluído por data, BRT)', () => {
     expect(past.status).toBe(EventStatus.PUBLISHED);
   });
 
+  it('withPastEventsAsCompleted: rascunho com data passada continua DRAFT', () => {
+    const now = new Date('2026-07-02T03:00:00.000Z');
+    const out = withPastEventsAsCompleted([{ eventDate, status: EventStatus.DRAFT }], now);
+    expect(out[0].status).toBe(EventStatus.DRAFT);
+  });
+
   /**
    * O filtro de status ("Concluído") roda no WHERE do banco via
    * `pastEventDateCutoff`, enquanto a EXIBIÇÃO usa `isEventDatePast`. Se as duas
