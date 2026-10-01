@@ -59,6 +59,9 @@ import {
 describe('OrdersExpirationService (integração, banco real)', () => {
   let prisma: PrismaService;
   let service: OrdersExpirationService;
+  // Stub da consulta à Cielo (pollPixStatus): cada teste define se o PIX está pago.
+  let pixPaid = false;
+  const pollPixStatus = jest.fn(async () => ({ status: 'PENDING', paid: pixPaid }));
 
   beforeAll(async () => {
     prisma = createTestPrisma();
@@ -76,7 +79,7 @@ describe('OrdersExpirationService (integração, banco real)', () => {
       {} as any, // OrderFinalizationService
       { record: () => {} } as any, // UserActivityService (telemetria — no-op no teste)
     );
-    service = new OrdersExpirationService(ordersService);
+    service = new OrdersExpirationService(ordersService, { pollPixStatus } as any);
   });
 
   afterAll(async () => {
@@ -84,6 +87,8 @@ describe('OrdersExpirationService (integração, banco real)', () => {
   });
 
   beforeEach(async () => {
+    pixPaid = false;
+    pollPixStatus.mockClear();
     await resetDb(prisma); // banco limpo antes de cada cenário
   });
 
@@ -407,7 +412,7 @@ describe('OrdersExpirationService (integração, banco real)', () => {
       });
     };
 
-    it('expirado HÁ POUCO com Payment PENDING (PIX em voo) → NÃO cancela (graça de 2h)', async () => {
+    it('expirado HÁ POUCO com Payment PENDING (PIX em voo) → NÃO cancela (graça de 15 min)', async () => {
       const { adminUserId, eventId } = await seedOrgUserEvent(prisma);
       const { ticketId, batchId } = await seedTicketWithBatch(eventId, { quantity: 10, available: 8 });
       const { orderId } = await seedPendingOrder({
@@ -425,22 +430,44 @@ describe('OrdersExpirationService (integração, banco real)', () => {
       expect(batch?.availableQuantity).toBe(8); // estoque NÃO devolvido (evita revenda da vaga)
     });
 
-    it('expirado ALÉM da graça (3h) com Payment PENDING → cancela normalmente', async () => {
+    it('PIX expirado ALÉM da graça (20 min) e NÃO pago na Cielo → cancela normalmente', async () => {
       const { adminUserId, eventId } = await seedOrgUserEvent(prisma);
       const { ticketId, batchId } = await seedTicketWithBatch(eventId, { quantity: 10, available: 8 });
       const { orderId } = await seedPendingOrder({
         eventId, userId: adminUserId, ticketId, batchId,
-        expiresAt: new Date(Date.now() - 3 * 60 * 60 * 1000), // venceu há 3h > graça de 2h
+        expiresAt: new Date(Date.now() - 20 * 60 * 1000), // venceu há 20 min > graça de 15 min
         quantity: 2, withBilling: true,
       });
       await seedPayment(orderId, adminUserId, 'PENDING');
 
       await service.handleExpiredOrders();
 
+      expect(pollPixStatus).toHaveBeenCalledWith(orderId, adminUserId); // consultou a Cielo antes
       const order = await prisma.getWriteClient().order.findUnique({ where: { id: orderId } });
       expect(order?.status).toBe('CANCELLED'); // graça vencida → expira
       const batch = await prisma.getWriteClient().ticketBatch.findUnique({ where: { id: batchId } });
       expect(batch?.availableQuantity).toBe(10); // estoque devolvido
+    });
+
+    // Regressão 2026-09-30: cliente pagou o PIX depois do prazo, sem webhook e com o modal
+    // já fechado (polling parado) — ninguém confirmava e o cron cancelava.
+    it('PIX expirado ALÉM da graça mas PAGO na Cielo → NÃO cancela (polling confirma e entrega)', async () => {
+      const { adminUserId, eventId } = await seedOrgUserEvent(prisma);
+      const { ticketId, batchId } = await seedTicketWithBatch(eventId, { quantity: 10, available: 8 });
+      const { orderId } = await seedPendingOrder({
+        eventId, userId: adminUserId, ticketId, batchId,
+        expiresAt: new Date(Date.now() - 20 * 60 * 1000),
+        quantity: 2, withBilling: true,
+      });
+      await seedPayment(orderId, adminUserId, 'PENDING');
+      pixPaid = true;
+
+      await service.handleExpiredOrders();
+
+      const order = await prisma.getWriteClient().order.findUnique({ where: { id: orderId } });
+      expect(order?.status).toBe('PENDING'); // o stub não finaliza; o real promove a PAID
+      const batch = await prisma.getWriteClient().ticketBatch.findUnique({ where: { id: batchId } });
+      expect(batch?.availableQuantity).toBe(8); // vaga preservada pra entrega
     });
 
     it('Payment FAILED → SEM graça: expira no prazo normal', async () => {

@@ -187,7 +187,7 @@ function computeFinalAmount(order: any, serviceFee: number): number {
 // `./order-discount.util` (funções puras reusadas pelo export de inscrições sem
 // puxar este módulo inteiro). Importados p/ uso interno (orderShape) e re-exportados
 // p/ manter os imports/tests que os pegavam daqui.
-import { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount } from './order-discount.util';
+import { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount, isQuantityInCouponRange } from './order-discount.util';
 export { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount };
 
 /**
@@ -2311,11 +2311,11 @@ export class OrdersService {
         if (coupon.minCartValue && ticketsSubtotal < coupon.minCartValue) continue;
 
         if (coupon.couponType === 'QUANTITY') {
-          // minQuantity conta as unidades dos ingressos VINCULADOS ao cupom (appliesTo), não
+          // A faixa min/max conta as unidades dos ingressos VINCULADOS ao cupom (appliesTo), não
           // o carrinho inteiro — senão "1 do cupom + 1 de outro ingresso" já satisfaria o
           // mínimo e o cupom dispararia/descontaria fora da restrição.
           const applicableQty = autoApplicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-          if (coupon.minQuantity && applicableQty < coupon.minQuantity) continue;
+          if (!isQuantityInCouponRange(applicableQty, coupon)) continue;
           // QUANTITY: all-or-nothing — se esgotado, não aplica
           if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) continue;
         } else if (coupon.couponType === 'AGE') {
@@ -2359,23 +2359,23 @@ export class OrdersService {
       }
     }
 
-    // (c) Remover cupom QUANTITY se a quantidade dos ingressos VINCULADOS (appliesTo) caiu
-    // abaixo do mínimo. Conta unidades escopadas — mesma regra do gatilho — e não
+    // (c) Remover cupom QUANTITY se a quantidade dos ingressos VINCULADOS (appliesTo) saiu
+    // da faixa min/max. Conta unidades escopadas — mesma regra do gatilho — e não
     // participants.length (carrinho inteiro), que manteria o cupom após trocar o ingresso
     // vinculado por outro qualquer.
     if (order.couponId && !autoCouponId && !shouldRemoveAgeCoupon) {
       const existingCoupon = await r.coupon.findUnique({
         where: { id: order.couponId },
-        select: { couponType: true, minQuantity: true, appliesTo: true },
+        select: { couponType: true, minQuantity: true, maxQuantity: true, appliesTo: true },
       });
-      if (existingCoupon?.couponType === 'QUANTITY' && existingCoupon.minQuantity) {
+      if (existingCoupon?.couponType === 'QUANTITY') {
         let applicableTickets = reservedTickets;
         if (existingCoupon.appliesTo && existingCoupon.appliesTo !== 'all') {
           const allowedIds = parseAppliesToArray(existingCoupon.appliesTo);
           applicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
         }
         const applicableQty = applicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-        if (applicableQty < existingCoupon.minQuantity) {
+        if (!isQuantityInCouponRange(applicableQty, existingCoupon)) {
           shouldRemoveQuantityCoupon = true;
         }
       }
@@ -3572,7 +3572,7 @@ export class OrdersService {
             applicableTicketsQ = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
           }
           const applicableQtyQ = applicableTicketsQ.reduce((s: number, rt: any) => s + rt.quantity, 0);
-          if (applicableQtyQ < (coupon.minQuantity ?? 0)) continue;
+          if (!isQuantityInCouponRange(applicableQtyQ, coupon)) continue;
           // QUANTITY: all-or-nothing (1 uso/pedido). RESERVA atômica de 1 unidade sob row-lock
           // — esgotado (granted = 0) → não aplica. Substitui o check não-atômico
           // `usageCount >= maxUsage`, que sob concorrência deixava ultrapassar o limite.
@@ -4617,7 +4617,14 @@ export class OrdersService {
 
   // ── 8. cancelExpiredOrders (cron) ─────────────────────────────────────────
 
-  async cancelExpiredOrders(): Promise<number> {
+  /**
+   * @param isPixPaid consulta a Cielo antes de cancelar um pedido com PIX pendente
+   *   (true = pago e confirmado → não cancelar). Injetado pelo cron para não acoplar
+   *   OrdersService ao PaymentsService.
+   */
+  async cancelExpiredOrders(
+    isPixPaid?: (orderId: string, userId: string) => Promise<boolean>,
+  ): Promise<number> {
     const w: any = this.prisma.getWriteClient();
 
     // Janela de GRAÇA pra pedido com PAGAMENTO EM ANDAMENTO (Payment PENDING = PIX/3DS
@@ -4626,9 +4633,14 @@ export class OrdersService {
     // Pedido com Payment PAID NUNCA é cancelado pelo cron (finalize em voo na mesma tx).
     // Confirmações que chegarem DEPOIS da graça caem na compensação automática
     // (PaymentCompensationService → estorno) — a graça só reduz a frequência disso.
+    // PIX: regra de negócio (2026-09-30) — pago até 15 min após expirar = ingresso entregue.
+    // O QR da Cielo segue pagável depois do nosso prazo; sem webhook, só o polling do modal
+    // (que fecha ao zerar) confirmava. Por isso o cron consulta a Cielo antes de cancelar.
     const now = new Date();
-    const PAYMENT_IN_FLIGHT_GRACE_MS = 2 * 60 * 60 * 1000; // 2h
+    const PAYMENT_IN_FLIGHT_GRACE_MS = 2 * 60 * 60 * 1000; // 2h (3DS/outros)
+    const PIX_LATE_PAYMENT_GRACE_MS = 15 * 60 * 1000; // 15 min
     const paymentGraceCutoff = new Date(now.getTime() - PAYMENT_IN_FLIGHT_GRACE_MS);
+    const pixGraceCutoff = new Date(now.getTime() - PIX_LATE_PAYMENT_GRACE_MS);
 
     const expired = await w.order.findMany({
       where: {
@@ -4638,8 +4650,9 @@ export class OrdersService {
           { expiresAt: { lte: now }, payment: null },
           // Tentativa falhou/estornada → expira no prazo normal.
           { expiresAt: { lte: now }, payment: { is: { status: { in: ['FAILED', 'REFUNDED'] } } } },
-          // Pagamento EM VOO (PIX/3DS pendente) → só expira após a janela de graça.
-          { expiresAt: { lte: paymentGraceCutoff }, payment: { is: { status: 'PENDING' } } },
+          // Pagamento EM VOO → só expira após a janela de graça (PIX 15 min, demais 2h).
+          { expiresAt: { lte: pixGraceCutoff }, payment: { is: { status: 'PENDING', method: 'PIX' } } },
+          { expiresAt: { lte: paymentGraceCutoff }, payment: { is: { status: 'PENDING', method: { not: 'PIX' } } } },
         ],
       },
       select: {
@@ -4650,6 +4663,7 @@ export class OrdersService {
         billingPostalCode: true,
         pendingProducts: true,
         reservedTickets: { select: { batchId: true, quantity: true } },
+        payment: { select: { status: true, method: true } },
       },
     });
 
@@ -4679,6 +4693,16 @@ export class OrdersService {
 
     let cancelled = 0;
     for (const order of expired) {
+      // PIX pago dentro da tolerância e sem webhook → o polling confirma e entrega; não cancelar.
+      if (
+        isPixPaid &&
+        order.payment?.method === 'PIX' &&
+        order.payment.status === 'PENDING' &&
+        (await isPixPaid(order.id, order.userId))
+      ) {
+        continue;
+      }
+
       const reachedBilling = !!order.billingPostalCode;
 
       if (reachedBilling) {

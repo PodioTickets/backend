@@ -1007,7 +1007,8 @@ model Coupon {
   // Fonte de verdade nova. cpfList é mantido em paralelo durante a transição
   // (fase E remove). Quando ambos estão presentes, o service prefere documentList.
   documentList  Json?
-  minQuantity   Int? // Para couponType QUANTITY
+  minQuantity   Int? // Para couponType QUANTITY (opcional; ao menos min ou max)
+  maxQuantity   Int? // Para couponType QUANTITY: acima disso o cupom NÃO aplica (faixa)
   ageRule       String? // 'MIN' ou 'MAX' para couponType AGE
   ageValue      String? // Ex: '9 anos'
   minAge        Int? // Idade mínima em anos (restrição de faixa etária)

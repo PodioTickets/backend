@@ -13,6 +13,7 @@ import { isDocumentInList, resolveDocument } from '../../common/utils/document.u
 import { tryConsumeVoucherUnreserved } from '../../common/utils/voucher-reservation.util';
 import { stripOrganizationContact } from '../../common/utils/organization-sanitizer.util';
 import { formatPdfAnswer } from '../../common/utils/pdf-answer.util';
+import { isQuantityInCouponRange } from '../orders/order-discount.util';
 import { formatEventHappensDate, formatEventCardAddress } from '../../common/utils/event-email-format.util';
 import {
   holdsStock,
@@ -2688,15 +2689,15 @@ export class RegistrationsService {
         discount = Math.min(coupon.value, totalAmount); // Não pode ser maior que o total
       }
     } else if (coupon.couponType === 'QUANTITY') {
-      // Para cupons de quantidade, verificar se a quantidade mínima foi atingida
-      if (coupon.minQuantity && modalityIds.length >= coupon.minQuantity) {
+      // Para cupons de quantidade, verificar se a quantidade está na faixa min/max
+      if (isQuantityInCouponRange(modalityIds.length, coupon)) {
         if (coupon.type === 'PERCENTAGE') {
           discount = (totalAmount * coupon.value) / 100;
         } else if (coupon.type === 'FIXED') {
           discount = Math.min(coupon.value, totalAmount);
         }
       } else {
-        throw new BadRequestException(`Minimum quantity of ${coupon.minQuantity} modalities is required for this coupon`);
+        throw new BadRequestException('Quantidade de modalidades fora da faixa exigida por este cupom');
       }
     } else if (coupon.couponType === 'AGE') {
       // Para cupons de idade, a validação de idade deve ser feita no frontend

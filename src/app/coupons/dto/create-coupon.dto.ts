@@ -176,17 +176,27 @@ export class CreateCouponDto {
   })
   documentList?: DocumentListItemDto[];
 
-  // Campos específicos para QUANTITY
-  @ValidateIf((o) => o.couponType === CouponType.QUANTITY)
-  @IsNotEmpty()
+  // Campos específicos para QUANTITY — faixa [min, max]; ambos opcionais, mas o
+  // service exige ao menos um (regra cruzada não cabe num decorator por campo).
+  @IsOptional()
   @IsInt()
   @Min(1)
   @ApiPropertyOptional({
-    description: 'Minimum quantity (required if couponType is QUANTITY)',
+    description: 'Minimum quantity (QUANTITY: informe min, max ou ambos)',
     example: 3,
   })
   @Type(() => Number)
-  minQuantity?: number;
+  minQuantity?: number | null;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @ApiPropertyOptional({
+    description: 'Maximum quantity (QUANTITY: acima disso o cupom não aplica)',
+    example: 5,
+  })
+  @Type(() => Number)
+  maxQuantity?: number | null;
 
   // Campos específicos para AGE (legado — use minAge/maxAge)
   @IsOptional()
@@ -306,7 +316,14 @@ export class UpdateCouponDto {
   @IsInt()
   @Min(1)
   @Type(() => Number)
-  minQuantity?: number;
+  minQuantity?: number | null;
+
+  // null = remove o máximo (sem limite).
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Type(() => Number)
+  maxQuantity?: number | null;
 
   @IsOptional()
   @IsEnum(['MIN', 'MAX'])
