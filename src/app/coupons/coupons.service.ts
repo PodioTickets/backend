@@ -232,7 +232,7 @@ export class CouponsService {
    * "10% OFF", "ingresso grátis") + as CONDIÇÕES/escopo de aplicação:
    *   - appliesTo: ingressos cobertos ('all' ou lista de ticketIds — públicos)
    *   - minCartValue: valor mínimo do carrinho (centavos)
-   *   - minQuantity: qtd mínima de ingressos (cupons QUANTITY)
+   *   - minQuantity/maxQuantity: faixa de qtd de ingressos (cupons QUANTITY)
    * Continua SEM vazar:
    *   - cpfList/documentList (PII de elegíveis)
    *   - usageCount/maxUsage (timing pra esgotar cupom)
@@ -282,6 +282,7 @@ export class CouponsService {
           appliesTo: true, // ingressos cobertos ('all' ou lista de ticketIds)
           minCartValue: true, // condição: valor mínimo do carrinho (centavos)
           minQuantity: true, // condição: qtd mínima de ingressos (cupons QUANTITY)
+          maxQuantity: true, // condição: qtd máxima de ingressos (cupons QUANTITY)
           maxUsage: true, // limite de uso (null = ilimitado) — esconde cupom esgotado do link
           usageCount: true, // usos já consumidos (só p/ checar esgotamento; NÃO exposto)
           status: true,
@@ -381,6 +382,7 @@ export class CouponsService {
           // ResponseCompressionInterceptor remove chaves null do response.
           minCartValue: coupon!.minCartValue, // centavos
           minQuantity: coupon!.minQuantity, // cupons QUANTITY
+          maxQuantity: coupon!.maxQuantity, // cupons QUANTITY
           // Uso RESTANTE (maxUsage − usageCount) — só p/ DISCOUNT (1 uso = 1 unidade
           // coberta), pra o front capar o desconto do preview às N unidades mais caras.
           // QUANTITY é all-or-nothing por PEDIDO (não por unidade) → não envia (null).
@@ -619,7 +621,10 @@ export class CouponsService {
     }
 
     // Validar campos específicos por tipo
-    if (updateCouponDto.couponType || updateCouponDto.type || updateCouponDto.value) {
+    if (
+      updateCouponDto.couponType || updateCouponDto.type || updateCouponDto.value ||
+      updateCouponDto.minQuantity !== undefined || updateCouponDto.maxQuantity !== undefined
+    ) {
       const mergedData = { ...coupon, ...updateCouponDto };
       this.validateCouponData(mergedData as any);
     }
@@ -795,10 +800,18 @@ export class CouponsService {
       throw new BadRequestException('Valor percentual não pode exceder 100');
     }
 
-    // Validar campos obrigatórios para QUANTITY
+    // QUANTITY: faixa [minQuantity, maxQuantity] — ambos opcionais, ao menos um obrigatório.
     if (dto.couponType === 'QUANTITY') {
-      if (!dto.minQuantity || dto.minQuantity <= 0) {
-        throw new BadRequestException('minQuantity is required and must be greater than 0 for QUANTITY coupon type');
+      const min = dto.minQuantity ?? null;
+      const max = dto.maxQuantity ?? null;
+      if (min == null && max == null) {
+        throw new BadRequestException('Informe a quantidade mínima, a máxima ou as duas');
+      }
+      if ((min != null && min <= 0) || (max != null && max <= 0)) {
+        throw new BadRequestException('As quantidades devem ser maiores que 0');
+      }
+      if (min != null && max != null && max < min) {
+        throw new BadRequestException('A quantidade máxima não pode ser menor que a mínima');
       }
     }
 

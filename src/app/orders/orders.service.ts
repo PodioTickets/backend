@@ -187,7 +187,7 @@ function computeFinalAmount(order: any, serviceFee: number): number {
 // `./order-discount.util` (funções puras reusadas pelo export de inscrições sem
 // puxar este módulo inteiro). Importados p/ uso interno (orderShape) e re-exportados
 // p/ manter os imports/tests que os pegavam daqui.
-import { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount } from './order-discount.util';
+import { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount, isQuantityInCouponRange } from './order-discount.util';
 export { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount };
 
 /**
@@ -2311,11 +2311,11 @@ export class OrdersService {
         if (coupon.minCartValue && ticketsSubtotal < coupon.minCartValue) continue;
 
         if (coupon.couponType === 'QUANTITY') {
-          // minQuantity conta as unidades dos ingressos VINCULADOS ao cupom (appliesTo), não
+          // A faixa min/max conta as unidades dos ingressos VINCULADOS ao cupom (appliesTo), não
           // o carrinho inteiro — senão "1 do cupom + 1 de outro ingresso" já satisfaria o
           // mínimo e o cupom dispararia/descontaria fora da restrição.
           const applicableQty = autoApplicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-          if (coupon.minQuantity && applicableQty < coupon.minQuantity) continue;
+          if (!isQuantityInCouponRange(applicableQty, coupon)) continue;
           // QUANTITY: all-or-nothing — se esgotado, não aplica
           if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) continue;
         } else if (coupon.couponType === 'AGE') {
@@ -2359,23 +2359,23 @@ export class OrdersService {
       }
     }
 
-    // (c) Remover cupom QUANTITY se a quantidade dos ingressos VINCULADOS (appliesTo) caiu
-    // abaixo do mínimo. Conta unidades escopadas — mesma regra do gatilho — e não
+    // (c) Remover cupom QUANTITY se a quantidade dos ingressos VINCULADOS (appliesTo) saiu
+    // da faixa min/max. Conta unidades escopadas — mesma regra do gatilho — e não
     // participants.length (carrinho inteiro), que manteria o cupom após trocar o ingresso
     // vinculado por outro qualquer.
     if (order.couponId && !autoCouponId && !shouldRemoveAgeCoupon) {
       const existingCoupon = await r.coupon.findUnique({
         where: { id: order.couponId },
-        select: { couponType: true, minQuantity: true, appliesTo: true },
+        select: { couponType: true, minQuantity: true, maxQuantity: true, appliesTo: true },
       });
-      if (existingCoupon?.couponType === 'QUANTITY' && existingCoupon.minQuantity) {
+      if (existingCoupon?.couponType === 'QUANTITY') {
         let applicableTickets = reservedTickets;
         if (existingCoupon.appliesTo && existingCoupon.appliesTo !== 'all') {
           const allowedIds = parseAppliesToArray(existingCoupon.appliesTo);
           applicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
         }
         const applicableQty = applicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-        if (applicableQty < existingCoupon.minQuantity) {
+        if (!isQuantityInCouponRange(applicableQty, existingCoupon)) {
           shouldRemoveQuantityCoupon = true;
         }
       }
@@ -3572,7 +3572,7 @@ export class OrdersService {
             applicableTicketsQ = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
           }
           const applicableQtyQ = applicableTicketsQ.reduce((s: number, rt: any) => s + rt.quantity, 0);
-          if (applicableQtyQ < (coupon.minQuantity ?? 0)) continue;
+          if (!isQuantityInCouponRange(applicableQtyQ, coupon)) continue;
           // QUANTITY: all-or-nothing (1 uso/pedido). RESERVA atômica de 1 unidade sob row-lock
           // — esgotado (granted = 0) → não aplica. Substitui o check não-atômico
           // `usageCount >= maxUsage`, que sob concorrência deixava ultrapassar o limite.

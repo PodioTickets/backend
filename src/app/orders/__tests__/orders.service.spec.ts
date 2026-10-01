@@ -875,6 +875,21 @@ describe('OrdersService', () => {
       expect(res.newDiscount).toBe(0);
     });
 
+    // Faixa min/max (2026-09-30): acima do máximo o cupom NÃO aplica (não é teto de unidades).
+    it('QUANTITY: acima do maxQuantity → NÃO aplica', async () => {
+      buildAutoClient([{ id: 'q1', couponType: 'QUANTITY', type: 'PERCENTAGE', value: 10, appliesTo: null, minQuantity: 1, maxQuantity: 1, maxUsage: null, usageCount: 0, minCartValue: null, applyToProducts: false }]);
+      const res = await call(order(), [{}, {}], tickets2);
+      expect(res.autoCouponId).toBeUndefined();
+      expect(res.newDiscount).toBe(0);
+    });
+
+    it('QUANTITY: só maxQuantity (sem mínimo), dentro da faixa → aplica', async () => {
+      buildAutoClient([{ id: 'q1', couponType: 'QUANTITY', type: 'PERCENTAGE', value: 10, appliesTo: null, minQuantity: null, maxQuantity: 2, maxUsage: null, usageCount: 0, minCartValue: null, applyToProducts: false }]);
+      const res = await call(order(), [{}, {}], tickets2);
+      expect(res.autoCouponId).toBe('q1');
+      expect(res.newDiscount).toBe(2000); // 2 = máximo (inclusivo)
+    });
+
     it('QUANTITY: esgotado (usageCount >= maxUsage) → NÃO aplica', async () => {
       buildAutoClient([{ id: 'q1', couponType: 'QUANTITY', type: 'PERCENTAGE', value: 10, appliesTo: null, minQuantity: 2, maxUsage: 1, usageCount: 1, minCartValue: null, applyToProducts: false }]);
       const res = await call(order(), [{}, {}], tickets2);
@@ -982,6 +997,13 @@ describe('OrdersService', () => {
       const existing = { couponType: 'QUANTITY', minQuantity: 3 };
       buildAutoClient([], existing);
       const res = await call(order({ couponId: 'q1', coupon: { couponType: 'QUANTITY' } }), [{}], tickets2);
+      expect(res.shouldRemoveQuantityCoupon).toBe(true);
+    });
+
+    it('QUANTITY existente: ingressos acima do maxQuantity → marca remoção', async () => {
+      const existing = { couponType: 'QUANTITY', minQuantity: null, maxQuantity: 1 };
+      buildAutoClient([], existing);
+      const res = await call(order({ couponId: 'q1', coupon: { couponType: 'QUANTITY' } }), [{}, {}], tickets2);
       expect(res.shouldRemoveQuantityCoupon).toBe(true);
     });
 
