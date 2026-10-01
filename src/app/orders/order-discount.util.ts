@@ -108,6 +108,28 @@ export function isQuantityInCouponRange(
 }
 
 /**
+ * Ordem de preferência entre cupons AUTOMÁTICOS elegíveis (regra de 2026-09-30): vale o
+ * que MAIS desconta; empate → o já aplicado no pedido (`currentCouponId`); persistindo o
+ * empate, mantém a ordem recebida (createdAt asc = o 1º criado). Não muta a entrada.
+ * O pay percorre essa ordem até um cupom conseguir reservar uso (esgotado → próximo).
+ */
+export function rankAutoCouponCandidates<T extends { coupon: { id: string }; discount: number }>(
+  candidates: T[],
+  currentCouponId?: string | null,
+): T[] {
+  return candidates
+    .map((c, index) => ({ c, index }))
+    .sort((a, b) => {
+      if (b.c.discount !== a.c.discount) return b.c.discount - a.c.discount;
+      const aCur = a.c.coupon.id === currentCouponId ? 1 : 0;
+      const bCur = b.c.coupon.id === currentCouponId ? 1 : 0;
+      if (aCur !== bCur) return bCur - aCur;
+      return a.index - b.index;
+    })
+    .map(({ c }) => c);
+}
+
+/**
  * Desconto de cupom QUANTITY (all-or-nothing) — FONTE ÚNICA usada pelo caminho de
  * exibição (`evaluateAndApplyAutoCoupons` / `orderShape`) E pela cobrança (`pay`), para
  * que os dois NUNCA divirjam (regressão histórica: display escopava por `appliesTo`, o
