@@ -94,6 +94,20 @@ export function distributeDiscount(
 }
 
 /**
+ * Cupom QUANTITY vale só DENTRO da faixa [minQuantity, maxQuantity] (ambos inclusivos;
+ * null = sem limite naquele lado). Acima do máximo o cupom NÃO aplica — não é teto de
+ * unidades descontadas. `qty` = unidades dos ingressos vinculados (appliesTo).
+ */
+export function isQuantityInCouponRange(
+  qty: number,
+  coupon: { minQuantity?: number | null; maxQuantity?: number | null },
+): boolean {
+  if (coupon.minQuantity != null && qty < coupon.minQuantity) return false;
+  if (coupon.maxQuantity != null && qty > coupon.maxQuantity) return false;
+  return true;
+}
+
+/**
  * Desconto de cupom QUANTITY (all-or-nothing) — FONTE ÚNICA usada pelo caminho de
  * exibição (`evaluateAndApplyAutoCoupons` / `orderShape`) E pela cobrança (`pay`), para
  * que os dois NUNCA divirjam (regressão histórica: display escopava por `appliesTo`, o

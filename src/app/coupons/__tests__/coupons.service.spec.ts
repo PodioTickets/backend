@@ -403,3 +403,25 @@ describe('CouponsService.previewByCode', () => {
     });
   });
 });
+
+// Faixa min/max do cupom QUANTITY (2026-09-30): ambos opcionais, ao menos um obrigatório.
+describe('CouponsService.validateCouponData (QUANTITY)', () => {
+  const service = new CouponsService({} as any, {} as any);
+  const validate = (over: any) =>
+    (service as any).validateCouponData({ couponType: 'QUANTITY', type: 'PERCENTAGE', value: 10, ...over });
+
+  it('sem mínimo e sem máximo → rejeita', () => {
+    expect(() => validate({ minQuantity: null, maxQuantity: null })).toThrow('mínima, a máxima');
+  });
+
+  it('só mínimo, só máximo ou os dois → aceita', () => {
+    expect(() => validate({ minQuantity: 3 })).not.toThrow();
+    expect(() => validate({ maxQuantity: 5 })).not.toThrow();
+    expect(() => validate({ minQuantity: 3, maxQuantity: 5 })).not.toThrow();
+    expect(() => validate({ minQuantity: 3, maxQuantity: 3 })).not.toThrow();
+  });
+
+  it('máximo menor que o mínimo → rejeita', () => {
+    expect(() => validate({ minQuantity: 5, maxQuantity: 3 })).toThrow('menor que a mínima');
+  });
+});
