@@ -107,6 +107,9 @@ class AppUnprocessableException extends UnprocessableEntityException {
 const RESERVATION_TTL_MINUTES = Number(process.env.RESERVATION_TTL_MINUTES ?? 30);
 const MAX_TICKETS_PER_ORDER = 20;
 
+// Cupom automático avaliado (sem reserva de uso) — ver `evaluateAutoCouponCandidate`.
+type AutoCouponCandidate = { coupon: any; discount: number; units: number; applicableTickets: any[]; ageSlots?: number[] };
+
 // ─── shared include ──────────────────────────────────────────────────────────
 
 const ORDER_INCLUDE = {
@@ -187,7 +190,7 @@ function computeFinalAmount(order: any, serviceFee: number): number {
 // `./order-discount.util` (funções puras reusadas pelo export de inscrições sem
 // puxar este módulo inteiro). Importados p/ uso interno (orderShape) e re-exportados
 // p/ manter os imports/tests que os pegavam daqui.
-import { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount, isQuantityInCouponRange } from './order-discount.util';
+import { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount, isQuantityInCouponRange, rankAutoCouponCandidates } from './order-discount.util';
 export { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount };
 
 /**
@@ -2191,15 +2194,75 @@ export class OrdersService {
   // ── 3. patchParticipants ──────────────────────────────────────────────────
 
   /**
+   * Avalia UM cupom automático (AGE/QUANTITY) SEM reservar uso: elegibilidade + desconto.
+   * Fonte única do display (`evaluateAutoCoupons`: lenient + limite pelo contador) e do pay
+   * (estrito; o limite vem da reserva atômica), pra que o "mais vantajoso" seja o mesmo
+   * nos dois. Devolve null quando o cupom não se aplica.
+   *  - appliesTo restringe os ingressos (faixa, base e desconto contam só eles);
+   *  - minCartValue compara com o subtotal de ingressos;
+   *  - QUANTITY: faixa min/max; all-or-nothing (1 uso por pedido);
+   *  - AGE: participantes na faixa de idade (e na lista de documento, se ENABLED).
+   * `units` = usos desejados (AGE: participantes qualificados × ingressos cobertos).
+   */
+  private evaluateAutoCouponCandidate(
+    coupon: any,
+    ctx: {
+      order: any;
+      participants: any[];
+      reservedTickets: any[];
+      ticketsSubtotal: number;
+      productsSubtotal: number;
+      productsExtraFor: (appliesTo: string | null | undefined) => number;
+      lenient: boolean;
+      capByUsageCount: boolean;
+    },
+  ): AutoCouponCandidate | null {
+    let applicableTickets = ctx.reservedTickets;
+    if (coupon.appliesTo && coupon.appliesTo !== 'all') {
+      const allowedIds = parseAppliesToArray(coupon.appliesTo);
+      applicableTickets = ctx.reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
+    }
+    if (applicableTickets.length === 0) return null;
+    if (coupon.minCartValue && ctx.ticketsSubtotal < coupon.minCartValue) return null;
+    const applicableQty = applicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
+
+    if (coupon.couponType === 'QUANTITY') {
+      if (!isQuantityInCouponRange(applicableQty, coupon)) return null;
+      if (ctx.capByUsageCount && coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) return null;
+      const productsContribution = coupon.applyToProducts ? ctx.productsSubtotal : 0;
+      const discount = computeQuantityCouponDiscount(
+        applicableTickets, ctx.ticketsSubtotal, productsContribution, coupon,
+      );
+      return { coupon, discount, units: 1, applicableTickets };
+    }
+
+    if (coupon.couponType === 'AGE') {
+      const totalUnits = ctx.reservedTickets.reduce((s: number, rt: any) => s + (rt.quantity ?? 0), 0);
+      const ageSlots = computeAgeCouponEligibleSlots(
+        ctx.participants, coupon, resolveAgeReferenceDate(ctx.order), totalUnits, ctx.lenient,
+      );
+      let units = Math.min(ageSlots.length, applicableQty);
+      if (ctx.capByUsageCount && coupon.maxUsage != null) {
+        units = Math.min(units, Math.max(0, coupon.maxUsage - coupon.usageCount));
+      }
+      if (units <= 0) return null;
+      const productsExtra = coupon.applyToProducts ? ctx.productsExtraFor(coupon.appliesTo) : 0;
+      const discount = computePartialCouponDiscount(applicableTickets, coupon.type, coupon.value, units, productsExtra);
+      return { coupon, discount, units, applicableTickets, ageSlots };
+    }
+    return null;
+  }
+
+  /**
    * Avalia e (re)aplica cupons AUTOMÁTICOS (AGE/QUANTITY) a partir dos participantes e
    * ingressos ATUAIS — FONTE ÚNICA usada por `PATCH /participants` e `PATCH /products`.
    * NÃO persiste nada: devolve os valores que o caller grava no `order.update` + os que o
    * `orderShape` precisa pra exibir o desconto por unidade.
    *
-   * Regras (espelham a aplicação no `pay`):
-   *  (a) cupom AGE já aplicado → re-avalia contra os participantes (remove se nenhum qualifica);
-   *  (b) sem cupom/voucher → tenta aplicar o 1º auto-cupom (QUANTITY/AGE) elegível;
-   *  (c) cupom QUANTITY aplicado → remove se a quantidade caiu abaixo do mínimo.
+   * Regras (espelham a aplicação no `pay`, via `evaluateAutoCouponCandidate`):
+   *  - sem voucher/cupom manual: entre os auto-cupons elegíveis (incluindo o já aplicado,
+   *    re-avaliado) vale o que MAIS desconta; empate → o já aplicado, senão o 1º criado;
+   *  - nenhum elegível → remove o auto-cupom atual (shouldRemoveAge/QuantityCoupon).
    * Cupom MANUAL (DISCOUNT PERCENTAGE) e voucher isolado são RECALCULADOS sobre a nova base
    * (sem trocar de cupom), mantendo o total coerente quando carrinho/participantes mudam.
    */
@@ -2242,51 +2305,19 @@ export class OrdersService {
     let shouldRemoveQuantityCoupon = false;
     let ageQualifyingSlots: number[] | undefined;
 
-    // (a) Re-avaliar cupom AGE já aplicado (depende dos participantes atuais)
-    if (order.couponId && !order.voucherId) {
-      const existingCoupon = await r.coupon.findUnique({
-        where: { id: order.couponId },
-        select: { id: true, couponType: true, type: true, value: true, minAge: true, maxAge: true, maxUsage: true, usageCount: true, appliesTo: true, applyToProducts: true, cpfListStatus: true, documentList: true, cpfList: true },
-      });
-      if (existingCoupon?.couponType === 'AGE') {
-        const refDate = resolveAgeReferenceDate(order);
-        const totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-        // Lenient (PENDING): slot ainda sem birthDate MANTÉM o cupom aplicado até o comprador
-        // preencher; participante preenchido é validado pela idade. Só remove o cupom quando há
-        // participantes preenchidos e NENHUM (preenchido ou vazio) qualifica.
-        // AGE respeita a lista exclusiva de documento quando ENABLED (idade E lista).
-        const ageSlots = computeAgeCouponEligibleSlots(participants, existingCoupon, refDate, totalUnits, true);
-        const ageMatchCount = ageSlots.length;
-
-        if (ageMatchCount <= 0) {
-          shouldRemoveAgeCoupon = true;
-        } else {
-          let ageApplicableTickets = reservedTickets;
-          if (existingCoupon.appliesTo && existingCoupon.appliesTo !== 'all') {
-            const allowed = parseAppliesToArray(existingCoupon.appliesTo);
-            ageApplicableTickets = reservedTickets.filter((rt: any) => allowed.includes(rt.ticketId));
-          }
-          const ageApplicableQty = ageApplicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-          const remaining = existingCoupon.maxUsage != null
-            ? Math.max(0, existingCoupon.maxUsage - existingCoupon.usageCount)
-            : ageMatchCount;
-          const effectiveUsage = Math.min(remaining, ageMatchCount, ageApplicableQty);
-          ageQualifyingSlots = ageSlots;
-          autoCouponId = existingCoupon.id;
-          const productsExtra = existingCoupon.applyToProducts ? scopedCouponProducts(existingCoupon.appliesTo) : 0;
-          autoDiscount = computePartialCouponDiscount(ageApplicableTickets, existingCoupon.type, existingCoupon.value, effectiveUsage, productsExtra);
-          autoEffectiveUsage = effectiveUsage;
-        }
-      }
-    }
-
-    // (b) Aplicação inicial — apenas se ainda não há cupom/voucher.
-    // `autoApplyCouponTypes` restringe quais tipos podem ser auto-aplicados nesta
-    // etapa. O `reserve` passa apenas ['AGE'] (idade do comprador como proxy); os
-    // PATCH /participants e /products usam o default (QUANTITY + AGE), pois já têm
-    // participantes/produtos reais para avaliar QUANTITY com segurança.
+    // Cupons AUTOMÁTICOS (AGE/QUANTITY) — regra de 2026-09-30: entre os elegíveis vale o que
+    // MAIS desconta; empate → o já aplicado no pedido, senão o 1º criado. O cupom atual entra
+    // como candidato (re-avaliado com os participantes/ingressos atuais) e é TROCADO se outro
+    // descontar mais, ou removido se deixou de ser elegível. Voucher e cupom manual (DISCOUNT)
+    // são escolha do usuário: com eles nada aqui roda (seguem no recálculo abaixo).
+    // `autoApplyCouponTypes`: o `reserve` passa só ['AGE'] (sem participantes, a idade do
+    // comprador é o proxy); os PATCH usam o default (QUANTITY + AGE).
     const autoApplyCouponTypes = opts.autoApplyCouponTypes ?? ['QUANTITY', 'AGE'];
-    if (!order.couponId && !order.voucherId) {
+    const currentCoupon = order.couponId
+      ? await r.coupon.findUnique({ where: { id: order.couponId }, select: { id: true, couponType: true } })
+      : null;
+    const currentIsAuto = currentCoupon?.couponType === 'AGE' || currentCoupon?.couponType === 'QUANTITY';
+    if (!order.voucherId && (!order.couponId || currentIsAuto)) {
       const autoCoupons = await w.coupon.findMany({
         where: {
           eventId: order.eventId,
@@ -2295,89 +2326,33 @@ export class OrdersService {
           couponType: { in: autoApplyCouponTypes },
           OR: [{ expiryDate: null }, { expiryDate: { gt: new Date() } }],
         },
+        // createdAt asc = desempate "1º criado" — a mesma ordem do preview do /ingressos.
+        orderBy: { createdAt: 'asc' },
       });
 
-      for (const coupon of autoCoupons) {
-        // appliesTo restringe os ingressos elegíveis; 'all'/null = todos do carrinho.
-        // Filtrado UMA vez e reutilizado pelo gatilho E pela base do desconto — evita a
-        // divergência de escopo que existia entre os dois.
-        let autoApplicableTickets = reservedTickets;
-        if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-          const allowedIds = parseAppliesToArray(coupon.appliesTo);
-          autoApplicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
-        }
-        if (autoApplicableTickets.length === 0) continue;
+      // Lenient (PENDING): slot sem birthDate conta como elegível para AGE até ser preenchido.
+      // Limite de uso pelo contador (maxUsage − usageCount); a reserva atômica fica no pay.
+      const candidates: AutoCouponCandidate[] = autoCoupons
+        .map((coupon: any) =>
+          this.evaluateAutoCouponCandidate(coupon, {
+            order, participants, reservedTickets, ticketsSubtotal, productsSubtotal,
+            productsExtraFor: scopedCouponProducts, lenient: true, capByUsageCount: true,
+          }),
+        )
+        .filter((c: AutoCouponCandidate | null): c is AutoCouponCandidate => c != null);
+      const best = rankAutoCouponCandidates(candidates, order.couponId)[0];
 
-        if (coupon.minCartValue && ticketsSubtotal < coupon.minCartValue) continue;
-
-        if (coupon.couponType === 'QUANTITY') {
-          // A faixa min/max conta as unidades dos ingressos VINCULADOS ao cupom (appliesTo), não
-          // o carrinho inteiro — senão "1 do cupom + 1 de outro ingresso" já satisfaria o
-          // mínimo e o cupom dispararia/descontaria fora da restrição.
-          const applicableQty = autoApplicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-          if (!isQuantityInCouponRange(applicableQty, coupon)) continue;
-          // QUANTITY: all-or-nothing — se esgotado, não aplica
-          if (coupon.maxUsage != null && coupon.usageCount >= coupon.maxUsage) continue;
-        } else if (coupon.couponType === 'AGE') {
-          const refDate = resolveAgeReferenceDate(order);
-          const totalUnits = reservedTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-          // Lenient (PENDING): slot vazio (sem birthDate) conta como elegível até preencher.
-          // AGE respeita a lista exclusiva de documento quando ENABLED (idade E lista).
-          const ageSlots = computeAgeCouponEligibleSlots(participants, coupon, refDate, totalUnits, true);
-          if (ageSlots.length <= 0) continue;
-          (coupon as any)._ageSlots = ageSlots;
+      if (best) {
+        autoCouponId = best.coupon.id;
+        autoDiscount = best.discount;
+        if (best.coupon.couponType === 'AGE') {
+          autoEffectiveUsage = best.units;
+          ageQualifyingSlots = best.ageSlots;
         }
-
-        {
-          if (coupon.couponType === 'QUANTITY') {
-            // Desconto SÓ sobre os ingressos vinculados (autoApplicableTickets). FONTE ÚNICA
-            // com o pay (computeQuantityCouponDiscount) — display e cobrança nunca divergem.
-            // Produtos adicionais entram na base apenas quando applyToProducts=true.
-            const productsContribution = coupon.applyToProducts ? productsSubtotal : 0;
-            autoDiscount = computeQuantityCouponDiscount(
-              autoApplicableTickets, ticketsSubtotal, productsContribution, coupon,
-            );
-          } else {
-            // AGE: desconto apenas nos ingressos dos participantes qualificados (slots do stash).
-            const ageSlots: number[] = (coupon as any)._ageSlots ?? [];
-            const ageMatchCount = ageSlots.length;
-            const autoApplicableQty = autoApplicableTickets.reduce((sum: number, rt: any) => sum + rt.quantity, 0);
-            const remaining = coupon.maxUsage != null
-              ? Math.max(0, coupon.maxUsage - coupon.usageCount)
-              : ageMatchCount;
-            const effectiveUsage = Math.min(remaining, ageMatchCount, autoApplicableQty);
-            if (effectiveUsage <= 0) continue;
-            const productsExtra = coupon.applyToProducts ? scopedCouponProducts(coupon.appliesTo) : 0;
-            autoDiscount = computePartialCouponDiscount(autoApplicableTickets, coupon.type, coupon.value, effectiveUsage, productsExtra);
-            autoEffectiveUsage = effectiveUsage;
-            ageQualifyingSlots = ageSlots;
-          }
-
-          autoCouponId = coupon.id;
-          break;
-        }
-      }
-    }
-
-    // (c) Remover cupom QUANTITY se a quantidade dos ingressos VINCULADOS (appliesTo) saiu
-    // da faixa min/max. Conta unidades escopadas — mesma regra do gatilho — e não
-    // participants.length (carrinho inteiro), que manteria o cupom após trocar o ingresso
-    // vinculado por outro qualquer.
-    if (order.couponId && !autoCouponId && !shouldRemoveAgeCoupon) {
-      const existingCoupon = await r.coupon.findUnique({
-        where: { id: order.couponId },
-        select: { couponType: true, minQuantity: true, maxQuantity: true, appliesTo: true },
-      });
-      if (existingCoupon?.couponType === 'QUANTITY') {
-        let applicableTickets = reservedTickets;
-        if (existingCoupon.appliesTo && existingCoupon.appliesTo !== 'all') {
-          const allowedIds = parseAppliesToArray(existingCoupon.appliesTo);
-          applicableTickets = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
-        }
-        const applicableQty = applicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-        if (!isQuantityInCouponRange(applicableQty, existingCoupon)) {
-          shouldRemoveQuantityCoupon = true;
-        }
+      } else if (currentCoupon?.couponType === 'AGE') {
+        shouldRemoveAgeCoupon = true;
+      } else if (currentCoupon?.couponType === 'QUANTITY') {
+        shouldRemoveQuantityCoupon = true;
       }
     }
 
@@ -3542,10 +3517,12 @@ export class OrdersService {
       }
     }
 
-    // Cupons automáticos (QUANTITY / AGE) — sem código, aplicados se condição satisfeita
+    // Cupons automáticos (QUANTITY / AGE) — sem código. Regra de 2026-09-30: vale o que MAIS
+    // desconta (empate → o já aplicado no pedido, senão o 1º criado), avaliado com a MESMA
+    // função do display (`evaluateAutoCouponCandidate`), mas ESTRITO: slot sem birthDate NÃO
+    // recebe AGE no commit. O limite de uso vem da RESERVA atômica (row-lock), não do contador:
+    // percorre o ranking e fica com o 1º que conseguir reservar (esgotado → próximo).
     if (!couponId && !effectiveVoucherCode) {
-      const ticketIds = reservedTickets.map((rt: any) => rt.ticketId);
-
       const autoCoupons = await w.coupon.findMany({
         where: {
           eventId: order.eventId,
@@ -3554,74 +3531,39 @@ export class OrdersService {
           couponType: { in: ['QUANTITY', 'AGE'] },
           OR: [{ expiryDate: null }, { expiryDate: { gt: new Date() } }],
         },
+        orderBy: { createdAt: 'asc' }, // desempate "1º criado", igual ao display
       });
 
-      for (const coupon of autoCoupons) {
-        // Verificar appliesTo — se não for 'all', checar se algum ticket está na lista
-        if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-          const allowedTicketIds = parseAppliesToArray(coupon.appliesTo);
-          if (!ticketIds.some((id: string) => allowedTicketIds.includes(id))) continue;
-        }
+      // applyToProducts SÓ nos produtos dos participantes cujo ingresso o cupom cobre.
+      const productsExtraPay = (appliesTo: string | null | undefined) =>
+        computeApplicableProductsSubtotal(
+          pricedPendingProducts,
+          participantTicketMap,
+          resolveApplicableTicketIds(appliesTo, reservedTickets),
+        );
+      const candidates: AutoCouponCandidate[] = autoCoupons
+        .map((coupon: any) =>
+          this.evaluateAutoCouponCandidate(coupon, {
+            order, participants, reservedTickets, ticketsSubtotal, productsSubtotal,
+            productsExtraFor: productsExtraPay, lenient: false, capByUsageCount: false,
+          }),
+        )
+        .filter((c: AutoCouponCandidate | null): c is AutoCouponCandidate => c != null);
 
-        if (coupon.couponType === 'QUANTITY') {
-          // Ingressos VINCULADOS ao cupom (appliesTo); mínimo e base se restringem a eles —
-          // nunca ao carrinho inteiro. 'all'/null = todos.
-          let applicableTicketsQ = reservedTickets;
-          if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-            const allowedIds = parseAppliesToArray(coupon.appliesTo);
-            applicableTicketsQ = reservedTickets.filter((rt: any) => allowedIds.includes(rt.ticketId));
-          }
-          const applicableQtyQ = applicableTicketsQ.reduce((s: number, rt: any) => s + rt.quantity, 0);
-          if (!isQuantityInCouponRange(applicableQtyQ, coupon)) continue;
-          // QUANTITY: all-or-nothing (1 uso/pedido). RESERVA atômica de 1 unidade sob row-lock
-          // — esgotado (granted = 0) → não aplica. Substitui o check não-atômico
-          // `usageCount >= maxUsage`, que sob concorrência deixava ultrapassar o limite.
-          const granted = await claimCouponUnits(w, coupon.id, orderId, 1);
-          if (granted <= 0) continue;
-
-          // Base = SÓ os ingressos vinculados (+ produtos quando applyToProducts). FONTE ÚNICA
-          // com o display (computeQuantityCouponDiscount) — o valor cobrado é igual ao exibido,
-          // sem descontar ingressos fora da restrição.
-          const productsContribution = coupon.applyToProducts ? productsSubtotal : 0;
-          couponDiscount = computeQuantityCouponDiscount(
-            applicableTicketsQ, ticketsSubtotal, productsContribution, coupon,
-          );
-          couponId = coupon.id;
-          couponAppliedToProducts = coupon.applyToProducts;
-          break;
-        } else if (coupon.couponType === 'AGE') {
-          // Validar idade na data do evento. ESTRITO no pay (lenient=false): slot sem birthDate
-          // NÃO recebe o desconto no commit — só idade informada e dentro da faixa.
-          // AGE respeita a lista exclusiva de documento quando ENABLED (idade E lista):
-          // no commit, só participante com documento na lista E idade na faixa recebe.
-          const refDate = resolveAgeReferenceDate(order);
-          const totalUnitsAge = reservedTickets.reduce((s: number, rt: any) => s + (rt.quantity ?? 0), 0);
-          const ageMatchCount = computeAgeCouponEligibleSlots(participants, coupon, refDate, totalUnitsAge).length;
-
-          if (ageMatchCount <= 0) continue;
-
-          // AGE: aplica nos ingressos mais caros dos participantes qualificados
-          let ageApplicableTickets = reservedTickets;
-          if (coupon.appliesTo && coupon.appliesTo !== 'all') {
-            const allowed = parseAppliesToArray(coupon.appliesTo);
-            ageApplicableTickets = reservedTickets.filter((rt: any) => allowed.includes(rt.ticketId));
-          }
-          const ageApplicableQty = ageApplicableTickets.reduce((s: number, rt: any) => s + rt.quantity, 0);
-          // Cap natural = participantes na faixa × ingressos aplicáveis; RESERVA atômica
-          // capa pelo disponível (descontando reservas concorrentes). 0 → esgotado, não aplica.
-          const desiredUnits = Math.min(ageMatchCount, ageApplicableQty);
-          const effectiveUsage = await claimCouponUnits(w, coupon.id, orderId, desiredUnits);
-          if (effectiveUsage <= 0) continue;
-          // applyToProducts SÓ nos produtos dos participantes cujo ingresso o cupom AGE cobre.
-          const ageApplicableTicketIdSet = new Set<string>(ageApplicableTickets.map((rt: any) => rt.ticketId));
-          const ageProductsExtra = coupon.applyToProducts
-            ? computeApplicableProductsSubtotal(pricedPendingProducts, participantTicketMap, ageApplicableTicketIdSet)
-            : 0;
-          couponDiscount = computePartialCouponDiscount(ageApplicableTickets, coupon.type, coupon.value, effectiveUsage, ageProductsExtra);
-          couponId = coupon.id;
-          couponAppliedToProducts = coupon.applyToProducts;
-          break;
-        }
+      for (const cand of rankAutoCouponCandidates(candidates, order.couponId)) {
+        // QUANTITY: all-or-nothing (1 uso/pedido). AGE: N unidades; reserva parcial
+        // (limite quase esgotado) desconta só as unidades concedidas.
+        const granted = await claimCouponUnits(w, cand.coupon.id, orderId, cand.units);
+        if (granted <= 0) continue;
+        couponDiscount = cand.coupon.couponType === 'AGE' && granted < cand.units
+          ? computePartialCouponDiscount(
+            cand.applicableTickets, cand.coupon.type, cand.coupon.value, granted,
+            cand.coupon.applyToProducts ? productsExtraPay(cand.coupon.appliesTo) : 0,
+          )
+          : cand.discount;
+        couponId = cand.coupon.id;
+        couponAppliedToProducts = cand.coupon.applyToProducts;
+        break;
       }
     }
 

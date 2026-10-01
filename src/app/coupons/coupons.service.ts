@@ -450,6 +450,11 @@ export class CouponsService {
       });
     }
 
+    // Cupons QUANTITY do evento — regras PÚBLICAS (sem lista de documento/contadores),
+    // pro /ingressos mostrar o desconto quando a seleção cair na faixa. Vem nesta
+    // resposta (que a tela já busca) em vez de um endpoint novo: zero request extra.
+    const quantityCoupons = await this.getDisplayableQuantityCoupons(eventId);
+
     // Sem usuário ou sem data de nascimento não há idade a avaliar.
     const birthDate = user?.dateOfBirth ?? null;
     if (!birthDate) {
@@ -460,6 +465,7 @@ export class CouponsService {
           reason: user ? 'NO_BIRTHDATE' : 'NOT_AUTHENTICATED',
           age: null,
           appliedCoupon: null,
+          quantityCoupons,
         },
       };
     }
@@ -500,6 +506,7 @@ export class CouponsService {
         cpfListStatus: true,
         documentList: true,
         cpfList: true,
+        createdAt: true, // desempate "1º criado" no /ingressos (AGE × QUANTITY)
       },
       // minAge asc → desempate determinístico caso (dado legado) haja sobreposição.
       orderBy: { minAge: 'asc' },
@@ -572,10 +579,55 @@ export class CouponsService {
               applyToProducts: winner.applyToProducts,
               minCartValue: winner.minCartValue,
               note: winner.note,
+              createdAt: winner.createdAt,
             }
           : null,
+        quantityCoupons,
       },
     };
+  }
+
+  /**
+   * Cupons QUANTITY ativos e não esgotados (vendas + reservas ativas), em `createdAt` asc.
+   * O front escolhe o MAIS vantajoso (empate → o já aplicado, senão o 1º criado), como o checkout.
+   * Só regras de aplicação; nada de usageCount/maxUsage/note/listas.
+   */
+  private async getDisplayableQuantityCoupons(eventId: string) {
+    const coupons = await this.prisma.getReadClient().coupon.findMany({
+      where: {
+        eventId,
+        couponType: 'QUANTITY',
+        status: 'ACTIVE',
+        deletedAt: null,
+        OR: [{ expiryDate: null }, { expiryDate: { gt: new Date() } }],
+      },
+      select: {
+        id: true,
+        type: true,
+        value: true,
+        appliesTo: true,
+        applyToProducts: true,
+        minCartValue: true,
+        minQuantity: true,
+        maxQuantity: true,
+        usageCount: true,
+        maxUsage: true,
+        createdAt: true, // desempate "1º criado" no /ingressos
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    const available: typeof coupons = [];
+    for (const c of coupons) {
+      if (c.maxUsage != null) {
+        const reserved = await sumActiveCouponReservations(this.prisma.getWriteClient(), c.id);
+        if (c.usageCount + reserved >= c.maxUsage) continue;
+      }
+      available.push(c);
+    }
+    return available.map(({ usageCount: _u, maxUsage: _m, ...c }) => ({
+      ...c,
+      appliesTo: c.appliesTo ?? 'all',
+    }));
   }
 
   async update(
