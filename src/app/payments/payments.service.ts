@@ -573,6 +573,10 @@ export class PaymentsService {
             avatar: organizer.avatarUrl,
           } : null,
         } : null,
+        // Cupom automático acumulado com o manual (metadata do pay); null no cupom único.
+        autoCoupon: discountsMeta?.autoCoupon
+          ? { id: discountsMeta.autoCoupon.id, discountAmount: discountsMeta.autoCoupon.discount ?? 0 }
+          : null,
         // Cupom utilizado (se houver)
         coupon: coupon ? {
           id: coupon.id,
@@ -1086,6 +1090,7 @@ export class PaymentsService {
         event: { include: { organization: true } },
         payment: true,
         coupon: true,
+        autoCoupon: true,
         voucher: true,
         registrations: {
           include: {

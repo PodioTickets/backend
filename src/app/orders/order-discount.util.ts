@@ -19,19 +19,36 @@ export function distributeDiscount(
   effectiveUsage?: number,
   fixedPerUnit?: number,
   qualifyingSlots?: number[],
+  appliesTo?: string | null,
+  slotProducts?: number[],
 ): any[] {
   // Expand all tickets into individual unit slots
-  const units: { rt: any; discount: number }[] = [];
+  const units: { rt: any; discount: number; productsDiscount: number }[] = [];
   for (const rt of reservedTickets) {
     for (let i = 0; i < rt.quantity; i++) {
-      units.push({ rt, discount: 0 });
+      units.push({ rt, discount: 0, productsDiscount: 0 });
     }
   }
+  // Base do slot = ingresso + produtos DO PARTICIPANTE do slot (`slotProducts`, só quando o
+  // cupom/voucher cobre produtos). Sem isso a parte dos produtos caía nos ingressos, rateada
+  // pelo preço (ia pro ingresso mais caro) e capada no unitPrice (o excedente sumia).
+  const base = (i: number) => units[i].rt.unitPrice + (slotProducts?.[i] ?? 0);
+  // Divide o desconto do slot entre o ingresso e os produtos dele, proporcional ao valor.
+  const assign = (i: number, slotDiscount: number) => {
+    const b = base(i);
+    const ticket = b > 0 ? Math.min(units[i].rt.unitPrice, Math.round(slotDiscount * (units[i].rt.unitPrice / b))) : 0;
+    units[i].discount = ticket;
+    units[i].productsDiscount = slotDiscount - ticket;
+  };
 
   if (!units.length) return [];
 
   const totalQuantity = units.length;
-  const coveredQty = Math.min(effectiveUsage ?? totalQuantity, totalQuantity);
+  // Só unidades dos ingressos do `appliesTo` recebem desconto. Sem isso, um ingresso FORA
+  // do cupom mais caro que os vinculados levava o desconto (ordem por preço).
+  const allowed = appliesTo && appliesTo !== 'all' ? new Set(parseAppliesToArray(appliesTo)) : null;
+  const eligible = [...units.keys()].filter(i => !allowed || allowed.has(units[i].rt.ticketId));
+  const coveredQty = Math.min(effectiveUsage ?? eligible.length, eligible.length);
 
   if (totalDiscount > 0 && coveredQty > 0) {
     let sorted: number[];
@@ -41,13 +58,13 @@ export function distributeDiscount(
       if (validSlots.length >= coveredQty) {
         sorted = validSlots.slice(0, coveredQty);
       } else {
-        const byPrice = [...units.keys()]
+        const byPrice = eligible
           .filter(i => !validSlots.includes(i))
           .sort((a, b) => units[b].rt.unitPrice - units[a].rt.unitPrice);
         sorted = [...validSlots, ...byPrice].slice(0, coveredQty);
       }
     } else {
-      sorted = [...units.keys()].sort((a, b) => units[b].rt.unitPrice - units[a].rt.unitPrice);
+      sorted = [...eligible].sort((a, b) => units[b].rt.unitPrice - units[a].rt.unitPrice);
     }
 
     if (fixedPerUnit !== undefined && fixedPerUnit > 0) {
@@ -56,38 +73,40 @@ export function distributeDiscount(
       // applyToProducts=true cobrindo também produtos adicionais).
       for (let i = 0; i < coveredQty; i++) {
         const slotIdx = sorted[i];
-        units[slotIdx].discount = Math.min(fixedPerUnit, units[slotIdx].rt.unitPrice);
+        // FIXED: ingresso primeiro; o que passa do unitPrice vai para os produtos do slot.
+        const slotDiscount = Math.min(fixedPerUnit, base(slotIdx));
+        units[slotIdx].discount = Math.min(slotDiscount, units[slotIdx].rt.unitPrice);
+        units[slotIdx].productsDiscount = slotDiscount - units[slotIdx].discount;
       }
     } else {
-      // PERCENTAGE: distribui totalDiscount proporcional ao unitPrice entre os slots cobertos.
-      // Quando totalDiscount > subtotal dos ingressos cobertos (cupom com applyToProducts=true),
-      // só a porção que cabe nos ingressos é distribuída por slot — o excedente fica implícito
-      // em order.discount (finalAmount segue correto via order.discount agregado).
-      const coveredSubtotal = sorted.slice(0, coveredQty).reduce((s, i) => s + units[i].rt.unitPrice, 0);
-      const ticketsPortion = Math.min(totalDiscount, coveredSubtotal);
+      // PERCENTAGE: distribui totalDiscount proporcional à base (ingresso + produtos do slot)
+      // entre os slots cobertos. Sem `slotProducts` a base é só o ingresso e o excedente
+      // (produtos) fica implícito em order.discount (finalAmount segue correto pelo agregado).
+      const coveredBase = sorted.slice(0, coveredQty).reduce((s, i) => s + base(i), 0);
+      const portion = Math.min(totalDiscount, coveredBase);
       let distrib = 0;
       for (let i = 0; i < coveredQty; i++) {
         const isLast = i === coveredQty - 1;
         const slotIdx = sorted[i];
-        const unitPrice = units[slotIdx].rt.unitPrice;
         let allocated = isLast
-          ? ticketsPortion - distrib
-          : coveredSubtotal > 0
-            ? Math.round(ticketsPortion * (unitPrice / coveredSubtotal))
+          ? portion - distrib
+          : coveredBase > 0
+            ? Math.round(portion * (base(slotIdx) / coveredBase))
             : 0;
-        allocated = Math.min(allocated, unitPrice);
-        units[slotIdx].discount = allocated;
+        allocated = Math.min(allocated, base(slotIdx));
+        assign(slotIdx, allocated);
         distrib += allocated;
       }
     }
   }
 
-  return units.map(({ rt, discount }) => ({
+  return units.map(({ rt, discount, productsDiscount }) => ({
     ...rt,
     quantity: 1,
     unitDiscount: discount,
     totalDiscount: discount,
-    couponApplied: discount > 0,
+    productsDiscount,
+    couponApplied: discount + productsDiscount > 0,
     finalUnitPrice: rt.unitPrice - discount,
     finalTotalPrice: rt.unitPrice - discount,
   }));
@@ -169,6 +188,39 @@ export function computeQuantityCouponDiscount(
   }
   // Nunca descontar mais do que a base efetivamente coberta.
   return Math.min(discount, applicableSubtotal + productsContribution);
+}
+
+/**
+ * Acúmulo cupom automático + manual (regra 2026-10-02): cada cupom calcula sobre o preço
+ * CHEIO e os descontos SOMAM por unidade, capados no preço — o ingresso chega a R$ 0 e para
+ * de descontar, nunca fica negativo. Recebe as duas saídas de `distributeDiscount` (mesma
+ * ordem de unidades). `overflow` = o que passou do preço (sai da parte do cupom manual).
+ * `productsDiscount` soma; o teto dos produtos é o do pedido (preDiscountTotal).
+ */
+export function mergeStackedUnits(
+  autoUnits: any[],
+  manualUnits: any[],
+): { units: any[]; overflow: number } {
+  let overflow = 0;
+  const units = manualUnits.map((m, i) => {
+    const a = autoUnits[i] ?? { unitDiscount: 0, productsDiscount: 0 };
+    const autoPart = Math.min(m.unitPrice, a.unitDiscount ?? 0);
+    const manualPart = Math.min(m.unitPrice - autoPart, m.unitDiscount ?? 0);
+    overflow += (m.unitDiscount ?? 0) - manualPart;
+    const discount = autoPart + manualPart;
+    const productsDiscount = (m.productsDiscount ?? 0) + (a.productsDiscount ?? 0);
+    return {
+      ...m,
+      unitDiscount: discount,
+      totalDiscount: discount,
+      autoUnitDiscount: autoPart,
+      productsDiscount,
+      couponApplied: discount + productsDiscount > 0,
+      finalUnitPrice: m.unitPrice - discount,
+      finalTotalPrice: m.unitPrice - discount,
+    };
+  });
+  return { units, overflow };
 }
 
 /**

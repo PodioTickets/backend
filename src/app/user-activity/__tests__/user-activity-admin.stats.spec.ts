@@ -37,14 +37,15 @@ describe('UserActivityAdminService.statsAsAdmin — métricas do dashboard', () 
           { action: 'page:home', _count: { _all: 50 } },
         ]);
       }
-      if (by[0] === 'userId') {
-        return Promise.resolve([{ userId: 'u1' }, { userId: 'u2' }]);
-      }
-      return Promise.resolve([{ sessionId: 's1' }]);
+      return Promise.resolve([]);
     });
-    const $queryRaw = jest.fn().mockResolvedValue([
-      { day: new Date('2026-06-01T00:00:00.000Z'), count: BigInt(7) },
-    ]);
+    // 1º raw = únicos (COUNT DISTINCT); depois as séries diárias.
+    const $queryRaw = jest
+      .fn()
+      .mockResolvedValueOnce([{ users: BigInt(2), sessions: BigInt(1) }])
+      .mockResolvedValue([
+        { day: new Date('2026-06-01T00:00:00.000Z'), count: BigInt(7) },
+      ]);
     const client: any = { userActivityLog: { count, groupBy }, $queryRaw };
     const prisma: any = { getReadClient: () => client };
     const service = new UserActivityAdminService(prisma);

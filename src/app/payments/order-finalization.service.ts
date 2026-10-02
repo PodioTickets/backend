@@ -161,6 +161,8 @@ export class OrderFinalizationService {
         userId: true,
         couponId: true,
         couponReservedUnits: true,
+        autoCouponId: true,
+        autoCouponReservedUnits: true,
         voucherId: true,
         reservedTickets: true,
         pendingParticipants: true,
@@ -208,6 +210,17 @@ export class OrderFinalizationService {
           WHERE id = ${order.couponId}::uuid
         `;
       }
+    }
+
+    // Cupom automático ACUMULADO: devolve exatamente o reservado/contabilizado no pay+finalize.
+    const autoReserved = order.autoCouponReservedUnits ?? 0;
+    if (order.autoCouponId && autoReserved > 0) {
+      await tx.$executeRaw`
+        UPDATE "Coupon"
+        SET "usageCount" = GREATEST(0, "usageCount" - ${autoReserved}),
+            "updatedAt" = NOW()
+        WHERE id = ${order.autoCouponId}::uuid
+      `;
     }
 
     if (order.voucherId) {
@@ -287,6 +300,7 @@ export class OrderFinalizationService {
       include: {
         reservedTickets: true,
         coupon: true,
+        autoCoupon: true,
         voucher: true,
         event: { include: { organization: true } },
       },
@@ -408,6 +422,17 @@ export class OrderFinalizationService {
           `;
         }
       }
+    }
+
+    // Cupom automático ACUMULADO com o manual: converte a reserva do pay em uso (sempre
+    // caminho reservado — o acúmulo só existe em pedidos novos).
+    const autoReservedUnits = (order as any).autoCouponReservedUnits as number | null;
+    if ((order as any).autoCouponId && autoReservedUnits && autoReservedUnits > 0) {
+      await tx.$executeRaw`
+        UPDATE "Coupon"
+        SET "usageCount" = "usageCount" + ${autoReservedUnits}, "updatedAt" = NOW()
+        WHERE id = ${(order as any).autoCouponId}::uuid
+      `;
     }
 
     // ── Consumir voucher — atômico ACTIVE → USED, ESCOPADO à reserva deste pedido ──
@@ -857,6 +882,16 @@ export class OrderFinalizationService {
               value: order.coupon.value,
               applyToProducts: couponAppliedToProducts,
             } : null,
+            // Cupom automático acumulado com o manual (null no cupom único).
+            autoCoupon: order.autoCoupon ? {
+              id: order.autoCoupon.id,
+              code: order.autoCoupon.code,
+              couponType: order.autoCoupon.couponType,
+              type: order.autoCoupon.type,
+              value: order.autoCoupon.value,
+              applyToProducts: order.autoCoupon.applyToProducts,
+            } : null,
+            autoDiscount: order.autoDiscount ?? 0,
             voucher: order.voucher ? {
               id: order.voucher.id,
               code: order.voucher.code,

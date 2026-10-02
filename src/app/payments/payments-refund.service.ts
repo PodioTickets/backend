@@ -588,6 +588,7 @@ export class PaymentsRefundService {
       include: {
         reservedTickets: true,
         coupon: true,
+        autoCoupon: true,
         voucher: true,
         payment: true,
         event: {

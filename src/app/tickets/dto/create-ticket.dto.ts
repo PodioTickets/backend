@@ -8,6 +8,8 @@ import {
   IsEnum,
   ValidateNested,
   Min,
+  Max,
+  IsInt,
   ArrayMinSize,
   ValidateIf,
   ArrayUnique,
@@ -129,6 +131,15 @@ export class CreateTicketDto {
   @ApiPropertyOptional({ description: 'Age limits', type: AgeLimitDto })
   ageLimit?: AgeLimitDto;
 
+  // Teto 20 = limite de ingressos por pedido do checkout; acima disso ninguém compraria.
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  @Type(() => Number)
+  @ApiPropertyOptional({ description: 'Minimum units of this ticket per order', example: 2 })
+  minPurchaseQuantity?: number;
+
   @IsArray()
   @ArrayMinSize(1)
   @ValidateNested({ each: true })
@@ -201,6 +212,15 @@ export class UpdateTicketDto {
   @ValidateNested()
   @Type(() => AgeLimitDto)
   ageLimit?: AgeLimitDto | null;
+
+  /** null = remove o mínimo. */
+  @IsOptional()
+  @ValidateIf((o) => o.minPurchaseQuantity !== null)
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  @Type(() => Number)
+  minPurchaseQuantity?: number | null;
 
   @IsOptional()
   @IsArray()

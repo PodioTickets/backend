@@ -397,7 +397,7 @@ describe('OrdersService', () => {
     const buyerId = 'buyer-1';
     const orderId = 'order-rm';
 
-    function build(order: any) {
+    function build(order: any, minPurchaseQuantity: number | null = null) {
       const captured: any = {};
       const tx: any = {
         $executeRaw: jest.fn().mockResolvedValue(1),
@@ -414,6 +414,7 @@ describe('OrdersService', () => {
         order: { findUnique: jest.fn().mockResolvedValue(order) },
         user: { findUnique: jest.fn().mockResolvedValue(null) },
         coupon: { findMany: jest.fn().mockResolvedValue([]), findUnique: jest.fn().mockResolvedValue(null) },
+        ticket: { findUnique: jest.fn().mockResolvedValue({ name: 'Revezamento', minPurchaseQuantity }) },
         $transaction: jest.fn().mockImplementation((fn: (tx: any) => any) => fn(tx)),
         _tx: tx,
         _captured: captured,
@@ -430,6 +431,15 @@ describe('OrdersService', () => {
       reservedTickets: [{ id: 'ort-A', ticketId: 'tk-A', batchId: 'batch-A', quantity: 2, unitPrice: 10000 }],
       pendingParticipants: [{ email: 'a@a.com' }, {}],
       ...over,
+    });
+
+    it('quantidade mínima: recusa remover se o ingresso ficaria entre 1 e N−1', async () => {
+      const client = build(order2(), 2);
+
+      await expect(service.removeReservedSlot(buyerId, orderId, 1)).rejects.toMatchObject({
+        message: expect.stringContaining('no mínimo 2'),
+      });
+      expect(client._tx.$executeRaw).not.toHaveBeenCalled();
     });
 
     it('remove o slot 1 → reserva 2→1, libera estoque, DELETA placeholder, decrementa ORT', async () => {
@@ -560,6 +570,7 @@ describe('OrdersService', () => {
         coupon: {
           findFirst: jest.fn().mockResolvedValue(coupon),
           findUnique: jest.fn().mockResolvedValue(coupon),
+          findMany: jest.fn().mockResolvedValue([]),
         },
         // Dois claims passam por $queryRaw:
         //  - claimCouponUnits (SQL com "couponReservedUnits") → sem escassez no unit: concede o
@@ -568,7 +579,9 @@ describe('OrdersService', () => {
         $queryRaw: jest.fn().mockImplementation((strings: any, ...vals: any[]) => {
           const sql = Array.isArray(strings) ? strings.join('') : String(strings);
           if (sql.includes('couponReservedUnits')) {
-            const want = typeof vals[1] === 'number' ? vals[1] : 0;
+            // `want` é o 1º valor do sub-SELECT (fragmento Prisma.sql interpolado).
+            const sub = vals.find((v: any) => Array.isArray(v?.values));
+            const want = typeof vals[1] === 'number' ? vals[1] : (sub?.values?.[0] ?? 0);
             return Promise.resolve([{ granted: want }]);
           }
           return Promise.resolve([{ id: voucher?.id ?? 'voucher' }]);
@@ -922,7 +935,24 @@ describe('OrdersService', () => {
       expect(res.autoCouponId).toBe('age1');
       expect(res.autoEffectiveUsage).toBe(1); // capado por maxUsage=1
       expect(res.newDiscount).toBe(5000); // 50% de 1 ingresso
-      expect(res.ageQualifyingSlots).toEqual([0, 1]);
+      expect(res.ageQualifyingSlots).toEqual([0]); // só os slots concedidos (cap 1)
+    });
+
+    it('AGE: desconto sobre o ingresso DO elegível, não sobre o mais caro; respeita appliesTo', async () => {
+      // tk-A R$100 (adulto) + tk-B R$50 (criança, elegível). Antes: 10% do mais caro (1000).
+      const mixed = [
+        { ticketId: 'tk-A', batchId: 'b-A', quantity: 1, unitPrice: 10000 },
+        { ticketId: 'tk-B', batchId: 'b-B', quantity: 1, unitPrice: 5000 },
+      ];
+      buildAutoClient([{ id: 'age1', couponType: 'AGE', type: 'PERCENTAGE', value: 10, appliesTo: null, minAge: 0, maxAge: 12, maxUsage: null, usageCount: 0, minCartValue: null, applyToProducts: false }]);
+      const res = await call(order(), [{ birthDate: '1990-01-01' }, { birthDate: '2020-01-01' }], mixed);
+      expect(res.newDiscount).toBe(500);
+      expect(res.ageQualifyingSlots).toEqual([1]);
+
+      // Mesmo elegível, ingresso fora do appliesTo não recebe.
+      buildAutoClient([{ id: 'age2', couponType: 'AGE', type: 'PERCENTAGE', value: 10, appliesTo: '["tk-A"]', minAge: 0, maxAge: 12, maxUsage: null, usageCount: 0, minCartValue: null, applyToProducts: false }]);
+      const res2 = await call(order(), [{ birthDate: '1990-01-01' }, { birthDate: '2020-01-01' }], mixed);
+      expect(res2.autoCouponId).toBeUndefined();
     });
 
     it('AGE no RESERVE (sem participantes, slots vazios) → aplica nos 2 ingressos (provisório)', async () => {
@@ -1075,7 +1105,7 @@ describe('OrdersService', () => {
       const client: any = {
         order: { findUnique: jest.fn().mockResolvedValue(order) },
         user: { findUnique: jest.fn().mockResolvedValue({ firstName: 'A', lastName: 'B', email: 'a@a.com' }) },
-        coupon: { findFirst: jest.fn().mockResolvedValue(coupon100) },
+        coupon: { findFirst: jest.fn().mockResolvedValue(coupon100), findMany: jest.fn().mockResolvedValue([]) },
         voucher: { findUnique: jest.fn().mockResolvedValue(null) },
         event: { findUnique: jest.fn().mockResolvedValue(null) }, // snapshotEvent null → pula e-mail
         // claimCouponUnits (reserva de uso do cupom) faz UPDATE ... RETURNING granted: 1 unidade concedida.
@@ -1120,7 +1150,7 @@ describe('OrdersService', () => {
       const client: any = {
         order: { findUnique: jest.fn().mockResolvedValue(order) },
         user: { findUnique: jest.fn().mockResolvedValue({ firstName: 'A', lastName: 'B', email: 'a@a.com' }) },
-        coupon: { findFirst: jest.fn().mockResolvedValue(coupon100) },
+        coupon: { findFirst: jest.fn().mockResolvedValue(coupon100), findMany: jest.fn().mockResolvedValue([]) },
         voucher: { findUnique: jest.fn().mockResolvedValue(null) },
         event: { findUnique: jest.fn().mockResolvedValue(null) },
         // claimCouponUnits (reserva de uso do cupom) faz UPDATE ... RETURNING granted: 1 unidade concedida.
@@ -1254,7 +1284,7 @@ describe('OrdersService', () => {
     it('manual DISCOUNT: effectiveUsage vem do claim (granted=1 → desconto PARCIAL de 1 unidade)', async () => {
       // FIXED R$100/uso em 2 ingressos. Se usasse applicableQty (2) → 20000; com granted=1 → 10000.
       const coupon = { id: 'cD', code: 'OFF', status: 'ACTIVE', couponType: 'DISCOUNT', type: 'FIXED', value: 10000, appliesTo: 'all', deletedAt: null, maxUsage: 5, usageCount: 0, applyToProducts: false, cpfListStatus: 'DISABLED', documentList: null, cpfList: null, expiryDate: null, minCartValue: null };
-      const { client, tx } = buildClient(baseOrder(), 1, { coupon: { findFirst: jest.fn().mockResolvedValue(coupon) } });
+      const { client, tx } = buildClient(baseOrder(), 1, { coupon: { findFirst: jest.fn().mockResolvedValue(coupon), findMany: jest.fn().mockResolvedValue([]) } });
 
       const res: any = await service.pay(buyerId, orderId, undefined, { method: 'PIX', couponCode: 'OFF' } as any);
 

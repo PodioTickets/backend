@@ -169,12 +169,17 @@ function buildDiscountLabel(
 ): string | undefined {
   if (discount <= 0) return undefined;
   if (hasCoupon) {
-    const c = order.coupon ?? {};
-    const automatic = c.couponType === 'QUANTITY' || c.couponType === 'AGE';
-    const pct =
-      c.type === 'PERCENTAGE' && c.value ? ` (${c.value}% OFF)` : '';
-    if (automatic) return `Cupom automático${pct}`;
-    return `${`Cupom ${c.code ?? ''}`.trim()}${pct}`;
+    const label = (c: any) => {
+      const automatic = c.couponType === 'QUANTITY' || c.couponType === 'AGE';
+      const pct =
+        c.type === 'PERCENTAGE' && c.value ? ` (${c.value}% OFF)` : '';
+      if (automatic) return `Cupom automático${pct}`;
+      return `${`Cupom ${c.code ?? ''}`.trim()}${pct}`;
+    };
+    // Acúmulo: automático + manual na mesma linha (o valor é o desconto somado).
+    return order.autoCoupon
+      ? `${label(order.autoCoupon)} + ${label(order.coupon ?? {})}`
+      : label(order.coupon ?? {});
   }
   if (hasVoucher) {
     return order.voucher?.code
