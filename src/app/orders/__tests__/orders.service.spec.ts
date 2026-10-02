@@ -951,11 +951,45 @@ describe('OrdersService', () => {
 
     it('AGE existente + participantes VAZIOS (preenchendo) → MANTÉM aplicado (lenient, não remove)', async () => {
       const existing = { id: 'age1', couponType: 'AGE', type: 'PERCENTAGE', value: 50, minAge: 18, maxAge: 200, maxUsage: null, usageCount: 0, appliesTo: null, applyToProducts: false };
-      buildAutoClient([], existing);
+      // O cupom aplicado também volta na busca de ativos (é re-avaliado como candidato).
+      buildAutoClient([existing], existing);
       const res = await call(order({ couponId: 'age1', coupon: existing }), [{}, {}], tickets2); // 2 slots ainda vazios
       expect(res.shouldRemoveAgeCoupon).toBeFalsy();
       expect(res.autoCouponId).toBe('age1');
       expect(res.newDiscount).toBe(10000); // 50% dos 2 (slots vazios contam até preencher)
+    });
+
+    // ── "Mais vantajoso" entre auto-cupons (2026-09-30) ──
+    const ageC = (over: any = {}) => ({ id: 'age1', couponType: 'AGE', type: 'PERCENTAGE', value: 10, minAge: 0, maxAge: 200, maxUsage: null, usageCount: 0, appliesTo: null, minCartValue: null, applyToProducts: false, ...over });
+    const qtyC = (over: any = {}) => ({ id: 'q1', couponType: 'QUANTITY', type: 'PERCENTAGE', value: 10, appliesTo: null, minQuantity: 2, maxQuantity: null, maxUsage: null, usageCount: 0, minCartValue: null, applyToProducts: false, ...over });
+
+    it('AGE e QUANTITY elegíveis → vale o que MAIS desconta (mesmo criado depois)', async () => {
+      buildAutoClient([ageC({ value: 10 }), qtyC({ value: 30 })]); // ordem createdAt: AGE primeiro
+      const res = await call(order(), [{}, {}], tickets2);
+      expect(res.autoCouponId).toBe('q1');
+      expect(res.newDiscount).toBe(6000); // 30% de 20000
+    });
+
+    it('AGE já aplicado mas QUANTITY desconta mais → TROCA para o QUANTITY', async () => {
+      const age = ageC({ value: 10 });
+      buildAutoClient([age, qtyC({ value: 30 })], { id: 'age1', couponType: 'AGE' });
+      const res = await call(order({ couponId: 'age1', coupon: age }), [{}, {}], tickets2);
+      expect(res.autoCouponId).toBe('q1');
+      expect(res.autoEffectiveUsage).toBeUndefined(); // QUANTITY não usa slots de idade
+      expect(res.newDiscount).toBe(6000);
+    });
+
+    it('empate → mantém o JÁ APLICADO, mesmo não sendo o 1º criado', async () => {
+      const qty = qtyC({ value: 10 });
+      buildAutoClient([ageC({ value: 10 }), qty], { id: 'q1', couponType: 'QUANTITY' });
+      const res = await call(order({ couponId: 'q1', coupon: qty }), [{}, {}], tickets2);
+      expect(res.autoCouponId).toBe('q1');
+    });
+
+    it('empate sem cupom aplicado → o 1º criado', async () => {
+      buildAutoClient([ageC({ value: 10 }), qtyC({ value: 10 })]);
+      const res = await call(order(), [{}, {}], tickets2);
+      expect(res.autoCouponId).toBe('age1');
     });
 
     it('DISCOUNT existente PERCENTAGE: 5 unidades, maxUsage=2 → desconto CAPADO em 2 (não infla)', async () => {
@@ -1263,6 +1297,32 @@ describe('OrdersService', () => {
       const data = dataOf(tx);
       expect(data.discount).toBe(0);
       expect(data.couponId).toBeUndefined();
+    });
+
+    // "Mais vantajoso" (2026-09-30): o pay cobra o que MAIS desconta, não o 1º criado.
+    const autoAge = { id: 'cA', code: null, status: 'ACTIVE', couponType: 'AGE', type: 'PERCENTAGE', value: 10, minAge: 0, maxAge: 200, appliesTo: 'all', deletedAt: null, maxUsage: null, usageCount: 0, applyToProducts: false, cpfListStatus: 'DISABLED', documentList: null, cpfList: null, expiryDate: null, minCartValue: null };
+    const autoQty = { id: 'cQ', code: null, status: 'ACTIVE', couponType: 'QUANTITY', type: 'PERCENTAGE', value: 30, appliesTo: 'all', minQuantity: 2, maxQuantity: null, deletedAt: null, maxUsage: null, usageCount: 0, applyToProducts: false, cpfListStatus: 'DISABLED', documentList: null, cpfList: null, expiryDate: null, minCartValue: null };
+
+    it('auto AGE 10% (criado antes) e QUANTITY 30% → cobra o QUANTITY', async () => {
+      const { tx } = buildClient(baseOrder(), 1, { coupon: { findFirst: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([autoAge, autoQty]) } });
+
+      await service.pay(buyerId, orderId, undefined, { method: 'PIX' } as any);
+
+      const data = dataOf(tx);
+      expect(data.couponId).toBe('cQ');
+      expect(data.discount).toBe(6000); // 30% de 20000
+    });
+
+    it('o mais vantajoso ESGOTADO na reserva atômica → cai no próximo do ranking', async () => {
+      const { client, tx } = buildClient(baseOrder(), 0, { coupon: { findFirst: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([autoAge, autoQty]) } });
+      // 1º claim (QUANTITY, o melhor) → 0; 2º claim (AGE) → 2 unidades.
+      client.$queryRaw.mockResolvedValueOnce([{ granted: 0 }]).mockResolvedValueOnce([{ granted: 2 }]);
+
+      await service.pay(buyerId, orderId, undefined, { method: 'PIX' } as any);
+
+      const data = dataOf(tx);
+      expect(data.couponId).toBe('cA');
+      expect(data.discount).toBe(2000); // 10% de 20000
     });
 
     it('auto AGE: effectiveUsage vem do claim (2 elegíveis mas granted=1 → desconto de 1 unidade)', async () => {

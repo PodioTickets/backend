@@ -253,12 +253,42 @@ describe('CouponsService.previewByCode', () => {
     const setupAge = ({ coupons = [] as any[], reserved = 0 }: any) => {
       mockPrisma.getReadClient.mockReturnValue({
         event: { findUnique: jest.fn().mockResolvedValue({ id: 'evt-1', eventDate: new Date('2030-01-01') }) },
-        coupon: { findMany: jest.fn().mockResolvedValue(coupons) },
+        // Filtra pelo couponType do where: a mesma chamada busca AGE e QUANTITY.
+        coupon: {
+          findMany: jest.fn(({ where }: any) =>
+            Promise.resolve(coupons.filter((c: any) => c.couponType === where.couponType)),
+          ),
+        },
       });
       mockPrisma.getWriteClient.mockReturnValue({
         $queryRaw: jest.fn().mockResolvedValue([{ reserved }]),
       });
     };
+
+    // Cupons QUANTITY vão junto (pro /ingressos mostrar o desconto) — até pra anônimo.
+    const qtyCoupon = (over: any = {}) => ({
+      id: 'q-1', couponType: 'QUANTITY', type: 'PERCENTAGE', value: 10, appliesTo: null,
+      applyToProducts: false, minCartValue: null, minQuantity: 3, maxQuantity: 5,
+      usageCount: 0, maxUsage: null, ...over,
+    });
+
+    it('anônimo recebe os cupons QUANTITY, sem contadores de uso', async () => {
+      setupAge({ coupons: [qtyCoupon()] });
+      const res: any = await service.getApplicableAgeCoupons('evt-1', null);
+      expect(res.data.applicable).toBe(false);
+      expect(res.data.quantityCoupons).toHaveLength(1);
+      expect(res.data.quantityCoupons[0]).toMatchObject({
+        id: 'q-1', type: 'PERCENTAGE', value: 10, appliesTo: 'all', minQuantity: 3, maxQuantity: 5,
+      });
+      expect(res.data.quantityCoupons[0]).not.toHaveProperty('usageCount');
+      expect(res.data.quantityCoupons[0]).not.toHaveProperty('maxUsage');
+    });
+
+    it('cupom QUANTITY esgotado (vendas + reservas) fica de fora', async () => {
+      setupAge({ coupons: [qtyCoupon({ usageCount: 4, maxUsage: 5 })], reserved: 1 });
+      const res: any = await service.getApplicableAgeCoupons('evt-1', { dateOfBirth: dob20 });
+      expect(res.data.quantityCoupons).toEqual([]);
+    });
 
     it('9 vendidos + 1 RESERVADO → 10/10 esgotado → NÃO aplicável', async () => {
       setupAge({ coupons: [ageCoupon({ usageCount: 9, maxUsage: 10 })], reserved: 1 });
