@@ -157,6 +157,7 @@ export class TicketsService {
           gender: createTicketDto.gender || 'all',
           ageLimitMin: createTicketDto.ageLimit?.min,
           ageLimitMax: createTicketDto.ageLimit?.max,
+          minPurchaseQuantity: createTicketDto.minPurchaseQuantity ?? null,
           hasKit: createTicketDto.hasKit || false,
           // kitId/produtos só existem quando o ingresso TEM kit. Sem esse gate, um payload
           // com hasKit=false + productIds/kitId criaria vínculos órfãos e o checkout exibiria
@@ -1000,6 +1001,7 @@ export class TicketsService {
           gender: originalTicket.gender,
           ageLimitMin: originalTicket.ageLimitMin,
           ageLimitMax: originalTicket.ageLimitMax,
+          minPurchaseQuantity: originalTicket.minPurchaseQuantity,
           hasKit: originalTicket.hasKit,
           kitId: originalTicket.kitId,
           eventId: originalTicket.eventId,

@@ -161,6 +161,42 @@ export function computeAgeCouponEligibleSlots(
   return ageSlots.filter((i) => docSlots.has(i));
 }
 
+/** ticketId de cada slot (unidade), na ordem de `reservedTickets` — slot = índice do participante. */
+function slotTicketIds(reservedTickets: any[]): string[] {
+  return (reservedTickets ?? []).flatMap((rt: any) => Array(rt.quantity ?? 0).fill(rt.ticketId));
+}
+
+/** Mantém só os slots cujo ingresso está no `appliesTo` do cupom ('all'/null = todos). */
+export function restrictSlotsToAppliesTo(
+  slots: number[],
+  reservedTickets: any[],
+  appliesTo: string | null | undefined,
+): number[] {
+  if (!appliesTo || appliesTo === 'all') return slots;
+  const allowed = new Set(parseAppliesToArray(appliesTo));
+  const ids = slotTicketIds(reservedTickets);
+  return slots.filter((i) => allowed.has(ids[i]));
+}
+
+/**
+ * Desconto de cupom sobre SLOTS específicos (AGE): base = preço do ingresso DE CADA slot
+ * (+ `productsExtra`). Antes o AGE descontava sobre os N ingressos MAIS CAROS do pedido —
+ * participante elegível num ingresso barato levava o desconto calculado sobre o caro.
+ */
+export function computeSlotsCouponDiscount(
+  reservedTickets: any[],
+  slots: number[],
+  couponValueType: string,
+  couponValue: number,
+  productsExtra = 0,
+): number {
+  if (slots.length === 0) return 0;
+  const prices = (reservedTickets ?? []).flatMap((rt: any) => Array(rt.quantity ?? 0).fill(rt.unitPrice ?? 0));
+  const base = slots.reduce((s, i) => s + (prices[i] ?? 0), 0) + Math.max(0, productsExtra);
+  if (couponValueType === 'PERCENTAGE') return Math.floor(base * (couponValue / 100));
+  return Math.min(slots.length * couponValue, base);
+}
+
 /**
  * Nº de INGRESSOS efetivamente cobertos por um cupom — base canônica do incremento de
  * `usageCount` no finalize (e do decremento no estorno). Espelha EXATAMENTE a regra de
@@ -207,13 +243,12 @@ export function computeCouponCoveredUnits(
 
   if (coupon.couponType === 'AGE') {
     // AGE respeita a lista exclusiva de documento quando ENABLED (idade E lista).
-    const ageMatch = computeAgeCouponEligibleSlots(
-      participants ?? [],
-      coupon as any,
-      ageRefDate,
-      totalUnits,
+    // Só participantes elegíveis cujo ingresso está no appliesTo.
+    return restrictSlotsToAppliesTo(
+      computeAgeCouponEligibleSlots(participants ?? [], coupon as any, ageRefDate, totalUnits),
+      reservedTickets,
+      coupon.appliesTo,
     ).length;
-    return Math.min(ageMatch, applicableQty);
   }
 
   // DISCOUNT

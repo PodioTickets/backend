@@ -229,6 +229,10 @@ export class UserActivityAdminService {
     const eventIdSqlFilter = query.eventId
       ? Prisma.sql`AND "metadata"->>'eventId' = ${query.eventId}`
       : Prisma.empty;
+    const sqlFilters = Prisma.sql`
+      ${query.category ? Prisma.sql`AND "category"::text = ${query.category}` : Prisma.empty}
+      ${query.source ? Prisma.sql`AND "source"::text = ${query.source}` : Prisma.empty}
+      ${eventIdSqlFilter}`;
 
     const [
       total,
@@ -236,8 +240,7 @@ export class UserActivityAdminService {
       byCategory,
       bySource,
       topActions,
-      uniqueUserGroups,
-      uniqueSessionGroups,
+      uniqueRaw,
       perDayRaw,
       eventPageViews,
       paymentsConfirmed,
@@ -262,23 +265,22 @@ export class UserActivityAdminService {
         orderBy: { _count: { action: 'desc' } },
         take: 10,
       }),
-      prismaRead.userActivityLog.groupBy({
-        by: ['userId'],
-        where: { ...where, userId: { not: null } },
-      }),
-      prismaRead.userActivityLog.groupBy({
-        by: ['sessionId'],
-        where: { ...where, sessionId: { not: null } },
-      }),
+      // Únicos via COUNT(DISTINCT) no banco (ignora NULL = `not: null`). O groupBy
+      // anterior trazia uma linha por usuário/sessão pro Node — no "Geral" (histórico
+      // inteiro) estourava o timeout do front.
+      prismaRead.$queryRaw<Array<{ users: bigint; sessions: bigint }>>(Prisma.sql`
+        SELECT COUNT(DISTINCT "userId")::bigint AS users, COUNT(DISTINCT "sessionId")::bigint AS sessions
+        FROM "UserActivityLog"
+        WHERE "occurredAt" >= ${from} AND "occurredAt" <= ${to}
+        ${sqlFilters}
+      `),
       // Série diária: date_trunc não existe no groupBy do Prisma → raw SQL.
       // Cast `::text` nos enums evita o cast explícito pro tipo do Postgres.
       prismaRead.$queryRaw<Array<{ day: Date; count: bigint }>>(Prisma.sql`
         SELECT date_trunc('day', "occurredAt") AS day, COUNT(*)::bigint AS count
         FROM "UserActivityLog"
         WHERE "occurredAt" >= ${from} AND "occurredAt" <= ${to}
-        ${query.category ? Prisma.sql`AND "category"::text = ${query.category}` : Prisma.empty}
-        ${query.source ? Prisma.sql`AND "source"::text = ${query.source}` : Prisma.empty}
-        ${eventIdSqlFilter}
+        ${sqlFilters}
         GROUP BY 1
         ORDER BY 1 ASC
       `),
@@ -310,8 +312,8 @@ export class UserActivityAdminService {
         range: { from: from.toISOString(), to: to.toISOString() },
         totals: {
           events: total,
-          uniqueUsers: uniqueUserGroups.length,
-          uniqueSessions: uniqueSessionGroups.length,
+          uniqueUsers: Number(uniqueRaw[0]?.users ?? 0),
+          uniqueSessions: Number(uniqueRaw[0]?.sessions ?? 0),
           anonymousEvents,
           eventPageViews,
           paymentsConfirmed,

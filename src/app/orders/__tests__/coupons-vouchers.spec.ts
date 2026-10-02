@@ -26,6 +26,7 @@ import {
   capUsageByMax,
   inferEffectiveUsage,
   orderShape,
+  mergeStackedUnits,
 } from '../orders.service';
 
 // ─── helpers ───────────────────────────────────────────────────────────────
@@ -137,6 +138,32 @@ describe('Cupons & Vouchers — motor de desconto', () => {
     it('B6 totalDiscount 0 → nenhuma unidade com desconto', () => {
       const units = distributeDiscount([rt('A', 2, 10000)], 0, 2);
       expect(discountedUnits(units).length).toBe(0);
+    });
+    it('B7 appliesTo: ingresso FORA do cupom (mais caro) não recebe desconto', () => {
+      const tickets = [rt('A', 2, 5000), rt('B', 1, 10000)];
+      const pct = distributeDiscount(tickets, 1000, 2, undefined, undefined, '["A"]');
+      expect(pct.map((u) => u.unitDiscount)).toEqual([500, 500, 0]);
+      const fixed = distributeDiscount(tickets, 2000, 2, 1000, undefined, '["A"]');
+      expect(fixed.map((u) => u.unitDiscount)).toEqual([1000, 1000, 0]);
+    });
+    it('B8 applyToProducts: desconto dos produtos vai pro slot do participante dono deles', () => {
+      // 10%: A R$100 (sem produto) + C R$50 com produto R$80 → total 2300
+      const pct = distributeDiscount([rt('A', 1, 10000), rt('C', 1, 5000)], 2300, undefined, undefined, undefined, 'all', [0, 8000]);
+      expect(pct.map((u) => [u.unitDiscount, u.productsDiscount])).toEqual([[1000, 0], [500, 800]]);
+      // 50% só em C + produto → 6500: nada some no cap do unitPrice
+      const half = distributeDiscount([rt('C', 1, 5000)], 6500, undefined, undefined, undefined, 'all', [8000]);
+      expect([half[0].unitDiscount, half[0].productsDiscount]).toEqual([2500, 4000]);
+      // FIXED maior que o ingresso: o excedente vai pros produtos do slot
+      const fixed = distributeDiscount([rt('C', 1, 5000)], 7000, 1, 7000, undefined, 'all', [8000]);
+      expect([fixed[0].unitDiscount, fixed[0].productsDiscount]).toEqual([5000, 2000]);
+    });
+    it('B9 acúmulo: soma por ingresso capada no preço (nunca negativo); excedente = overflow', () => {
+      const tickets = [rt('A', 1, 10000)];
+      const auto = distributeDiscount(tickets, 1000, 1); // 10%
+      const ok = mergeStackedUnits(auto, distributeDiscount(tickets, 2000, 1)); // + 20%
+      expect([ok.units[0].unitDiscount, ok.units[0].autoUnitDiscount, ok.overflow]).toEqual([3000, 1000, 0]);
+      const cap = mergeStackedUnits(auto, distributeDiscount(tickets, 9500, 1, 9500)); // + R$95 fixo
+      expect([cap.units[0].unitDiscount, cap.units[0].finalUnitPrice, cap.overflow]).toEqual([10000, 0, 500]);
     });
   });
 
@@ -304,6 +331,36 @@ describe('Cupons & Vouchers — motor de desconto', () => {
       id: 'age-1', couponType: 'AGE', type: 'PERCENTAGE', value: 50, appliesTo: 'all',
       minAge: 0, maxAge: 200, applyToProducts: false, cpfListStatus: 'DISABLED',
       documentList: null, cpfList: null, maxUsage: null, usageCount: 0, ...over,
+    });
+
+    it('G-acúmulo: auto 10% + manual 20% sobre o preço cheio → linhas separadas e total somado', () => {
+      const manual = { id: 'm1', code: 'OFF20', couponType: 'DISCOUNT', type: 'PERCENTAGE', value: 20, appliesTo: 'all', applyToProducts: false, cpfListStatus: 'DISABLED' };
+      const shaped = orderShape(baseOrder({
+        totalAmount: 10000, finalAmount: 7000, reservedTickets: [rt('A', 1, 10000)],
+        coupon: manual, couponId: 'm1',
+        autoCoupon: ageCoupon({ value: 10 }), autoCouponId: 'age-1',
+        discount: 3000, autoDiscount: 1000,
+        pendingParticipants: [{ birthDate: '1990-01-01' }],
+      }));
+      expect(shaped.discount).toBe(3000);
+      expect(shaped.pricing.couponDiscount).toBe(2000);
+      expect(shaped.pricing.autoCouponDiscount).toBe(1000);
+      expect(shaped.finalAmount).toBe(7000);
+      expect(shaped.reservedTickets[0]).toMatchObject({ unitDiscount: 3000, autoUnitDiscount: 1000, finalUnitPrice: 7000 });
+    });
+
+    it('G-acúmulo: soma que passa do preço trava em R$0 (manual FIXED R$95 + auto 10%)', () => {
+      const manual = { id: 'm1', code: 'OFF95', couponType: 'DISCOUNT', type: 'FIXED', value: 9500, appliesTo: 'all', applyToProducts: false, cpfListStatus: 'DISABLED' };
+      const shaped = orderShape(baseOrder({
+        totalAmount: 10000, reservedTickets: [rt('A', 1, 10000)],
+        coupon: manual, couponId: 'm1',
+        autoCoupon: ageCoupon({ value: 10 }), autoCouponId: 'age-1',
+        discount: 10500, autoDiscount: 1000,
+        pendingParticipants: [{ birthDate: '1990-01-01' }],
+      }));
+      expect(shaped.discount).toBe(10000);
+      expect(shaped.finalAmount).toBe(0);
+      expect(shaped.reservedTickets[0].finalUnitPrice).toBe(0);
     });
 
     it('G1 AGE: re-deriva elegíveis de pendingParticipants (PENDING) e recomputa o desconto', () => {
