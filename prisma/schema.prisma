@@ -719,6 +719,11 @@ model Registration {
   participantGender     String?
   // Snapshot completo da compra no momento do pagamento — recibo imutável
   receiptSnapshot Json?
+  // Troca de ingresso pelo admin: a inscrição antiga vira status CANCELLED (todas as
+  // contagens de vaga/estoque/CPF já tratam como cancelada) + voidedAt → exibida como
+  // "Trocado". replacedById aponta para a inscrição nova que a substituiu.
+  voidedAt      DateTime?
+  replacedById  String?            @unique @db.Uuid
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
 
@@ -727,6 +732,8 @@ model Registration {
   user            User?                  @relation("Participant", fields: [userId], references: [id], onDelete: SetNull)
   invitedBy       User?                  @relation("InvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
   invitedById     String?                @db.Uuid
+  replacedBy      Registration?          @relation("RegistrationReplacement", fields: [replacedById], references: [id], onDelete: SetNull)
+  replaces        Registration?          @relation("RegistrationReplacement")
   modalities      RegistrationModality[]
   kitItems        RegistrationKitItem[]
   questionAnswers QuestionAnswer[]
@@ -1113,6 +1120,8 @@ model Ticket {
   ageLimitMax  Int?
   /// Mínimo de unidades DESTE ingresso por pedido (quem levar, leva ao menos N). NULL = sem mínimo.
   minPurchaseQuantity Int?
+  /// Máximo de unidades DESTE ingresso por pedido. NULL = sem máximo (só o teto geral do checkout).
+  maxPurchaseQuantity Int?
   hasKit       Boolean  @default(false)
   kitId        String?  @db.Uuid
   isActive     Boolean  @default(true)

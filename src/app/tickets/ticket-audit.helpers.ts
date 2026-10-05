@@ -13,6 +13,7 @@ export const TICKET_FIELD_LABELS: Record<string, string> = {
   ageLimitMin: 'idade mínima',
   ageLimitMax: 'idade máxima',
   minPurchaseQuantity: 'quantidade mínima',
+  maxPurchaseQuantity: 'quantidade máxima',
   hasKit: 'kit',
   kitId: 'kit',
   isActive: 'situação ativa',

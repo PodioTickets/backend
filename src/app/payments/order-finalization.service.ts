@@ -39,8 +39,8 @@ import {
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
 import {
   incrementVariationSold,
-  decrementVariationSold,
   releaseVariationHold,
+  reverseRegistrationProductSale,
 } from '../../common/utils/product-stock.util';
 import { computeCouponCoveredUnits } from '../../common/utils/coupon-eligibility.util';
 import { tryConsumeVoucher } from '../../common/utils/voucher-reservation.util';
@@ -264,27 +264,14 @@ export class OrderFinalizationService {
     // Reverte estoque/venda das variações de produto (estorno + chargeback usam este ponto).
     // soldCount-- SEMPRE; availableStock++ só para itens que seguraram estoque (verdade
     // congelada em productSnapshot.stockHeld; fallback p/ regra LEGADA em pedidos antigos).
+    // Inscrições ANULADAS (troca de ingresso) ficam de fora: os produtos delas já foram
+    // revertidos na própria troca — revertê-los de novo devolveria estoque em dobro.
     const regProducts = await tx.registrationProduct.findMany({
-      where: { registration: { orderId } },
+      where: { registration: { orderId, voidedAt: null } },
       select: { variationId: true, quantity: true, productSnapshot: true },
     });
     for (const rp of regProducts) {
-      if (!rp.variationId) continue;
-      const qty = rp.quantity ?? 1;
-      await decrementVariationSold(tx, rp.variationId, qty);
-      const snap = (rp.productSnapshot as any) ?? {};
-      const held =
-        typeof snap.stockHeld === 'boolean'
-          ? snap.stockHeld
-          // Fallback p/ snapshots ANTIGOS (pré-feature de estoque em incluso+obrigatório):
-          // aplica a regra LEGADA — naquela época incluso+obrigatório NÃO segurava
-          // estoque, então NÃO restaura availableStock (evita vazar estoque que o
-          // pedido nunca reservou). Pedidos novos sempre têm `stockHeld` congelado.
-          : !(snap.isIncludedInTicket === true && snap.isRequired === true);
-      // releaseVariationHold tem guard `stock > 0` → no-op seguro p/ variação ilimitada.
-      if (held) {
-        await releaseVariationHold(tx, rp.variationId, qty);
-      }
+      await reverseRegistrationProductSale(tx, rp);
     }
   }
 

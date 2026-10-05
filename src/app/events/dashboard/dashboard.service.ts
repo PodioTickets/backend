@@ -484,6 +484,8 @@ export class DashboardService {
       LEFT JOIN "Payment" p ON p."orderId" = o.id
       WHERE r."eventId" = ${eventId}::uuid
         AND r.status IN ('CONFIRMED'::"RegistrationStatus", 'CANCELLED'::"RegistrationStatus", 'COMPLETED'::"RegistrationStatus")
+        -- Inscrição ANULADA (troca de ingresso) não é cancelamento: a substituta já conta.
+        AND r."voidedAt" IS NULL
         ${this.sqlDateFilter(dateRange, 'o')}
         ${this.sqlTicketIdsFilter(ticketIds, 'r')};
     `);
@@ -530,6 +532,8 @@ export class DashboardService {
         LEFT JOIN "Payment" p ON p."orderId" = o.id
         WHERE r."eventId" = ${eventId}::uuid
           AND r.status IN ('CONFIRMED'::"RegistrationStatus", 'CANCELLED'::"RegistrationStatus", 'COMPLETED'::"RegistrationStatus")
+          -- Inscrição ANULADA (troca de ingresso) não é cancelamento: a substituta já conta.
+          AND r."voidedAt" IS NULL
           ${this.sqlDateFilter(effectiveRange, 'o')}
           ${this.sqlTicketIdsFilter(ticketIds, 'r')}
         GROUP BY o.id, bucket_key
@@ -579,6 +583,8 @@ export class DashboardService {
       LEFT JOIN "Payment" p ON p."orderId" = o.id
       WHERE r."eventId" = ${eventId}::uuid
         AND r.status IN ('CONFIRMED'::"RegistrationStatus", 'CANCELLED'::"RegistrationStatus", 'COMPLETED'::"RegistrationStatus")
+        -- Inscrição ANULADA (troca de ingresso) não é cancelamento: a substituta já conta.
+        AND r."voidedAt" IS NULL
         ${this.sqlDateFilter(effectiveRange, 'o')}
         ${this.sqlTicketIdsFilter(ticketIds, 'r')}
       GROUP BY bucket_key;

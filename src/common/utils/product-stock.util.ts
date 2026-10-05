@@ -83,3 +83,25 @@ export function decrementVariationSold(tx: any, variationId: string, qty: number
     WHERE id = ${variationId}::uuid
   `;
 }
+
+/**
+ * Desfaz a venda de UM RegistrationProduct: soldCount-- sempre; availableStock++ só se
+ * o item segurou estoque (verdade congelada em productSnapshot.stockHeld; fallback p/ a
+ * regra LEGADA em snapshots antigos — incluso+obrigatório não segurava). Fonte única do
+ * estorno (reverseSaleSideEffects) e da troca de ingresso (anulação da inscrição antiga).
+ */
+export async function reverseRegistrationProductSale(
+  tx: any,
+  rp: { variationId: string | null; quantity: number | null; productSnapshot: unknown },
+): Promise<void> {
+  if (!rp.variationId) return;
+  const qty = rp.quantity ?? 1;
+  await decrementVariationSold(tx, rp.variationId, qty);
+  const snap = (rp.productSnapshot as any) ?? {};
+  const held =
+    typeof snap.stockHeld === 'boolean'
+      ? snap.stockHeld
+      : !(snap.isIncludedInTicket === true && snap.isRequired === true);
+  // releaseVariationHold tem guard `stock > 0` → no-op seguro p/ variação ilimitada.
+  if (held) await releaseVariationHold(tx, rp.variationId, qty);
+}

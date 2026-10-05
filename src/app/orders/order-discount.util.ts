@@ -191,24 +191,36 @@ export function computeQuantityCouponDiscount(
 }
 
 /**
- * Acúmulo cupom automático + manual (regra 2026-10-02): cada cupom calcula sobre o preço
- * CHEIO e os descontos SOMAM por unidade, capados no preço — o ingresso chega a R$ 0 e para
- * de descontar, nunca fica negativo. Recebe as duas saídas de `distributeDiscount` (mesma
- * ordem de unidades). `overflow` = o que passou do preço (sai da parte do cupom manual).
- * `productsDiscount` soma; o teto dos produtos é o do pedido (preDiscountTotal).
+ * Acúmulo cupom automático + manual. Regra (2026-10-05, substitui a de 2026-10-02): o
+ * automático desconta primeiro e o manual incide sobre o valor JÁ DESCONTADO — cupom manual
+ * percentual vira `% × (preço − parte do automático)` por ingresso (idem nos produtos). Valor
+ * fixo não muda (já era capado no preço). Nunca negativo: o ingresso chega a R$ 0 e para.
+ *
+ * Recebe as duas saídas de `distributeDiscount` (mesma ordem de unidades), com o manual
+ * calculado sobre o preço CHEIO. `sequentialPercent` = % do manual a rebasear; omitido = o
+ * manual já veio sobre o valor descontado (pedido PAGO grava assim) e só o teto é aplicado.
+ * `overflow` = quanto sai da parte do manual (rebase + o que passou do preço).
  */
 export function mergeStackedUnits(
   autoUnits: any[],
   manualUnits: any[],
+  sequentialPercent?: number | null,
 ): { units: any[]; overflow: number } {
   let overflow = 0;
+  const pct = sequentialPercent != null && sequentialPercent > 0 ? sequentialPercent / 100 : 0;
   const units = manualUnits.map((m, i) => {
     const a = autoUnits[i] ?? { unitDiscount: 0, productsDiscount: 0 };
     const autoPart = Math.min(m.unitPrice, a.unitDiscount ?? 0);
-    const manualPart = Math.min(m.unitPrice - autoPart, m.unitDiscount ?? 0);
-    overflow += (m.unitDiscount ?? 0) - manualPart;
+    const autoProducts = a.productsDiscount ?? 0;
+    // Rebase: tira do manual o % que ele daria sobre a parte que o automático já descontou.
+    const manualTicket = Math.max(0, (m.unitDiscount ?? 0) - Math.round(pct * autoPart));
+    const manualProducts = (m.productsDiscount ?? 0) > 0
+      ? Math.max(0, (m.productsDiscount ?? 0) - Math.round(pct * autoProducts))
+      : 0;
+    const manualPart = Math.min(m.unitPrice - autoPart, manualTicket);
+    overflow += (m.unitDiscount ?? 0) - manualPart + ((m.productsDiscount ?? 0) - manualProducts);
     const discount = autoPart + manualPart;
-    const productsDiscount = (m.productsDiscount ?? 0) + (a.productsDiscount ?? 0);
+    const productsDiscount = manualProducts + autoProducts;
     return {
       ...m,
       unitDiscount: discount,
