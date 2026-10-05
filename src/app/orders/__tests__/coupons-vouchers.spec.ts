@@ -157,6 +157,19 @@ describe('Cupons & Vouchers — motor de desconto', () => {
       const fixed = distributeDiscount([rt('C', 1, 5000)], 7000, 1, 7000, undefined, 'all', [8000]);
       expect([fixed[0].unitDiscount, fixed[0].productsDiscount]).toEqual([5000, 2000]);
     });
+    it('B10 acúmulo sequencial: manual percentual incide sobre o valor já descontado pelo automático', () => {
+      // 5km R$89 (auto AGE 10% só nele = R$8,90) + 21km R$189; manual 20% sobre o cheio = R$55,60.
+      const tickets = [rt('A', 1, 8900), rt('B', 1, 18900)];
+      const auto = distributeDiscount(tickets, 890, 1, undefined, [0]);
+      const manual = distributeDiscount(tickets, 5560);
+      const seq = mergeStackedUnits(auto, manual, 20);
+      // 5km: 20% de (89 − 8,90) = 16,02; 21km: 20% de 189 = 37,80 → manual R$53,82.
+      expect(seq.units.map((u) => [u.autoUnitDiscount, u.unitDiscount - u.autoUnitDiscount])).toEqual([[890, 1602], [0, 3780]]);
+      expect(5560 - seq.overflow).toBe(5382);
+      // Sem o % (manual já rebaseado, pedido pago): só o teto → idempotente.
+      const paid = mergeStackedUnits(auto, distributeDiscount(tickets, 5382), undefined);
+      expect(paid.overflow).toBe(0);
+    });
     it('B9 acúmulo: soma por ingresso capada no preço (nunca negativo); excedente = overflow', () => {
       const tickets = [rt('A', 1, 10000)];
       const auto = distributeDiscount(tickets, 1000, 1); // 10%
@@ -333,20 +346,34 @@ describe('Cupons & Vouchers — motor de desconto', () => {
       documentList: null, cpfList: null, maxUsage: null, usageCount: 0, ...over,
     });
 
-    it('G-acúmulo: auto 10% + manual 20% sobre o preço cheio → linhas separadas e total somado', () => {
+    it('G-acúmulo: auto 10% + manual 20% sobre o valor JÁ descontado → linhas separadas', () => {
       const manual = { id: 'm1', code: 'OFF20', couponType: 'DISCOUNT', type: 'PERCENTAGE', value: 20, appliesTo: 'all', applyToProducts: false, cpfListStatus: 'DISABLED' };
+      // Pendente: o persistido é a soma CHEIA (10 + 20); o orderShape rebaseia o manual: 20% de 90 = 18.
       const shaped = orderShape(baseOrder({
-        totalAmount: 10000, finalAmount: 7000, reservedTickets: [rt('A', 1, 10000)],
+        totalAmount: 10000, finalAmount: 7200, reservedTickets: [rt('A', 1, 10000)],
         coupon: manual, couponId: 'm1',
         autoCoupon: ageCoupon({ value: 10 }), autoCouponId: 'age-1',
         discount: 3000, autoDiscount: 1000,
         pendingParticipants: [{ birthDate: '1990-01-01' }],
       }));
-      expect(shaped.discount).toBe(3000);
-      expect(shaped.pricing.couponDiscount).toBe(2000);
+      expect(shaped.discount).toBe(2800);
+      expect(shaped.pricing.couponDiscount).toBe(1800);
       expect(shaped.pricing.autoCouponDiscount).toBe(1000);
-      expect(shaped.finalAmount).toBe(7000);
-      expect(shaped.reservedTickets[0]).toMatchObject({ unitDiscount: 3000, autoUnitDiscount: 1000, finalUnitPrice: 7000 });
+      expect(shaped.finalAmount).toBe(7200);
+      expect(shaped.reservedTickets[0]).toMatchObject({ unitDiscount: 2800, autoUnitDiscount: 1000, finalUnitPrice: 7200 });
+    });
+
+    it('G-acúmulo pago: o manual gravado já é o rebaseado → não desconta de novo', () => {
+      const manual = { id: 'm1', code: 'OFF20', couponType: 'DISCOUNT', type: 'PERCENTAGE', value: 20, appliesTo: 'all', applyToProducts: false, cpfListStatus: 'DISABLED' };
+      const shaped = orderShape(baseOrder({
+        status: 'PAID', totalAmount: 10000, finalAmount: 7200, reservedTickets: [rt('A', 1, 10000)],
+        coupon: manual, couponId: 'm1',
+        autoCoupon: ageCoupon({ value: 10 }), autoCouponId: 'age-1',
+        discount: 2800, autoDiscount: 1000,
+        pendingParticipants: [{ birthDate: '1990-01-01' }],
+      }));
+      expect(shaped.discount).toBe(2800);
+      expect(shaped.pricing.couponDiscount).toBe(1800);
     });
 
     it('G-acúmulo: soma que passa do preço trava em R$0 (manual FIXED R$95 + auto 10%)', () => {

@@ -194,6 +194,7 @@ function computeFinalAmount(order: any, serviceFee: number): number {
 // `./order-discount.util` (funções puras reusadas pelo export de inscrições sem
 // puxar este módulo inteiro). Importados p/ uso interno (orderShape) e re-exportados
 // p/ manter os imports/tests que os pegavam daqui.
+import { purchaseQuantityError } from '../tickets/purchase-quantity.util';
 import { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount, isQuantityInCouponRange, rankAutoCouponCandidates, mergeStackedUnits } from './order-discount.util';
 export { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount, mergeStackedUnits };
 
@@ -444,7 +445,10 @@ export function orderShape(order: any, discountOverride?: number, extra?: Record
     ...order, coupon: order.autoCoupon, couponId: order.autoCouponId, voucher: null, voucherId: null, discount: autoPersisted,
   });
   const manualShape = orderShapeSingle({ ...order, discount: Math.max(0, totalPersisted - autoPersisted) }, undefined, extra);
-  const { units, overflow } = mergeStackedUnits(autoShape.reservedTickets, manualShape.reservedTickets);
+  // Pendente: o manual persistido é sobre o preço cheio → rebaseia (percentual) sobre o valor
+  // já descontado pelo automático. Pago: o pay já gravou o manual rebaseado → só o teto.
+  const manualPercent = order.status === 'PENDING' && order.coupon?.type === 'PERCENTAGE' ? order.coupon.value : undefined;
+  const { units, overflow } = mergeStackedUnits(autoShape.reservedTickets, manualShape.reservedTickets, manualPercent);
   const autoDiscount = autoShape.discount;
   const subtotal = order.totalAmount ?? 0;
   const discount = Math.min(subtotal, autoDiscount + Math.max(0, manualShape.discount - overflow));
@@ -945,7 +949,7 @@ export class OrdersService {
     for (const item of dto.tickets) {
       const ticket = await r.ticket.findUnique({
         where: { id: item.ticketId },
-        select: { id: true, name: true, isActive: true, eventId: true, minPurchaseQuantity: true },
+        select: { id: true, name: true, isActive: true, eventId: true, minPurchaseQuantity: true, maxPurchaseQuantity: true },
       });
       if (!ticket || !ticket.isActive) {
         throw new NotFoundException(`Ingresso ${item.ticketId} não encontrado ou inativo`);
@@ -953,14 +957,12 @@ export class OrdersService {
       if (ticket.eventId !== dto.eventId) {
         throw new NotFoundException(`Ingresso ${item.ticketId} não pertence a este evento`);
       }
-      // Quantidade mínima por pedido. Cortesia (organizador) fica de fora, como as
+      // Quantidade mínima/máxima por pedido. Cortesia (organizador) fica de fora, como as
       // demais regras de venda que ela já ignora.
-      const minQty = ticket.minPurchaseQuantity ?? 0;
-      if (!isCourtesy && minQty > 1 && (unitsByTicket.get(item.ticketId) ?? 0) < minQty) {
-        throw new BadRequestException(
-          `O ingresso "${ticket.name}" exige a compra de no mínimo ${minQty} unidades.`,
-        );
-      }
+      const quantityError = isCourtesy
+        ? null
+        : purchaseQuantityError(ticket, unitsByTicket.get(item.ticketId) ?? 0);
+      if (quantityError) throw new BadRequestException(quantityError);
 
       // Busca todos os lotes do ingresso para resolver o lote ativo
       const allBatches = await r.ticketBatch.findMany({
@@ -3080,8 +3082,9 @@ export class OrdersService {
         }
       }
 
-      // Acúmulo (regra 2026-10-02): sem voucher, o melhor cupom AUTOMÁTICO continua valendo
-      // junto do manual — cada um sobre o preço cheio. Reusa a avaliação dos PATCH com o
+      // Acúmulo: sem voucher, o melhor cupom AUTOMÁTICO continua valendo junto do manual.
+      // O persistido aqui é a soma CHEIA (manual sobre o preço cheio); o rebase do manual
+      // sobre o valor já descontado (regra 2026-10-05) acontece no orderShape/pay. Reusa a avaliação dos PATCH com o
       // manual já como cupom atual (vai para a posição acumulada); o auto que estava em
       // couponId entra como desempate.
       if (!voucherId) {
@@ -3759,6 +3762,8 @@ export class OrdersService {
               cand.coupon.type === 'FIXED' ? cand.coupon.value : undefined, isAge ? grantedSlots : undefined, cand.coupon.appliesTo),
             distributeDiscount(reservedTickets, couponDiscount, manualUsage,
               manualCoupon.type === 'FIXED' ? manualCoupon.value : undefined, undefined, manualCoupon.appliesTo),
+            // Manual sobre o valor já descontado pelo automático (regra 2026-10-05).
+            manualCoupon.type === 'PERCENTAGE' ? manualCoupon.value : undefined,
           );
           couponDiscount = Math.max(0, couponDiscount - overflow);
         } else {
