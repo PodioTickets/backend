@@ -100,8 +100,16 @@ export class RegistrationSwapService {
           throw new NotFoundException('Ingresso não encontrado neste evento');
         }
 
+        // Coluna pode estar vazia em inscrições cujo participante só existe no receiptSnapshot
+        // ("YYYY-MM-DD") — o mesmo dado que a tela da troca e o ingresso mostram.
+        const snapParticipant = (reg.receiptSnapshot as any)?.participant;
+        const snapBirth = snapParticipant?.birthDate ? new Date(snapParticipant.birthDate) : null;
+        const participantDateOfBirth =
+          reg.participantDateOfBirth ?? (snapBirth && !isNaN(snapBirth.getTime()) ? snapBirth : null);
+        const participantGender = reg.participantGender ?? snapParticipant?.gender ?? null;
+
         const eligibility = swapEligibilityError(
-          { dateOfBirth: reg.participantDateOfBirth, gender: reg.participantGender },
+          { dateOfBirth: participantDateOfBirth, gender: participantGender },
           ticket,
           reg.event?.eventDate ?? null,
         );
@@ -234,8 +242,8 @@ export class RegistrationSwapService {
             participantDocumentNumber: reg.participantDocumentNumber,
             participantDocumentNumberClean: reg.participantDocumentNumberClean,
             participantPhone: reg.participantPhone,
-            participantDateOfBirth: reg.participantDateOfBirth,
-            participantGender: reg.participantGender,
+            participantDateOfBirth,
+            participantGender,
           },
         });
         const frontendUrl = (process.env.FRONTEND_URL ?? '').replace(/\/$/, '');
