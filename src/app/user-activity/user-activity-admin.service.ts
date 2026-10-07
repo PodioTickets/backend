@@ -276,8 +276,10 @@ export class UserActivityAdminService {
       `),
       // Série diária: date_trunc não existe no groupBy do Prisma → raw SQL.
       // Cast `::text` nos enums evita o cast explícito pro tipo do Postgres.
+      // Dia CIVIL de Brasília (occurredAt é UTC sem tz), igual ao from/to: em UTC a
+      // atividade após 21h BRT caía no dia seguinte e o gráfico ganhava um "amanhã".
       prismaRead.$queryRaw<Array<{ day: Date; count: bigint }>>(Prisma.sql`
-        SELECT date_trunc('day', "occurredAt") AS day, COUNT(*)::bigint AS count
+        SELECT date_trunc('day', "occurredAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo') AS day, COUNT(*)::bigint AS count
         FROM "UserActivityLog"
         WHERE "occurredAt" >= ${from} AND "occurredAt" <= ${to}
         ${sqlFilters}
@@ -291,9 +293,9 @@ export class UserActivityAdminService {
         where: { ...fixedMetricWhere, action: 'order.paid' },
       }),
       // Views da página de evento por dia — métrica pedida pelo produto
-      // ("quantos eventos deu no dia"). Índice (action, occurredAt).
+      // ("quantos eventos deu no dia"). Índice (action, occurredAt). Dia BRT (ver acima).
       prismaRead.$queryRaw<Array<{ day: Date; count: bigint }>>(Prisma.sql`
-        SELECT date_trunc('day', "occurredAt") AS day, COUNT(*)::bigint AS count
+        SELECT date_trunc('day', "occurredAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo') AS day, COUNT(*)::bigint AS count
         FROM "UserActivityLog"
         WHERE "occurredAt" >= ${from} AND "occurredAt" <= ${to}
           AND "action" = ${EVENT_PAGE_VIEW_ACTION}
