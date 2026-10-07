@@ -680,6 +680,8 @@ export class RegistrationsService {
             },
           },
           registrations: {
+            // Trocada (voidedAt) não conta modalidade nem participante.
+            where: { voidedAt: null },
             select: {
               userId: true,
               invitedById: true,
