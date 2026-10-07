@@ -1694,7 +1694,8 @@ export class OrdersService {
             },
           },
           registrations: {
-            where: { status: { not: RegistrationStatus.PENDING } },
+            // voidedAt: inscrição trocada (histórico) — o usuário só vê a nova.
+            where: { status: { not: RegistrationStatus.PENDING }, voidedAt: null },
             include: {
               user: {
                 select: {
