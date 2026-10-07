@@ -4495,6 +4495,8 @@ export class EventsService {
         eventId: reg.eventId,
         orderId: reg.orderId,
         status: reg.status,
+        // Trocada pelo admin (CANCELLED + voidedAt) → "Trocado" na lista.
+        voidedAt: reg.voidedAt ? reg.voidedAt.toISOString() : null,
         qrCode: reg.qrCode,
         createdAt: reg.createdAt.toISOString(),
         updatedAt: reg.updatedAt.toISOString(),
