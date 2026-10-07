@@ -184,6 +184,7 @@ export class AdminUsersService {
           id: true,
           createdAt: true,
           status: true,
+          voidedAt: true,
           // Campos crus do pagamento p/ o front replicar EXATAMENTE o status da
           // tela de inscrições do evento (getFinalStatus: estorno/chargeback etc).
           order: {
@@ -205,6 +206,8 @@ export class AdminUsersService {
             id: r.id,
             createdAt: r.createdAt,
             status: r.status,
+            // Substituída por troca de ingresso (status segue CANCELLED) → front mostra "Trocado".
+            voidedAt: r.voidedAt,
             eventName: r.event?.name ?? '',
             orderId: r.order?.id ?? null,
             // Mesma shape (subset) que RegistrationListRow → o front chama getFinalStatus.

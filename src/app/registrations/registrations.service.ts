@@ -680,6 +680,8 @@ export class RegistrationsService {
             },
           },
           registrations: {
+            // Trocada (voidedAt) não conta modalidade nem participante.
+            where: { voidedAt: null },
             select: {
               userId: true,
               invitedById: true,
@@ -798,6 +800,8 @@ export class RegistrationsService {
       select: {
         id: true,
         status: true,
+        orderId: true,
+        voidedAt: true,
         qrCode: true,
         userId: true,
         invitedById: true,
@@ -915,6 +919,9 @@ export class RegistrationsService {
           registration: {
             id: registration.id,
             status: registration.status,
+            orderId: registration.orderId,
+            // Substituída por troca de ingresso (status segue CANCELLED) → "Trocado" na tela.
+            voidedAt: registration.voidedAt ?? null,
             qrCode: registration.qrCode ?? `https://www.podioticket.com.br/user/tickets/${registration.id}`,
             ...snapshot,
             event: snapshotEvent,

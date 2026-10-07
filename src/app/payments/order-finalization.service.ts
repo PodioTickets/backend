@@ -39,8 +39,8 @@ import {
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
 import {
   incrementVariationSold,
-  decrementVariationSold,
   releaseVariationHold,
+  reverseRegistrationProductSale,
 } from '../../common/utils/product-stock.util';
 import { computeCouponCoveredUnits } from '../../common/utils/coupon-eligibility.util';
 import { tryConsumeVoucher } from '../../common/utils/voucher-reservation.util';
@@ -161,6 +161,8 @@ export class OrderFinalizationService {
         userId: true,
         couponId: true,
         couponReservedUnits: true,
+        autoCouponId: true,
+        autoCouponReservedUnits: true,
         voucherId: true,
         reservedTickets: true,
         pendingParticipants: true,
@@ -210,6 +212,17 @@ export class OrderFinalizationService {
       }
     }
 
+    // Cupom automático ACUMULADO: devolve exatamente o reservado/contabilizado no pay+finalize.
+    const autoReserved = order.autoCouponReservedUnits ?? 0;
+    if (order.autoCouponId && autoReserved > 0) {
+      await tx.$executeRaw`
+        UPDATE "Coupon"
+        SET "usageCount" = GREATEST(0, "usageCount" - ${autoReserved}),
+            "updatedAt" = NOW()
+        WHERE id = ${order.autoCouponId}::uuid
+      `;
+    }
+
     if (order.voucherId) {
       // Libera USED→ACTIVE e zera a reserva — o voucher volta totalmente disponível.
       await tx.voucher.updateMany({
@@ -251,27 +264,14 @@ export class OrderFinalizationService {
     // Reverte estoque/venda das variações de produto (estorno + chargeback usam este ponto).
     // soldCount-- SEMPRE; availableStock++ só para itens que seguraram estoque (verdade
     // congelada em productSnapshot.stockHeld; fallback p/ regra LEGADA em pedidos antigos).
+    // Inscrições ANULADAS (troca de ingresso) ficam de fora: os produtos delas já foram
+    // revertidos na própria troca — revertê-los de novo devolveria estoque em dobro.
     const regProducts = await tx.registrationProduct.findMany({
-      where: { registration: { orderId } },
+      where: { registration: { orderId, voidedAt: null } },
       select: { variationId: true, quantity: true, productSnapshot: true },
     });
     for (const rp of regProducts) {
-      if (!rp.variationId) continue;
-      const qty = rp.quantity ?? 1;
-      await decrementVariationSold(tx, rp.variationId, qty);
-      const snap = (rp.productSnapshot as any) ?? {};
-      const held =
-        typeof snap.stockHeld === 'boolean'
-          ? snap.stockHeld
-          // Fallback p/ snapshots ANTIGOS (pré-feature de estoque em incluso+obrigatório):
-          // aplica a regra LEGADA — naquela época incluso+obrigatório NÃO segurava
-          // estoque, então NÃO restaura availableStock (evita vazar estoque que o
-          // pedido nunca reservou). Pedidos novos sempre têm `stockHeld` congelado.
-          : !(snap.isIncludedInTicket === true && snap.isRequired === true);
-      // releaseVariationHold tem guard `stock > 0` → no-op seguro p/ variação ilimitada.
-      if (held) {
-        await releaseVariationHold(tx, rp.variationId, qty);
-      }
+      await reverseRegistrationProductSale(tx, rp);
     }
   }
 
@@ -287,6 +287,7 @@ export class OrderFinalizationService {
       include: {
         reservedTickets: true,
         coupon: true,
+        autoCoupon: true,
         voucher: true,
         event: { include: { organization: true } },
       },
@@ -408,6 +409,17 @@ export class OrderFinalizationService {
           `;
         }
       }
+    }
+
+    // Cupom automático ACUMULADO com o manual: converte a reserva do pay em uso (sempre
+    // caminho reservado — o acúmulo só existe em pedidos novos).
+    const autoReservedUnits = (order as any).autoCouponReservedUnits as number | null;
+    if ((order as any).autoCouponId && autoReservedUnits && autoReservedUnits > 0) {
+      await tx.$executeRaw`
+        UPDATE "Coupon"
+        SET "usageCount" = "usageCount" + ${autoReservedUnits}, "updatedAt" = NOW()
+        WHERE id = ${(order as any).autoCouponId}::uuid
+      `;
     }
 
     // ── Consumir voucher — atômico ACTIVE → USED, ESCOPADO à reserva deste pedido ──
@@ -857,6 +869,16 @@ export class OrderFinalizationService {
               value: order.coupon.value,
               applyToProducts: couponAppliedToProducts,
             } : null,
+            // Cupom automático acumulado com o manual (null no cupom único).
+            autoCoupon: order.autoCoupon ? {
+              id: order.autoCoupon.id,
+              code: order.autoCoupon.code,
+              couponType: order.autoCoupon.couponType,
+              type: order.autoCoupon.type,
+              value: order.autoCoupon.value,
+              applyToProducts: order.autoCoupon.applyToProducts,
+            } : null,
+            autoDiscount: order.autoDiscount ?? 0,
             voucher: order.voucher ? {
               id: order.voucher.id,
               code: order.voucher.code,

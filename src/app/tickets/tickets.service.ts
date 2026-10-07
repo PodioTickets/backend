@@ -16,6 +16,7 @@ import {
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { stripDeletedTicketFromKitSelectionDisplay } from '../events/kit-selection-display.prune';
 import { resolveActiveBatch, type BatchWithSold } from './batch-active.util';
+import { assertPurchaseQuantityRange } from './purchase-quantity.util';
 
 function resolveImageUrl(url: string | null | undefined, baseUrl: string): string | null | undefined {
   if (!url) return url;
@@ -97,6 +98,7 @@ export class TicketsService {
     if (createTicketDto.ageLimit && !createTicketDto.ageLimit.min && !createTicketDto.ageLimit.max) {
       throw new BadRequestException('ageLimit must have at least min or max');
     }
+    assertPurchaseQuantityRange(createTicketDto.minPurchaseQuantity, createTicketDto.maxPurchaseQuantity);
 
     // Validar categoryId se fornecido
     if (createTicketDto.categoryId) {
@@ -157,6 +159,8 @@ export class TicketsService {
           gender: createTicketDto.gender || 'all',
           ageLimitMin: createTicketDto.ageLimit?.min,
           ageLimitMax: createTicketDto.ageLimit?.max,
+          minPurchaseQuantity: createTicketDto.minPurchaseQuantity ?? null,
+          maxPurchaseQuantity: createTicketDto.maxPurchaseQuantity ?? null,
           hasKit: createTicketDto.hasKit || false,
           // kitId/produtos só existem quando o ingresso TEM kit. Sem esse gate, um payload
           // com hasKit=false + productIds/kitId criaria vínculos órfãos e o checkout exibiria
@@ -551,6 +555,11 @@ export class TicketsService {
     if (updateTicketDto.ageLimit && !updateTicketDto.ageLimit.min && !updateTicketDto.ageLimit.max) {
       throw new BadRequestException('ageLimit must have at least min or max');
     }
+    // Mínimo ≤ máximo, com o valor que ficará gravado (o campo ausente mantém o atual).
+    assertPurchaseQuantityRange(
+      'minPurchaseQuantity' in updateTicketDto ? updateTicketDto.minPurchaseQuantity : ticket.minPurchaseQuantity,
+      'maxPurchaseQuantity' in updateTicketDto ? updateTicketDto.maxPurchaseQuantity : ticket.maxPurchaseQuantity,
+    );
 
     const updateData: any = { ...updateTicketDto };
     delete updateData.batches;
@@ -1000,6 +1009,8 @@ export class TicketsService {
           gender: originalTicket.gender,
           ageLimitMin: originalTicket.ageLimitMin,
           ageLimitMax: originalTicket.ageLimitMax,
+          minPurchaseQuantity: originalTicket.minPurchaseQuantity,
+          maxPurchaseQuantity: originalTicket.maxPurchaseQuantity,
           hasKit: originalTicket.hasKit,
           kitId: originalTicket.kitId,
           eventId: originalTicket.eventId,

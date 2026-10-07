@@ -96,7 +96,8 @@ function formatStatus(reg: any): string {
   // pedido GRATUITO cancelado mantém Payment.status=PAID (não há CANCELLED no
   // enum de pagamento), então sem este check o export mostrava "Pago" para uma
   // inscrição cancelada. Espelha a precedência da lista (RegistrationRow).
-  if (reg.status === 'CANCELLED') return 'Cancelado';
+  // Troca de ingresso pelo admin: a antiga fica CANCELLED + voidedAt → "Trocado".
+  if (reg.status === 'CANCELLED') return reg.voidedAt ? 'Trocado' : 'Cancelado';
   if (reg.status === 'CONFIRMED' || reg.status === 'COMPLETED' || pStatus === 'PAID') {
     return isVoucherOrder(reg.order) ? 'Voucher' : 'Pago';
   }

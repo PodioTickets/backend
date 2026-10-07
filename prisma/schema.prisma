@@ -719,6 +719,11 @@ model Registration {
   participantGender     String?
   // Snapshot completo da compra no momento do pagamento — recibo imutável
   receiptSnapshot Json?
+  // Troca de ingresso pelo admin: a inscrição antiga vira status CANCELLED (todas as
+  // contagens de vaga/estoque/CPF já tratam como cancelada) + voidedAt → exibida como
+  // "Trocado". replacedById aponta para a inscrição nova que a substituiu.
+  voidedAt      DateTime?
+  replacedById  String?            @unique @db.Uuid
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
 
@@ -727,6 +732,8 @@ model Registration {
   user            User?                  @relation("Participant", fields: [userId], references: [id], onDelete: SetNull)
   invitedBy       User?                  @relation("InvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
   invitedById     String?                @db.Uuid
+  replacedBy      Registration?          @relation("RegistrationReplacement", fields: [replacedById], references: [id], onDelete: SetNull)
+  replaces        Registration?          @relation("RegistrationReplacement")
   modalities      RegistrationModality[]
   kitItems        RegistrationKitItem[]
   questionAnswers QuestionAnswer[]
@@ -839,6 +846,12 @@ model Order {
   /// no claim (coupon-reservation.util). Auto-libera ao sair de PENDING (some da SUM) e
   /// quando `expiresAt` vence — sem release explícito. null = pedido legado/sem cupom.
   couponReservedUnits Int?  // Unidades de cupom reservadas por este pedido (PENDING)
+  /// Cupom AUTOMÁTICO (AGE/QUANTITY) ACUMULADO sobre um cupom manual em `couponId`.
+  /// Só preenchido no acúmulo (couponId = DISCOUNT e sem voucher); pedido de cupom único
+  /// segue usando só `couponId`. `autoDiscount` = parte do auto dentro de `discount`.
+  autoCouponId            String? @db.Uuid
+  autoCouponReservedUnits Int?    // Reserva de uso do autoCouponId (claim no pay)
+  autoDiscount            Int?    // Centavos do auto dentro de `discount` (null = 0)
   voucherId       String?  @db.Uuid // Voucher aplicado no pedido
   idempotencyKey  String?  @unique  // Chave de idempotência para evitar pedidos duplicados
   /// Endereço de cobrança (checkout)
@@ -876,7 +889,8 @@ model Order {
   // pedido não é hard-deletada — ver common/utils/remove-user-account.util.ts.
   user            User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
   event           Event                @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  coupon          Coupon?              @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  coupon          Coupon?              @relation("OrderCoupon", fields: [couponId], references: [id], onDelete: SetNull)
+  autoCoupon      Coupon?              @relation("OrderAutoCoupon", fields: [autoCouponId], references: [id], onDelete: SetNull)
   voucher         Voucher?             @relation(fields: [voucherId], references: [id], onDelete: SetNull)
   payment         Payment?
   registrations   Registration[]
@@ -889,6 +903,7 @@ model Order {
   @@index([status, expiresAt])
   @@index([eventId, status, createdAt]) // Listagem fiscal (PAID por evento + ordenação por data)
   @@index([couponId, status]) // SUM das reservas de cupom por pedidos PENDING (claim atômico)
+  @@index([autoCouponId, status]) // Idem para o cupom automático acumulado
 }
 
 model Payment {
@@ -1021,8 +1036,9 @@ model Coupon {
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
 
-  event  Event   @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  orders Order[]
+  event      Event   @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  orders     Order[] @relation("OrderCoupon")
+  autoOrders Order[] @relation("OrderAutoCoupon")
 
   @@unique([eventId, code])
   @@index([eventId])
@@ -1102,6 +1118,10 @@ model Ticket {
   gender       String? // 'all', 'male', 'female'
   ageLimitMin  Int?
   ageLimitMax  Int?
+  /// Mínimo de unidades DESTE ingresso por pedido (quem levar, leva ao menos N). NULL = sem mínimo.
+  minPurchaseQuantity Int?
+  /// Máximo de unidades DESTE ingresso por pedido. NULL = sem máximo (só o teto geral do checkout).
+  maxPurchaseQuantity Int?
   hasKit       Boolean  @default(false)
   kitId        String?  @db.Uuid
   isActive     Boolean  @default(true)

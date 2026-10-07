@@ -1,4 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import { Prisma } from '@prisma/client';
+
 /**
  * Helpers ATÔMICOS de reserva de USO de cupom (limite por contagem — `maxUsage`).
  *
@@ -50,51 +52,75 @@
  * IMPORTANTE: o claim também grava `couponId = $couponId` no pedido (vínculo atômico). Em
  * `desiredUnits <= 0` o `couponId` NÃO é tocado — quem remove o cupom decide o couponId.
  */
+/** Posição do cupom no pedido: `primary` = couponId; `auto` = autoCouponId (acúmulo). */
+export type CouponSlot = 'primary' | 'auto';
+
+/**
+ * SUM das unidades do cupom reservadas por pedidos PENDING não-expirados, nas DUAS posições
+ * do pedido (couponId e autoCouponId do acúmulo). `excludeOrderId` tira o próprio pedido.
+ */
+function reservedUnitsSql(couponId: string, excludeOrderId?: string): Prisma.Sql {
+  return Prisma.sql`COALESCE((
+    SELECT SUM(
+      CASE WHEN o2."couponId" = ${couponId}::uuid THEN COALESCE(o2."couponReservedUnits", 0) ELSE 0 END +
+      CASE WHEN o2."autoCouponId" = ${couponId}::uuid THEN COALESCE(o2."autoCouponReservedUnits", 0) ELSE 0 END
+    )::int
+    FROM "Order" o2
+    WHERE (o2."couponId" = ${couponId}::uuid OR o2."autoCouponId" = ${couponId}::uuid)
+      AND o2."status" = 'PENDING'
+      AND o2."expiresAt" > NOW()
+      ${excludeOrderId ? Prisma.sql`AND o2.id <> ${excludeOrderId}::uuid` : Prisma.empty}
+  ), 0)`;
+}
+
 export async function claimCouponUnits(
   client: any,
   couponId: string,
   orderId: string,
   desiredUnits: number,
+  slot: CouponSlot = 'primary',
 ): Promise<number> {
   if (!Number.isFinite(desiredUnits) || desiredUnits <= 0) {
-    await releaseCouponByOrder(client, orderId);
+    await releaseCouponByOrder(client, orderId, slot);
     return 0;
   }
 
   const want = Math.floor(desiredUnits);
-  const rows: any[] = await client.$queryRaw`
-    UPDATE "Order" o
-    SET "couponReservedUnits" = sub.granted,
-        -- Vincula o cupom ATOMICAMENTE com as unidades só quando há concessão (granted > 0):
-        -- assim a SUM concorrente nunca vê unidades sem o couponId. Em granted = 0 (esgotado)
-        -- preserva o couponId atual — o caller decide não aplicar e persiste o vínculo final.
-        "couponId" = CASE WHEN sub.granted > 0 THEN ${couponId}::uuid ELSE o."couponId" END,
-        "updatedAt" = NOW()
-    FROM (
+  // maxUsage NULL = ILIMITADO: concede o desejado integralmente. Sem o CASE, o
+  // COALESCE(maxUsage, want) usava want como teto e subtraia usageCount, entao apos o 1o
+  // uso (usageCount >= want) o cupom ilimitado zerava (esgotado indevido).
+  const sub = Prisma.sql`
       SELECT (CASE
-        -- maxUsage NULL = ILIMITADO: concede o desejado integralmente. Sem o CASE,
-        -- o COALESCE(maxUsage, want) usava want como teto e subtraia usageCount, entao
-        -- apos o 1o uso (usageCount >= want) o cupom ilimitado zerava (esgotado indevido).
         WHEN c."maxUsage" IS NULL THEN ${want}::int
         ELSE GREATEST(0, LEAST(
           ${want}::int,
-          c."maxUsage" - c."usageCount" - COALESCE((
-            SELECT SUM(o2."couponReservedUnits")::int
-            FROM "Order" o2
-            WHERE o2."couponId" = c.id
-              AND o2."status" = 'PENDING'
-              AND o2."expiresAt" > NOW()
-              AND o2.id <> ${orderId}::uuid
-          ), 0)
+          c."maxUsage" - c."usageCount" - ${reservedUnitsSql(couponId, orderId)}
         ))
       END) AS granted
       FROM "Coupon" c
       WHERE c.id = ${couponId}::uuid
-      FOR UPDATE OF c
-    ) sub
-    WHERE o.id = ${orderId}::uuid
-    RETURNING o."couponReservedUnits" AS granted
-  `;
+      FOR UPDATE OF c`;
+  // Vincula o cupom ATOMICAMENTE com as unidades só quando há concessão (granted > 0):
+  // assim a SUM concorrente nunca vê unidades sem o vínculo. Em granted = 0 (esgotado)
+  // preserva o vínculo atual — o caller decide não aplicar e persiste o vínculo final.
+  // Nome de coluna não vira parâmetro → um statement por posição.
+  const rows: any[] = slot === 'auto'
+    ? await client.$queryRaw`
+      UPDATE "Order" o
+      SET "autoCouponReservedUnits" = sub.granted,
+          "autoCouponId" = CASE WHEN sub.granted > 0 THEN ${couponId}::uuid ELSE o."autoCouponId" END,
+          "updatedAt" = NOW()
+      FROM (${sub}) sub
+      WHERE o.id = ${orderId}::uuid
+      RETURNING o."autoCouponReservedUnits" AS granted`
+    : await client.$queryRaw`
+      UPDATE "Order" o
+      SET "couponReservedUnits" = sub.granted,
+          "couponId" = CASE WHEN sub.granted > 0 THEN ${couponId}::uuid ELSE o."couponId" END,
+          "updatedAt" = NOW()
+      FROM (${sub}) sub
+      WHERE o.id = ${orderId}::uuid
+      RETURNING o."couponReservedUnits" AS granted`;
   return rows.length > 0 ? Number(rows[0].granted) : 0;
 }
 
@@ -113,13 +139,7 @@ export async function sumActiveCouponReservations(
   client: any,
   couponId: string,
 ): Promise<number> {
-  const rows: any[] = await client.$queryRaw`
-    SELECT COALESCE(SUM(o."couponReservedUnits")::int, 0) AS reserved
-    FROM "Order" o
-    WHERE o."couponId" = ${couponId}::uuid
-      AND o."status" = 'PENDING'
-      AND o."expiresAt" > NOW()
-  `;
+  const rows: any[] = await client.$queryRaw`SELECT ${reservedUnitsSql(couponId)} AS reserved`;
   return rows.length > 0 ? Number(rows[0].reserved) : 0;
 }
 
@@ -128,7 +148,21 @@ export async function sumActiveCouponReservations(
  * decide se também desvincula. Idempotente. Usado ao remover/trocar cupom no PENDING; o
  * release por término de pedido (PAID/CANCELLED/expirado) é automático (sai da SUM).
  */
-export async function releaseCouponByOrder(client: any, orderId: string): Promise<void> {
+export async function releaseCouponByOrder(
+  client: any,
+  orderId: string,
+  slot: CouponSlot = 'primary',
+): Promise<void> {
+  if (slot === 'auto') {
+    await client.$executeRaw`
+      UPDATE "Order"
+      SET "autoCouponReservedUnits" = 0, "updatedAt" = NOW()
+      WHERE id = ${orderId}::uuid
+        AND "autoCouponReservedUnits" IS NOT NULL
+        AND "autoCouponReservedUnits" <> 0
+    `;
+    return;
+  }
   await client.$executeRaw`
     UPDATE "Order"
     SET "couponReservedUnits" = 0, "updatedAt" = NOW()

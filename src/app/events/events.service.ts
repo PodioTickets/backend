@@ -5830,6 +5830,7 @@ export class EventsService {
             select: { ticketId: true, unitPrice: true, quantity: true },
           },
           coupon: { select: { type: true, value: true, appliesTo: true } },
+          autoCoupon: { select: { type: true, value: true, appliesTo: true } },
         },
       },
     };
@@ -6050,6 +6051,7 @@ export class EventsService {
             select: { ticketId: true, unitPrice: true, quantity: true },
           },
           coupon: { select: { type: true, value: true, appliesTo: true } },
+          autoCoupon: { select: { type: true, value: true, appliesTo: true } },
         },
       },
     };
