@@ -3827,16 +3827,16 @@ export class EventsService {
     const desc = params.sortOrder !== 'asc';
     if (params.sortBy === 'amount') {
       orderSql = desc
-        ? Prisma.sql`o."finalAmount" DESC, r.id DESC`
-        : Prisma.sql`o."finalAmount" ASC, r.id ASC`;
+        ? Prisma.sql`o."finalAmount" DESC, r."createdAt" DESC, r.id DESC`
+        : Prisma.sql`o."finalAmount" ASC, r."createdAt" ASC, r.id ASC`;
     } else if (params.sortBy === 'status') {
       orderSql = desc
-        ? Prisma.sql`r.status DESC, r.id DESC`
-        : Prisma.sql`r.status ASC, r.id ASC`;
+        ? Prisma.sql`r.status DESC, r."createdAt" DESC, r.id DESC`
+        : Prisma.sql`r.status ASC, r."createdAt" ASC, r.id ASC`;
     } else {
       orderSql = desc
-        ? Prisma.sql`o."createdAt" DESC NULLS LAST, r.id DESC`
-        : Prisma.sql`o."createdAt" ASC NULLS LAST, r.id ASC`;
+        ? Prisma.sql`o."createdAt" DESC NULLS LAST, r."createdAt" DESC, r.id DESC`
+        : Prisma.sql`o."createdAt" ASC NULLS LAST, r."createdAt" ASC, r.id ASC`;
     }
 
     const fromJoin = Prisma.sql`
@@ -4293,7 +4293,9 @@ export class EventsService {
         status: sortOrder,
       });
     }
-    // Sempre adicionar ordenação secundária por id para garantir ordem consistente entre registrations do mesmo pedido
+    // Desempate entre inscrições do MESMO pedido: a criada por último primeiro (ex.: troca de
+    // ingresso — a nova fica acima da trocada). O id (UUID aleatório) só garante ordem estável.
+    orderBy.push({ createdAt: sortOrder });
     orderBy.push({ id: sortOrder });
 
     // Se precisar filtrar por metadata do payment (CHARGEBACK ou REFUNDED), buscar todos e filtrar depois
