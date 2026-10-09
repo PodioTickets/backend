@@ -3834,9 +3834,10 @@ export class EventsService {
         ? Prisma.sql`r.status DESC, r."createdAt" DESC, r.id DESC`
         : Prisma.sql`r.status ASC, r."createdAt" ASC, r.id ASC`;
     } else {
+      // Mesma regra do orderBy do Prisma: data da inscrição (a exibida), não a do pedido.
       orderSql = desc
-        ? Prisma.sql`o."createdAt" DESC NULLS LAST, r."createdAt" DESC, r.id DESC`
-        : Prisma.sql`o."createdAt" ASC NULLS LAST, r."createdAt" ASC, r.id ASC`;
+        ? Prisma.sql`r."createdAt" DESC, r.id DESC`
+        : Prisma.sql`r."createdAt" ASC, r.id ASC`;
     }
 
     const fromJoin = Prisma.sql`
@@ -4276,13 +4277,9 @@ export class EventsService {
     // Ordenação
     // Sempre adicionar ordenação secundária por id da registration para garantir ordem consistente
     const orderBy: any[] = [];
-    if (sortBy === 'purchaseDate') {
-      orderBy.push({
-        order: {
-          createdAt: sortOrder,
-        },
-      });
-    } else if (sortBy === 'amount') {
+    // "Data" = Registration.createdAt (a que a lista exibe), não a do pedido: a inscrição criada
+    // por troca de ingresso fica no pedido antigo, mas tem que aparecer na data/hora da troca.
+    if (sortBy === 'amount') {
       orderBy.push({
         order: {
           finalAmount: sortOrder,
@@ -4293,8 +4290,8 @@ export class EventsService {
         status: sortOrder,
       });
     }
-    // Desempate entre inscrições do MESMO pedido: a criada por último primeiro (ex.: troca de
-    // ingresso — a nova fica acima da trocada). O id (UUID aleatório) só garante ordem estável.
+    // purchaseDate: chave principal. Demais: desempate (a criada por último primeiro). O id
+    // (UUID aleatório) só garante ordem estável.
     orderBy.push({ createdAt: sortOrder });
     orderBy.push({ id: sortOrder });
 
