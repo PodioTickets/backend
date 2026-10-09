@@ -1482,6 +1482,9 @@ export class RegistrationsService {
 
     const formattedRegistration = {
       id: reg.id,
+      // Mesmo contrato do caminho com snapshot: o modal do admin decide "Trocar ingresso" por eles.
+      status: reg.status,
+      voidedAt: reg.voidedAt ?? null,
       qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
       user: participant,
       modalities: (reg.modalities || []).map((rm: any) => ({
