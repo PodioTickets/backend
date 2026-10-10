@@ -3827,16 +3827,17 @@ export class EventsService {
     const desc = params.sortOrder !== 'asc';
     if (params.sortBy === 'amount') {
       orderSql = desc
-        ? Prisma.sql`o."finalAmount" DESC, r.id DESC`
-        : Prisma.sql`o."finalAmount" ASC, r.id ASC`;
+        ? Prisma.sql`o."finalAmount" DESC, r."createdAt" DESC, r.id DESC`
+        : Prisma.sql`o."finalAmount" ASC, r."createdAt" ASC, r.id ASC`;
     } else if (params.sortBy === 'status') {
       orderSql = desc
-        ? Prisma.sql`r.status DESC, r.id DESC`
-        : Prisma.sql`r.status ASC, r.id ASC`;
+        ? Prisma.sql`r.status DESC, r."createdAt" DESC, r.id DESC`
+        : Prisma.sql`r.status ASC, r."createdAt" ASC, r.id ASC`;
     } else {
+      // Mesma regra do orderBy do Prisma: data da inscrição (a exibida), não a do pedido.
       orderSql = desc
-        ? Prisma.sql`o."createdAt" DESC NULLS LAST, r.id DESC`
-        : Prisma.sql`o."createdAt" ASC NULLS LAST, r.id ASC`;
+        ? Prisma.sql`r."createdAt" DESC, r.id DESC`
+        : Prisma.sql`r."createdAt" ASC, r.id ASC`;
     }
 
     const fromJoin = Prisma.sql`
@@ -4276,13 +4277,9 @@ export class EventsService {
     // Ordenação
     // Sempre adicionar ordenação secundária por id da registration para garantir ordem consistente
     const orderBy: any[] = [];
-    if (sortBy === 'purchaseDate') {
-      orderBy.push({
-        order: {
-          createdAt: sortOrder,
-        },
-      });
-    } else if (sortBy === 'amount') {
+    // "Data" = Registration.createdAt (a que a lista exibe), não a do pedido: a inscrição criada
+    // por troca de ingresso fica no pedido antigo, mas tem que aparecer na data/hora da troca.
+    if (sortBy === 'amount') {
       orderBy.push({
         order: {
           finalAmount: sortOrder,
@@ -4293,7 +4290,9 @@ export class EventsService {
         status: sortOrder,
       });
     }
-    // Sempre adicionar ordenação secundária por id para garantir ordem consistente entre registrations do mesmo pedido
+    // purchaseDate: chave principal. Demais: desempate (a criada por último primeiro). O id
+    // (UUID aleatório) só garante ordem estável.
+    orderBy.push({ createdAt: sortOrder });
     orderBy.push({ id: sortOrder });
 
     // Se precisar filtrar por metadata do payment (CHARGEBACK ou REFUNDED), buscar todos e filtrar depois
@@ -4495,6 +4494,8 @@ export class EventsService {
         eventId: reg.eventId,
         orderId: reg.orderId,
         status: reg.status,
+        // Trocada pelo admin (CANCELLED + voidedAt) → "Trocado" na lista.
+        voidedAt: reg.voidedAt ? reg.voidedAt.toISOString() : null,
         qrCode: reg.qrCode,
         createdAt: reg.createdAt.toISOString(),
         updatedAt: reg.updatedAt.toISOString(),

@@ -13,6 +13,7 @@ import { DashboardSecondaryQueryDto } from './dto/secondary.dto';
 import {
   DashboardPeriod,
   calculateDateRange,
+  dashboardNow,
   getComparisonBounds,
   percentChange,
   eachBrtDayKeys,
@@ -139,12 +140,14 @@ export class DashboardService {
     const prismaRead = this.prisma.getReadClient();
     const eventConfig = await prismaRead.event.findUnique({
       where: { id: eventId },
-      select: { organizerFeePercent: true },
+      select: { organizerFeePercent: true, eventDate: true },
     });
     const organizerFeeRate = (eventConfig?.organizerFeePercent ?? 0) / 100;
 
-    const dateRange = calculateDateRange(period);
-    const comparison = getComparisonBounds(dateRange, new Date(), period);
+    const now = dashboardNow(eventConfig?.eventDate);
+    const dateRange = calculateDateRange(period, now);
+    const comparison = getComparisonBounds(dateRange, now, period);
+    const chartRange = this.effectiveChartRange(period, dateRange, now);
 
     const [
       currentAgg,
@@ -176,8 +179,8 @@ export class DashboardService {
             cancelled_regs: BigInt(0),
             refunded_regs: BigInt(0),
           } as RegCountsRow),
-      this.queryChartOrderBuckets(eventId, period, dateRange, ticketIds, organizerFeeRate),
-      this.queryChartRegBuckets(eventId, period, dateRange, ticketIds),
+      this.queryChartOrderBuckets(eventId, period, chartRange, ticketIds, organizerFeeRate),
+      this.queryChartRegBuckets(eventId, period, chartRange, ticketIds),
       period === DashboardPeriod.GERAL && !ticketIds?.length
         ? this.repasseService.computeBreakdownForEvent(eventId)
         : Promise.resolve(null),
@@ -210,7 +213,7 @@ export class DashboardService {
     const cancellationRate = totalFinalized > 0 ? (cancellations / totalFinalized) * 100 : 0;
     const refundRate = totalFinalized > 0 ? (refunds / totalFinalized) * 100 : 0;
 
-    const chartData = this.assembleChartData(period, dateRange, orderBuckets, regBuckets);
+    const chartData = this.assembleChartData(period, dateRange, orderBuckets, regBuckets, now);
 
     const response = {
       message: 'Dashboard overview fetched successfully',
@@ -277,10 +280,10 @@ export class DashboardService {
     const prismaRead = this.prisma.getReadClient();
     const eventConfig = await prismaRead.event.findUnique({
       where: { id: eventId },
-      select: { organizerFeePercent: true },
+      select: { organizerFeePercent: true, eventDate: true },
     });
     const organizerFeeRate = (eventConfig?.organizerFeePercent ?? 0) / 100;
-    const dateRange = calculateDateRange(period);
+    const dateRange = calculateDateRange(period, dashboardNow(eventConfig?.eventDate));
 
     const [
       rankingRows,
@@ -370,7 +373,10 @@ export class DashboardService {
     const cacheKey = this.buildCacheKey('secondary', eventId, { period, ticketIds });
     let base = await this.cache.getJson<SecondaryBase>(cacheKey);
     if (!base) {
-      const dateRange = calculateDateRange(period);
+      const ev = await this.prisma
+        .getReadClient()
+        .event.findUnique({ where: { id: eventId }, select: { eventDate: true } });
+      const dateRange = calculateDateRange(period, dashboardNow(ev?.eventDate));
       const [salesHeatmap, mostAnsweredQuestions, purchaseLocationsRaw] = await Promise.all([
         this.queryHeatmap(eventId, dateRange, ticketIds),
         this.buildMostAnsweredQuestions(eventId),
@@ -506,9 +512,8 @@ export class DashboardService {
     ticketIds: string[] | null,
     organizerFeeRate: number,
   ): Promise<OrderBucketRow[]> {
+    // `dateRange` já vem do `effectiveChartRange` (getOverview).
     const bucketExpr = this.chartBucketExpr(period);
-
-    const effectiveRange = this.effectiveChartRange(period, dateRange);
 
     return this.prisma.getReadClient().$queryRaw<OrderBucketRow[]>(Prisma.sql`
       WITH order_status AS (
@@ -534,7 +539,7 @@ export class DashboardService {
           AND r.status IN ('CONFIRMED'::"RegistrationStatus", 'CANCELLED'::"RegistrationStatus", 'COMPLETED'::"RegistrationStatus")
           -- Inscrição ANULADA (troca de ingresso) não é cancelamento: a substituta já conta.
           AND r."voidedAt" IS NULL
-          ${this.sqlDateFilter(effectiveRange, 'o')}
+          ${this.sqlDateFilter(dateRange, 'o')}
           ${this.sqlTicketIdsFilter(ticketIds, 'r')}
         GROUP BY o.id, bucket_key
       )
@@ -561,9 +566,8 @@ export class DashboardService {
     dateRange: DateRange,
     ticketIds: string[] | null,
   ): Promise<RegBucketRow[]> {
+    // `dateRange` já vem do `effectiveChartRange` (getOverview).
     const bucketExpr = this.chartBucketExpr(period);
-
-    const effectiveRange = this.effectiveChartRange(period, dateRange);
 
     return this.prisma.getReadClient().$queryRaw<RegBucketRow[]>(Prisma.sql`
       SELECT
@@ -585,7 +589,7 @@ export class DashboardService {
         AND r.status IN ('CONFIRMED'::"RegistrationStatus", 'CANCELLED'::"RegistrationStatus", 'COMPLETED'::"RegistrationStatus")
         -- Inscrição ANULADA (troca de ingresso) não é cancelamento: a substituta já conta.
         AND r."voidedAt" IS NULL
-        ${this.sqlDateFilter(effectiveRange, 'o')}
+        ${this.sqlDateFilter(dateRange, 'o')}
         ${this.sqlTicketIdsFilter(ticketIds, 'r')}
       GROUP BY bucket_key;
     `);
@@ -803,9 +807,8 @@ export class DashboardService {
    * Para GERAL, o chart cobre os últimos 6 meses calendário —
    * estende o range pra cobrir esses meses na query SQL.
    */
-  private effectiveChartRange(period: DashboardPeriod, dateRange: DateRange): DateRange {
+  private effectiveChartRange(period: DashboardPeriod, dateRange: DateRange, now: Date): DateRange {
     if (period !== DashboardPeriod.GERAL) return dateRange;
-    const now = new Date();
     const start = new Date(now.getFullYear(), now.getMonth() - 5, 1, 0, 0, 0, 0);
     return { start, end: now };
   }
@@ -833,10 +836,11 @@ export class DashboardService {
     dateRange: DateRange,
     orderBuckets: OrderBucketRow[],
     regBuckets: RegBucketRow[],
+    now: Date,
   ) {
     const keys =
       period === DashboardPeriod.GERAL
-        ? lastSixBrtMonthKeys()
+        ? lastSixBrtMonthKeys(now)
         : dateRange.start && dateRange.end
           ? period === DashboardPeriod.LAST_24H
             ? eachBrtHourKeys(dateRange.start, dateRange.end)

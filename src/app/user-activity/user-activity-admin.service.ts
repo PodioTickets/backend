@@ -245,6 +245,8 @@ export class UserActivityAdminService {
       eventPageViews,
       paymentsConfirmed,
       viewsPerDayRaw,
+      paidByMethodRaw,
+      repeatBuyersRaw,
     ] = await Promise.all([
       prismaRead.userActivityLog.count({ where }),
       prismaRead.userActivityLog.count({ where: { ...where, userId: null } }),
@@ -276,8 +278,10 @@ export class UserActivityAdminService {
       `),
       // Série diária: date_trunc não existe no groupBy do Prisma → raw SQL.
       // Cast `::text` nos enums evita o cast explícito pro tipo do Postgres.
+      // Dia CIVIL de Brasília (occurredAt é UTC sem tz), igual ao from/to: em UTC a
+      // atividade após 21h BRT caía no dia seguinte e o gráfico ganhava um "amanhã".
       prismaRead.$queryRaw<Array<{ day: Date; count: bigint }>>(Prisma.sql`
-        SELECT date_trunc('day', "occurredAt") AS day, COUNT(*)::bigint AS count
+        SELECT date_trunc('day', "occurredAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo') AS day, COUNT(*)::bigint AS count
         FROM "UserActivityLog"
         WHERE "occurredAt" >= ${from} AND "occurredAt" <= ${to}
         ${sqlFilters}
@@ -291,9 +295,9 @@ export class UserActivityAdminService {
         where: { ...fixedMetricWhere, action: 'order.paid' },
       }),
       // Views da página de evento por dia — métrica pedida pelo produto
-      // ("quantos eventos deu no dia"). Índice (action, occurredAt).
+      // ("quantos eventos deu no dia"). Índice (action, occurredAt). Dia BRT (ver acima).
       prismaRead.$queryRaw<Array<{ day: Date; count: bigint }>>(Prisma.sql`
-        SELECT date_trunc('day', "occurredAt") AS day, COUNT(*)::bigint AS count
+        SELECT date_trunc('day', "occurredAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo') AS day, COUNT(*)::bigint AS count
         FROM "UserActivityLog"
         WHERE "occurredAt" >= ${from} AND "occurredAt" <= ${to}
           AND "action" = ${EVENT_PAGE_VIEW_ACTION}
@@ -301,7 +305,38 @@ export class UserActivityAdminService {
         GROUP BY 1
         ORDER BY 1 ASC
       `),
+      // Pedidos pagos por forma de pagamento (Order/Payment, não o log) — base também do
+      // ticket médio. Semântica fixa como `paymentsConfirmed`: período + evento, ignora
+      // category/source. `finalAmount > 0` tira gratuito/voucher/cortesia (Payment com
+      // método nominal) e `p.status = 'PAID'` tira estornados.
+      prismaRead.$queryRaw<Array<{ method: string; orders: bigint; amount: bigint }>>(Prisma.sql`
+        SELECT p.method::text AS method, COUNT(*)::bigint AS orders, SUM(o."finalAmount")::bigint AS amount
+        FROM "Order" o
+        INNER JOIN "Payment" p ON p."orderId" = o.id
+        WHERE o.status = 'PAID'::"OrderStatus" AND p.status = 'PAID'::"PaymentStatus"
+          AND o."finalAmount" > 0
+          AND o."createdAt" >= ${from} AND o."createdAt" <= ${to}
+          ${query.eventId ? Prisma.sql`AND o."eventId" = ${query.eventId}::uuid` : Prisma.empty}
+        GROUP BY 1
+      `),
+      // Compradores com 2+ pedidos pagos em TODA a história (pedido do produto: "já
+      // compraram mais de uma vez") — ignora todos os filtros da tela. Varre os pedidos
+      // pagos inteiros; se pesar, materializar/cachear.
+      prismaRead.$queryRaw<Array<{ count: bigint }>>(Prisma.sql`
+        SELECT COUNT(*)::bigint AS count FROM (
+          SELECT o."userId"
+          FROM "Order" o
+          INNER JOIN "Payment" p ON p."orderId" = o.id
+          WHERE o.status = 'PAID'::"OrderStatus" AND p.status = 'PAID'::"PaymentStatus"
+            AND o."finalAmount" > 0
+          GROUP BY o."userId"
+          HAVING COUNT(*) > 1
+        ) t
+      `),
     ]);
+
+    const paidOrders = paidByMethodRaw.reduce((acc, r) => acc + Number(r.orders), 0);
+    const paidAmount = paidByMethodRaw.reduce((acc, r) => acc + Number(r.amount), 0);
 
     const sortDesc = (a: { count: number }, b: { count: number }) =>
       b.count - a.count;
@@ -317,7 +352,13 @@ export class UserActivityAdminService {
           anonymousEvents,
           eventPageViews,
           paymentsConfirmed,
+          // Centavos; valor cobrado ÷ pedidos pagos (inclui taxa e produtos).
+          averageTicket: paidOrders > 0 ? Math.round(paidAmount / paidOrders) : 0,
+          repeatBuyers: Number(repeatBuyersRaw[0]?.count ?? 0),
         },
+        byPaymentMethod: paidByMethodRaw
+          .map((r) => ({ method: r.method, count: Number(r.orders) }))
+          .sort(sortDesc),
         byCategory: byCategory
           .map((g) => ({ category: g.category, count: g._count._all }))
           .sort(sortDesc),
