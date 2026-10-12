@@ -24,6 +24,7 @@
 import {
   DashboardPeriod,
   calculateDateRange,
+  dashboardNow,
   getComparisonBounds,
   percentChange,
   eachUtcDayKeys,
@@ -177,5 +178,32 @@ describe('lastSixBrtMonthKeys', () => {
     expect(lastSixBrtMonthKeys(now)).toEqual([
       '2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06',
     ]);
+  });
+});
+
+describe('dashboardNow', () => {
+  // eventDate é wall-clock gravado como UTC: 2026-03-10T07:00Z = 10/03 às 07:00 (BRT).
+  const eventDate = new Date('2026-03-10T07:00:00.000Z');
+
+  it('antes do fim do dia do evento, é o próprio agora', () => {
+    const now = new Date('2026-03-10T20:00:00.000Z');
+    expect(dashboardNow(eventDate, now)).toEqual(now);
+  });
+
+  it('depois do dia do evento, congela em 23:59:59.999 BRT do dia do evento', () => {
+    const now = new Date('2026-05-01T12:00:00.000Z');
+    expect(dashboardNow(eventDate, now).toISOString()).toBe('2026-03-11T02:59:59.999Z');
+  });
+
+  it('as janelas param de andar: "7 dias" termina no dia do evento', () => {
+    const anchor = dashboardNow(eventDate, new Date('2026-05-01T12:00:00.000Z'));
+    const { end } = calculateDateRange(DashboardPeriod.LAST_7D, anchor);
+    expect(end?.toISOString()).toBe('2026-03-11T02:59:59.999Z');
+    expect(lastSixBrtMonthKeys(anchor)[5]).toBe('2026-03');
+  });
+
+  it('sem data do evento, usa o agora', () => {
+    const now = new Date('2026-05-01T12:00:00.000Z');
+    expect(dashboardNow(null, now)).toEqual(now);
   });
 });

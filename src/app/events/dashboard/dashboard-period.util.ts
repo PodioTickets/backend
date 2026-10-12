@@ -1,4 +1,4 @@
-import { brtDayStartUtcOfInstant } from '../../../common/utils/brt-date.util';
+import { brtDayEndUtc, brtDayStartUtcOfInstant } from '../../../common/utils/brt-date.util';
 
 /**
  * Períodos suportados pelo dashboard (mesmo enum legacy mantido pra não quebrar
@@ -28,11 +28,10 @@ export interface ComparisonBounds {
  * - GERAL: { start: null, end: null } — sem filtro temporal.
  * - LAST_24H ("Hoje"): DIA CIVIL de hoje em BRT (00:00 BRT → agora), NÃO as últimas
  *   24h rolantes — senão apareciam inscrições de ontem (janela cruzava a meia-noite).
- * - Demais: janela relativa ao agora.
+ * - Demais: janela relativa ao agora (`now` — ver `dashboardNow`).
  */
-export function calculateDateRange(period: DashboardPeriod): DateRange {
-  const now = new Date();
-  const start = new Date();
+export function calculateDateRange(period: DashboardPeriod, now: Date = new Date()): DateRange {
+  const start = new Date(now);
 
   switch (period) {
     case DashboardPeriod.LAST_24H:
@@ -54,6 +53,18 @@ export function calculateDateRange(period: DashboardPeriod): DateRange {
     default:
       return { start: null, end: null };
   }
+}
+
+/**
+ * "Agora" do dashboard. Depois do DIA do evento (fim do dia em BRT; `eventDate` é
+ * wall-clock gravado como UTC, então a parte da data já é o dia civil), congela nesse
+ * instante: as janelas (7d, 1m, 6 meses do "Geral"…) param de andar sobre dias sem venda
+ * e o gráfico não vai zerando com o tempo.
+ */
+export function dashboardNow(eventDate: Date | null | undefined, now: Date = new Date()): Date {
+  if (!eventDate) return now;
+  const eventDayEnd = brtDayEndUtc(eventDate);
+  return eventDayEnd < now ? eventDayEnd : now;
 }
 
 /**
