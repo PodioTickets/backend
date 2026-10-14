@@ -703,17 +703,17 @@ describe('Cupons & Vouchers — motor de desconto', () => {
       expect(computeAgeEligibleSlots(ps, 18, 200, refDate, 3)).toEqual([0]); // estrito (pay) só o válido
     });
 
-    it('HG6 AGE: 1 participante na faixa + 1 slot vazio → MANTÉM aplicado nos 2 (lenient PENDING)', () => {
+    it('HG6 AGE: 1 participante na faixa + 1 slot vazio → desconto SÓ no preenchido (2026-10-14)', () => {
       const shaped = orderShape({
-        id: 'o', eventId: 'e', status: 'PENDING', totalAmount: 20000, discount: 10000,
-        serviceFee: 0, finalAmount: 10000, event: { participantFeePercent: 0, eventDate: '2026-12-01' },
+        id: 'o', eventId: 'e', status: 'PENDING', totalAmount: 20000, discount: 5000,
+        serviceFee: 0, finalAmount: 15000, event: { participantFeePercent: 0, eventDate: '2026-12-01' },
         coupon: { id: 'age', couponType: 'AGE', type: 'PERCENTAGE', value: 50, appliesTo: 'all', minAge: 18, maxAge: 200, applyToProducts: false, cpfListStatus: 'DISABLED', documentList: null, cpfList: null, maxUsage: null, usageCount: 0 },
         couponId: 'age', voucher: null, voucherId: null, payment: null,
         reservedTickets: [rt('A', 2, 10000)],
         pendingParticipants: [{ birthDate: '1990-01-01' }, { /* vazio */ }],
       });
-      expect(shaped.discount).toBe(10000); // 2 slots (na faixa + vazio)
-      expect(discountedUnits(shaped.reservedTickets).length).toBe(2);
+      expect(shaped.discount).toBe(5000); // só o slot na faixa; o vazio não conta
+      expect(discountedUnits(shaped.reservedTickets).length).toBe(1);
     });
   });
 });

@@ -144,6 +144,21 @@ function resolveAgeReferenceDate(order: any): Date {
 }
 
 /**
+ * Slots elegíveis ao AGE em PENDING: só participante JÁ com data de nascimento conta (regra
+ * do usuário de 2026-10-14 — antes o slot vazio contava como elegível e o desconto aparecia
+ * em Informações para quem não estava na faixa). A lista de documento segue lenient.
+ */
+function filledAgeCouponSlots(
+  participants: any[],
+  coupon: Parameters<typeof computeAgeCouponEligibleSlots>[1],
+  refDate: Date,
+  totalUnits: number,
+): number[] {
+  return computeAgeCouponEligibleSlots(participants, coupon, refDate, totalUnits, true)
+    .filter((i) => !!participants[i]?.birthDate);
+}
+
+/**
  * Taxa de serviço cobrada do participante.
  *
  * Fórmula aplicada: taxa incide sobre `(totalAmount - discount)`, em linha com
@@ -489,11 +504,11 @@ function orderShapeSingle(order: any, discountOverride?: number, extra?: Record<
     const participants = order.pendingParticipants as any[];
     const refDate = resolveAgeReferenceDate(order);
     const totalUnits = (order.reservedTickets ?? []).reduce((s: number, rt: any) => s + (rt.quantity ?? 1), 0);
-    // Lenient (PENDING): slot ainda sem birthDate mantém o cupom aplicado até preencher.
+    // PENDING: só participante já com data de nascimento conta (`filledAgeCouponSlots`).
     // AGE respeita a lista exclusiva de documento quando ENABLED (idade E lista).
     // Elegíveis = idade ∩ ingresso no appliesTo (mesma regra do evaluateAutoCouponCandidate).
     const derived = restrictSlotsToAppliesTo(
-      computeAgeCouponEligibleSlots(participants, coupon, refDate, totalUnits, true),
+      filledAgeCouponSlots(participants, coupon, refDate, totalUnits),
       order.reservedTickets ?? [],
       coupon.appliesTo,
     );
@@ -1091,44 +1106,10 @@ export class OrdersService {
       }
     }
 
-    // 1.7b Auto-cupom AGE no reserve — aplica PROVISORIAMENTE em TODOS os ingressos reservados.
-    // Como ainda não há participantes, tratamos cada unidade como um slot VAZIO (sem birthDate):
-    // o modo lenient do `computeAgeEligibleSlots` conta slot vazio como elegível, então o AGE
-    // cai nos N ingressos (capado por maxUsage). Conforme o comprador preenche os participantes,
-    // o PATCH /participants revalida cada slot (preenchido → valida idade; vazio → mantém).
-    const reserveTotalAmount = batchInfos.reduce(
-      (sum, info) => sum + info.unitPrice * info.quantity,
-      0,
-    );
-    const reservedTicketsLite = batchInfos.map((info) => ({
-      ticketId: info.ticketId,
-      quantity: info.quantity,
-      unitPrice: info.unitPrice,
-    }));
-    const totalReservedUnits = batchInfos.reduce((sum, info) => sum + info.quantity, 0);
-    // Slots provisórios = uma "vaga vazia" por unidade reservada.
-    const provisionalParticipants = Array.from({ length: totalReservedUnits }, () => ({}));
-    const {
-      autoCouponId: ageCouponId,
-      autoEffectiveUsage: ageEffectiveUsage,
-      ageQualifyingSlots,
-      newDiscount: ageDiscount,
-    } = await this.evaluateAutoCoupons(
-      {
-        eventId: dto.eventId,
-        couponId: null,
-        voucherId: null,
-        discount: 0,
-        coupon: null,
-        voucher: null,
-        event: { eventDate: event.eventDate },
-      },
-      provisionalParticipants,
-      reservedTicketsLite,
-      reserveTotalAmount,
-      0,
-      { autoApplyCouponTypes: ['AGE'] },
-    );
+    // Sem auto-cupom no reserve: o AGE só é avaliado quando há participante com data de
+    // nascimento (PATCH /participants) — regra do usuário de 2026-10-14. Antes ele entrava
+    // provisório em todos os ingressos (slot vazio = elegível) e comprador de 22 anos via
+    // "Cupom automático (50% OFF)" de um cupom ≤17 em Informações.
 
     // 1.8 Atomic stock decrement + order creation inside a single transaction
     const order = await w.$transaction(async (tx: any) => {
@@ -1208,11 +1189,8 @@ export class OrdersService {
           eventId: dto.eventId,
           totalAmount,
           serviceFee: 0,
-          // Cupom AGE auto-aplicado na reserva (passo 1.7b). Sem elegibilidade,
-          // ageDiscount=0 e ageCouponId=undefined — comportamento original preservado.
-          discount: ageDiscount,
-          finalAmount: Math.max(0, totalAmount - ageDiscount),
-          ...(ageCouponId && { couponId: ageCouponId }),
+          discount: 0,
+          finalAmount: totalAmount,
           status: 'PENDING',
           expiresAt: new Date(Date.now() + RESERVATION_TTL_MINUTES * 60 * 1000),
           reservedAt: new Date(),
@@ -1265,21 +1243,8 @@ export class OrdersService {
       });
     });
 
-    this.logger.log(
-      `Reserved order ${order.id} for user ${userId}, event ${dto.eventId}` +
-        (ageCouponId ? ` (auto AGE coupon ${ageCouponId}, discount ${ageDiscount})` : ''),
-    );
-    // Quando o cupom AGE foi aplicado, passamos discount/effectiveUsage/slots explícitos
-    // para o orderShape distribuir o desconto no slot do comprador (não há
-    // pendingParticipants na reserva para re-derivar). Sem cupom, todos undefined → leitura padrão.
-    return orderShape(
-      order,
-      ageCouponId ? ageDiscount : undefined,
-      undefined,
-      ageCouponId ? ageEffectiveUsage : undefined,
-      undefined,
-      ageCouponId ? ageQualifyingSlots : undefined,
-    );
+    this.logger.log(`Reserved order ${order.id} for user ${userId}, event ${dto.eventId}`);
+    return orderShape(order);
   }
 
   // ── 1b. createCourtesyRegistration (organizador) ───────────────────────────
@@ -2345,7 +2310,9 @@ export class OrdersService {
       // Elegíveis = idade (e lista) ∩ ingresso no appliesTo. O desconto incide no ingresso
       // DE CADA elegível — não nos N mais caros do pedido.
       const eligibleSlots = restrictSlotsToAppliesTo(
-        computeAgeCouponEligibleSlots(ctx.participants, coupon, resolveAgeReferenceDate(ctx.order), totalUnits, ctx.lenient),
+        ctx.lenient
+          ? filledAgeCouponSlots(ctx.participants, coupon, resolveAgeReferenceDate(ctx.order), totalUnits)
+          : computeAgeCouponEligibleSlots(ctx.participants, coupon, resolveAgeReferenceDate(ctx.order), totalUnits, false),
         ctx.reservedTickets,
         coupon.appliesTo,
       );
@@ -2381,7 +2348,7 @@ export class OrdersService {
     reservedTickets: any[],
     ticketsSubtotal: number,
     productsSubtotal: number,
-    opts: { autoApplyCouponTypes?: ('QUANTITY' | 'AGE')[]; pendingProducts?: any[] } = {},
+    opts: { pendingProducts?: any[] } = {},
   ): Promise<{
     autoCouponId?: string;
     autoEffectiveUsage?: number;
@@ -2422,9 +2389,6 @@ export class OrdersService {
     // como candidato (re-avaliado com os participantes/ingressos atuais) e é TROCADO se outro
     // descontar mais, ou removido se deixou de ser elegível. Voucher e cupom manual (DISCOUNT)
     // são escolha do usuário: com eles nada aqui roda (seguem no recálculo abaixo).
-    // `autoApplyCouponTypes`: o `reserve` passa só ['AGE'] (sem participantes, a idade do
-    // comprador é o proxy); os PATCH usam o default (QUANTITY + AGE).
-    const autoApplyCouponTypes = opts.autoApplyCouponTypes ?? ['QUANTITY', 'AGE'];
     const currentCoupon = order.couponId
       ? await r.coupon.findUnique({ where: { id: order.couponId }, select: { id: true, couponType: true } })
       : null;
@@ -2440,14 +2404,14 @@ export class OrdersService {
           eventId: order.eventId,
           status: 'ACTIVE',
           deletedAt: null,
-          couponType: { in: autoApplyCouponTypes },
+          couponType: { in: ['QUANTITY', 'AGE'] },
           OR: [{ expiryDate: null }, { expiryDate: { gt: new Date() } }],
         },
         // createdAt asc = desempate "1º criado" — a mesma ordem do preview do /ingressos.
         orderBy: { createdAt: 'asc' },
       });
 
-      // Lenient (PENDING): slot sem birthDate conta como elegível para AGE até ser preenchido.
+      // Lenient (PENDING): AGE só conta participante JÁ com data de nascimento (`filledAgeCouponSlots`).
       // Limite de uso pelo contador (maxUsage − usageCount); a reserva atômica fica no pay.
       const candidates: AutoCouponCandidate[] = autoCoupons
         .map((coupon: any) =>
