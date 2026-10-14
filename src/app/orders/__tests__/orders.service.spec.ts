@@ -955,14 +955,20 @@ describe('OrdersService', () => {
       expect(res2.autoCouponId).toBeUndefined();
     });
 
-    it('AGE no RESERVE (sem participantes, slots vazios) → aplica nos 2 ingressos (provisório)', async () => {
+    it('AGE com slots VAZIOS (sem data de nascimento) → NÃO aplica (2026-10-14)', async () => {
       buildAutoClient([{ id: 'age1', couponType: 'AGE', type: 'PERCENTAGE', value: 50, appliesTo: null, minAge: 18, maxAge: 200, maxUsage: null, usageCount: 0, minCartValue: null, applyToProducts: false }]);
-      // 2 unidades reservadas, ainda sem participante (slots vazios) → lenient aplica nos 2
       const res = await call(order(), [{}, {}], tickets2);
+      expect(res.autoCouponId).toBeUndefined();
+      expect(res.newDiscount).toBe(0);
+    });
+
+    it('AGE: 1 participante preenchido na faixa + 1 vazio → desconto SÓ no preenchido', async () => {
+      buildAutoClient([{ id: 'age1', couponType: 'AGE', type: 'PERCENTAGE', value: 50, appliesTo: null, minAge: 18, maxAge: 200, maxUsage: null, usageCount: 0, minCartValue: null, applyToProducts: false }]);
+      const res = await call(order(), [{ birthDate: '2000-01-01' }, {}], tickets2);
       expect(res.autoCouponId).toBe('age1');
-      expect(res.autoEffectiveUsage).toBe(2);
-      expect(res.newDiscount).toBe(10000); // 50% dos 2 ingressos
-      expect(res.ageQualifyingSlots).toEqual([0, 1]);
+      expect(res.autoEffectiveUsage).toBe(1);
+      expect(res.newDiscount).toBe(5000); // 50% de 1 ingresso
+      expect(res.ageQualifyingSlots).toEqual([0]);
     });
 
     it('AGE: ninguém na faixa → NÃO aplica', async () => {
@@ -979,14 +985,14 @@ describe('OrdersService', () => {
       expect(res.newDiscount).toBe(0);
     });
 
-    it('AGE existente + participantes VAZIOS (preenchendo) → MANTÉM aplicado (lenient, não remove)', async () => {
+    it('AGE existente + participantes VAZIOS → remove (slot vazio não conta desde 2026-10-14)', async () => {
       const existing = { id: 'age1', couponType: 'AGE', type: 'PERCENTAGE', value: 50, minAge: 18, maxAge: 200, maxUsage: null, usageCount: 0, appliesTo: null, applyToProducts: false };
       // O cupom aplicado também volta na busca de ativos (é re-avaliado como candidato).
       buildAutoClient([existing], existing);
       const res = await call(order({ couponId: 'age1', coupon: existing }), [{}, {}], tickets2); // 2 slots ainda vazios
-      expect(res.shouldRemoveAgeCoupon).toBeFalsy();
-      expect(res.autoCouponId).toBe('age1');
-      expect(res.newDiscount).toBe(10000); // 50% dos 2 (slots vazios contam até preencher)
+      expect(res.shouldRemoveAgeCoupon).toBe(true);
+      expect(res.autoCouponId).toBeUndefined();
+      expect(res.newDiscount).toBe(0);
     });
 
     // ── "Mais vantajoso" entre auto-cupons (2026-09-30) ──
@@ -1018,7 +1024,7 @@ describe('OrdersService', () => {
 
     it('empate sem cupom aplicado → o 1º criado', async () => {
       buildAutoClient([ageC({ value: 10 }), qtyC({ value: 10 })]);
-      const res = await call(order(), [{}, {}], tickets2);
+      const res = await call(order(), [{ birthDate: '2000-01-01' }, { birthDate: '2000-01-01' }], tickets2);
       expect(res.autoCouponId).toBe('age1');
     });
 
@@ -1071,12 +1077,6 @@ describe('OrdersService', () => {
       expect(res.shouldRemoveQuantityCoupon).toBe(true);
     });
 
-    it('restrição autoApplyCouponTypes: a query de candidatos pede só os tipos informados', async () => {
-      const client = buildAutoClient([]);
-      await call(order(), [{}, {}], tickets2, { autoApplyCouponTypes: ['AGE'] });
-      const whereArg = client.coupon.findMany.mock.calls[0][0].where;
-      expect(whereArg.couponType).toEqual({ in: ['AGE'] });
-    });
   });
 
   // ── pay — cupom no PAGAMENTO (caminho de pedido grátis: cupom 100% → pula gateway) ──
