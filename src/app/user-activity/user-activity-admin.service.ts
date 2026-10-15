@@ -354,6 +354,8 @@ export class UserActivityAdminService {
           paymentsConfirmed,
           // Centavos; valor cobrado ÷ pedidos pagos (inclui taxa e produtos).
           averageTicket: paidOrders > 0 ? Math.round(paidAmount / paidOrders) : 0,
+          // Centavos; soma do ticket médio acima (mesma base: período + evento).
+          totalPaid: paidAmount,
           repeatBuyers: Number(repeatBuyersRaw[0]?.count ?? 0),
         },
         byPaymentMethod: paidByMethodRaw
