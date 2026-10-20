@@ -267,15 +267,23 @@ export class UserActivityAdminService {
         orderBy: { _count: { action: 'desc' } },
         take: 10,
       }),
-      // Únicos via COUNT(DISTINCT) no banco (ignora NULL = `not: null`). O groupBy
-      // anterior trazia uma linha por usuário/sessão pro Node — no "Geral" (histórico
-      // inteiro) estourava o timeout do front.
-      prismaRead.$queryRaw<Array<{ users: bigint; sessions: bigint }>>(Prisma.sql`
-        SELECT COUNT(DISTINCT "userId")::bigint AS users, COUNT(DISTINCT "sessionId")::bigint AS sessions
-        FROM "UserActivityLog"
-        WHERE "occurredAt" >= ${from} AND "occurredAt" <= ${to}
-        ${sqlFilters}
-      `),
+      // Total de participantes cadastrados (accountType USER, não excluídos).
+      // Conta direto da tabela User — independe da janela de atividade.
+      // Sessões únicas continuam vindo dos logs de atividade no período.
+      Promise.all([
+        prismaRead.user.count({
+          where: { accountType: 'USER', deletedAt: null },
+        }),
+        prismaRead.$queryRaw<Array<{ sessions: bigint }>>(Prisma.sql`
+          SELECT COUNT(DISTINCT "sessionId")::bigint AS sessions
+          FROM "UserActivityLog"
+          WHERE "occurredAt" >= ${from} AND "occurredAt" <= ${to}
+          ${sqlFilters}
+        `),
+      ]).then(([users, sessionsRaw]) => [{
+        users: BigInt(users),
+        sessions: sessionsRaw[0]?.sessions ?? BigInt(0),
+      }]),
       // Série diária: date_trunc não existe no groupBy do Prisma → raw SQL.
       // Cast `::text` nos enums evita o cast explícito pro tipo do Postgres.
       // Dia CIVIL de Brasília (occurredAt é UTC sem tz), igual ao from/to: em UTC a
@@ -319,9 +327,9 @@ export class UserActivityAdminService {
           ${query.eventId ? Prisma.sql`AND o."eventId" = ${query.eventId}::uuid` : Prisma.empty}
         GROUP BY 1
       `),
-      // Compradores com 2+ pedidos pagos em TODA a história (pedido do produto: "já
-      // compraram mais de uma vez") — ignora todos os filtros da tela. Varre os pedidos
-      // pagos inteiros; se pesar, materializar/cachear.
+      // Compradores com 2+ pedidos pagos DENTRO do recorte — mesma base do ticket médio
+      // (período + evento, ignora category/source). Antes era a história inteira, sem
+      // filtro; o produto pediu que seguisse o filtro da tela.
       prismaRead.$queryRaw<Array<{ count: bigint }>>(Prisma.sql`
         SELECT COUNT(*)::bigint AS count FROM (
           SELECT o."userId"
@@ -329,6 +337,8 @@ export class UserActivityAdminService {
           INNER JOIN "Payment" p ON p."orderId" = o.id
           WHERE o.status = 'PAID'::"OrderStatus" AND p.status = 'PAID'::"PaymentStatus"
             AND o."finalAmount" > 0
+            AND o."createdAt" >= ${from} AND o."createdAt" <= ${to}
+            ${query.eventId ? Prisma.sql`AND o."eventId" = ${query.eventId}::uuid` : Prisma.empty}
           GROUP BY o."userId"
           HAVING COUNT(*) > 1
         ) t
