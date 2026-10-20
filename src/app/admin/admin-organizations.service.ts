@@ -21,6 +21,21 @@ export class AdminOrganizationsService {
     private readonly cache: CacheRedisService,
   ) {}
 
+  async getOrganizationStats() {
+    const prismaRead = this.prisma.getReadClient();
+    const [withEvents, total] = await Promise.all([
+      prismaRead.organization.count({ where: { events: { some: {} } } }),
+      prismaRead.organization.count(),
+    ]);
+    return {
+      message: 'Organization stats fetched successfully',
+      data: {
+        organizersWithEvents: withEvents,
+        organizersWithoutEvents: total - withEvents,
+      },
+    };
+  }
+
   async getOrganizations(params: {
     page: number;
     limit: number;
