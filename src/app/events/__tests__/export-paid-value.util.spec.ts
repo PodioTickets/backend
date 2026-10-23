@@ -136,3 +136,57 @@ describe('computeRegistrationPaidValues — valor pago por ingresso (recibo)', (
     expect(computeRegistrationPaidValues([semLotes]).get('r7')).toBe(7000);
   });
 });
+
+describe('computeRegistrationPaidValues — troca de ingresso (voidedAt/replacedById)', () => {
+  const T5 = { ticketId: 't5', batch: { price: 8900 } };
+  const T10 = { ticketId: 't10', batch: { price: 12900 } };
+  const T21 = { ticketId: 't21', batch: { price: 18900 } };
+  // Após 5km(R$89) → 21km → 10km: a unidade do pedido é 10km a R$89 (preço pago mantido).
+  const swapped = (id: string, replacedById: string, o: any, t: any) => ({
+    ...reg({ id, order: o, tickets: [t] }),
+    voidedAt: new Date(),
+    replacedById,
+  });
+
+  it('trocadas repetem o valor da atual da vaga; ativa do mesmo ingresso não perde a unidade', () => {
+    const o = order({
+      id: 'o1',
+      totalAmount: 8900 + 12900,
+      reservedTickets: [
+        { ticketId: 't10', unitPrice: 8900, quantity: 1 }, // vaga trocada (pagou R$89)
+        { ticketId: 't10', unitPrice: 12900, quantity: 1 }, // outro participante
+      ],
+    });
+    // Ordem do export: a trocada de 10km vem ANTES da ativa (antes roubava a unidade).
+    const regs = [
+      swapped('a-old5', 'b-old10', o, T5),
+      swapped('b-old10', 'c-cur10', o, T10),
+      reg({ id: 'c-cur10', order: o, tickets: [T10] }),
+      reg({ id: 'd-outro10', order: o, tickets: [T10] }),
+    ];
+    const map = computeRegistrationPaidValues(regs);
+    expect(map.get('c-cur10')).toBe(8900);
+    expect(map.get('d-outro10')).toBe(12900);
+    expect(map.get('a-old5')).toBe(8900);
+    expect(map.get('b-old10')).toBe(8900);
+  });
+
+  it('produtos pagos na antiga contam na atual (a nova recebe produtos a R$ 0)', () => {
+    const o = order({
+      id: 'o2',
+      totalAmount: 8900 + 3000,
+      reservedTickets: [{ ticketId: 't10', unitPrice: 8900, quantity: 1 }],
+    });
+    const old = { ...swapped('old', 'cur', o, T5), products: [{ totalPrice: 3000 }] };
+    const cur = reg({ id: 'cur', order: o, tickets: [T10], products: [{ totalPrice: 0 }] });
+    const map = computeRegistrationPaidValues([old, cur]);
+    expect(map.get('cur')).toBe(11900);
+    expect(map.get('old')).toBe(11900);
+  });
+
+  it('atual fora do export (filtro): trocada cai no bruto do próprio ingresso', () => {
+    const o = order({ id: 'o3', totalAmount: 8900, reservedTickets: [{ ticketId: 't10', unitPrice: 8900, quantity: 1 }] });
+    const map = computeRegistrationPaidValues([swapped('old', 'fora', o, T21)]);
+    expect(map.get('old')).toBe(18900);
+  });
+});

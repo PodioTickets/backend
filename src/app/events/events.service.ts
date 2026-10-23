@@ -5909,6 +5909,8 @@ export class EventsService {
       return {
         id: reg.id,
         status: reg.status,
+        // Trocada pelo admin (CANCELLED + voidedAt) → "Trocado" no export (formatStatus).
+        voidedAt: reg.voidedAt ?? null,
         user: participant,
         emergencyContact: {
           name: reg.emergencyContactName ?? null,
@@ -6074,6 +6076,8 @@ export class EventsService {
       return {
         id: reg.id,
         status: reg.status,
+        // Trocada pelo admin (CANCELLED + voidedAt) → "Trocado" no export (formatStatus).
+        voidedAt: reg.voidedAt ?? null,
         user: participant,
         emergencyContact: {
           name: reg.emergencyContactName ?? null,

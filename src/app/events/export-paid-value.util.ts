@@ -51,6 +51,27 @@ export function computeRegistrationPaidValues(
 ): Map<string, number> {
   const result = new Map<string, number>();
 
+  // Troca de ingresso pelo admin: a antiga fica CANCELLED + voidedAt + replacedById → nova.
+  // `currentOf` segue a cadeia até a inscrição ATUAL da vaga (undefined se ela não veio no
+  // export, ex.: filtro de status). Os produtos pagos ficam na antiga (a nova os recebe a
+  // R$ 0), então a atual herda o bruto deles.
+  const byId = new Map(registrations.map((r) => [r.id, r]));
+  const currentOf = (reg: any): any => {
+    const seen = new Set<string>();
+    let cur = reg;
+    while (cur?.voidedAt && cur.replacedById && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      cur = byId.get(cur.replacedById);
+    }
+    return cur && !cur.voidedAt ? cur : undefined;
+  };
+  const inheritedProducts = new Map<string, number>();
+  for (const reg of registrations) {
+    if (!reg?.voidedAt) continue;
+    const cur = currentOf(reg);
+    if (cur) inheritedProducts.set(cur.id, (inheritedProducts.get(cur.id) ?? 0) + regProductsGross(reg));
+  }
+
   // Agrupa por pedido — a distribuição do desconto é feita sobre o pedido inteiro
   // (todas as unidades de reservedTickets), independente de quais inscrições
   // passaram no filtro do export.
@@ -125,7 +146,11 @@ export function computeRegistrationPaidValues(
     // Porção do desconto que recaiu sobre PRODUTOS (applyToProducts).
     const productDiscountTotal = Math.max(0, discount - ticketDiscountTotal);
 
+    // Trocadas NÃO consomem unidade: a troca moveu a unidade do pedido para a nova. Se
+    // consumissem, roubariam a unidade de uma ativa do mesmo ingresso (que cairia no
+    // preço de tabela). O valor delas é resolvido no fim.
     for (const reg of regs) {
+      if (reg.voidedAt) continue;
       let ticketNet = 0;
       for (const t of reg.tickets ?? []) {
         const queue = netByTicket.get(t?.ticketId);
@@ -138,7 +163,7 @@ export function computeRegistrationPaidValues(
         }
       }
 
-      const productsGross = regProductsGross(reg);
+      const productsGross = regProductsGross(reg) + (inheritedProducts.get(reg.id) ?? 0);
       const productDiscount =
         productsSubtotalOrder > 0
           ? Math.min(
@@ -151,6 +176,14 @@ export function computeRegistrationPaidValues(
 
       result.set(reg.id, Math.max(0, ticketNet + productsGross - productDiscount));
     }
+  }
+
+  // Trocada → mesmo valor da inscrição atual da vaga (o que o participante pagou de fato).
+  // Sem a atual no export, cai no bruto do próprio ingresso, como antes.
+  for (const reg of registrations) {
+    if (!reg?.voidedAt) continue;
+    const cur = currentOf(reg);
+    result.set(reg.id, cur && result.has(cur.id) ? (result.get(cur.id) as number) : computeGrossOnly(reg));
   }
 
   return result;
