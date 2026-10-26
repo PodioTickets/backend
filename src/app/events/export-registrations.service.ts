@@ -401,8 +401,13 @@ function csvEscape(cell: string): string {
   return /[,"\n\r]/.test(s) ? `"${s}"` : s;
 }
 
+/** Instante da geração em BRT — sem `timeZone` sai no fuso do servidor (UTC em prod = +3h). */
+function formatGeneratedAtBRT(d: Date): string {
+  return d.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+}
+
 function metadataLine(eventName: string, extractedAt: Date): string {
-  return `${eventName} — Relatório gerado em ${extractedAt.toLocaleString('pt-BR')}`;
+  return `${eventName} — Relatório gerado em ${formatGeneratedAtBRT(extractedAt)}`;
 }
 
 @Injectable()
@@ -475,7 +480,7 @@ export class ExportRegistrationsService {
   generatePdf(registrations: any[], fields: ExportField[], eventName: string): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       const extractedAt = new Date();
-      const footerText = `${eventName}  •  Gerado em ${extractedAt.toLocaleString('pt-BR')}  •  ${registrations.length} inscrições`;
+      const footerText = `${eventName}  •  Gerado em ${formatGeneratedAtBRT(extractedAt)}  •  ${registrations.length} inscrições`;
 
       const chunks: Buffer[] = [];
       const doc = new PDFDocument({ margin: 0, size: 'A4', layout: 'landscape', autoFirstPage: false });

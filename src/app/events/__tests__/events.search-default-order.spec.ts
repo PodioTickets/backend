@@ -54,6 +54,17 @@ describe('EventsService.search — ordem padrão (concluídos por último)', () 
     expect(res.data.pagination.totalPages).toBe(3);
   });
 
+  it('featuredFirst=false (busca com filtro): pagina SÓ por data, sem destaque primeiro', async () => {
+    const { service, findMany } = buildService(50, 7);
+
+    await service.search({ page: 1, limit: 20, featuredFirst: false } as any);
+
+    const arg = findMany.mock.calls[0][0];
+    expect(arg.orderBy).toEqual([{ eventDate: 'asc' }, { id: 'asc' }]);
+    // O parâmetro não vaza para o where (não é coluna).
+    expect(JSON.stringify(arg.where)).not.toContain('featuredFirst');
+  });
+
   it('página que ATRAVESSA a fronteira: completa com concluídos, sem pular nem repetir', async () => {
     // 5 futuros, 10 concluídos, página 2 de 4 → itens 4..7 = 2 futuros + 2 concluídos.
     const { service, findMany } = buildService(5, 10);
