@@ -14,7 +14,7 @@ import {
   ValidateNested,
   ValidateIf,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { EventStatus } from '@prisma/client';
 import { EventKitSelectionDisplayDto } from './kit-selection-display.dto';
@@ -421,6 +421,14 @@ export class SearchEventsDto {
   @IsOptional()
   @IsString()
   modalities?: string; // CSV de códigos de modalidade (ex: "corrida,natacao")
+
+  /** `false` = paginar só por data, sem destaque primeiro (a busca do front tem algum
+   *  filtro, inclusive status/ordenação que só existem no client). Ausente = destaque
+   *  primeiro (padrão; home). `@Type(() => Boolean)` faria "false" virar `true`. */
+  @IsOptional()
+  @IsBoolean()
+  @Transform(({ value }) => (value === 'true' ? true : value === 'false' ? false : value))
+  featuredFirst?: boolean;
 
   /** Piso do FILTRO de preço, em CENTAVOS (o front converte reais→centavos; ex.:
    *  R$100,01 → 10001). O evento entra quando possui ALGUM ingresso ativo com preço
