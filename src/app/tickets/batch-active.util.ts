@@ -51,9 +51,15 @@ function isStartReached(b: BatchWithSold, now: Date): boolean {
   return !b.startDate || now >= eventWindowInstant(b.startDate);
 }
 
+/**
+ * `autoSoldOutAt` = esgotamento automático do INGRESSO (`Ticket.autoSoldOutAt`, wall-clock
+ * como UTC): passado o instante (BRT), o ingresso fica ESGOTADO mesmo com vaga e sem
+ * fallback. Mora aqui para valer igual na leitura, na reserva e na troca.
+ */
 export function resolveActiveBatch(
   batches: BatchWithSold[],
   now: Date,
+  autoSoldOutAt?: Date | null,
 ): { batch: BatchWithSold; batchNumber: number; status: 'AVAILABLE' | 'SOLD_OUT' } {
   const sorted = [...batches].sort((a, b) => a.sortOrder - b.sortOrder);
 
@@ -80,6 +86,10 @@ export function resolveActiveBatch(
   }
 
   const active = sorted[activeIdx];
+
+  if (autoSoldOutAt && now > eventWindowInstant(autoSoldOutAt)) {
+    return { batch: active, batchNumber: activeIdx + 1, status: 'SOLD_OUT' };
+  }
 
   // 2) Lote ativo VENDÁVEL (dentro da janela E com vaga) → segue ele.
   const activeSellable =

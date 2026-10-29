@@ -256,7 +256,11 @@ describe('CouponsService.previewByCode', () => {
         // Filtra pelo couponType do where: a mesma chamada busca AGE e QUANTITY.
         coupon: {
           findMany: jest.fn(({ where }: any) =>
-            Promise.resolve(coupons.filter((c: any) => c.couponType === where.couponType)),
+            Promise.resolve(
+              coupons.filter((c: any) =>
+                where.couponType?.in ? where.couponType.in.includes(c.couponType) : c.couponType === where.couponType,
+              ),
+            ),
           ),
         },
       });
@@ -282,6 +286,20 @@ describe('CouponsService.previewByCode', () => {
       });
       expect(res.data.quantityCoupons[0]).not.toHaveProperty('usageCount');
       expect(res.data.quantityCoupons[0]).not.toHaveProperty('maxUsage');
+    });
+
+    it('ageCoupons: faixas públicas de todos os AGE (selos), fora lista exclusiva e esgotados', async () => {
+      setupAge({
+        coupons: [
+          ageCoupon({ id: 'a-ok', minAge: null, maxAge: 10, maxUsage: null }),
+          ageCoupon({ id: 'a-lista', cpfListStatus: 'ENABLED', maxUsage: null }),
+          ageCoupon({ id: 'a-esgotado', usageCount: 10, maxUsage: 10 }),
+        ],
+      });
+      const res: any = await service.getApplicableAgeCoupons('evt-1', null);
+      expect(res.data.ageCoupons).toEqual([
+        { id: 'a-ok', type: 'PERCENTAGE', value: 20, appliesTo: 'all', createdAt: undefined, minAge: null, maxAge: 10 },
+      ]);
     });
 
     it('cupom QUANTITY esgotado (vendas + reservas) fica de fora', async () => {
