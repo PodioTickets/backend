@@ -964,7 +964,7 @@ export class OrdersService {
     for (const item of dto.tickets) {
       const ticket = await r.ticket.findUnique({
         where: { id: item.ticketId },
-        select: { id: true, name: true, isActive: true, eventId: true, minPurchaseQuantity: true, maxPurchaseQuantity: true },
+        select: { id: true, name: true, isActive: true, eventId: true, minPurchaseQuantity: true, maxPurchaseQuantity: true, autoSoldOutAt: true },
       });
       if (!ticket || !ticket.isActive) {
         throw new NotFoundException(`Ingresso ${item.ticketId} não encontrado ou inativo`);
@@ -1022,6 +1022,7 @@ export class OrdersService {
       const { batch: activeBatch, status: activeStatus } = resolveActiveBatch(
         batchesWithSold,
         now,
+        ticket.autoSoldOutAt,
       );
 
       // Se batchId foi enviado, valida que é o lote ativo

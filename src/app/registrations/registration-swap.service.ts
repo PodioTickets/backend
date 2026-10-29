@@ -143,6 +143,7 @@ export class RegistrationSwapService {
         const { batch, status } = resolveActiveBatch(
           ticket.batches.map((b: any) => ({ ...b, quantitySold: soldMap.get(b.id) ?? 0 })),
           new Date(),
+          ticket.autoSoldOutAt,
         );
         if (status === 'SOLD_OUT') {
           throw new ConflictException(`Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`);

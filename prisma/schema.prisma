@@ -1122,6 +1122,9 @@ model Ticket {
   minPurchaseQuantity Int?
   /// Máximo de unidades DESTE ingresso por pedido. NULL = sem máximo (só o teto geral do checkout).
   maxPurchaseQuantity Int?
+  /// Esgotamento automático: a partir deste instante o ingresso fica ESGOTADO mesmo com vagas.
+  /// WALL-CLOCK gravado como UTC (igual às datas do lote). NULL = sem esgotamento programado.
+  autoSoldOutAt DateTime?
   hasKit       Boolean  @default(false)
   kitId        String?  @db.Uuid
   isActive     Boolean  @default(true)

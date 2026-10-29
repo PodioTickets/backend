@@ -286,3 +286,25 @@ describe('resolveActiveBatch — progressão SEQUENCIAL (respeita a ordem dos lo
     expect(r.status).toBe('AVAILABLE');
   });
 });
+
+describe('resolveActiveBatch — esgotamento automático do ingresso (autoSoldOutAt)', () => {
+  // Wall-clock 18:00Z = 18:00 BRT → instante real 21:00Z. Lote com vaga e sem janela.
+  const only = batch({ id: 'l1' });
+  const at = new Date('2030-05-01T18:00:00.000Z');
+
+  it('segue AVAILABLE até o instante real em BRT (21:00Z), mesmo após o wall-clock cru', () => {
+    expect(resolveActiveBatch([only], new Date('2030-05-01T21:00:00.000Z'), at).status).toBe('AVAILABLE');
+  });
+
+  it('vira SOLD_OUT depois do instante, mesmo com vaga', () => {
+    const r = resolveActiveBatch([only], new Date('2030-05-01T21:00:01.000Z'), at);
+    expect(r.status).toBe('SOLD_OUT');
+    expect(r.batch.id).toBe('l1');
+  });
+
+  it('null/ausente = comportamento antigo', () => {
+    const now = new Date('2031-01-01T00:00:00.000Z');
+    expect(resolveActiveBatch([only], now, null).status).toBe('AVAILABLE');
+    expect(resolveActiveBatch([only], now).status).toBe('AVAILABLE');
+  });
+});

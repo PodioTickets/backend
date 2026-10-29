@@ -453,7 +453,10 @@ export class CouponsService {
     // Cupons QUANTITY do evento — regras PÚBLICAS (sem lista de documento/contadores),
     // pro /ingressos mostrar o desconto quando a seleção cair na faixa. Vem nesta
     // resposta (que a tela já busca) em vez de um endpoint novo: zero request extra.
-    const quantityCoupons = await this.getDisplayableQuantityCoupons(eventId);
+    // `ageCoupons` = faixas de TODOS os AGE exibíveis (selos dos cards), independente da
+    // idade do usuário — a aplicação continua sendo o `appliedCoupon` abaixo.
+    const { quantityCoupons, ageCoupons: displayableAgeCoupons } =
+      await this.getDisplayableAutoCoupons(eventId);
 
     // Sem usuário ou sem data de nascimento não há idade a avaliar.
     const birthDate = user?.dateOfBirth ?? null;
@@ -466,6 +469,7 @@ export class CouponsService {
           age: null,
           appliedCoupon: null,
           quantityCoupons,
+          ageCoupons: displayableAgeCoupons,
         },
       };
     }
@@ -583,26 +587,30 @@ export class CouponsService {
             }
           : null,
         quantityCoupons,
+        ageCoupons: displayableAgeCoupons,
       },
     };
   }
 
   /**
-   * Cupons QUANTITY ativos e não esgotados (vendas + reservas ativas), em `createdAt` asc.
-   * O front escolhe o MAIS vantajoso (empate → o já aplicado, senão o 1º criado), como o checkout.
-   * Só regras de aplicação; nada de usageCount/maxUsage/note/listas.
+   * Cupons automáticos (QUANTITY + AGE) ativos e não esgotados (vendas + reservas ativas),
+   * em `createdAt` asc, numa query só. O front escolhe o MAIS vantajoso (empate → o já
+   * aplicado, senão o 1º criado), como o checkout. Só regras de aplicação; nada de
+   * usageCount/maxUsage/note/listas. AGE com lista exclusiva de documento fica de fora:
+   * o selo prometeria o desconto a quem não está na lista.
    */
-  private async getDisplayableQuantityCoupons(eventId: string) {
+  private async getDisplayableAutoCoupons(eventId: string) {
     const coupons = await this.prisma.getReadClient().coupon.findMany({
       where: {
         eventId,
-        couponType: 'QUANTITY',
+        couponType: { in: ['QUANTITY', 'AGE'] },
         status: 'ACTIVE',
         deletedAt: null,
         OR: [{ expiryDate: null }, { expiryDate: { gt: new Date() } }],
       },
       select: {
         id: true,
+        couponType: true,
         type: true,
         value: true,
         appliesTo: true,
@@ -610,6 +618,9 @@ export class CouponsService {
         minCartValue: true,
         minQuantity: true,
         maxQuantity: true,
+        minAge: true,
+        maxAge: true,
+        cpfListStatus: true,
         usageCount: true,
         maxUsage: true,
         createdAt: true, // desempate "1º criado" no /ingressos
@@ -618,16 +629,35 @@ export class CouponsService {
     });
     const available: typeof coupons = [];
     for (const c of coupons) {
+      if (c.couponType === 'AGE' && (c.cpfListStatus === 'ENABLED' || (c.minAge == null && c.maxAge == null))) continue;
       if (c.maxUsage != null) {
         const reserved = await sumActiveCouponReservations(this.prisma.getWriteClient(), c.id);
         if (c.usageCount + reserved >= c.maxUsage) continue;
       }
       available.push(c);
     }
-    return available.map(({ usageCount: _u, maxUsage: _m, ...c }) => ({
-      ...c,
+    const pub = (c: (typeof coupons)[number]) => ({
+      id: c.id,
+      type: c.type,
+      value: c.value,
       appliesTo: c.appliesTo ?? 'all',
-    }));
+      createdAt: c.createdAt,
+    });
+    return {
+      // Mesmo shape de antes para QUANTITY (o front já consome).
+      quantityCoupons: available
+        .filter((c) => c.couponType === 'QUANTITY')
+        .map((c) => ({
+          ...pub(c),
+          applyToProducts: c.applyToProducts,
+          minCartValue: c.minCartValue,
+          minQuantity: c.minQuantity,
+          maxQuantity: c.maxQuantity,
+        })),
+      ageCoupons: available
+        .filter((c) => c.couponType === 'AGE')
+        .map((c) => ({ ...pub(c), minAge: c.minAge, maxAge: c.maxAge })),
+    };
   }
 
   async update(
