@@ -12,6 +12,7 @@ import { OrganizationAuditService } from '../../common/services/organization-aud
 import { computeAgeAt } from '../../common/utils/age.util';
 import { brtDayEndUtc } from '../../common/utils/brt-date.util';
 import { sumActiveCouponReservations } from '../../common/utils/coupon-reservation.util';
+import { parseAppliesToArray } from '../../helpers/AppliesToHelper';
 
 @Injectable()
 export class CouponsService {
@@ -837,14 +838,25 @@ export class CouponsService {
     };
   }
 
+  /**
+   * Faixas etárias não podem se sobrepor entre cupons AGE que cobrem ALGUM ingresso em
+   * comum. Cupons de ingressos diferentes nunca disputam o mesmo participante (a aplicação
+   * avalia idade ∩ appliesTo e fica com o que mais desconta), então não se bloqueiam.
+   */
   private async assertNoAgeOverlap(
     eventId: string,
-    dto: { minAge?: number | null; maxAge?: number | null },
+    dto: { minAge?: number | null; maxAge?: number | null; appliesTo?: string | string[] | null },
     excludeId?: string,
   ): Promise<void> {
     const prismaRead = this.prisma.getReadClient();
     const newMin = dto.minAge ?? 0;
     const newMax = dto.maxAge ?? Infinity;
+    // null = todos os ingressos. Na criação vem array/'all'; na edição, o JSON gravado ou o array novo.
+    const ticketIds = (v: string | string[] | null | undefined): string[] | null => {
+      const ids = Array.isArray(v) ? v : parseAppliesToArray(v ?? null);
+      return ids.length > 0 ? ids : null;
+    };
+    const newTickets = ticketIds(dto.appliesTo);
 
     const existingAge = await prismaRead.coupon.findMany({
       where: {
@@ -854,10 +866,13 @@ export class CouponsService {
         status: { not: 'EXPIRED' },
         ...(excludeId ? { id: { not: excludeId } } : {}),
       },
-      select: { id: true, minAge: true, maxAge: true },
+      select: { id: true, minAge: true, maxAge: true, appliesTo: true },
     });
 
     for (const existing of existingAge) {
+      const eTickets = ticketIds(existing.appliesTo);
+      const shareTicket = !newTickets || !eTickets || newTickets.some((id) => eTickets.includes(id));
+      if (!shareTicket) continue;
       const eMin = existing.minAge ?? 0;
       const eMax = existing.maxAge ?? Infinity;
       // Duas faixas se sobrepõem quando: newMin <= eMax E newMax >= eMin
