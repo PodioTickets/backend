@@ -473,3 +473,29 @@ describe('CouponsService.validateCouponData (QUANTITY)', () => {
     expect(() => validate({ minQuantity: 5, maxQuantity: 3 })).toThrow('menor que a mínima');
   });
 });
+
+// Sobreposição de faixa etária (2026-10-29): só barra quando os cupons cobrem algum ingresso em comum.
+describe('CouponsService.assertNoAgeOverlap', () => {
+  const existing = (over: any = {}) => ({ id: 'e1', minAge: 11, maxAge: 18, appliesTo: JSON.stringify(['t-5k']), ...over });
+  const check = (dto: any, rows: any[]) => {
+    const prisma = { getReadClient: () => ({ coupon: { findMany: jest.fn().mockResolvedValue(rows) } }) };
+    return (new CouponsService(prisma as any, {} as any) as any).assertNoAgeOverlap('evt-1', dto);
+  };
+
+  it('ingressos diferentes → permite faixas sobrepostas', async () => {
+    await expect(check({ minAge: 0, maxAge: 18, appliesTo: ['t-10k'] }, [existing()])).resolves.toBeUndefined();
+  });
+
+  it('ingresso em comum → barra', async () => {
+    await expect(check({ minAge: 0, maxAge: 18, appliesTo: ['t-10k', 't-5k'] }, [existing()])).rejects.toThrow('sobrepõe');
+  });
+
+  it('"all" (novo ou existente) cruza com qualquer ingresso → barra', async () => {
+    await expect(check({ minAge: 0, maxAge: 18, appliesTo: 'all' }, [existing()])).rejects.toThrow('sobrepõe');
+    await expect(check({ minAge: 0, maxAge: 18, appliesTo: ['t-10k'] }, [existing({ appliesTo: 'all' })])).rejects.toThrow('sobrepõe');
+  });
+
+  it('mesmo ingresso sem cruzar a faixa → permite', async () => {
+    await expect(check({ minAge: 0, maxAge: 10, appliesTo: ['t-5k'] }, [existing()])).resolves.toBeUndefined();
+  });
+});
