@@ -891,6 +891,7 @@ model Order {
   event           Event                @relation(fields: [eventId], references: [id], onDelete: Cascade)
   coupon          Coupon?              @relation("OrderCoupon", fields: [couponId], references: [id], onDelete: SetNull)
   autoCoupon      Coupon?              @relation("OrderAutoCoupon", fields: [autoCouponId], references: [id], onDelete: SetNull)
+  extraAutoCoupons OrderExtraAutoCoupon[]
   voucher         Voucher?             @relation(fields: [voucherId], references: [id], onDelete: SetNull)
   payment         Payment?
   registrations   Registration[]
@@ -1004,6 +1005,24 @@ model LinkedUser {
   @@index([mainUserId, documentType])
 }
 
+/// Cupons AUTOMÁTICOS além do principal, em ingressos que ele não cobre: cupons sem ingresso em
+/// comum não competem e valem juntos. O principal segue em `couponId` (sem manual) ou
+/// `autoCouponId` (com manual). `discount` entra em `Order.discount`.
+model OrderExtraAutoCoupon {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId       String   @db.Uuid
+  couponId      String   @db.Uuid
+  discount      Int      // Centavos deste cupom dentro de `Order.discount`
+  reservedUnits Int      @default(0) // Reserva de uso (claim no pay); mesma regra de couponReservedUnits
+  createdAt     DateTime @default(now())
+
+  order  Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  coupon Coupon @relation(fields: [couponId], references: [id], onDelete: Cascade)
+
+  @@unique([orderId, couponId])
+  @@index([couponId])
+}
+
 model Coupon {
   id            String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   eventId       String             @db.Uuid
@@ -1039,6 +1058,7 @@ model Coupon {
   event      Event   @relation(fields: [eventId], references: [id], onDelete: Cascade)
   orders     Order[] @relation("OrderCoupon")
   autoOrders Order[] @relation("OrderAutoCoupon")
+  extraAutoOrders OrderExtraAutoCoupon[]
 
   @@unique([eventId, code])
   @@index([eventId])

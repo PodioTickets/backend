@@ -219,6 +219,7 @@ export class PaymentsWebhookService {
           payment: true,
           coupon: true,
           autoCoupon: true,
+          extraAutoCoupons: { include: { coupon: true } },
           voucher: true,
           registrations: {
             include: {
@@ -530,6 +531,7 @@ export class PaymentsWebhookService {
           payment: true,
           coupon: true,
           autoCoupon: true,
+          extraAutoCoupons: { include: { coupon: true } },
           voucher: true,
           registrations: {
             include: {

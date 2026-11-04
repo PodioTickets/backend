@@ -67,7 +67,7 @@ import {
   computeSlotsCouponDiscount,
 } from '../../common/utils/coupon-eligibility.util';
 import { claimVoucher, releaseVoucherByOrder } from '../../common/utils/voucher-reservation.util';
-import { claimCouponUnits, releaseCouponByOrder } from '../../common/utils/coupon-reservation.util';
+import { claimCouponUnits, claimExtraAutoCouponUnits, releaseCouponByOrder } from '../../common/utils/coupon-reservation.util';
 import { stripOrganizationContact } from '../../common/utils/organization-sanitizer.util';
 import { formatPdfAnswer } from '../../common/utils/pdf-answer.util';
 
@@ -110,7 +110,8 @@ const RESERVATION_TTL_MINUTES = Number(process.env.RESERVATION_TTL_MINUTES ?? 30
 const MAX_TICKETS_PER_ORDER = 20;
 
 // Cupom automático avaliado (sem reserva de uso) — ver `evaluateAutoCouponCandidate`.
-type AutoCouponCandidate = { coupon: any; discount: number; units: number; applicableTickets: any[]; ageSlots?: number[] };
+// `coveredTicketIds` = ingressos em que ele desconta: só compete com quem cobre um deles.
+type AutoCouponCandidate = { coupon: any; discount: number; units: number; applicableTickets: any[]; coveredTicketIds: string[]; ageSlots?: number[] };
 
 // ─── shared include ──────────────────────────────────────────────────────────
 
@@ -119,6 +120,8 @@ const ORDER_INCLUDE = {
   coupon: { select: { id: true, code: true, couponType: true, type: true, value: true, appliesTo: true, minAge: true, maxAge: true, applyToProducts: true, cpfListStatus: true, documentList: true, cpfList: true, maxUsage: true, usageCount: true } },
   // Cupom automático ACUMULADO com o manual (ver `orderShape`).
   autoCoupon: { select: { id: true, code: true, couponType: true, type: true, value: true, appliesTo: true, minAge: true, maxAge: true, applyToProducts: true, cpfListStatus: true, documentList: true, cpfList: true, maxUsage: true, usageCount: true } },
+  // Cupons automáticos além do principal (ver `OrderExtraAutoCoupon`).
+  extraAutoCoupons: { include: { coupon: { select: { id: true, code: true, couponType: true, type: true, value: true, appliesTo: true, minAge: true, maxAge: true, applyToProducts: true, cpfListStatus: true, documentList: true, cpfList: true, maxUsage: true, usageCount: true } } } },
   voucher: { select: { id: true, code: true, name: true, status: true, appliesTo: true, applyToProducts: true, cpfListStatus: true, documentList: true, cpfList: true } },
   payment: { select: { id: true, method: true, status: true, amount: true, transactionId: true, paymentDate: true, createdAt: true, metadata: true } },
   // participantFeePercent é necessário para calcular serviceFee em pedidos PENDING
@@ -210,7 +213,7 @@ function computeFinalAmount(order: any, serviceFee: number): number {
 // puxar este módulo inteiro). Importados p/ uso interno (orderShape) e re-exportados
 // p/ manter os imports/tests que os pegavam daqui.
 import { purchaseQuantityError } from '../tickets/purchase-quantity.util';
-import { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount, isQuantityInCouponRange, rankAutoCouponCandidates, mergeStackedUnits } from './order-discount.util';
+import { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount, isQuantityInCouponRange, rankAutoCouponCandidates, selectAutoCoupons, ticketIdsOfSlots, sumUnitDiscounts, mergeStackedUnits } from './order-discount.util';
 export { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount, mergeStackedUnits };
 
 /**
@@ -442,29 +445,43 @@ function stackedAutoData(stackedAutoCouponId: string | null | undefined, stacked
     : { autoCouponId: null, autoDiscount: null, autoCouponReservedUnits: 0 };
 }
 
+/** Substitui os cupons extras do pedido (reserva zerada: o claim é no pay, como no `stackedAutoData`). */
+function extraAutoData(extras: Array<{ couponId: string; discount: number }>): Record<string, unknown> {
+  return { extraAutoCoupons: { deleteMany: {}, ...(extras.length > 0 && { create: extras }) } };
+}
+
+const sumDiscounts = (items: Array<{ discount: number }> | null | undefined): number =>
+  (items ?? []).reduce((s, i) => s + i.discount, 0);
+
 /**
- * Acúmulo cupom automático (autoCouponId) + manual (couponId): monta cada cupom com o
+ * Pedido com mais de um cupom: automático acumulado (autoCouponId) sobre o manual (couponId)
+ * e/ou automáticos extras (`extraAutoCoupons`) sobre o principal. Monta cada cupom com o
  * `orderShapeSingle` (cada um sobre o preço CHEIO, com as próprias re-derivações de slots),
  * soma por unidade capando no preço (`mergeStackedUnits`) e recompõe taxa/total com o
- * desconto somado. Os args posicionais (effectiveUsage/slots) são ignorados no acúmulo —
- * seriam ambíguos entre os dois cupons; tudo sai dos valores persistidos.
- * Pedido sem acúmulo → `orderShapeSingle` intacto.
+ * desconto somado. Os args posicionais (effectiveUsage/slots) são ignorados aqui —
+ * seriam ambíguos entre os cupons; tudo sai dos valores persistidos.
+ * Pedido de cupom único → `orderShapeSingle` intacto.
  */
 export function orderShape(order: any, discountOverride?: number, extra?: Record<string, unknown>, effectiveUsage?: number, fixedPerUnit?: number, qualifyingSlots?: number[]): Record<string, any> {
-  if (!order?.autoCouponId || !order?.autoCoupon || order?.voucherId) {
+  const stackedAutos: Array<{ coupon: any; discount: number }> = order?.voucherId ? [] : [
+    ...(order?.autoCouponId && order?.autoCoupon ? [{ coupon: order.autoCoupon, discount: order.autoDiscount ?? 0 }] : []),
+    ...(order?.extraAutoCoupons ?? []),
+  ];
+  if (stackedAutos.length === 0) {
     return orderShapeSingle(order, discountOverride, extra, effectiveUsage, fixedPerUnit, qualifyingSlots);
   }
-  const autoPersisted = order.autoDiscount ?? 0;
+  const autoPersisted = sumDiscounts(stackedAutos);
   const totalPersisted = discountOverride ?? order.discount ?? 0;
-  const autoShape = orderShapeSingle({
-    ...order, coupon: order.autoCoupon, couponId: order.autoCouponId, voucher: null, voucherId: null, discount: autoPersisted,
-  });
+  const autoShapes = stackedAutos.map((a) => orderShapeSingle({
+    ...order, coupon: a.coupon, couponId: a.coupon.id, voucher: null, voucherId: null, discount: a.discount,
+  }));
   const manualShape = orderShapeSingle({ ...order, discount: Math.max(0, totalPersisted - autoPersisted) }, undefined, extra);
   // Pendente: o manual persistido é sobre o preço cheio → rebaseia (percentual) sobre o valor
   // já descontado pelo automático. Pago: o pay já gravou o manual rebaseado → só o teto.
-  const manualPercent = order.status === 'PENDING' && order.coupon?.type === 'PERCENTAGE' ? order.coupon.value : undefined;
-  const { units, overflow } = mergeStackedUnits(autoShape.reservedTickets, manualShape.reservedTickets, manualPercent);
-  const autoDiscount = autoShape.discount;
+  // Sem autoCouponId o `coupon` é o automático principal: não há manual a rebasear.
+  const manualPercent = order.autoCouponId && order.status === 'PENDING' && order.coupon?.type === 'PERCENTAGE' ? order.coupon.value : undefined;
+  const { units, overflow } = mergeStackedUnits(sumUnitDiscounts(autoShapes.map((a) => a.reservedTickets)), manualShape.reservedTickets, manualPercent);
+  const autoDiscount = sumDiscounts(autoShapes as Array<{ discount: number }>);
   const subtotal = order.totalAmount ?? 0;
   const discount = Math.min(subtotal, autoDiscount + Math.max(0, manualShape.discount - overflow));
   const manualDiscount = discount - autoDiscount;
@@ -479,7 +496,12 @@ export function orderShape(order: any, discountOverride?: number, extra?: Record
     serviceFee,
     finalAmount,
     reservedTickets: units,
-    autoCoupon: order.autoCoupon,
+    autoCoupon: stackedAutos[0].coupon,
+    // Uma linha por cupom no resumo (sem documentList/cpfList do cupom).
+    autoCoupons: stackedAutos.map(({ coupon }, i) => ({
+      id: coupon.id, code: coupon.code, couponType: coupon.couponType, type: coupon.type, value: coupon.value,
+      discount: autoShapes[i].discount,
+    })),
     pricing: {
       ...manualShape.pricing,
       couponDiscount: manualDiscount,
@@ -1445,6 +1467,7 @@ export class OrdersService {
           payment: true,
           coupon: true,
           autoCoupon: true,
+          extraAutoCoupons: { include: { coupon: true } },
           voucher: true,
           registrations: {
             include: {
@@ -1638,6 +1661,7 @@ export class OrdersService {
           autoCoupon: {
             select: { id: true, code: true, type: true, value: true, couponType: true },
           },
+          extraAutoCoupons: { select: { discount: true } },
           voucher: {
             select: { id: true, code: true, name: true, status: true },
           },
@@ -1863,7 +1887,7 @@ export class OrdersService {
             const hasVoucher = !!(primaryReceipt?.pricing?.voucher ?? order.voucher);
             const voucherDiscount = hasVoucher && !hasCoupon ? discount : 0;
             // Acúmulo: a parte do cupom automático sai do balde do cupom manual.
-            const autoCouponDiscount = order.autoCouponId ? (order.autoDiscount ?? 0) : 0;
+            const autoCouponDiscount = (order.autoCouponId ? (order.autoDiscount ?? 0) : 0) + sumDiscounts(order.extraAutoCoupons);
             const couponDiscount = discount - voucherDiscount - autoCouponDiscount;
             return {
               ticketsSubtotal,
@@ -2303,7 +2327,7 @@ export class OrdersService {
       const discount = computeQuantityCouponDiscount(
         applicableTickets, ctx.ticketsSubtotal, productsContribution, coupon,
       );
-      return { coupon, discount, units: 1, applicableTickets };
+      return { coupon, discount, units: 1, applicableTickets, coveredTicketIds: applicableTickets.map((rt: any) => rt.ticketId) };
     }
 
     if (coupon.couponType === 'AGE') {
@@ -2325,7 +2349,7 @@ export class OrdersService {
       const ageSlots = eligibleSlots.slice(0, units);
       const productsExtra = coupon.applyToProducts ? ctx.productsExtraFor(coupon.appliesTo) : 0;
       const discount = computeSlotsCouponDiscount(ctx.reservedTickets, ageSlots, coupon.type, coupon.value, productsExtra);
-      return { coupon, discount, units, applicableTickets, ageSlots };
+      return { coupon, discount, units, applicableTickets, ageSlots, coveredTicketIds: ticketIdsOfSlots(ctx.reservedTickets, ageSlots) };
     }
     return null;
   }
@@ -2360,6 +2384,8 @@ export class OrdersService {
     /** Acúmulo (cupom atual é manual): melhor auto → autoCouponId; null = remover; undefined = não mexe. */
     stackedAutoCouponId?: string | null;
     stackedAutoDiscount?: number;
+    /** Automáticos sem ingresso em comum com o principal: valem junto dele. */
+    extraAutoCoupons: Array<{ couponId: string; discount: number }>;
   }> {
     const r: any = this.prisma.getReadClient();
     const w: any = this.prisma.getWriteClient();
@@ -2399,6 +2425,7 @@ export class OrdersService {
     const currentIsManual = currentCoupon?.couponType === 'DISCOUNT';
     let stackedAutoCouponId: string | null | undefined;
     let stackedAutoDiscount = 0;
+    let extraAutoCoupons: Array<{ couponId: string; discount: number }> = [];
     if (!order.voucherId && (!order.couponId || currentIsAuto || currentIsManual)) {
       const autoCoupons = await w.coupon.findMany({
         where: {
@@ -2422,7 +2449,9 @@ export class OrdersService {
           }),
         )
         .filter((c: AutoCouponCandidate | null): c is AutoCouponCandidate => c != null);
-      const best = rankAutoCouponCandidates(candidates, currentIsManual ? order.autoCouponId : order.couponId)[0];
+      // Só competem cupons que cobrem o mesmo ingresso; o 1º é o principal, os demais valem junto.
+      const [best, ...others] = selectAutoCoupons(candidates, currentIsManual ? order.autoCouponId : order.couponId);
+      extraAutoCoupons = others.map((c) => ({ couponId: c.coupon.id, discount: c.discount }));
 
       if (currentIsManual) {
         stackedAutoCouponId = best ? best.coupon.id : null;
@@ -2453,7 +2482,7 @@ export class OrdersService {
       newDiscount = 0;
     } else {
       // Acumulado: o persistido inclui o auto — a base do recálculo do manual é só a parte dele.
-      newDiscount = Math.max(0, ((order as any).discount ?? 0) - ((order as any).autoDiscount ?? 0));
+      newDiscount = Math.max(0, ((order as any).discount ?? 0) - ((order as any).autoDiscount ?? 0) - sumDiscounts((order as any).extraAutoCoupons));
       const activeCoupon = (order as any).coupon;
       if (
         activeCoupon &&
@@ -2549,6 +2578,7 @@ export class OrdersService {
     // Acúmulo: manual (recalculado acima) + auto, cada um sobre o preço cheio. O teto POR
     // INGRESSO (nunca negativo) é aplicado no orderShape/pay; aqui só o teto do pedido.
     if (stackedAutoCouponId) newDiscount = Math.min(totalAmount, newDiscount + stackedAutoDiscount);
+    newDiscount = Math.min(totalAmount, newDiscount + sumDiscounts(extraAutoCoupons));
 
     return {
       autoCouponId,
@@ -2559,6 +2589,7 @@ export class OrdersService {
       newDiscount,
       stackedAutoCouponId,
       stackedAutoDiscount,
+      extraAutoCoupons,
     };
   }
 
@@ -2646,6 +2677,7 @@ export class OrdersService {
       newDiscount,
       stackedAutoCouponId,
       stackedAutoDiscount,
+      extraAutoCoupons,
     } = await this.evaluateAutoCoupons(
       order,
       filledParticipants,
@@ -2667,6 +2699,7 @@ export class OrdersService {
         ...(autoCouponId && { couponId: autoCouponId }),
         ...((shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon) && { couponId: null }),
         ...stackedAutoData(stackedAutoCouponId, stackedAutoDiscount),
+        ...extraAutoData(extraAutoCoupons),
         updatedAt: new Date(),
       },
       include: ORDER_INCLUDE,
@@ -2787,6 +2820,7 @@ export class OrdersService {
       newDiscount,
       stackedAutoCouponId,
       stackedAutoDiscount,
+      extraAutoCoupons,
     } = await this.evaluateAutoCoupons(order, filledParticipants, newReservedTickets, ticketsSubtotal, productsSubtotal, { pendingProducts: (order.pendingProducts as any[]) ?? [] });
     const newFinalAmount = Math.max(0, newTotalAmount - newDiscount);
 
@@ -2830,6 +2864,7 @@ export class OrdersService {
           ...(autoCouponId && { couponId: autoCouponId }),
           ...((shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon) && { couponId: null }),
           ...stackedAutoData(stackedAutoCouponId, stackedAutoDiscount),
+          ...extraAutoData(extraAutoCoupons),
           updatedAt: new Date(),
         },
         include: ORDER_INCLUDE,
@@ -2891,7 +2926,7 @@ export class OrdersService {
     // 2026-06-26): o 1º a aplicar segura a unidade; o 2º vê "esgotado".
     let couponReservedUnits = 0;
     // Posição acumulada (autoCouponId): default LIMPA (voucher / sem auto elegível).
-    let autoSlot: Record<string, unknown> = stackedAutoData(null);
+    let autoSlot: Record<string, unknown> = { ...stackedAutoData(null), ...extraAutoData([]) };
 
     if (dto.couponCode) {
       const normalizedCode = dto.couponCode.toUpperCase().trim();
@@ -2939,7 +2974,7 @@ export class OrdersService {
           const updatedV = await w.order.update({
             where: { id: orderId },
             // couponId: null → libera também a reserva de cupom anterior (couponReservedUnits: 0).
-            data: { couponId: null, couponReservedUnits: 0, voucherId, discount, finalAmount: finalAmountV, updatedAt: new Date() },
+            data: { couponId: null, couponReservedUnits: 0, ...extraAutoData([]), voucherId, discount, finalAmount: finalAmountV, updatedAt: new Date() },
             include: ORDER_INCLUDE,
           });
           return {
@@ -3054,16 +3089,16 @@ export class OrdersService {
       // manual já como cupom atual (vai para a posição acumulada); o auto que estava em
       // couponId entra como desempate.
       if (!voucherId) {
-        const { stackedAutoCouponId, stackedAutoDiscount } = await this.evaluateAutoCoupons(
+        const { stackedAutoCouponId, stackedAutoDiscount, extraAutoCoupons } = await this.evaluateAutoCoupons(
           {
-            ...order, couponId: coupon.id, coupon, discount, autoDiscount: 0,
+            ...order, couponId: coupon.id, coupon, discount, autoDiscount: 0, extraAutoCoupons: [],
             autoCouponId: order.autoCouponId ?? order.couponId,
           },
           participants, reservedTickets, ticketsSubtotal, productsSubtotal,
           { pendingProducts: (order.pendingProducts as any[]) ?? [] },
         );
-        autoSlot = stackedAutoData(stackedAutoCouponId, stackedAutoDiscount);
-        if (stackedAutoCouponId) discount += stackedAutoDiscount ?? 0;
+        autoSlot = { ...stackedAutoData(stackedAutoCouponId, stackedAutoDiscount), ...extraAutoData(extraAutoCoupons) };
+        if (stackedAutoCouponId) discount += (stackedAutoDiscount ?? 0) + sumDiscounts(extraAutoCoupons);
       }
 
       discount = Math.min(discount, order.totalAmount as number);
@@ -3127,7 +3162,10 @@ export class OrdersService {
       couponId = order.autoCouponId;
       couponReservedUnits = order.autoCouponReservedUnits ?? 0;
       voucherId = null;
-      discount = order.autoDiscount ?? 0;
+      discount = (order.autoDiscount ?? 0) + sumDiscounts(order.extraAutoCoupons);
+      autoSlot = { ...stackedAutoData(null), ...extraAutoData(
+        ((order.extraAutoCoupons ?? []) as any[]).map((e) => ({ couponId: e.couponId, discount: e.discount })),
+      ) };
     } else {
       // Sem código — remover cupom/voucher existente
       couponId = null;
@@ -3287,6 +3325,7 @@ export class OrdersService {
       newDiscount,
       stackedAutoCouponId,
       stackedAutoDiscount,
+      extraAutoCoupons,
     } = await this.evaluateAutoCoupons(order, participants, reservedTickets, ticketsSubtotal, productsSubtotal, { pendingProducts: enrichedProducts });
 
     const finalAmount = Math.max(0, totalAmount - newDiscount);
@@ -3331,6 +3370,7 @@ export class OrdersService {
           ...(autoCouponId && { couponId: autoCouponId }),
           ...((shouldRemoveQuantityCoupon || shouldRemoveAgeCoupon) && { couponId: null }),
           ...stackedAutoData(stackedAutoCouponId, stackedAutoDiscount),
+          ...extraAutoData(extraAutoCoupons),
           updatedAt: new Date(),
         },
         include: ORDER_INCLUDE,
@@ -3609,6 +3649,10 @@ export class OrdersService {
     let manualUsage = 0;
     let autoCoupon: any;
     let autoDiscountPay = 0;
+    // Automáticos além do principal (sem ingresso em comum com ele): valem junto.
+    const extraAutoPay: Array<{ coupon: any; discount: number }> = [];
+    // Pedido sem extra nenhum não gasta query na sincronização do fim do bloco de cupons.
+    let syncExtraAutoCoupons = (order.extraAutoCoupons?.length ?? 0) > 0;
 
     if (effectiveCouponCode) {
       // Cupom com código (DISCOUNT type)
@@ -3706,11 +3750,22 @@ export class OrdersService {
         )
         .filter((c: AutoCouponCandidate | null): c is AutoCouponCandidate => c != null);
 
+      // Só competem cupons que cobrem o mesmo ingresso: o ranking é percorrido reservando; o 1º
+      // reservado é o principal e os seguintes, sem ingresso em comum, viram extras. Mesma regra
+      // do `selectAutoCoupons`, mas um cupom esgotado não ocupa os ingressos dele.
+      const takenTicketIds = new Set<string>();
+      const autoUnits: any[][] = [];
+      let primaryAutoClaimed = false;
       for (const cand of rankAutoCouponCandidates(candidates, stacking ? order.autoCouponId : order.couponId)) {
+        if (cand.coveredTicketIds.some((id) => takenTicketIds.has(id))) continue;
         // QUANTITY: all-or-nothing (1 uso/pedido). AGE: N unidades; reserva parcial
         // (limite quase esgotado) desconta só as unidades concedidas.
-        const granted = await claimCouponUnits(w, cand.coupon.id, orderId, cand.units, stacking ? 'auto' : 'primary');
+        syncExtraAutoCoupons ||= primaryAutoClaimed;
+        const granted = primaryAutoClaimed
+          ? await claimExtraAutoCouponUnits(w, cand.coupon.id, orderId, cand.units)
+          : await claimCouponUnits(w, cand.coupon.id, orderId, cand.units, stacking ? 'auto' : 'primary');
         if (granted <= 0) continue;
+        cand.coveredTicketIds.forEach((id) => takenTicketIds.add(id));
         const grantedSlots = (cand.ageSlots ?? []).slice(0, granted);
         const candDiscount = cand.coupon.couponType === 'AGE' && granted < cand.units
           ? computeSlotsCouponDiscount(
@@ -3718,30 +3773,49 @@ export class OrdersService {
             cand.coupon.applyToProducts ? productsExtraPay(cand.coupon.appliesTo) : 0,
           )
           : cand.discount;
-        if (stacking) {
+        const isAge = cand.coupon.couponType === 'AGE';
+        autoUnits.push(distributeDiscount(reservedTickets, candDiscount, isAge ? granted : undefined,
+          cand.coupon.type === 'FIXED' ? cand.coupon.value : undefined, isAge ? grantedSlots : undefined, cand.coupon.appliesTo));
+        if (primaryAutoClaimed) {
+          extraAutoPay.push({ coupon: cand.coupon, discount: candDiscount });
+        } else if (stacking) {
           autoCoupon = cand.coupon;
           autoDiscountPay = candDiscount;
-          // Soma por ingresso capada no preço (nunca negativo): o que passar sai do manual.
-          const isAge = cand.coupon.couponType === 'AGE';
-          const { overflow } = mergeStackedUnits(
-            distributeDiscount(reservedTickets, autoDiscountPay, isAge ? granted : undefined,
-              cand.coupon.type === 'FIXED' ? cand.coupon.value : undefined, isAge ? grantedSlots : undefined, cand.coupon.appliesTo),
-            distributeDiscount(reservedTickets, couponDiscount, manualUsage,
-              manualCoupon.type === 'FIXED' ? manualCoupon.value : undefined, undefined, manualCoupon.appliesTo),
-            // Manual sobre o valor já descontado pelo automático (regra 2026-10-05).
-            manualCoupon.type === 'PERCENTAGE' ? manualCoupon.value : undefined,
-          );
-          couponDiscount = Math.max(0, couponDiscount - overflow);
         } else {
           couponDiscount = candDiscount;
           couponId = cand.coupon.id;
           couponAppliedToProducts = cand.coupon.applyToProducts;
         }
-        break;
+        primaryAutoClaimed = true;
+      }
+      if (stacking && autoCoupon) {
+        // Soma por ingresso capada no preço (nunca negativo): o que passar sai do manual.
+        const { overflow } = mergeStackedUnits(
+          sumUnitDiscounts(autoUnits),
+          distributeDiscount(reservedTickets, couponDiscount, manualUsage,
+            manualCoupon.type === 'FIXED' ? manualCoupon.value : undefined, undefined, manualCoupon.appliesTo),
+          // Manual sobre o valor já descontado pelo automático (regra 2026-10-05).
+          manualCoupon.type === 'PERCENTAGE' ? manualCoupon.value : undefined,
+        );
+        couponDiscount = Math.max(0, couponDiscount - overflow);
       }
       // Acumulado sem auto concedido (nenhum elegível/esgotado): libera a posição.
       if (stacking && !autoCoupon && order.autoCouponReservedUnits) await releaseCouponByOrder(w, orderId, 'auto');
     }
+    // Sincroniza os extras com o que foi reservado agora (retentativa de pagamento, voucher,
+    // cupom esgotado): linha fora da lista sai e libera a própria reserva.
+    if (syncExtraAutoCoupons) {
+      await w.orderExtraAutoCoupon.deleteMany({
+        where: { orderId, couponId: { notIn: extraAutoPay.map((e) => e.coupon.id) } },
+      });
+      for (const e of extraAutoPay) {
+        await w.orderExtraAutoCoupon.update({
+          where: { orderId_couponId: { orderId, couponId: e.coupon.id } },
+          data: { discount: e.discount },
+        });
+      }
+    }
+    const extraAutoDiscountPay = sumDiscounts(extraAutoPay);
     // Campos da posição acumulada a gravar nas atualizações do pagamento (só no acúmulo).
     const stackedPayData = stacking
       ? { autoCouponId: autoCoupon?.id ?? null, autoDiscount: autoCoupon ? autoDiscountPay : null }
@@ -3820,7 +3894,7 @@ export class OrdersService {
       (order as any).event?.organizerFeePercent ?? 0;
     // Fix #12: cap do total de descontos para não ultrapassar o valor pré-desconto,
     // evitando feeBase negativo (e finalTotal negativo) quando cupom+voucher excedem o total.
-    const totalDiscount = Math.min(couponDiscount + autoDiscountPay + voucherDiscount, preDiscountTotal);
+    const totalDiscount = Math.min(couponDiscount + autoDiscountPay + extraAutoDiscountPay + voucherDiscount, preDiscountTotal);
     const feeBase = Math.max(0, preDiscountTotal - totalDiscount);
     const serviceFee = Math.round(feeBase * (participantFeePercent / 100));
 
@@ -3838,8 +3912,11 @@ export class OrdersService {
     // Cada chave só aparece quando há o respectivo desconto (ausência = não aplicado);
     // evita gravar lixo e o strip de null do ResponseCompressionInterceptor não interfere.
     const discountMeta: Record<string, any> = {};
-    if (couponId) discountMeta.coupon = { id: couponId, applyToProducts: couponAppliedToProducts, ...(autoCoupon && { discount: couponDiscount }) };
+    if (couponId) discountMeta.coupon = { id: couponId, applyToProducts: couponAppliedToProducts, ...((autoCoupon || extraAutoPay.length > 0) && { discount: couponDiscount }) };
     if (autoCoupon) discountMeta.autoCoupon = { id: autoCoupon.id, discount: autoDiscountPay, applyToProducts: autoCoupon.applyToProducts };
+    if (extraAutoPay.length > 0) {
+      discountMeta.extraAutoCoupons = extraAutoPay.map((e) => ({ id: e.coupon.id, discount: e.discount, applyToProducts: e.coupon.applyToProducts }));
+    }
     if (voucherId) discountMeta.voucher = { id: voucherId, applyToProducts: voucherAppliedToProducts };
 
     // Pedido grátis (voucher 100% ou cupom integral): não chama gateway, finaliza direto.
@@ -4040,7 +4117,7 @@ export class OrdersService {
           where: { id: orderId },
           data: {
             expiresAt: newExpiresAt,
-            discount: couponDiscount + autoDiscountPay + voucherDiscount,
+            discount: couponDiscount + autoDiscountPay + extraAutoDiscountPay + voucherDiscount,
             serviceFee,
             participantFeePercent,
             organizerFeePercent,
@@ -4121,7 +4198,7 @@ export class OrdersService {
           where: { id: orderId },
           data: {
             expiresAt: newExpiresAt,
-            discount: couponDiscount + autoDiscountPay + voucherDiscount,
+            discount: couponDiscount + autoDiscountPay + extraAutoDiscountPay + voucherDiscount,
             serviceFee,
             participantFeePercent,
             organizerFeePercent,
@@ -4228,7 +4305,7 @@ export class OrdersService {
           where: { id: orderId },
           data: {
             expiresAt: newExpiresAt,
-            discount: couponDiscount + autoDiscountPay + voucherDiscount,
+            discount: couponDiscount + autoDiscountPay + extraAutoDiscountPay + voucherDiscount,
             serviceFee,
             participantFeePercent,
             organizerFeePercent,
@@ -4364,7 +4441,7 @@ export class OrdersService {
       await tx.order.update({
         where: { id: orderId },
         data: {
-          discount: couponDiscount + autoDiscountPay + voucherDiscount,
+          discount: couponDiscount + autoDiscountPay + extraAutoDiscountPay + voucherDiscount,
           serviceFee,
           participantFeePercent,
           organizerFeePercent,
@@ -4496,7 +4573,7 @@ export class OrdersService {
       pricing: {
         ticketsSubtotal,
         productsSubtotal,
-        discount: couponDiscount + autoDiscountPay + voucherDiscount,
+        discount: couponDiscount + autoDiscountPay + extraAutoDiscountPay + voucherDiscount,
         pixDiscount,
         finalTotal,
       },
@@ -4522,6 +4599,7 @@ export class OrdersService {
           payment: true,
           coupon: true,
           autoCoupon: true,
+          extraAutoCoupons: { include: { coupon: true } },
           voucher: true,
           registrations: {
             include: {
