@@ -5834,6 +5834,7 @@ export class EventsService {
           },
           coupon: { select: { type: true, value: true, appliesTo: true } },
           autoCoupon: { select: { type: true, value: true, appliesTo: true } },
+          extraAutoCoupons: { select: { discount: true, coupon: { select: { type: true, value: true, appliesTo: true } } } },
         },
       },
     };
@@ -6057,6 +6058,7 @@ export class EventsService {
           },
           coupon: { select: { type: true, value: true, appliesTo: true } },
           autoCoupon: { select: { type: true, value: true, appliesTo: true } },
+          extraAutoCoupons: { select: { discount: true, coupon: { select: { type: true, value: true, appliesTo: true } } } },
         },
       },
     };

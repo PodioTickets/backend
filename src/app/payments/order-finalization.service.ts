@@ -163,6 +163,7 @@ export class OrderFinalizationService {
         couponReservedUnits: true,
         autoCouponId: true,
         autoCouponReservedUnits: true,
+        extraAutoCoupons: { select: { couponId: true, reservedUnits: true } },
         voucherId: true,
         reservedTickets: true,
         pendingParticipants: true,
@@ -220,6 +221,17 @@ export class OrderFinalizationService {
         SET "usageCount" = GREATEST(0, "usageCount" - ${autoReserved}),
             "updatedAt" = NOW()
         WHERE id = ${order.autoCouponId}::uuid
+      `;
+    }
+
+    // Cupons automáticos extras: mesma devolução, cupom a cupom.
+    for (const extra of order.extraAutoCoupons ?? []) {
+      if (extra.reservedUnits <= 0) continue;
+      await tx.$executeRaw`
+        UPDATE "Coupon"
+        SET "usageCount" = GREATEST(0, "usageCount" - ${extra.reservedUnits}),
+            "updatedAt" = NOW()
+        WHERE id = ${extra.couponId}::uuid
       `;
     }
 
@@ -288,6 +300,7 @@ export class OrderFinalizationService {
         reservedTickets: true,
         coupon: true,
         autoCoupon: true,
+        extraAutoCoupons: { include: { coupon: true } },
         voucher: true,
         event: { include: { organization: true } },
       },
@@ -419,6 +432,16 @@ export class OrderFinalizationService {
         UPDATE "Coupon"
         SET "usageCount" = "usageCount" + ${autoReservedUnits}, "updatedAt" = NOW()
         WHERE id = ${(order as any).autoCouponId}::uuid
+      `;
+    }
+
+    // Cupons automáticos extras: converte a reserva do pay em uso, cupom a cupom.
+    for (const extra of ((order as any).extraAutoCoupons ?? []) as Array<{ couponId: string; reservedUnits: number }>) {
+      if (extra.reservedUnits <= 0) continue;
+      await tx.$executeRaw`
+        UPDATE "Coupon"
+        SET "usageCount" = "usageCount" + ${extra.reservedUnits}, "updatedAt" = NOW()
+        WHERE id = ${extra.couponId}::uuid
       `;
     }
 
@@ -879,6 +902,15 @@ export class OrderFinalizationService {
               applyToProducts: order.autoCoupon.applyToProducts,
             } : null,
             autoDiscount: order.autoDiscount ?? 0,
+            extraAutoCoupons: ((order as any).extraAutoCoupons ?? []).map((e: any) => ({
+              id: e.coupon.id,
+              code: e.coupon.code,
+              couponType: e.coupon.couponType,
+              type: e.coupon.type,
+              value: e.coupon.value,
+              applyToProducts: e.coupon.applyToProducts,
+              discount: e.discount,
+            })),
             voucher: order.voucher ? {
               id: order.voucher.id,
               code: order.voucher.code,

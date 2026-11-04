@@ -2,6 +2,7 @@ import {
   distributeDiscount,
   inferEffectiveUsage,
   mergeStackedUnits,
+  sumUnitDiscounts,
 } from '../orders/order-discount.util';
 
 /**
@@ -115,14 +116,18 @@ export function computeRegistrationPaidValues(
     // Uma passada por cupom: (desconto, cupom) → unidades com o desconto rateado.
     const unitsFor = (d: number, c: typeof coupon) =>
       distributeDiscount(reserved, d, inferEffectiveUsage(reserved, c, d), c?.type === 'FIXED' ? c.value : undefined, undefined, c?.appliesTo);
-    // Acúmulo (cupom automático + manual): cada cupom rateado à parte e somado por unidade,
-    // capado no preço — mesma regra do orderShape.
-    const auto = order.autoCoupon
-      ? { type: order.autoCoupon.type, value: order.autoCoupon.value, appliesTo: order.autoCoupon.appliesTo ?? null }
-      : null;
-    const autoDiscount = auto ? (order.autoDiscount ?? 0) : 0;
-    const units = auto
-      ? mergeStackedUnits(unitsFor(autoDiscount, auto), unitsFor(discount - autoDiscount, coupon)).units
+    // Vários cupons (automático acumulado e/ou extras): cada um rateado à parte e somado por
+    // unidade, capado no preço — mesma regra do orderShape.
+    const autos: Array<{ discount: number; coupon: any }> = [
+      ...(order.autoCoupon ? [{ discount: order.autoDiscount ?? 0, coupon: order.autoCoupon }] : []),
+      ...(order.extraAutoCoupons ?? []),
+    ];
+    const autoDiscount = autos.reduce((s, a) => s + a.discount, 0);
+    const units = autos.length > 0
+      ? mergeStackedUnits(
+          sumUnitDiscounts(autos.map((a) => unitsFor(a.discount, { type: a.coupon.type, value: a.coupon.value, appliesTo: a.coupon.appliesTo ?? null }))),
+          unitsFor(discount - autoDiscount, coupon),
+        ).units
       : unitsFor(discount, coupon);
 
     // Fila de valores líquidos por ticketId (net = finalTotalPrice do recibo).

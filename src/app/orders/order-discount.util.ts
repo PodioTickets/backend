@@ -149,6 +149,38 @@ export function rankAutoCouponCandidates<T extends { coupon: { id: string }; dis
 }
 
 /**
+ * Cupons automáticos que valem JUNTOS: só competem os que cobrem o mesmo ingresso. Percorre o
+ * ranking (maior desconto primeiro) e o cupom escolhido tira dos demais os ingressos dele.
+ * O 1º é o principal do pedido. O pay faz esta mesma passada intercalando a reserva de uso.
+ */
+export function selectAutoCoupons<T extends { coupon: { id: string }; discount: number; coveredTicketIds: string[] }>(
+  candidates: T[],
+  currentCouponId?: string | null,
+): T[] {
+  const taken = new Set<string>();
+  return rankAutoCouponCandidates(candidates, currentCouponId).filter((c) => {
+    if (c.coveredTicketIds.some((id) => taken.has(id))) return false;
+    c.coveredTicketIds.forEach((id) => taken.add(id));
+    return true;
+  });
+}
+
+/** Ingressos (ticketId) das unidades `slots` — mesma ordem de unidades do `distributeDiscount`. */
+export function ticketIdsOfSlots(reservedTickets: any[], slots: number[]): string[] {
+  const units = reservedTickets.flatMap((rt) => Array(rt.quantity ?? 0).fill(rt.ticketId));
+  return [...new Set(slots.map((i) => units[i]).filter(Boolean))] as string[];
+}
+
+/** Soma por unidade o rateio de vários cupons (mesma ordem de unidades; entrada do merge). */
+export function sumUnitDiscounts(unitLists: any[][]): any[] {
+  return (unitLists[0] ?? []).map((u, i) => ({
+    ...u,
+    unitDiscount: unitLists.reduce((s, l) => s + (l[i]?.unitDiscount ?? 0), 0),
+    productsDiscount: unitLists.reduce((s, l) => s + (l[i]?.productsDiscount ?? 0), 0),
+  }));
+}
+
+/**
  * Desconto de cupom QUANTITY (all-or-nothing) — FONTE ÚNICA usada pelo caminho de
  * exibição (`evaluateAndApplyAutoCoupons` / `orderShape`) E pela cobrança (`pay`), para
  * que os dois NUNCA divirjam (regressão histórica: display escopava por `appliesTo`, o

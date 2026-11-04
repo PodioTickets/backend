@@ -56,11 +56,13 @@ import { Prisma } from '@prisma/client';
 export type CouponSlot = 'primary' | 'auto';
 
 /**
- * SUM das unidades do cupom reservadas por pedidos PENDING não-expirados, nas DUAS posições
- * do pedido (couponId e autoCouponId do acúmulo). `excludeOrderId` tira o próprio pedido.
+ * SUM das unidades do cupom reservadas por pedidos PENDING não-expirados, em TODAS as posições
+ * do pedido (couponId, autoCouponId e extras). `excludeOrderId` tira o próprio pedido.
  */
 function reservedUnitsSql(couponId: string, excludeOrderId?: string): Prisma.Sql {
-  return Prisma.sql`COALESCE((
+  const notThisOrder = (idColumn: Prisma.Sql) =>
+    excludeOrderId ? Prisma.sql`AND ${idColumn} <> ${excludeOrderId}::uuid` : Prisma.empty;
+  return Prisma.sql`(COALESCE((
     SELECT SUM(
       CASE WHEN o2."couponId" = ${couponId}::uuid THEN COALESCE(o2."couponReservedUnits", 0) ELSE 0 END +
       CASE WHEN o2."autoCouponId" = ${couponId}::uuid THEN COALESCE(o2."autoCouponReservedUnits", 0) ELSE 0 END
@@ -69,8 +71,56 @@ function reservedUnitsSql(couponId: string, excludeOrderId?: string): Prisma.Sql
     WHERE (o2."couponId" = ${couponId}::uuid OR o2."autoCouponId" = ${couponId}::uuid)
       AND o2."status" = 'PENDING'
       AND o2."expiresAt" > NOW()
-      ${excludeOrderId ? Prisma.sql`AND o2.id <> ${excludeOrderId}::uuid` : Prisma.empty}
-  ), 0)`;
+      ${notThisOrder(Prisma.sql`o2.id`)}
+  ), 0) + COALESCE((
+    SELECT SUM(e."reservedUnits")::int
+    FROM "OrderExtraAutoCoupon" e
+    JOIN "Order" o3 ON o3.id = e."orderId"
+    WHERE e."couponId" = ${couponId}::uuid
+      AND o3."status" = 'PENDING'
+      AND o3."expiresAt" > NOW()
+      ${notThisOrder(Prisma.sql`o3.id`)}
+  ), 0))`;
+}
+
+/** SELECT das unidades concedidas sob row-lock do cupom (`want` limitado ao disponível). */
+function grantedUnitsSql(couponId: string, orderId: string, want: number): Prisma.Sql {
+  // maxUsage NULL = ILIMITADO: concede o desejado integralmente. Sem o CASE, o
+  // COALESCE(maxUsage, want) usava want como teto e subtraia usageCount, entao apos o 1o
+  // uso (usageCount >= want) o cupom ilimitado zerava (esgotado indevido).
+  return Prisma.sql`
+      SELECT (CASE
+        WHEN c."maxUsage" IS NULL THEN ${want}::int
+        ELSE GREATEST(0, LEAST(
+          ${want}::int,
+          c."maxUsage" - c."usageCount" - ${reservedUnitsSql(couponId, orderId)}
+        ))
+      END) AS granted
+      FROM "Coupon" c
+      WHERE c.id = ${couponId}::uuid
+      FOR UPDATE OF c`;
+}
+
+/**
+ * Reserva (mesmas regras do `claimCouponUnits`) um cupom automático EXTRA do pedido. Grava
+ * a linha na mesma instrução, para a SUM concorrente nunca ver unidades sem vínculo.
+ * Retorna as unidades concedidas; 0 = esgotado (o pay remove a linha na sincronização final).
+ */
+export async function claimExtraAutoCouponUnits(
+  client: any,
+  couponId: string,
+  orderId: string,
+  desiredUnits: number,
+): Promise<number> {
+  const want = Math.floor(desiredUnits);
+  if (!Number.isFinite(want) || want <= 0) return 0;
+  const rows: any[] = await client.$queryRaw`
+    INSERT INTO "OrderExtraAutoCoupon" ("orderId", "couponId", "discount", "reservedUnits")
+    SELECT ${orderId}::uuid, ${couponId}::uuid, 0, sub.granted
+    FROM (${grantedUnitsSql(couponId, orderId, want)}) sub
+    ON CONFLICT ("orderId", "couponId") DO UPDATE SET "reservedUnits" = EXCLUDED."reservedUnits"
+    RETURNING "reservedUnits" AS granted`;
+  return rows.length > 0 ? Number(rows[0].granted) : 0;
 }
 
 export async function claimCouponUnits(
@@ -86,20 +136,7 @@ export async function claimCouponUnits(
   }
 
   const want = Math.floor(desiredUnits);
-  // maxUsage NULL = ILIMITADO: concede o desejado integralmente. Sem o CASE, o
-  // COALESCE(maxUsage, want) usava want como teto e subtraia usageCount, entao apos o 1o
-  // uso (usageCount >= want) o cupom ilimitado zerava (esgotado indevido).
-  const sub = Prisma.sql`
-      SELECT (CASE
-        WHEN c."maxUsage" IS NULL THEN ${want}::int
-        ELSE GREATEST(0, LEAST(
-          ${want}::int,
-          c."maxUsage" - c."usageCount" - ${reservedUnitsSql(couponId, orderId)}
-        ))
-      END) AS granted
-      FROM "Coupon" c
-      WHERE c.id = ${couponId}::uuid
-      FOR UPDATE OF c`;
+  const sub = grantedUnitsSql(couponId, orderId, want);
   // Vincula o cupom ATOMICAMENTE com as unidades só quando há concessão (granted > 0):
   // assim a SUM concorrente nunca vê unidades sem o vínculo. Em granted = 0 (esgotado)
   // preserva o vínculo atual — o caller decide não aplicar e persiste o vínculo final.

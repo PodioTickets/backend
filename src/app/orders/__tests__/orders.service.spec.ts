@@ -330,7 +330,7 @@ describe('OrdersService', () => {
           findUnique: jest.fn().mockResolvedValue(order),
           update: jest.fn().mockImplementation(({ data }: any) => {
             captured.update = data;
-            return { ...order, ...data, coupon: null, voucher: null, payment: null, event: order.event ?? null };
+            return { ...order, ...data, extraAutoCoupons: [], coupon: null, voucher: null, payment: null, event: order.event ?? null };
           }),
         },
         user: { findUnique: jest.fn().mockResolvedValue(null) },
@@ -406,7 +406,7 @@ describe('OrdersService', () => {
         order: {
           update: jest.fn().mockImplementation(({ data }: any) => {
             captured.update = data;
-            return { ...order, ...data, coupon: null, voucher: null, payment: null, event: order.event ?? null };
+            return { ...order, ...data, extraAutoCoupons: [], coupon: null, voucher: null, payment: null, event: order.event ?? null };
           }),
         },
       };
@@ -557,6 +557,7 @@ describe('OrdersService', () => {
             return {
               ...order,
               ...data,
+              extraAutoCoupons: [],
               coupon: data.couponId ? coupon : null,
               voucher: data.voucherId ? voucher : null,
               reservedTickets: order.reservedTickets,
@@ -1327,6 +1328,93 @@ describe('OrdersService', () => {
       const data = dataOf(tx);
       expect(data.discount).toBe(0);
       expect(data.couponId).toBeUndefined();
+    });
+
+    // Só competem cupons que cobrem o mesmo ingresso (2026-11-04).
+    describe('cupons automáticos em ingressos diferentes', () => {
+      const twoTickets = () => baseOrder({
+        totalAmount: 60000,
+        reservedTickets: [
+          { ticketId: 'tk-A', quantity: 2, unitPrice: 10000 },
+          { ticketId: 'tk-B', quantity: 2, unitPrice: 20000 },
+        ],
+        pendingParticipants: ['1', '2', '3', '4'].map((n) => ({
+          email: `${n}@a.com`, name: n, documentType: 'CPF', documentNumber: n.repeat(11), birthDate: '1990-01-01',
+        })),
+      });
+      const quantityCoupon = (id: string, value: number, ticketId: string) => ({
+        id, code: null, status: 'ACTIVE', couponType: 'QUANTITY', type: 'PERCENTAGE', value,
+        appliesTo: JSON.stringify([ticketId]), minQuantity: 2, maxQuantity: null, minCartValue: null,
+        maxUsage: 10, usageCount: 0, expiryDate: null,
+      });
+      const extrasMock = () => ({
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+        update: jest.fn().mockResolvedValue({}),
+      });
+      const coupons = (list: any[]) => ({
+        findFirst: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue(list),
+      });
+
+      it('cada cupom desconta do próprio ingresso: o maior é o principal, o outro vira extra', async () => {
+        const extras = extrasMock();
+        const { tx } = buildClient(twoTickets(), 1, {
+          coupon: coupons([quantityCoupon('cA', 10, 'tk-A'), quantityCoupon('cB', 15, 'tk-B')]),
+          orderExtraAutoCoupon: extras,
+        });
+
+        await service.pay(buyerId, orderId, undefined, { method: 'PIX' } as any);
+
+        const data = dataOf(tx);
+        expect(data.discount).toBe(8000); // 10% de 20000 + 15% de 40000
+        expect(data.couponId).toBe('cB');
+        expect(extras.update).toHaveBeenCalledWith({
+          where: { orderId_couponId: { orderId, couponId: 'cA' } }, data: { discount: 2000 },
+        });
+      });
+
+      it('dois cupons no mesmo ingresso: vale só o que mais desconta, sem query de extras', async () => {
+        const extras = extrasMock();
+        const { tx } = buildClient(twoTickets(), 1, {
+          coupon: coupons([quantityCoupon('c1', 10, 'tk-B'), quantityCoupon('c2', 15, 'tk-B')]),
+          orderExtraAutoCoupon: extras,
+        });
+
+        await service.pay(buyerId, orderId, undefined, { method: 'PIX' } as any);
+
+        const data = dataOf(tx);
+        expect(data.discount).toBe(6000);
+        expect(data.couponId).toBe('c2');
+        expect(extras.deleteMany).not.toHaveBeenCalled();
+      });
+
+      it('cupom extra esgotado na reserva: não desconta e a linha é removida', async () => {
+        const extras = extrasMock();
+        const { client, tx } = buildClient(twoTickets(), 1, {
+          coupon: coupons([quantityCoupon('cA', 10, 'tk-A'), quantityCoupon('cB', 15, 'tk-B')]),
+          orderExtraAutoCoupon: extras,
+        });
+        client.$queryRaw.mockResolvedValueOnce([{ granted: 1 }]).mockResolvedValueOnce([{ granted: 0 }]);
+
+        await service.pay(buyerId, orderId, undefined, { method: 'PIX' } as any);
+
+        expect(dataOf(tx).discount).toBe(6000);
+        expect(extras.deleteMany).toHaveBeenCalledWith({ where: { orderId, couponId: { notIn: [] } } });
+        expect(extras.update).not.toHaveBeenCalled();
+      });
+
+      it('retentativa sem cupom elegível: remove o extra da tentativa anterior e a reserva dele', async () => {
+        const extras = extrasMock();
+        const { tx } = buildClient(
+          { ...twoTickets(), extraAutoCoupons: [{ couponId: 'cA', discount: 2000 }] },
+          0,
+          { coupon: coupons([]), orderExtraAutoCoupon: extras },
+        );
+
+        await service.pay(buyerId, orderId, undefined, { method: 'PIX' } as any);
+
+        expect(dataOf(tx).discount).toBe(0);
+        expect(extras.deleteMany).toHaveBeenCalledWith({ where: { orderId, couponId: { notIn: [] } } });
+      });
     });
 
     // "Mais vantajoso" (2026-09-30): o pay cobra o que MAIS desconta, não o 1º criado.
