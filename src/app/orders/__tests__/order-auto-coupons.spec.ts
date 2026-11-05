@@ -102,6 +102,13 @@ describe('orderShape com cupons extras', () => {
     ]);
   });
 
+  it('marca em cada unidade o automático que caiu nela', () => {
+    const units = orderShape(order).reservedTickets;
+    expect(units.map((u: any) => [u.ticketId, u.autoCouponId, u.autoCouponDiscount])).toEqual([
+      ['t5', 'c5', 1000], ['t5', 'c5', 1000], ['t10', undefined, undefined], ['t10', undefined, undefined],
+    ]);
+  });
+
   it('não expõe a lista de documentos do cupom nas linhas do resumo', () => {
     const withList = {
       ...order,

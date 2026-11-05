@@ -495,7 +495,21 @@ export function orderShape(order: any, discountOverride?: number, extra?: Record
     discount,
     serviceFee,
     finalAmount,
-    reservedTickets: units,
+    // Automático de cada unidade (no máximo 1: só competem os que cobrem o mesmo ingresso) para o
+    // resumo mostrar o cupom certo em cada participante. O que sobrar da unidade é do `coupon`.
+    reservedTickets: units.map((unit, i) => {
+      const k = autoShapes.findIndex((a) => {
+        const u = a.reservedTickets[i];
+        return (u?.unitDiscount ?? 0) + (u?.productsDiscount ?? 0) > 0;
+      });
+      if (k < 0) return unit;
+      const u = autoShapes[k].reservedTickets[i];
+      return {
+        ...unit,
+        autoCouponId: stackedAutos[k].coupon.id,
+        autoCouponDiscount: Math.min(unit.unitPrice, u.unitDiscount ?? 0) + (u.productsDiscount ?? 0),
+      };
+    }),
     autoCoupon: stackedAutos[0].coupon,
     // Uma linha por cupom no resumo (sem documentList/cpfList do cupom).
     autoCoupons: stackedAutos.map(({ coupon }, i) => ({
