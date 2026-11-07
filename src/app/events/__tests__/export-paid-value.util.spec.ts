@@ -135,6 +135,15 @@ describe('computeRegistrationPaidValues — valor pago por ingresso (recibo)', (
     });
     expect(computeRegistrationPaidValues([semLotes]).get('r7')).toBe(7000);
   });
+
+  it('preço do lote mudou depois da venda → vale o congelado no snapshot', () => {
+    const r = reg({
+      id: 'r8',
+      order: order({ id: 'o8', totalAmount: 7000, reservedTickets: [] }),
+      tickets: [{ ticketId: 't1', batch: { price: 9900 }, ticketSnapshot: { batch: { price: 7000 } } }],
+    });
+    expect(computeRegistrationPaidValues([r]).get('r8')).toBe(7000);
+  });
 });
 
 describe('computeRegistrationPaidValues — troca de ingresso (voidedAt/replacedById)', () => {

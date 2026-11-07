@@ -474,6 +474,94 @@ describe('CouponsService.validateCouponData (QUANTITY)', () => {
   });
 });
 
+// 1 cupom automático por ingresso (2026-11-06).
+describe('CouponsService.assertOneAutoCouponPerTicket', () => {
+  const setup = (rows: any[]) => {
+    const findMany = jest.fn().mockResolvedValue(rows);
+    const prisma = { getWriteClient: () => ({ coupon: { findMany } }) };
+    return { service: new CouponsService(prisma as any, {} as any) as any, findMany };
+  };
+  const check = (appliesTo: any, rows: any[]) => setup(rows).service.assertOneAutoCouponPerTicket('evt-1', appliesTo);
+  const row = (ids: string[] | string | null) => ({ appliesTo: Array.isArray(ids) ? JSON.stringify(ids) : ids });
+
+  it('sem outro automático → permite', async () => {
+    await expect(check('all', [])).resolves.toBeUndefined();
+  });
+
+  it('ingressos diferentes → permite', async () => {
+    await expect(check(['t-10k'], [row(['t-5k'])])).resolves.toBeUndefined();
+  });
+
+  it('ingresso em comum → barra com código e a mensagem do painel', async () => {
+    await expect(check(['t-10k', 't-5k'], [row(['t-5k'])])).rejects.toMatchObject({
+      response: {
+        code: 'AUTO_COUPON_TICKET_CONFLICT',
+        message: 'Os ingressos selecionados já possuem desconto automático por quantidade.',
+      },
+    });
+  });
+
+  it('"all" (novo ou existente) cruza com qualquer ingresso → barra', async () => {
+    await expect(check('all', [row(['t-5k'])])).rejects.toThrow('desconto automático');
+    await expect(check(['t-5k'], [row('all')])).rejects.toThrow('desconto automático');
+    await expect(check(['t-5k'], [row(null)])).rejects.toThrow('desconto automático');
+  });
+
+  it('consulta só automáticos em vigor e ignora o próprio cupom', async () => {
+    const { service, findMany } = setup([]);
+    await service.assertOneAutoCouponPerTicket('evt-1', 'all', 'c1');
+    const { where } = findMany.mock.calls[0][0];
+    expect(where).toMatchObject({
+      eventId: 'evt-1',
+      couponType: { in: ['QUANTITY', 'AGE'] },
+      deletedAt: null,
+      status: { not: 'EXPIRED' },
+      id: { not: 'c1' },
+    });
+  });
+});
+
+describe('CouponsService.update: quando valida 1 automático por ingresso', () => {
+  const base = { id: 'c1', eventId: 'evt-1', couponType: 'QUANTITY', status: 'ACTIVE', expiryDate: null, usageCount: 0, appliesTo: JSON.stringify(['t-5k', 't-10k']), code: null };
+  const setup = (coupon: any) => {
+    const db = {
+      coupon: {
+        findUnique: jest.fn().mockResolvedValue(coupon),
+        findMany: jest.fn().mockResolvedValue([{ appliesTo: 'all' }]),
+        update: jest.fn().mockResolvedValue(coupon),
+      },
+    };
+    const prisma = { getWriteClient: () => db, getReadClient: () => db };
+    const service = new CouponsService(prisma as any, { recordForEvent: jest.fn() } as any) as any;
+    service.verifyOrganizerAccess = jest.fn();
+    return { service, db };
+  };
+
+  it('mesmos ingressos em outra ordem → não valida (legado com 2 automáticos segue editável)', async () => {
+    const { service, db } = setup(base);
+    await service.update('u1', 'evt-1', 'c1', { note: 'x', appliesTo: ['t-10k', 't-5k'] });
+    expect(db.coupon.findMany).not.toHaveBeenCalled();
+    expect(db.coupon.update).toHaveBeenCalled();
+  });
+
+  it('muda os ingressos → valida e barra', async () => {
+    const { service, db } = setup(base);
+    await expect(service.update('u1', 'evt-1', 'c1', { appliesTo: ['t-21k'] })).rejects.toThrow('desconto automático');
+    expect(db.coupon.update).not.toHaveBeenCalled();
+  });
+
+  it('cupom vencido → valida, pois a edição pode revalidá-lo', async () => {
+    const { service } = setup({ ...base, expiryDate: new Date('2020-01-01') });
+    await expect(service.update('u1', 'evt-1', 'c1', { expiryDate: '2099-01-01' })).rejects.toThrow('desconto automático');
+  });
+
+  it('cupom de desconto (manual) nunca valida', async () => {
+    const { service, db } = setup({ ...base, couponType: 'DISCOUNT', code: 'X' });
+    await service.update('u1', 'evt-1', 'c1', { appliesTo: ['t-21k'] });
+    expect(db.coupon.findMany).not.toHaveBeenCalled();
+  });
+});
+
 // Sobreposição de faixa etária (2026-10-29): só barra quando os cupons cobrem algum ingresso em comum.
 describe('CouponsService.assertNoAgeOverlap', () => {
   const existing = (over: any = {}) => ({ id: 'e1', minAge: 11, maxAge: 18, appliesTo: JSON.stringify(['t-5k']), ...over });

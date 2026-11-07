@@ -291,6 +291,7 @@ export class DashboardService {
       topProductVariations,
       lotsNearDepletion,
       salesByPaymentMethod,
+      soldValueByBatchId,
     ] = await Promise.all([
       this.queryTicketRanking(eventId, dateRange, ticketIds, organizerFeeRate),
       this.ticketsService.findAll(eventId, {
@@ -301,6 +302,7 @@ export class DashboardService {
       this.buildTopProductVariations(eventId, dateRange, ticketIds, organizerFeeRate),
       this.buildLotsNearDepletion(eventId),
       this.buildSalesByPaymentMethod(eventId, dateRange, ticketIds, organizerFeeRate),
+      this.querySoldValueByBatch(eventId),
     ]);
 
     const total = rankingRows.length;
@@ -325,7 +327,7 @@ export class DashboardService {
         .filter((r) => !r.is_modality)
         .map((r) => [r.item_id, Number(r.total_net)]),
     );
-    const ticketsWithNet = this.injectOrganizerNetIntoTickets(tickets, netByTicketId);
+    const ticketsWithNet = this.injectOrganizerNetIntoTickets(tickets, netByTicketId, soldValueByBatchId);
 
     const response = {
       message: 'Dashboard rankings fetched successfully',
@@ -606,6 +608,7 @@ export class DashboardService {
   private injectOrganizerNetIntoTickets(
     tickets: any,
     netByTicketId: Map<string, number>,
+    soldValueByBatchId: Map<string, number>,
   ): any {
     const list = tickets?.data?.tickets;
     if (!Array.isArray(list)) return tickets;
@@ -617,9 +620,30 @@ export class DashboardService {
         tickets: list.map((t: any) => ({
           ...t,
           organizerNet: netByTicketId.get(t.id) ?? 0,
+          batches: t.batches?.map((b: any) => ({ ...b, soldValue: soldValueByBatchId.get(b.id) ?? 0 })),
         })),
       },
     };
+  }
+
+  /**
+   * Centavos vendidos por lote, a preço de compra: o preço do lote pode mudar depois da
+   * venda, então `quantidade × preço atual` distorceria o rateio entre lotes do ingresso.
+   * Mesmo predicado do `quantitySold` do TicketsService.findAll.
+   */
+  private async querySoldValueByBatch(eventId: string): Promise<Map<string, number>> {
+    const rows = await this.prisma.getReadClient().$queryRaw<{ batchId: string; total: bigint }[]>(Prisma.sql`
+      SELECT
+        rt."batchId",
+        SUM(COALESCE((rt."ticketSnapshot"->'batch'->>'price')::int, tb.price))::bigint AS total
+      FROM "RegistrationTicket" rt
+      INNER JOIN "Registration" r ON r.id = rt."registrationId"
+      INNER JOIN "TicketBatch" tb ON tb.id = rt."batchId"
+      WHERE r."eventId" = ${eventId}::uuid
+        AND r.status <> 'CANCELLED'::"RegistrationStatus"
+      GROUP BY rt."batchId"
+    `);
+    return new Map(rows.map((r) => [r.batchId, Number(r.total)]));
   }
 
   /**

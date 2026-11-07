@@ -30,11 +30,11 @@ interface RawReservedTicket {
   quantity: number;
 }
 
-/** Preço unitário (centavos) do ingresso da inscrição — batch vivo → snapshot → 0. */
+/** Preço unitário (centavos) do ingresso da inscrição — snapshot → batch vivo → 0. */
 function regTicketUnitPrice(rt: any): number {
   return (
-    rt?.batch?.price ??
     rt?.ticketSnapshot?.batch?.price ??
+    rt?.batch?.price ??
     0
   );
 }
