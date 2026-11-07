@@ -692,7 +692,8 @@ export class OrderFinalizationService {
           ageLimitMin: ticketData.ageLimitMin ?? null,
           ageLimitMax: ticketData.ageLimitMax ?? null,
           category: ticketData.category ?? null,
-          batch: batchData ? { id: batchData.id, name: batchData.name, price: batchData.price } : null,
+          // Preço reservado, não o atual: o lote pode ter mudado entre a reserva e o pagamento.
+          batch: batchData ? { id: batchData.id, name: batchData.name, price: rt.unitPrice ?? batchData.price } : null,
         } : null;
 
         await tx.registrationTicket.create({

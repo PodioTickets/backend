@@ -39,6 +39,10 @@ export class CouponsService {
       await this.assertNoAgeOverlap(eventId, createCouponDto as any);
     }
 
+    if (createCouponDto.couponType !== 'DISCOUNT') {
+      await this.assertOneAutoCouponPerTicket(eventId, createCouponDto.appliesTo);
+    }
+
     // Verificar se o código já existe para este evento (apenas se fornecido)
     if (createCouponDto.code) {
       const existingCoupon = await prismaWrite.coupon.findUnique({
@@ -719,6 +723,17 @@ export class CouponsService {
       await this.assertNoAgeOverlap(eventId, merged as any, couponId);
     }
 
+    // Sem mudar os ingressos de um cupom em vigor não há o que validar: evento que já tem
+    // 2 automáticos no mesmo ingresso (regra anterior) segue podendo editar nota, valor etc.
+    const nextAppliesTo = updateCouponDto.appliesTo ?? coupon.appliesTo;
+    const expired = coupon.status === 'EXPIRED' || (coupon.expiryDate != null && coupon.expiryDate <= new Date());
+    const sameTickets =
+      JSON.stringify(this.appliesToTicketIds(nextAppliesTo)?.sort()) ===
+      JSON.stringify(this.appliesToTicketIds(coupon.appliesTo)?.sort());
+    if (effectiveType !== 'DISCOUNT' && (expired || !sameTickets)) {
+      await this.assertOneAutoCouponPerTicket(eventId, nextAppliesTo, couponId);
+    }
+
     const updateData: any = { ...updateCouponDto };
     if (updateCouponDto.code) {
       updateData.code = updateCouponDto.code.toUpperCase();
@@ -838,6 +853,48 @@ export class CouponsService {
     };
   }
 
+  /** null = todos os ingressos. Na criação vem array/'all'; na edição, o JSON gravado ou o array novo. */
+  private appliesToTicketIds(v: string | string[] | null | undefined): string[] | null {
+    const ids = Array.isArray(v) ? v : parseAppliesToArray(v ?? null);
+    return ids.length > 0 ? [...ids] : null;
+  }
+
+  /**
+   * Cada ingresso tem no máximo 1 cupom automático, em qualquer faixa de quantidade. Conta AGE
+   * também: os antigos continuam valendo, mesmo sem a opção de criar. Cupom esgotado conta
+   * (reserva expirada devolve o uso) e o organizador pode excluí-lo; vencido não conta.
+   * Lê do write client: o organizador cria em sequência e a réplica pode estar atrasada.
+   */
+  private async assertOneAutoCouponPerTicket(
+    eventId: string,
+    appliesTo: string | string[] | null | undefined,
+    excludeId?: string,
+  ): Promise<void> {
+    const newTickets = this.appliesToTicketIds(appliesTo);
+    const existing = await this.prisma.getWriteClient().coupon.findMany({
+      where: {
+        eventId,
+        couponType: { in: ['QUANTITY', 'AGE'] },
+        deletedAt: null,
+        status: { not: 'EXPIRED' },
+        OR: [{ expiryDate: null }, { expiryDate: { gt: new Date() } }],
+        ...(excludeId ? { id: { not: excludeId } } : {}),
+      },
+      select: { appliesTo: true },
+    });
+
+    const conflict = existing.some((c) => {
+      const tickets = this.appliesToTicketIds(c.appliesTo);
+      return !newTickets || !tickets || newTickets.some((id) => tickets.includes(id));
+    });
+    if (conflict) {
+      throw new BadRequestException({
+        code: 'AUTO_COUPON_TICKET_CONFLICT',
+        message: 'Os ingressos selecionados já possuem desconto automático por quantidade.',
+      });
+    }
+  }
+
   /**
    * Faixas etárias não podem se sobrepor entre cupons AGE que cobrem ALGUM ingresso em
    * comum. Cupons de ingressos diferentes nunca disputam o mesmo participante (a aplicação
@@ -851,12 +908,7 @@ export class CouponsService {
     const prismaRead = this.prisma.getReadClient();
     const newMin = dto.minAge ?? 0;
     const newMax = dto.maxAge ?? Infinity;
-    // null = todos os ingressos. Na criação vem array/'all'; na edição, o JSON gravado ou o array novo.
-    const ticketIds = (v: string | string[] | null | undefined): string[] | null => {
-      const ids = Array.isArray(v) ? v : parseAppliesToArray(v ?? null);
-      return ids.length > 0 ? ids : null;
-    };
-    const newTickets = ticketIds(dto.appliesTo);
+    const newTickets = this.appliesToTicketIds(dto.appliesTo);
 
     const existingAge = await prismaRead.coupon.findMany({
       where: {
@@ -870,7 +922,7 @@ export class CouponsService {
     });
 
     for (const existing of existingAge) {
-      const eTickets = ticketIds(existing.appliesTo);
+      const eTickets = this.appliesToTicketIds(existing.appliesTo);
       const shareTicket = !newTickets || !eTickets || newTickets.some((id) => eTickets.includes(id));
       if (!shareTicket) continue;
       const eMin = existing.minAge ?? 0;
