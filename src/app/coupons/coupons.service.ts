@@ -620,6 +620,7 @@ export class CouponsService {
         value: true,
         appliesTo: true,
         applyToProducts: true,
+        allowStacking: true,
         minCartValue: true,
         minQuantity: true,
         maxQuantity: true,
@@ -655,6 +656,7 @@ export class CouponsService {
         .map((c) => ({
           ...pub(c),
           applyToProducts: c.applyToProducts,
+          allowStacking: c.allowStacking,
           minCartValue: c.minCartValue,
           minQuantity: c.minQuantity,
           maxQuantity: c.maxQuantity,

@@ -165,6 +165,14 @@ export function selectAutoCoupons<T extends { coupon: { id: string }; discount: 
   });
 }
 
+/**
+ * Automático que vale junto de um cupom de código (manual). Regra de 2026-11-09: QUANTITY só com
+ * "Acumular descontos" (`allowStacking`); sem ela o manual tira o automático. AGE (legado) segue acumulando.
+ */
+export function stacksWithManualCoupon(coupon: { couponType: string; allowStacking?: boolean | null }): boolean {
+  return coupon.couponType === 'AGE' || (coupon.couponType === 'QUANTITY' && !!coupon.allowStacking);
+}
+
 /** Ingressos (ticketId) das unidades `slots` — mesma ordem de unidades do `distributeDiscount`. */
 export function ticketIdsOfSlots(reservedTickets: any[], slots: number[]): string[] {
   const units = reservedTickets.flatMap((rt) => Array(rt.quantity ?? 0).fill(rt.ticketId));
