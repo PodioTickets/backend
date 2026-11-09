@@ -2,7 +2,7 @@
  * Cupons automáticos no mesmo pedido: só competem os que cobrem o mesmo ingresso.
  * Cupons de ingressos diferentes valem juntos, cada um descontando do próprio ingresso.
  */
-import { selectAutoCoupons, sumUnitDiscounts, ticketIdsOfSlots } from '../order-discount.util';
+import { selectAutoCoupons, stacksWithManualCoupon, sumUnitDiscounts, ticketIdsOfSlots } from '../order-discount.util';
 import { orderShape } from '../orders.service';
 
 const cand = (id: string, discount: number, coveredTicketIds: string[]) => ({
@@ -40,6 +40,18 @@ describe('selectAutoCoupons', () => {
 
   it('nenhum candidato → lista vazia', () => {
     expect(selectAutoCoupons([])).toEqual([]);
+  });
+});
+
+describe('stacksWithManualCoupon', () => {
+  it('quantidade só acumula com "Acumular descontos"', () => {
+    expect(stacksWithManualCoupon({ couponType: 'QUANTITY', allowStacking: false })).toBe(false);
+    expect(stacksWithManualCoupon({ couponType: 'QUANTITY' })).toBe(false);
+    expect(stacksWithManualCoupon({ couponType: 'QUANTITY', allowStacking: true })).toBe(true);
+  });
+
+  it('idade (legado) segue acumulando', () => {
+    expect(stacksWithManualCoupon({ couponType: 'AGE', allowStacking: false })).toBe(true);
   });
 });
 

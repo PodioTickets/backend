@@ -10,6 +10,7 @@ import { RepasseService } from '../../repasse/repasse.service';
 import { DashboardOverviewQueryDto } from './dto/overview.dto';
 import { DashboardRankingsQueryDto } from './dto/rankings.dto';
 import { DashboardSecondaryQueryDto } from './dto/secondary.dto';
+import { lotDepletionStatus } from './lot-depletion.util';
 import {
   DashboardPeriod,
   calculateDateRange,
@@ -1159,11 +1160,11 @@ export class DashboardService {
     const now = new Date();
     const allBatches = await prismaRead.ticketBatch.findMany({
       where: { ticket: { eventId, isActive: true }, quantity: { gt: 0 } },
-      include: { ticket: { select: { id: true, name: true } } },
+      include: { ticket: { select: { id: true, name: true, category: { select: { name: true } } } } },
       orderBy: [{ ticketId: 'asc' }, { sortOrder: 'asc' }],
     });
 
-    const activeBatchByTicket = new Map<string, { id: string; number: number }>();
+    const activeBatchByTicket = new Map<string, { id: string; number: number; count: number }>();
     const batchesByTicket = new Map<string, typeof allBatches>();
     for (const b of allBatches) {
       const list = batchesByTicket.get(b.ticketId) ?? [];
@@ -1176,6 +1177,7 @@ export class DashboardService {
         activeBatchByTicket.set(ticketId, {
           id: active.id,
           number: tBatches.indexOf(active) + 1,
+          count: tBatches.length, // "Lote 3 de 3" no card do dashboard
         });
       }
     }
@@ -1238,20 +1240,12 @@ export class DashboardService {
       }
     }
 
-    const statusOf = (remaining: number, pct: number): 'Normal' | 'Atenção' | 'Crítico' => {
-      const lowStock = remaining > 0 && remaining <= 25;
-      if (pct >= 90 || remaining === 0 || (lowStock && pct >= 50)) return 'Crítico';
-      if (pct >= 75 || (lowStock && pct >= 25)) return 'Atenção';
-      return 'Normal';
-    };
-
     const tickets = new Map<
       string,
       {
         ticketId: string;
         ticketName: string;
-        total: number;
-        sold: number;
+        categoryName: string | null;
         batches: Array<{
           id: string;
           name: string;
@@ -1273,12 +1267,9 @@ export class DashboardService {
       const entry = tickets.get(batch.ticketId) ?? {
         ticketId: batch.ticket.id,
         ticketName: batch.ticket.name,
-        total: 0,
-        sold: 0,
+        categoryName: batch.ticket.category?.name ?? null,
         batches: [],
       };
-      entry.total += batch.quantity;
-      entry.sold += batchSold;
       entry.batches.push({
         id: batch.id,
         name: `Lote ${(batch.sortOrder ?? entry.batches.length) + 1}`,
@@ -1286,26 +1277,31 @@ export class DashboardService {
         sold: batchSold,
         remaining: batchRemaining,
         percentageSold: batchPct,
-        status: statusOf(batchRemaining, batchPct),
+        status: lotDepletionStatus(batchPct, true),
       });
       tickets.set(batch.ticketId, entry);
     }
 
     return Array.from(tickets.values())
       .map((t) => {
-        const remaining = Math.max(0, t.total - t.sold);
-        const pct = t.total > 0 ? Math.round((t.sold / t.total) * 10000) / 100 : 0;
+        // Regra do usuário (09/11): o ingresso é medido pela SOMA de todos os lotes (inclusive os fora
+        // da janela de datas), não só pelos lotes vigentes. Crítico só no último lote ("3 de 3").
+        const total = (batchesByTicket.get(t.ticketId) ?? []).reduce((s, b) => s + b.quantity, 0);
+        const sold = Math.min(totalSoldByTicketId.get(t.ticketId) ?? 0, total);
+        const remaining = Math.max(0, total - sold);
+        const pct = total > 0 ? Math.round((sold / total) * 10000) / 100 : 0;
         const active = activeBatchByTicket.get(t.ticketId) ?? null;
         return {
           ticketId: t.ticketId,
           ticketName: t.ticketName,
-          status: statusOf(remaining, pct),
-          sold: t.sold,
-          total: t.total,
+          categoryName: t.categoryName,
+          status: lotDepletionStatus(pct, !active || active.number === active.count),
+          sold,
+          total,
           remaining,
           percentageSold: pct,
           activeBatch: active
-            ? { id: active.id, number: active.number, label: `Lote ${active.number}` }
+            ? { id: active.id, number: active.number, count: active.count, label: `Lote ${active.number}` }
             : null,
           batches: t.batches,
         };

@@ -1051,6 +1051,7 @@ model Coupon {
   usageCount    Int                @default(0)
   maxUsage      Int?               // Limite máximo de usos do cupom
   applyToProducts Boolean          @default(false) // Inclui produtos adicionais (kits/extras) na base de cálculo do desconto
+  allowStacking Boolean            @default(false) // QUANTITY: acumula com cupom de código; false = o manual tira este automático
   deletedAt     DateTime?          // Soft delete — cupom removido após uso
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt

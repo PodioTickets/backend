@@ -213,7 +213,7 @@ function computeFinalAmount(order: any, serviceFee: number): number {
 // puxar este módulo inteiro). Importados p/ uso interno (orderShape) e re-exportados
 // p/ manter os imports/tests que os pegavam daqui.
 import { purchaseQuantityError } from '../tickets/purchase-quantity.util';
-import { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount, isQuantityInCouponRange, rankAutoCouponCandidates, selectAutoCoupons, ticketIdsOfSlots, sumUnitDiscounts, mergeStackedUnits } from './order-discount.util';
+import { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount, isQuantityInCouponRange, rankAutoCouponCandidates, selectAutoCoupons, stacksWithManualCoupon, ticketIdsOfSlots, sumUnitDiscounts, mergeStackedUnits } from './order-discount.util';
 export { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount, mergeStackedUnits };
 
 /**
@@ -2456,6 +2456,8 @@ export class OrdersService {
       // Lenient (PENDING): AGE só conta participante JÁ com data de nascimento (`filledAgeCouponSlots`).
       // Limite de uso pelo contador (maxUsage − usageCount); a reserva atômica fica no pay.
       const candidates: AutoCouponCandidate[] = autoCoupons
+        // Com manual, só os que acumulam (`stacksWithManualCoupon`); os demais nem entram.
+        .filter((coupon: any) => !currentIsManual || stacksWithManualCoupon(coupon))
         .map((coupon: any) =>
           this.evaluateAutoCouponCandidate(coupon, {
             order, participants, reservedTickets, ticketsSubtotal, productsSubtotal,
@@ -3171,15 +3173,25 @@ export class OrdersService {
       discount = cov.discount + voucherProductsExtra;
       voucherId = voucher.id;
 
-    } else if (order.autoCouponId) {
-      // Remover o manual de um pedido ACUMULADO: o automático volta para a posição principal.
-      couponId = order.autoCouponId;
-      couponReservedUnits = order.autoCouponReservedUnits ?? 0;
+    } else if (order.coupon?.couponType === 'DISCOUNT') {
+      // Remover o manual: os automáticos voltam — inclusive os que ele tirava (QUANTITY sem
+      // "Acumular descontos"), por isso reavalia em vez de só promover o acumulado. O acumulado
+      // entra como desempate e, se continuar o principal, leva a reserva da posição 'auto'.
+      const auto = await this.evaluateAutoCoupons(
+        {
+          ...order, couponId: order.autoCouponId ?? null, coupon: null, voucherId: null,
+          discount: 0, autoDiscount: 0, extraAutoCoupons: [],
+        },
+        participants, reservedTickets, ticketsSubtotal, productsSubtotal,
+        { pendingProducts: (order.pendingProducts as any[]) ?? [] },
+      );
+      couponId = auto.autoCouponId ?? null;
+      couponReservedUnits = couponId && couponId === order.autoCouponId ? order.autoCouponReservedUnits ?? 0 : 0;
+      couponEffectiveUsage = auto.autoEffectiveUsage;
+      couponQualifyingSlots = auto.ageQualifyingSlots;
       voucherId = null;
-      discount = (order.autoDiscount ?? 0) + sumDiscounts(order.extraAutoCoupons);
-      autoSlot = { ...stackedAutoData(null), ...extraAutoData(
-        ((order.extraAutoCoupons ?? []) as any[]).map((e) => ({ couponId: e.couponId, discount: e.discount })),
-      ) };
+      discount = auto.newDiscount;
+      autoSlot = { ...stackedAutoData(null), ...extraAutoData(auto.extraAutoCoupons) };
     } else {
       // Sem código — remover cupom/voucher existente
       couponId = null;
@@ -3756,6 +3768,7 @@ export class OrdersService {
           resolveApplicableTicketIds(appliesTo, reservedTickets),
         );
       const candidates: AutoCouponCandidate[] = autoCoupons
+        .filter((coupon: any) => !stacking || stacksWithManualCoupon(coupon)) // mesma regra do display
         .map((coupon: any) =>
           this.evaluateAutoCouponCandidate(coupon, {
             order, participants, reservedTickets, ticketsSubtotal, productsSubtotal,
