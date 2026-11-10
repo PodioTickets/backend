@@ -44,14 +44,20 @@ describe('selectAutoCoupons', () => {
 });
 
 describe('stacksWithManualCoupon', () => {
-  it('quantidade só acumula com "Acumular descontos"', () => {
-    expect(stacksWithManualCoupon({ couponType: 'QUANTITY', allowStacking: false })).toBe(false);
-    expect(stacksWithManualCoupon({ couponType: 'QUANTITY' })).toBe(false);
-    expect(stacksWithManualCoupon({ couponType: 'QUANTITY', allowStacking: true })).toBe(true);
+  it('quantidade no mesmo ingresso só acumula com "Acumular descontos"', () => {
+    expect(stacksWithManualCoupon({ couponType: 'QUANTITY', allowStacking: false }, 'all')).toBe(false);
+    expect(stacksWithManualCoupon({ couponType: 'QUANTITY' }, null)).toBe(false);
+    expect(stacksWithManualCoupon({ couponType: 'QUANTITY', allowStacking: true }, 'all')).toBe(true);
+    expect(stacksWithManualCoupon({ couponType: 'QUANTITY', appliesTo: '["t1","t2"]' }, '["t2"]')).toBe(false);
+    expect(stacksWithManualCoupon({ couponType: 'QUANTITY', appliesTo: 'all' }, '["t2"]')).toBe(false);
+  });
+
+  it('quantidade em ingresso que o manual não cobre vale junto', () => {
+    expect(stacksWithManualCoupon({ couponType: 'QUANTITY', appliesTo: '["t1"]' }, '["t2"]')).toBe(true);
   });
 
   it('idade (legado) segue acumulando', () => {
-    expect(stacksWithManualCoupon({ couponType: 'AGE', allowStacking: false })).toBe(true);
+    expect(stacksWithManualCoupon({ couponType: 'AGE', allowStacking: false }, 'all')).toBe(true);
   });
 });
 

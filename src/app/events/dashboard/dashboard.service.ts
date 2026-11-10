@@ -793,7 +793,8 @@ export class DashboardService {
 
   /**
    * Heatmap de vendas — registrations PAID+CONFIRMED agrupadas por dia da
-   * semana (0=Dom...6=Sáb) e hora (0..23) do `Order.createdAt`.
+   * semana (0=Dom...6=Sáb) e hora (0..23) do `Order.createdAt` em horário de Brasília
+   * (mesma conversão do `chartBucketExpr`; antes saía em UTC, 3h adiantado).
    */
   private async queryHeatmap(
     eventId: string,
@@ -802,8 +803,8 @@ export class DashboardService {
   ): Promise<{ day: string; hour: number; sales: number }[]> {
     const rows = await this.prisma.getReadClient().$queryRaw<HeatmapRow[]>(Prisma.sql`
       SELECT
-        EXTRACT(DOW FROM o."createdAt")::int AS dow,
-        EXTRACT(HOUR FROM o."createdAt")::int AS hour,
+        EXTRACT(DOW FROM o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')::int AS dow,
+        EXTRACT(HOUR FROM o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')::int AS hour,
         COUNT(*)::bigint AS sales
       FROM "Registration" r
       INNER JOIN "Order" o ON o.id = r."orderId"
