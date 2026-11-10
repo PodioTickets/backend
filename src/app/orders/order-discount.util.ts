@@ -168,9 +168,24 @@ export function selectAutoCoupons<T extends { coupon: { id: string }; discount: 
 /**
  * Automático que vale junto de um cupom de código (manual). Regra de 2026-11-09: QUANTITY só com
  * "Acumular descontos" (`allowStacking`); sem ela o manual tira o automático. AGE (legado) segue acumulando.
+ * 2026-11-10: o manual só tira o QUANTITY se os dois cobrem algum ingresso em comum (`appliesTo`);
+ * em ingressos diferentes não interferem e valem juntos, cada um no seu.
  */
-export function stacksWithManualCoupon(coupon: { couponType: string; allowStacking?: boolean | null }): boolean {
-  return coupon.couponType === 'AGE' || (coupon.couponType === 'QUANTITY' && !!coupon.allowStacking);
+export function stacksWithManualCoupon(
+  coupon: { couponType: string; allowStacking?: boolean | null; appliesTo?: string | null },
+  manualAppliesTo: string | null | undefined,
+): boolean {
+  if (coupon.couponType === 'AGE') return true;
+  if (coupon.couponType !== 'QUANTITY') return false;
+  return !!coupon.allowStacking || !appliesToOverlap(coupon.appliesTo, manualAppliesTo);
+}
+
+/** Os dois `appliesTo` têm ingresso em comum? "all"/vazio = todos. */
+function appliesToOverlap(a: string | null | undefined, b: string | null | undefined): boolean {
+  const idsA = parseAppliesToArray(a);
+  const idsB = parseAppliesToArray(b);
+  if (idsA.length === 0 || idsB.length === 0) return true;
+  return idsA.some((id) => idsB.includes(id));
 }
 
 /** Ingressos (ticketId) das unidades `slots` — mesma ordem de unidades do `distributeDiscount`. */

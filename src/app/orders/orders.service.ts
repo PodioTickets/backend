@@ -2431,7 +2431,7 @@ export class OrdersService {
     // descontar mais, ou removido se deixou de ser elegível. Voucher e cupom manual (DISCOUNT)
     // são escolha do usuário: com eles nada aqui roda (seguem no recálculo abaixo).
     const currentCoupon = order.couponId
-      ? await r.coupon.findUnique({ where: { id: order.couponId }, select: { id: true, couponType: true } })
+      ? await r.coupon.findUnique({ where: { id: order.couponId }, select: { id: true, couponType: true, appliesTo: true } })
       : null;
     const currentIsAuto = currentCoupon?.couponType === 'AGE' || currentCoupon?.couponType === 'QUANTITY';
     // Acúmulo (regra 2026-10-02): com cupom MANUAL (DISCOUNT) o auto também é avaliado, mas
@@ -2456,8 +2456,8 @@ export class OrdersService {
       // Lenient (PENDING): AGE só conta participante JÁ com data de nascimento (`filledAgeCouponSlots`).
       // Limite de uso pelo contador (maxUsage − usageCount); a reserva atômica fica no pay.
       const candidates: AutoCouponCandidate[] = autoCoupons
-        // Com manual, só os que acumulam (`stacksWithManualCoupon`); os demais nem entram.
-        .filter((coupon: any) => !currentIsManual || stacksWithManualCoupon(coupon))
+        // Com manual, só os que acumulam ou não dividem ingresso com ele (`stacksWithManualCoupon`).
+        .filter((coupon: any) => !currentIsManual || stacksWithManualCoupon(coupon, currentCoupon?.appliesTo))
         .map((coupon: any) =>
           this.evaluateAutoCouponCandidate(coupon, {
             order, participants, reservedTickets, ticketsSubtotal, productsSubtotal,
@@ -3768,7 +3768,7 @@ export class OrdersService {
           resolveApplicableTicketIds(appliesTo, reservedTickets),
         );
       const candidates: AutoCouponCandidate[] = autoCoupons
-        .filter((coupon: any) => !stacking || stacksWithManualCoupon(coupon)) // mesma regra do display
+        .filter((coupon: any) => !stacking || stacksWithManualCoupon(coupon, manualCoupon?.appliesTo)) // mesma regra do display
         .map((coupon: any) =>
           this.evaluateAutoCouponCandidate(coupon, {
             order, participants, reservedTickets, ticketsSubtotal, productsSubtotal,
