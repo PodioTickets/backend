@@ -168,24 +168,28 @@ export function selectAutoCoupons<T extends { coupon: { id: string }; discount: 
 /**
  * Automático que vale junto de um cupom de código (manual). Regra de 2026-11-09: QUANTITY só com
  * "Acumular descontos" (`allowStacking`); sem ela o manual tira o automático. AGE (legado) segue acumulando.
- * 2026-11-10: o manual só tira o QUANTITY se os dois cobrem algum ingresso em comum (`appliesTo`);
- * em ingressos diferentes não interferem e valem juntos, cada um no seu.
+ * 2026-11-11: o manual só tira o QUANTITY dos ingressos DELE; nos outros o automático segue valendo
+ * (antes saía do pedido inteiro se os dois dividissem algum ingresso).
+ *
+ * Devolve o cupom com o `appliesTo` reduzido (a faixa de quantidade passa a contar só esses
+ * ingressos), o próprio cupom quando nada muda, ou null quando não sobra ingresso.
+ * `orderTicketIds` resolve o "all" do automático. Manual "all"/vazio cobre tudo → null.
  */
-export function stacksWithManualCoupon(
-  coupon: { couponType: string; allowStacking?: boolean | null; appliesTo?: string | null },
+export function autoCouponScopeWithManual<T extends { couponType: string; allowStacking?: boolean | null; appliesTo?: string | null }>(
+  coupon: T,
   manualAppliesTo: string | null | undefined,
-): boolean {
-  if (coupon.couponType === 'AGE') return true;
-  if (coupon.couponType !== 'QUANTITY') return false;
-  return !!coupon.allowStacking || !appliesToOverlap(coupon.appliesTo, manualAppliesTo);
-}
-
-/** Os dois `appliesTo` têm ingresso em comum? "all"/vazio = todos. */
-function appliesToOverlap(a: string | null | undefined, b: string | null | undefined): boolean {
-  const idsA = parseAppliesToArray(a);
-  const idsB = parseAppliesToArray(b);
-  if (idsA.length === 0 || idsB.length === 0) return true;
-  return idsA.some((id) => idsB.includes(id));
+  orderTicketIds: string[],
+): T | null {
+  if (coupon.couponType === 'AGE' || coupon.allowStacking) return coupon;
+  if (coupon.couponType !== 'QUANTITY') return null;
+  const manualIds = parseAppliesToArray(manualAppliesTo);
+  if (manualIds.length === 0) return null;
+  const autoIds = parseAppliesToArray(coupon.appliesTo);
+  const scope = autoIds.length > 0 ? autoIds : [...new Set(orderTicketIds)];
+  const remaining = scope.filter((id) => !manualIds.includes(id));
+  if (remaining.length === 0) return null;
+  if (autoIds.length > 0 && remaining.length === autoIds.length) return coupon;
+  return { ...coupon, appliesTo: JSON.stringify(remaining) };
 }
 
 /** Ingressos (ticketId) das unidades `slots` — mesma ordem de unidades do `distributeDiscount`. */

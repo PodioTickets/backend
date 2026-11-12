@@ -2,7 +2,7 @@
  * Cupons automáticos no mesmo pedido: só competem os que cobrem o mesmo ingresso.
  * Cupons de ingressos diferentes valem juntos, cada um descontando do próprio ingresso.
  */
-import { selectAutoCoupons, stacksWithManualCoupon, sumUnitDiscounts, ticketIdsOfSlots } from '../order-discount.util';
+import { autoCouponScopeWithManual, selectAutoCoupons, sumUnitDiscounts, ticketIdsOfSlots } from '../order-discount.util';
 import { orderShape } from '../orders.service';
 
 const cand = (id: string, discount: number, coveredTicketIds: string[]) => ({
@@ -43,21 +43,38 @@ describe('selectAutoCoupons', () => {
   });
 });
 
-describe('stacksWithManualCoupon', () => {
-  it('quantidade no mesmo ingresso só acumula com "Acumular descontos"', () => {
-    expect(stacksWithManualCoupon({ couponType: 'QUANTITY', allowStacking: false }, 'all')).toBe(false);
-    expect(stacksWithManualCoupon({ couponType: 'QUANTITY' }, null)).toBe(false);
-    expect(stacksWithManualCoupon({ couponType: 'QUANTITY', allowStacking: true }, 'all')).toBe(true);
-    expect(stacksWithManualCoupon({ couponType: 'QUANTITY', appliesTo: '["t1","t2"]' }, '["t2"]')).toBe(false);
-    expect(stacksWithManualCoupon({ couponType: 'QUANTITY', appliesTo: 'all' }, '["t2"]')).toBe(false);
+describe('autoCouponScopeWithManual', () => {
+  const order = ['t1', 't2', 't2'];
+  const scope = (coupon: any, manual: string | null) => autoCouponScopeWithManual(coupon, manual, order)?.appliesTo;
+
+  it('manual em todos os ingressos tira a quantidade sem "Acumular descontos"', () => {
+    expect(autoCouponScopeWithManual({ couponType: 'QUANTITY', allowStacking: false }, 'all', order)).toBeNull();
+    expect(autoCouponScopeWithManual({ couponType: 'QUANTITY' }, null, order)).toBeNull();
   });
 
-  it('quantidade em ingresso que o manual não cobre vale junto', () => {
-    expect(stacksWithManualCoupon({ couponType: 'QUANTITY', appliesTo: '["t1"]' }, '["t2"]')).toBe(true);
+  it('com "Acumular descontos" o automático fica inteiro', () => {
+    const c = { couponType: 'QUANTITY', allowStacking: true, appliesTo: 'all' };
+    expect(autoCouponScopeWithManual(c, '["t1"]', order)).toBe(c);
   });
 
-  it('idade (legado) segue acumulando', () => {
-    expect(stacksWithManualCoupon({ couponType: 'AGE', allowStacking: false }, 'all')).toBe(true);
+  it('automático em ingresso que o manual não cobre fica igual', () => {
+    const c = { couponType: 'QUANTITY', appliesTo: '["t1"]' };
+    expect(autoCouponScopeWithManual(c, '["t2"]', order)).toBe(c);
+  });
+
+  it('automático da categoria perde só o ingresso do manual (2026-11-11)', () => {
+    expect(scope({ couponType: 'QUANTITY', appliesTo: '["t1","t2"]' }, '["t2"]')).toBe('["t1"]');
+    expect(scope({ couponType: 'QUANTITY', appliesTo: 'all' }, '["t2"]')).toBe('["t1"]');
+    expect(scope({ couponType: 'QUANTITY', appliesTo: null }, '["t1"]')).toBe('["t2"]');
+  });
+
+  it('sem ingresso sobrando o automático sai', () => {
+    expect(autoCouponScopeWithManual({ couponType: 'QUANTITY', appliesTo: '["t2"]' }, '["t2","t3"]', order)).toBeNull();
+  });
+
+  it('idade (legado) segue acumulando inteira', () => {
+    const c = { couponType: 'AGE', allowStacking: false };
+    expect(autoCouponScopeWithManual(c, 'all', order)).toBe(c);
   });
 });
 

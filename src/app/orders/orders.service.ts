@@ -119,9 +119,9 @@ const ORDER_INCLUDE = {
   reservedTickets: true,
   coupon: { select: { id: true, code: true, couponType: true, type: true, value: true, appliesTo: true, minAge: true, maxAge: true, applyToProducts: true, cpfListStatus: true, documentList: true, cpfList: true, maxUsage: true, usageCount: true } },
   // Cupom automático ACUMULADO com o manual (ver `orderShape`).
-  autoCoupon: { select: { id: true, code: true, couponType: true, type: true, value: true, appliesTo: true, minAge: true, maxAge: true, applyToProducts: true, cpfListStatus: true, documentList: true, cpfList: true, maxUsage: true, usageCount: true } },
+  autoCoupon: { select: { id: true, code: true, couponType: true, type: true, value: true, appliesTo: true, allowStacking: true, minAge: true, maxAge: true, applyToProducts: true, cpfListStatus: true, documentList: true, cpfList: true, maxUsage: true, usageCount: true } },
   // Cupons automáticos além do principal (ver `OrderExtraAutoCoupon`).
-  extraAutoCoupons: { include: { coupon: { select: { id: true, code: true, couponType: true, type: true, value: true, appliesTo: true, minAge: true, maxAge: true, applyToProducts: true, cpfListStatus: true, documentList: true, cpfList: true, maxUsage: true, usageCount: true } } } },
+  extraAutoCoupons: { include: { coupon: { select: { id: true, code: true, couponType: true, type: true, value: true, appliesTo: true, allowStacking: true, minAge: true, maxAge: true, applyToProducts: true, cpfListStatus: true, documentList: true, cpfList: true, maxUsage: true, usageCount: true } } } },
   voucher: { select: { id: true, code: true, name: true, status: true, appliesTo: true, applyToProducts: true, cpfListStatus: true, documentList: true, cpfList: true } },
   payment: { select: { id: true, method: true, status: true, amount: true, transactionId: true, paymentDate: true, createdAt: true, metadata: true } },
   // participantFeePercent é necessário para calcular serviceFee em pedidos PENDING
@@ -213,7 +213,7 @@ function computeFinalAmount(order: any, serviceFee: number): number {
 // puxar este módulo inteiro). Importados p/ uso interno (orderShape) e re-exportados
 // p/ manter os imports/tests que os pegavam daqui.
 import { purchaseQuantityError } from '../tickets/purchase-quantity.util';
-import { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount, isQuantityInCouponRange, rankAutoCouponCandidates, selectAutoCoupons, stacksWithManualCoupon, ticketIdsOfSlots, sumUnitDiscounts, mergeStackedUnits } from './order-discount.util';
+import { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount, isQuantityInCouponRange, rankAutoCouponCandidates, selectAutoCoupons, autoCouponScopeWithManual, ticketIdsOfSlots, sumUnitDiscounts, mergeStackedUnits } from './order-discount.util';
 export { distributeDiscount, inferEffectiveUsage, computeQuantityCouponDiscount, mergeStackedUnits };
 
 /**
@@ -463,9 +463,15 @@ const sumDiscounts = (items: Array<{ discount: number }> | null | undefined): nu
  * Pedido de cupom único → `orderShapeSingle` intacto.
  */
 export function orderShape(order: any, discountOverride?: number, extra?: Record<string, unknown>, effectiveUsage?: number, fixedPerUnit?: number, qualifyingSlots?: number[]): Record<string, any> {
+  // Pedido em aberto com manual: o automático é rateado só nos ingressos em que vale (mesmo escopo do
+  // cálculo, `autoCouponScopeWithManual`). Pago fica como está: pedido antigo foi gravado com a regra antiga.
+  const manualScope = order?.status === 'PENDING' && order?.coupon?.couponType === 'DISCOUNT' ? order.coupon.appliesTo : undefined;
+  const orderTicketIds = ((order?.reservedTickets ?? []) as any[]).map((rt) => rt.ticketId);
+  const scoped = (coupon: any) =>
+    manualScope === undefined ? coupon : autoCouponScopeWithManual(coupon, manualScope, orderTicketIds) ?? coupon;
   const stackedAutos: Array<{ coupon: any; discount: number }> = order?.voucherId ? [] : [
-    ...(order?.autoCouponId && order?.autoCoupon ? [{ coupon: order.autoCoupon, discount: order.autoDiscount ?? 0 }] : []),
-    ...(order?.extraAutoCoupons ?? []),
+    ...(order?.autoCouponId && order?.autoCoupon ? [{ coupon: scoped(order.autoCoupon), discount: order.autoDiscount ?? 0 }] : []),
+    ...((order?.extraAutoCoupons ?? []) as any[]).map((e) => ({ ...e, coupon: scoped(e.coupon) })),
   ];
   if (stackedAutos.length === 0) {
     return orderShapeSingle(order, discountOverride, extra, effectiveUsage, fixedPerUnit, qualifyingSlots);
@@ -2456,8 +2462,9 @@ export class OrdersService {
       // Lenient (PENDING): AGE só conta participante JÁ com data de nascimento (`filledAgeCouponSlots`).
       // Limite de uso pelo contador (maxUsage − usageCount); a reserva atômica fica no pay.
       const candidates: AutoCouponCandidate[] = autoCoupons
-        // Com manual, só os que acumulam ou não dividem ingresso com ele (`stacksWithManualCoupon`).
-        .filter((coupon: any) => !currentIsManual || stacksWithManualCoupon(coupon, currentCoupon?.appliesTo))
+        // Com manual, o automático sem "Acumular descontos" perde só os ingressos dele (`autoCouponScopeWithManual`).
+        .map((coupon: any) => (currentIsManual ? autoCouponScopeWithManual(coupon, currentCoupon?.appliesTo, reservedTickets.map((rt: any) => rt.ticketId)) : coupon))
+        .filter((coupon: any) => coupon != null)
         .map((coupon: any) =>
           this.evaluateAutoCouponCandidate(coupon, {
             order, participants, reservedTickets, ticketsSubtotal, productsSubtotal,
@@ -3768,7 +3775,9 @@ export class OrdersService {
           resolveApplicableTicketIds(appliesTo, reservedTickets),
         );
       const candidates: AutoCouponCandidate[] = autoCoupons
-        .filter((coupon: any) => !stacking || stacksWithManualCoupon(coupon, manualCoupon?.appliesTo)) // mesma regra do display
+        // Mesma regra do display: com manual, o automático perde só os ingressos dele.
+        .map((coupon: any) => (stacking ? autoCouponScopeWithManual(coupon, manualCoupon?.appliesTo, reservedTickets.map((rt: any) => rt.ticketId)) : coupon))
+        .filter((coupon: any) => coupon != null)
         .map((coupon: any) =>
           this.evaluateAutoCouponCandidate(coupon, {
             order, participants, reservedTickets, ticketsSubtotal, productsSubtotal,
