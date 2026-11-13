@@ -133,7 +133,8 @@ const ORDER_INCLUDE = {
   // validada no pay() antes de chamar o gateway.
   // allowMultipleTicketsPerCpf governa a regra de 1 ingresso por documento —
   // lida no patchParticipants, junto do pedido, para não custar uma query extra.
-  event: { select: { name: true, participantFeePercent: true, organizerFeePercent: true, eventDate: true, acceptedPaymentMethods: true, allowMultipleTicketsPerCpf: true } },
+  // tickets (id + categoria): o cupom manual tira o automático da categoria inteira (`autoCouponScopeWithManual`).
+  event: { select: { name: true, participantFeePercent: true, organizerFeePercent: true, eventDate: true, acceptedPaymentMethods: true, allowMultipleTicketsPerCpf: true, tickets: { select: { id: true, categoryId: true } } } },
 } as const;
 
 /**
@@ -468,7 +469,7 @@ export function orderShape(order: any, discountOverride?: number, extra?: Record
   const manualScope = order?.status === 'PENDING' && order?.coupon?.couponType === 'DISCOUNT' ? order.coupon.appliesTo : undefined;
   const orderTicketIds = ((order?.reservedTickets ?? []) as any[]).map((rt) => rt.ticketId);
   const scoped = (coupon: any) =>
-    manualScope === undefined ? coupon : autoCouponScopeWithManual(coupon, manualScope, orderTicketIds) ?? coupon;
+    manualScope === undefined ? coupon : autoCouponScopeWithManual(coupon, manualScope, orderTicketIds, order?.event?.tickets) ?? coupon;
   const stackedAutos: Array<{ coupon: any; discount: number }> = order?.voucherId ? [] : [
     ...(order?.autoCouponId && order?.autoCoupon ? [{ coupon: scoped(order.autoCoupon), discount: order.autoDiscount ?? 0 }] : []),
     ...((order?.extraAutoCoupons ?? []) as any[]).map((e) => ({ ...e, coupon: scoped(e.coupon) })),
@@ -2459,11 +2460,15 @@ export class OrdersService {
         orderBy: { createdAt: 'asc' },
       });
 
+      // Categorias dos ingressos: vêm no ORDER_INCLUDE; pedido carregado sem elas → 1 query, só com manual.
+      const ticketCategories = currentIsManual
+        ? order.event?.tickets ?? await r.ticket.findMany({ where: { eventId: order.eventId }, select: { id: true, categoryId: true } })
+        : [];
       // Lenient (PENDING): AGE só conta participante JÁ com data de nascimento (`filledAgeCouponSlots`).
       // Limite de uso pelo contador (maxUsage − usageCount); a reserva atômica fica no pay.
       const candidates: AutoCouponCandidate[] = autoCoupons
-        // Com manual, o automático sem "Acumular descontos" perde só os ingressos dele (`autoCouponScopeWithManual`).
-        .map((coupon: any) => (currentIsManual ? autoCouponScopeWithManual(coupon, currentCoupon?.appliesTo, reservedTickets.map((rt: any) => rt.ticketId)) : coupon))
+        // Com manual, o automático sem "Acumular descontos" perde as categorias dele (`autoCouponScopeWithManual`).
+        .map((coupon: any) => (currentIsManual ? autoCouponScopeWithManual(coupon, currentCoupon?.appliesTo, reservedTickets.map((rt: any) => rt.ticketId), ticketCategories) : coupon))
         .filter((coupon: any) => coupon != null)
         .map((coupon: any) =>
           this.evaluateAutoCouponCandidate(coupon, {
@@ -3775,8 +3780,8 @@ export class OrdersService {
           resolveApplicableTicketIds(appliesTo, reservedTickets),
         );
       const candidates: AutoCouponCandidate[] = autoCoupons
-        // Mesma regra do display: com manual, o automático perde só os ingressos dele.
-        .map((coupon: any) => (stacking ? autoCouponScopeWithManual(coupon, manualCoupon?.appliesTo, reservedTickets.map((rt: any) => rt.ticketId)) : coupon))
+        // Mesma regra do display: com manual, o automático perde as categorias dele (ORDER_INCLUDE traz os ingressos).
+        .map((coupon: any) => (stacking ? autoCouponScopeWithManual(coupon, manualCoupon?.appliesTo, reservedTickets.map((rt: any) => rt.ticketId), order.event?.tickets) : coupon))
         .filter((coupon: any) => coupon != null)
         .map((coupon: any) =>
           this.evaluateAutoCouponCandidate(coupon, {

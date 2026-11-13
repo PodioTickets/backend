@@ -68,6 +68,26 @@ describe('autoCouponScopeWithManual', () => {
     expect(scope({ couponType: 'QUANTITY', appliesTo: null }, '["t1"]')).toBe('["t2"]');
   });
 
+  it('manual tira o automático da categoria inteira (2026-11-13)', () => {
+    // t1/t2 = categoria "corrida"; t3 = "kids"; t4 sem categoria.
+    const tickets = [
+      { id: 't1', categoryId: 'corrida' },
+      { id: 't2', categoryId: 'corrida' },
+      { id: 't3', categoryId: 'kids' },
+      { id: 't4', categoryId: null },
+    ];
+    const cart = ['t1', 't2', 't3', 't4'];
+    const scoped = (appliesTo: string | null, manual: string) =>
+      autoCouponScopeWithManual({ couponType: 'QUANTITY', appliesTo }, manual, cart, tickets)?.appliesTo ?? null;
+    expect(scoped('all', '["t1"]')).toBe('["t3","t4"]');
+    expect(scoped('["t2","t3"]', '["t1"]')).toBe('["t3"]');
+    expect(scoped('["t2"]', '["t1"]')).toBeNull();
+    // Sem categoria: só o próprio ingresso.
+    expect(scoped('all', '["t4"]')).toBe('["t1","t2","t3"]');
+    // Manual fora do carrinho ainda bloqueia a categoria dele.
+    expect(autoCouponScopeWithManual({ couponType: 'QUANTITY', appliesTo: 'all' }, '["t1"]', ['t2', 't3'], tickets)?.appliesTo).toBe('["t3"]');
+  });
+
   it('sem ingresso sobrando o automático sai', () => {
     expect(autoCouponScopeWithManual({ couponType: 'QUANTITY', appliesTo: '["t2"]' }, '["t2","t3"]', order)).toBeNull();
   });

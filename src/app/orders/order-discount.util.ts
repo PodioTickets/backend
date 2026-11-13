@@ -173,23 +173,41 @@ export function selectAutoCoupons<T extends { coupon: { id: string }; discount: 
  *
  * Devolve o cupom com o `appliesTo` reduzido (a faixa de quantidade passa a contar só esses
  * ingressos), o próprio cupom quando nada muda, ou null quando não sobra ingresso.
+ * 2026-11-13: o bloqueio vale para a CATEGORIA inteira — ingresso da mesma categoria de um ingresso do
+ * manual também perde o automático (regra do usuário). `ticketCategories` = ingressos do evento com a
+ * categoria; sem categoria, só o próprio ingresso.
  * `orderTicketIds` resolve o "all" do automático. Manual "all"/vazio cobre tudo → null.
  */
 export function autoCouponScopeWithManual<T extends { couponType: string; allowStacking?: boolean | null; appliesTo?: string | null }>(
   coupon: T,
   manualAppliesTo: string | null | undefined,
   orderTicketIds: string[],
+  ticketCategories: ReadonlyArray<{ id: string; categoryId?: string | null }> = [],
 ): T | null {
   if (coupon.couponType === 'AGE' || coupon.allowStacking) return coupon;
   if (coupon.couponType !== 'QUANTITY') return null;
   const manualIds = parseAppliesToArray(manualAppliesTo);
   if (manualIds.length === 0) return null;
+  const blocked = manualBlockedTicketIds(manualIds, ticketCategories);
   const autoIds = parseAppliesToArray(coupon.appliesTo);
   const scope = autoIds.length > 0 ? autoIds : [...new Set(orderTicketIds)];
-  const remaining = scope.filter((id) => !manualIds.includes(id));
+  const remaining = scope.filter((id) => !blocked.has(id));
   if (remaining.length === 0) return null;
   if (autoIds.length > 0 && remaining.length === autoIds.length) return coupon;
   return { ...coupon, appliesTo: JSON.stringify(remaining) };
+}
+
+/** Ingressos do manual + todos os da mesma categoria deles. */
+function manualBlockedTicketIds(
+  manualIds: string[],
+  ticketCategories: ReadonlyArray<{ id: string; categoryId?: string | null }>,
+): Set<string> {
+  const blocked = new Set(manualIds);
+  const categories = new Set(
+    ticketCategories.filter((t) => blocked.has(t.id) && t.categoryId).map((t) => t.categoryId as string),
+  );
+  for (const t of ticketCategories) if (t.categoryId && categories.has(t.categoryId)) blocked.add(t.id);
+  return blocked;
 }
 
 /** Ingressos (ticketId) das unidades `slots` — mesma ordem de unidades do `distributeDiscount`. */

@@ -573,6 +573,8 @@ describe('OrdersService', () => {
           findUnique: jest.fn().mockResolvedValue(coupon),
           findMany: jest.fn().mockResolvedValue([]),
         },
+        // Categorias dos ingressos (cupom manual tira o automático da categoria) quando o pedido vem sem `event.tickets`.
+        ticket: { findMany: jest.fn().mockResolvedValue([]) },
         // Dois claims passam por $queryRaw:
         //  - claimCouponUnits (SQL com "couponReservedUnits") → sem escassez no unit: concede o
         //    desejado (2º valor interpolado do template = `want`), então granted = desired.
