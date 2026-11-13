@@ -72,8 +72,6 @@ const CACHE_TTL_OVERVIEW = 30;
 const CACHE_TTL_RANKINGS = 30;
 const CACHE_TTL_SECONDARY = 60;
 
-/** Quantas cidades o card "Cidade com mais vendas" exibe. */
-const TOP_CITIES_LIMIT = 2;
 /**
  * Teto de locais enviados ao geocoding/mapa (cada um vira um lookup + item de
  * fila no worker). Os locais além do teto continuam somando no total das
@@ -94,6 +92,8 @@ const normalizeGeoText = (s: string) =>
  * card vinha de outra query (1 por INSCRIÇÃO, sobre o espelho `User.city`), então
  * todo pedido com mais de um ingresso — ou com billing diferente do cadastro —
  * abria uma diferença entre o número do card e o do mapa.
+ * Todas as cidades, da que mais vende para a que menos (quadro do mapa, 2026-11-13). O tamanho
+ * já é limitado pelo `MAX_LOCATION_ROWS` da agregação por bairro.
  */
 function buildTopCities(
   locations: { city: string; state?: string; purchases: number }[],
@@ -109,8 +109,7 @@ function buildTopCities(
     }
   }
   return Array.from(merged.values())
-    .sort((a, b) => b.purchases - a.purchases)
-    .slice(0, TOP_CITIES_LIMIT);
+    .sort((a, b) => b.purchases - a.purchases);
 }
 
 @Injectable()
