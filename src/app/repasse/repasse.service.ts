@@ -14,6 +14,7 @@ import { PaymentMethod, PaymentStatus, WithdrawalStatus } from '@prisma/client';
 import { computeRefundImpact, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 import {
   computeAnticipation,
+  computeAnticipationByGross,
   totalAvailableGross,
   unitCost,
   anticipatableUnits,
@@ -1022,6 +1023,8 @@ export class RepasseService {
     eventId: string,
     amount: number,
     clientIp?: string | null,
+    /** 'net' (legado): amount = quanto recebe. 'gross': amount = quanto antecipa (recebe amount − taxa). */
+    mode: 'net' | 'gross' = 'net',
   ) {
     await this.assertAccess(userId, eventId);
     if (!amount || amount <= 0) {
@@ -1049,14 +1052,28 @@ export class RepasseService {
         );
       }
 
-      // `amount` = quanto o organizador quer RECEBER hoje (líquido). Recálculo
-      // AUTORITATIVO: o motor escolhe as unidades mais baratas por INTEIRO.
-      const result = computeAnticipation(units, amount, monthlyRate);
+      // Recálculo AUTORITATIVO por unidades INTEIRAS. Modo líquido: `amount` = quanto
+      // quer RECEBER. Modo bruto: `amount` = quanto quer ANTECIPAR (recebe − taxa).
+      if (mode === 'gross') {
+        const available = totalAvailableGross(units);
+        if (amount > available) {
+          throw new BadRequestException(
+          `Valor acima do disponível para antecipação. Disponível: ${available} centavos, solicitado: ${amount} centavos`,
+          );
+        }
+      }
+      const result =
+        mode === 'gross'
+          ? computeAnticipationByGross(units, amount, monthlyRate)
+          : computeAnticipation(units, amount, monthlyRate);
       if (result.consumedGross <= 0) {
         throw new BadRequestException('Nenhum recebível disponível para antecipação.');
       }
-      // Teto: não dá pra receber mais do que o líquido total possível.
-      if (amount > result.recommendedNet) {
+      if (mode === 'gross' && result.receive <= 0) {
+        throw new BadRequestException('Valor muito baixo: a taxa de antecipação supera o valor informado.');
+      }
+      // Teto (modo líquido): não dá pra receber mais do que o líquido total possível.
+      if (mode === 'net' && amount > result.recommendedNet) {
         throw new BadRequestException(
           `Valor acima do disponível para antecipação. Máximo a receber: ${result.recommendedNet} centavos, solicitado: ${amount} centavos`,
         );
