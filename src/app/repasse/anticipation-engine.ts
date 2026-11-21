@@ -231,8 +231,10 @@ function dpMinGross(
   }
   const pick = collectPicked(units, (idx) => picked.has(idx));
   // Defesa: nunca devolver um conjunto que não cobre o pedido.
-  const pickNet = pick.gross - pick.cost;
-  return pickNet >= X ? pick : collectPicked(units, () => true);
+  // Cobertura pelo campo `net` (no modo bruto ele carrega o próprio gross).
+  let covered = 0;
+  picked.forEach((idx) => (covered += units[idx].net));
+  return covered >= X ? pick : collectPicked(units, () => true);
 }
 
 /**
@@ -306,4 +308,57 @@ export function recommendedNetFor(
 ): number {
   if (requestedNet <= 0 || units.length === 0) return 0;
   return computeAnticipation(units, requestedNet, monthlyRate).recommendedNet;
+}
+
+export interface AnticipationByGrossResult extends AnticipationResult {
+  /** Bruto das unidades inteiras que cobrem o pedido — o "valor recomendado" do input. */
+  recommendedGross: number;
+}
+
+/**
+ * Modo BRUTO (input do modal desde 20/11): o organizador informa quanto quer
+ * ANTECIPAR em recebíveis (até o "Valor disponível") e recebe esse valor MENOS a
+ * taxa. Consumo continua por unidades INTEIRAS: escolhemos o subconjunto de menor
+ * gross que cobre o pedido (menos sobra). Se o pedido não cai numa fronteira, a
+ * sobra (gross consumido − pedido) vira taxa, como no modo líquido — o "valor
+ * recomendado" (= gross do conjunto) evita isso.
+ *   recebe = pedido − custo real   (0 se a taxa passar do pedido)
+ */
+export function computeAnticipationByGross(
+  units: AnticipationUnit[],
+  requestedGross: number,
+  monthlyRate: number,
+): AnticipationByGrossResult {
+  if (requestedGross <= 0 || units.length === 0) {
+    return {
+      consumedUnitIds: [],
+      consumedGross: 0,
+      realCost: 0,
+      recommendedNet: 0,
+      receive: 0,
+      effectiveFee: 0,
+      effectiveRatePct: 0,
+      recommendedGross: 0,
+    };
+  }
+  const priced = priceUnits(units, monthlyRate);
+  const totalGross = priced.reduce((s, u) => s + u.gross, 0);
+  const pick =
+    requestedGross >= totalGross
+      ? collectPicked(priced, () => true)
+      : // Cobertura por gross: o motor cobre pelo campo `net`, então ele recebe o gross.
+        minGrossSubsetForNet(priced.map((u) => ({ ...u, net: u.gross })), requestedGross);
+  const requested = Math.min(requestedGross, pick.gross);
+  const receive = Math.max(0, requested - pick.cost);
+  const effectiveFee = pick.gross - receive;
+  return {
+    consumedUnitIds: pick.ids,
+    consumedGross: pick.gross,
+    realCost: pick.cost,
+    recommendedNet: pick.gross - pick.cost,
+    receive,
+    effectiveFee,
+    effectiveRatePct: pick.gross > 0 ? (effectiveFee / pick.gross) * 100 : 0,
+    recommendedGross: pick.gross,
+  };
 }

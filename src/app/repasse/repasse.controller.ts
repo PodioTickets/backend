@@ -34,10 +34,19 @@ class RequestWithdrawalDto {
 }
 
 class RequestAnticipationDto {
+  /** LEGADO: líquido que o organizador quer receber (centavos). */
+  @IsOptional()
   @IsInt()
   @Min(1)
   @Type(() => Number)
-  amount: number; // centavos
+  amount?: number;
+
+  /** Bruto a antecipar em recebíveis (centavos, até o "Valor disponível"); recebe isso menos a taxa. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Type(() => Number)
+  grossAmount?: number;
 }
 
 class AuditEventDto {
@@ -180,12 +189,10 @@ export class RepasseController {
     @Param('eventId') eventId: string,
     @Body() dto: RequestAnticipationDto,
   ) {
-    return this.repasseService.requestAnticipation(
-      req.user.id,
-      eventId,
-      dto.amount,
-      getClientIp(req),
-    );
+    // Bruto (modal desde 20/11) tem prioridade; `amount` (líquido) segue p/ clientes antigos.
+    return dto.grossAmount != null
+      ? this.repasseService.requestAnticipation(req.user.id, eventId, dto.grossAmount, getClientIp(req), 'gross')
+      : this.repasseService.requestAnticipation(req.user.id, eventId, dto.amount ?? 0, getClientIp(req));
   }
 
   @Patch('anticipations/:anticipationId/complete')

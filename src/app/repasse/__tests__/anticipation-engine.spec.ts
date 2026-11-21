@@ -1,6 +1,7 @@
 import {
   anticipatableUnits,
   computeAnticipation,
+  computeAnticipationByGross,
   totalAvailableGross,
   unitCost,
   type AnticipationUnit,
@@ -263,5 +264,53 @@ describe('mais de 16 recebíveis (DP) — o conjunto escolhido cobre o pedido', 
         expect(computeAnticipation(units, req, rate).recommendedNet).toBeGreaterThanOrEqual(req);
       }
     }
+  });
+});
+
+describe('computeAnticipationByGross — input = bruto a antecipar', () => {
+  const R = 0.02;
+  const units: AnticipationUnit[] = [
+    { unitId: 'a', orderId: 'a', paymentId: 'a', installmentNumber: null, gross: 10000, daysUntilRelease: 30 }, // custo 200
+    { unitId: 'b', orderId: 'b', paymentId: 'b', installmentNumber: null, gross: 20000, daysUntilRelease: 15 }, // custo 200
+  ];
+
+  it('antecipar tudo: total = disponível e recebe disponível − custo', () => {
+    const r = computeAnticipationByGross(units, 30000, R);
+    expect(r.consumedGross).toBe(30000);
+    expect(r.realCost).toBe(400);
+    expect(r.receive).toBe(29600);
+    expect(r.effectiveFee).toBe(400);
+  });
+
+  it('valor numa fronteira: sem sobra', () => {
+    const r = computeAnticipationByGross(units, 20000, R);
+    expect(r.consumedUnitIds).toEqual(['b']);
+    expect(r.receive).toBe(19800);
+    expect(r.recommendedGross).toBe(20000);
+  });
+
+  it('valor entre fronteiras: menor conjunto que cobre, sobra vira taxa', () => {
+    const r = computeAnticipationByGross(units, 15000, R);
+    expect(r.consumedGross).toBe(20000);
+    expect(r.recommendedGross).toBe(20000);
+    expect(r.receive).toBe(14800); // 150,00 − custo 2,00
+    expect(r.effectiveFee).toBe(5200); // sobra 50,00 + custo 2,00
+  });
+
+  it('acima do disponível: limita ao total', () => {
+    expect(computeAnticipationByGross(units, 99999, R).receive).toBe(29600);
+  });
+
+  it('mais de 16 recebíveis: cobre o bruto pedido', () => {
+    const many: AnticipationUnit[] = Array.from({ length: 30 }, (_, i) => ({
+      unitId: 'u' + i, orderId: 'o' + i, paymentId: 'p' + i, installmentNumber: null,
+      gross: 1000 + i * 137, daysUntilRelease: 5 + i * 7,
+    }));
+    const total = many.reduce((s, u) => s + u.gross, 0);
+    for (const req of [total, Math.floor(total / 2), Math.floor(total / 7)]) {
+      const r = computeAnticipationByGross(many, req, R);
+      expect(r.consumedGross).toBeGreaterThanOrEqual(req);
+    }
+    expect(computeAnticipationByGross(many, total, R).consumedGross).toBe(total);
   });
 });
