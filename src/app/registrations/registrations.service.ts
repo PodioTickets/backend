@@ -6,6 +6,7 @@ import { UpdateRegistrationParticipantDto } from './dto/update-registration-part
 import { AccountType, DocumentType, Prisma, RegistrationStatus, PaymentStatus } from '@prisma/client';
 import { OrganizerMemberAccessService } from '../organizations/organizer-member-access.service';
 import { eventWindowInstant } from '../../common/utils/brt-date.util';
+import { isEventDatePast } from '../../common/utils/event-status.util';
 // QR Code é gerado dinamicamente no frontend/backend usando o payload salvo em qrCode
 import { KitsService } from '../kits/kits.service';
 import { EmailService } from '../../common/services/email.service';
@@ -812,7 +813,7 @@ export class RegistrationsService {
         emergencyContactPhone: true,
         receiptSnapshot: true,
         order: { select: { userId: true } },
-        event: { select: { organizationId: true } },
+        event: { select: { organizationId: true, eventDate: true } },
         // RegistrationProduct é a fonte de verdade PÓS-compra da variação: `updateProductVariation`
         // grava aqui (variationId + variationEdited) sem reescrever o snapshot. Lemos só este
         // recorte mutável p/ expor `variationEdited` e refletir a variação ATUAL no produto.
@@ -922,6 +923,9 @@ export class RegistrationsService {
             orderId: registration.orderId,
             // Substituída por troca de ingresso (status segue CANCELLED) → "Trocado" na tela.
             voidedAt: registration.voidedAt ?? null,
+            // Data AO VIVO (o snapshot congela a da compra) e relógio do servidor: esconde
+            // "Trocar ingresso" depois do evento. O swap revalida (registration-swap.service).
+            eventDatePast: registration.event?.eventDate ? isEventDatePast(registration.event.eventDate) : false,
             qrCode: registration.qrCode ?? `https://www.podioticket.com.br/user/tickets/${registration.id}`,
             ...snapshot,
             event: snapshotEvent,
@@ -1485,6 +1489,7 @@ export class RegistrationsService {
       // Mesmo contrato do caminho com snapshot: o modal do admin decide "Trocar ingresso" por eles.
       status: reg.status,
       voidedAt: reg.voidedAt ?? null,
+      eventDatePast: reg.event?.eventDate ? isEventDatePast(reg.event.eventDate) : false,
       qrCode: `https://www.podioticket.com.br/user/tickets/${reg.id}`,
       user: participant,
       modalities: (reg.modalities || []).map((rm: any) => ({

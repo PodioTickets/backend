@@ -39,13 +39,25 @@ describe('UserActivityAdminService.statsAsAdmin — métricas do dashboard', () 
       }
       return Promise.resolve([]);
     });
-    // 1º raw = únicos (COUNT DISTINCT); depois as séries diárias.
-    const $queryRaw = jest
-      .fn()
-      .mockResolvedValueOnce([{ users: BigInt(2), sessions: BigInt(1) }])
-      .mockResolvedValue([
+    // Raw por conteúdo do SQL (a ordem no Promise.all muda quando entra métrica nova).
+    const $queryRaw = jest.fn().mockImplementation((q: any) => {
+      const sql: string = q.sql ?? q.strings?.join('') ?? '';
+      if (sql.includes('COUNT(DISTINCT')) {
+        return Promise.resolve([{ users: BigInt(2), sessions: BigInt(1) }]);
+      }
+      if (sql.includes('HAVING COUNT(*) > 1')) {
+        return Promise.resolve([{ count: BigInt(3) }]);
+      }
+      if (sql.includes('p.method')) {
+        return Promise.resolve([
+          { method: 'PIX', orders: BigInt(2), amount: BigInt(10000) },
+          { method: 'CREDIT_CARD', orders: BigInt(3), amount: BigInt(20000) },
+        ]);
+      }
+      return Promise.resolve([
         { day: new Date('2026-06-01T00:00:00.000Z'), count: BigInt(7) },
       ]);
+    });
     const client: any = { userActivityLog: { count, groupBy }, $queryRaw };
     const prisma: any = { getReadClient: () => client };
     const service = new UserActivityAdminService(prisma);
@@ -92,9 +104,13 @@ describe('UserActivityAdminService.statsAsAdmin — métricas do dashboard', () 
       anonymousEvents: 40,
       eventPageViews: 25,
       paymentsConfirmed: 8,
+      averageTicket: 6000, // 30000 ÷ 5 pedidos
+      totalPaid: 30000,
+      repeatBuyers: 3,
     });
     // ordenado: CHECKOUT (60) antes de PAGE_VIEW (10)
     expect(res.data.byCategory[0]).toEqual({ category: 'CHECKOUT', count: 60 });
+    expect(res.data.byPaymentMethod[0]).toEqual({ method: 'CREDIT_CARD', count: 3 });
     expect(res.data.perDay).toEqual([{ day: '2026-06-01', count: 7 }]);
     // viewsPerDay também sai convertida (mesmo mock do $queryRaw)
     expect(res.data.viewsPerDay).toEqual([{ day: '2026-06-01', count: 7 }]);
@@ -130,6 +146,23 @@ describe('UserActivityAdminService.statsAsAdmin — métricas do dashboard', () 
     expect(count.mock.calls[2][0].where.category).toBeUndefined();
     expect(count.mock.calls[2][0].where.action).toBe('page:event');
     expect(count.mock.calls[3][0].where.action).toBe('order.paid');
+  });
+
+  it('"compraram mais de uma vez" segue período + eventId (bound como parâmetro)', async () => {
+    const { service, $queryRaw } = build();
+    const eventId = '11111111-2222-4333-8444-555555555555';
+
+    await service.statsAsAdmin({ from: '2026-06-02', to: '2026-06-02', eventId });
+
+    const repeatCall = $queryRaw.mock.calls.find((c: any[]) =>
+      (c[0].sql ?? c[0].strings?.join('')).includes('HAVING COUNT(*) > 1'),
+    );
+    const values: unknown[] = repeatCall[0].values;
+    expect(values).toContain(eventId);
+    expect(values.filter((v): v is Date => v instanceof Date).map((d) => d.toISOString())).toEqual([
+      '2026-06-02T03:00:00.000Z',
+      '2026-06-03T02:59:59.999Z',
+    ]);
   });
 
   it('to vira fim do dia BRT (23:59:59.999 BRT = 02:59:59.999Z do dia seguinte) — inclusivo', async () => {

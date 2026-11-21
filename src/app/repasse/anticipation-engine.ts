@@ -60,6 +60,16 @@ export function unitCost(gross: number, daysUntilRelease: number, monthlyRate: n
   return Math.round(gross * monthlyRate * (daysUntilRelease / 30));
 }
 
+/**
+ * Só os recebíveis que VALEM a pena antecipar: custo < valor (líquido > 0). Com taxa
+ * mensal alta ou parcela que vence longe, o custo passa do valor; essa unidade não
+ * pode entrar no "Valor disponível" — o motor nunca a escolhe (líquido ≤ 0 só piora
+ * o conjunto) e o disponível, o "Antecipar tudo" e o recomendado ficavam divergentes.
+ */
+export function anticipatableUnits<T extends AnticipationUnit>(units: T[], monthlyRate: number): T[] {
+  return units.filter((u) => unitCost(u.gross, u.daysUntilRelease, monthlyRate) < u.gross);
+}
+
 /** Soma bruta de todas as unidades — o "Valor disponível" (teto antecipável bruto). */
 export function totalAvailableGross(units: AnticipationUnit[]): number {
   return units.reduce((s, u) => s + u.gross, 0);
@@ -170,8 +180,14 @@ function dpMinGross(
   const INF = Number.POSITIVE_INFINITY;
   const dpGross = new Float64Array(R + 1).fill(INF);
   const dpNet = new Float64Array(R + 1).fill(INF); // líquido REAL do caminho (desempate)
-  const fromUnit = new Int32Array(R + 1).fill(-1);
-  const fromPrev = new Int32Array(R + 1).fill(-1);
+  // Decisão por (unidade, estado) num bitset: "o estado k melhorou nesta unidade".
+  // (Antes: 1 "de onde veio" por estado, sobrescrito pelas unidades seguintes →
+  // a reconstrução seguia um caminho misturado e devolvia conjuntos que NÃO cobriam
+  // o pedido — recomendado < pedido com mais de 16 recebíveis.) n×(R+1) ≤ orçamento
+  // → no máximo ~2,5 MB. Estado R é capado (vários k levam a R): guarda o k de origem.
+  const takeBits = new Uint32Array(Math.ceil((n * (R + 1)) / 32));
+  const prevAtR = new Int32Array(n).fill(-1);
+  const scaled = new Int32Array(n);
   dpGross[0] = 0;
   dpNet[0] = 0;
 
@@ -179,7 +195,11 @@ function dpMinGross(
     const g = units[ui].gross;
     const realNet = units[ui].net;
     const ns = Math.floor(realNet / r); // contribuição de líquido ESCALADA (piso)
+    scaled[ui] = ns;
     if (ns <= 0) continue; // some ~nada à cobertura → nunca compensa (só soma gross)
+    const base = ui * (R + 1);
+    // k decrescente: dp[k] lido ainda é o da rodada anterior (só escrevemos em nk > k,
+    // ou em R a partir de k = R, que é o primeiro lido).
     for (let k = R; k >= 0; k--) {
       if (dpGross[k] === INF) continue;
       const nk = k + ns >= R ? R : k + ns;
@@ -188,8 +208,9 @@ function dpMinGross(
       if (cg < dpGross[nk] || (cg === dpGross[nk] && cn < dpNet[nk])) {
         dpGross[nk] = cg;
         dpNet[nk] = cn;
-        fromUnit[nk] = ui;
-        fromPrev[nk] = k;
+        const bit = base + nk;
+        takeBits[bit >>> 5] |= 1 << (bit & 31);
+        if (nk === R) prevAtR[ui] = k;
       }
     }
   }
@@ -198,15 +219,22 @@ function dpMinGross(
   // (Σlíquido ≥ X garante que cobrir tudo é válido). Raro.
   if (dpGross[R] === INF) return collectPicked(units, () => true);
 
+  // Reconstrução de trás pra frente: se o estado k melhorou na unidade ui, ela entra
+  // e voltamos ao estado de origem; senão o estado já vinha das unidades anteriores.
   const picked = new Set<number>();
   let k = R;
-  while (k > 0) {
-    const ui = fromUnit[k];
-    if (ui < 0) break;
+  for (let ui = n - 1; ui >= 0 && k > 0; ui--) {
+    const bit = ui * (R + 1) + k;
+    if ((takeBits[bit >>> 5] & (1 << (bit & 31))) === 0) continue;
     picked.add(ui);
-    k = fromPrev[k];
+    k = k === R ? prevAtR[ui] : k - scaled[ui];
   }
-  return collectPicked(units, (idx) => picked.has(idx));
+  const pick = collectPicked(units, (idx) => picked.has(idx));
+  // Defesa: nunca devolver um conjunto que não cobre o pedido.
+  // Cobertura pelo campo `net` (no modo bruto ele carrega o próprio gross).
+  let covered = 0;
+  picked.forEach((idx) => (covered += units[idx].net));
+  return covered >= X ? pick : collectPicked(units, () => true);
 }
 
 /**
@@ -280,4 +308,57 @@ export function recommendedNetFor(
 ): number {
   if (requestedNet <= 0 || units.length === 0) return 0;
   return computeAnticipation(units, requestedNet, monthlyRate).recommendedNet;
+}
+
+export interface AnticipationByGrossResult extends AnticipationResult {
+  /** Bruto das unidades inteiras que cobrem o pedido — o "valor recomendado" do input. */
+  recommendedGross: number;
+}
+
+/**
+ * Modo BRUTO (input do modal desde 20/11): o organizador informa quanto quer
+ * ANTECIPAR em recebíveis (até o "Valor disponível") e recebe esse valor MENOS a
+ * taxa. Consumo continua por unidades INTEIRAS: escolhemos o subconjunto de menor
+ * gross que cobre o pedido (menos sobra). Se o pedido não cai numa fronteira, a
+ * sobra (gross consumido − pedido) vira taxa, como no modo líquido — o "valor
+ * recomendado" (= gross do conjunto) evita isso.
+ *   recebe = pedido − custo real   (0 se a taxa passar do pedido)
+ */
+export function computeAnticipationByGross(
+  units: AnticipationUnit[],
+  requestedGross: number,
+  monthlyRate: number,
+): AnticipationByGrossResult {
+  if (requestedGross <= 0 || units.length === 0) {
+    return {
+      consumedUnitIds: [],
+      consumedGross: 0,
+      realCost: 0,
+      recommendedNet: 0,
+      receive: 0,
+      effectiveFee: 0,
+      effectiveRatePct: 0,
+      recommendedGross: 0,
+    };
+  }
+  const priced = priceUnits(units, monthlyRate);
+  const totalGross = priced.reduce((s, u) => s + u.gross, 0);
+  const pick =
+    requestedGross >= totalGross
+      ? collectPicked(priced, () => true)
+      : // Cobertura por gross: o motor cobre pelo campo `net`, então ele recebe o gross.
+        minGrossSubsetForNet(priced.map((u) => ({ ...u, net: u.gross })), requestedGross);
+  const requested = Math.min(requestedGross, pick.gross);
+  const receive = Math.max(0, requested - pick.cost);
+  const effectiveFee = pick.gross - receive;
+  return {
+    consumedUnitIds: pick.ids,
+    consumedGross: pick.gross,
+    realCost: pick.cost,
+    recommendedNet: pick.gross - pick.cost,
+    receive,
+    effectiveFee,
+    effectiveRatePct: pick.gross > 0 ? (effectiveFee / pick.gross) * 100 : 0,
+    recommendedGross: pick.gross,
+  };
 }

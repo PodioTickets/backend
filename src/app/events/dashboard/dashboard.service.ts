@@ -10,6 +10,7 @@ import { RepasseService } from '../../repasse/repasse.service';
 import { DashboardOverviewQueryDto } from './dto/overview.dto';
 import { DashboardRankingsQueryDto } from './dto/rankings.dto';
 import { DashboardSecondaryQueryDto } from './dto/secondary.dto';
+import { lotDepletionStatus } from './lot-depletion.util';
 import {
   DashboardPeriod,
   calculateDateRange,
@@ -71,8 +72,6 @@ const CACHE_TTL_OVERVIEW = 30;
 const CACHE_TTL_RANKINGS = 30;
 const CACHE_TTL_SECONDARY = 60;
 
-/** Quantas cidades o card "Cidade com mais vendas" exibe. */
-const TOP_CITIES_LIMIT = 2;
 /**
  * Teto de locais enviados ao geocoding/mapa (cada um vira um lookup + item de
  * fila no worker). Os locais além do teto continuam somando no total das
@@ -93,6 +92,8 @@ const normalizeGeoText = (s: string) =>
  * card vinha de outra query (1 por INSCRIÇÃO, sobre o espelho `User.city`), então
  * todo pedido com mais de um ingresso — ou com billing diferente do cadastro —
  * abria uma diferença entre o número do card e o do mapa.
+ * Todas as cidades, da que mais vende para a que menos (quadro do mapa, 2026-11-13). O tamanho
+ * já é limitado pelo `MAX_LOCATION_ROWS` da agregação por bairro.
  */
 function buildTopCities(
   locations: { city: string; state?: string; purchases: number }[],
@@ -108,8 +109,7 @@ function buildTopCities(
     }
   }
   return Array.from(merged.values())
-    .sort((a, b) => b.purchases - a.purchases)
-    .slice(0, TOP_CITIES_LIMIT);
+    .sort((a, b) => b.purchases - a.purchases);
 }
 
 @Injectable()
@@ -291,6 +291,7 @@ export class DashboardService {
       topProductVariations,
       lotsNearDepletion,
       salesByPaymentMethod,
+      soldValueByBatchId,
     ] = await Promise.all([
       this.queryTicketRanking(eventId, dateRange, ticketIds, organizerFeeRate),
       this.ticketsService.findAll(eventId, {
@@ -301,6 +302,7 @@ export class DashboardService {
       this.buildTopProductVariations(eventId, dateRange, ticketIds, organizerFeeRate),
       this.buildLotsNearDepletion(eventId),
       this.buildSalesByPaymentMethod(eventId, dateRange, ticketIds, organizerFeeRate),
+      this.querySoldValueByBatch(eventId),
     ]);
 
     const total = rankingRows.length;
@@ -325,7 +327,7 @@ export class DashboardService {
         .filter((r) => !r.is_modality)
         .map((r) => [r.item_id, Number(r.total_net)]),
     );
-    const ticketsWithNet = this.injectOrganizerNetIntoTickets(tickets, netByTicketId);
+    const ticketsWithNet = this.injectOrganizerNetIntoTickets(tickets, netByTicketId, soldValueByBatchId);
 
     const response = {
       message: 'Dashboard rankings fetched successfully',
@@ -606,6 +608,7 @@ export class DashboardService {
   private injectOrganizerNetIntoTickets(
     tickets: any,
     netByTicketId: Map<string, number>,
+    soldValueByBatchId: Map<string, number>,
   ): any {
     const list = tickets?.data?.tickets;
     if (!Array.isArray(list)) return tickets;
@@ -617,9 +620,30 @@ export class DashboardService {
         tickets: list.map((t: any) => ({
           ...t,
           organizerNet: netByTicketId.get(t.id) ?? 0,
+          batches: t.batches?.map((b: any) => ({ ...b, soldValue: soldValueByBatchId.get(b.id) ?? 0 })),
         })),
       },
     };
+  }
+
+  /**
+   * Centavos vendidos por lote, a preço de compra: o preço do lote pode mudar depois da
+   * venda, então `quantidade × preço atual` distorceria o rateio entre lotes do ingresso.
+   * Mesmo predicado do `quantitySold` do TicketsService.findAll.
+   */
+  private async querySoldValueByBatch(eventId: string): Promise<Map<string, number>> {
+    const rows = await this.prisma.getReadClient().$queryRaw<{ batchId: string; total: bigint }[]>(Prisma.sql`
+      SELECT
+        rt."batchId",
+        SUM(COALESCE((rt."ticketSnapshot"->'batch'->>'price')::int, tb.price))::bigint AS total
+      FROM "RegistrationTicket" rt
+      INNER JOIN "Registration" r ON r.id = rt."registrationId"
+      INNER JOIN "TicketBatch" tb ON tb.id = rt."batchId"
+      WHERE r."eventId" = ${eventId}::uuid
+        AND r.status <> 'CANCELLED'::"RegistrationStatus"
+      GROUP BY rt."batchId"
+    `);
+    return new Map(rows.map((r) => [r.batchId, Number(r.total)]));
   }
 
   /**
@@ -768,7 +792,8 @@ export class DashboardService {
 
   /**
    * Heatmap de vendas — registrations PAID+CONFIRMED agrupadas por dia da
-   * semana (0=Dom...6=Sáb) e hora (0..23) do `Order.createdAt`.
+   * semana (0=Dom...6=Sáb) e hora (0..23) do `Order.createdAt` em horário de Brasília
+   * (mesma conversão do `chartBucketExpr`; antes saía em UTC, 3h adiantado).
    */
   private async queryHeatmap(
     eventId: string,
@@ -777,8 +802,8 @@ export class DashboardService {
   ): Promise<{ day: string; hour: number; sales: number }[]> {
     const rows = await this.prisma.getReadClient().$queryRaw<HeatmapRow[]>(Prisma.sql`
       SELECT
-        EXTRACT(DOW FROM o."createdAt")::int AS dow,
-        EXTRACT(HOUR FROM o."createdAt")::int AS hour,
+        EXTRACT(DOW FROM o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')::int AS dow,
+        EXTRACT(HOUR FROM o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')::int AS hour,
         COUNT(*)::bigint AS sales
       FROM "Registration" r
       INNER JOIN "Order" o ON o.id = r."orderId"
@@ -1135,11 +1160,11 @@ export class DashboardService {
     const now = new Date();
     const allBatches = await prismaRead.ticketBatch.findMany({
       where: { ticket: { eventId, isActive: true }, quantity: { gt: 0 } },
-      include: { ticket: { select: { id: true, name: true } } },
+      include: { ticket: { select: { id: true, name: true, category: { select: { name: true } } } } },
       orderBy: [{ ticketId: 'asc' }, { sortOrder: 'asc' }],
     });
 
-    const activeBatchByTicket = new Map<string, { id: string; number: number }>();
+    const activeBatchByTicket = new Map<string, { id: string; number: number; count: number }>();
     const batchesByTicket = new Map<string, typeof allBatches>();
     for (const b of allBatches) {
       const list = batchesByTicket.get(b.ticketId) ?? [];
@@ -1152,6 +1177,7 @@ export class DashboardService {
         activeBatchByTicket.set(ticketId, {
           id: active.id,
           number: tBatches.indexOf(active) + 1,
+          count: tBatches.length, // "Lote 3 de 3" no card do dashboard
         });
       }
     }
@@ -1214,20 +1240,12 @@ export class DashboardService {
       }
     }
 
-    const statusOf = (remaining: number, pct: number): 'Normal' | 'Atenção' | 'Crítico' => {
-      const lowStock = remaining > 0 && remaining <= 25;
-      if (pct >= 90 || remaining === 0 || (lowStock && pct >= 50)) return 'Crítico';
-      if (pct >= 75 || (lowStock && pct >= 25)) return 'Atenção';
-      return 'Normal';
-    };
-
     const tickets = new Map<
       string,
       {
         ticketId: string;
         ticketName: string;
-        total: number;
-        sold: number;
+        categoryName: string | null;
         batches: Array<{
           id: string;
           name: string;
@@ -1249,12 +1267,9 @@ export class DashboardService {
       const entry = tickets.get(batch.ticketId) ?? {
         ticketId: batch.ticket.id,
         ticketName: batch.ticket.name,
-        total: 0,
-        sold: 0,
+        categoryName: batch.ticket.category?.name ?? null,
         batches: [],
       };
-      entry.total += batch.quantity;
-      entry.sold += batchSold;
       entry.batches.push({
         id: batch.id,
         name: `Lote ${(batch.sortOrder ?? entry.batches.length) + 1}`,
@@ -1262,26 +1277,31 @@ export class DashboardService {
         sold: batchSold,
         remaining: batchRemaining,
         percentageSold: batchPct,
-        status: statusOf(batchRemaining, batchPct),
+        status: lotDepletionStatus(batchPct, true),
       });
       tickets.set(batch.ticketId, entry);
     }
 
     return Array.from(tickets.values())
       .map((t) => {
-        const remaining = Math.max(0, t.total - t.sold);
-        const pct = t.total > 0 ? Math.round((t.sold / t.total) * 10000) / 100 : 0;
+        // Regra do usuário (09/11): o ingresso é medido pela SOMA de todos os lotes (inclusive os fora
+        // da janela de datas), não só pelos lotes vigentes. Crítico só no último lote ("3 de 3").
+        const total = (batchesByTicket.get(t.ticketId) ?? []).reduce((s, b) => s + b.quantity, 0);
+        const sold = Math.min(totalSoldByTicketId.get(t.ticketId) ?? 0, total);
+        const remaining = Math.max(0, total - sold);
+        const pct = total > 0 ? Math.round((sold / total) * 10000) / 100 : 0;
         const active = activeBatchByTicket.get(t.ticketId) ?? null;
         return {
           ticketId: t.ticketId,
           ticketName: t.ticketName,
-          status: statusOf(remaining, pct),
-          sold: t.sold,
-          total: t.total,
+          categoryName: t.categoryName,
+          status: lotDepletionStatus(pct, !active || active.number === active.count),
+          sold,
+          total,
           remaining,
           percentageSold: pct,
           activeBatch: active
-            ? { id: active.id, number: active.number, label: `Lote ${active.number}` }
+            ? { id: active.id, number: active.number, count: active.count, label: `Lote ${active.number}` }
             : null,
           batches: t.batches,
         };

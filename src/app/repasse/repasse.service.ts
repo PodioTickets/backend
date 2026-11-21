@@ -14,8 +14,10 @@ import { PaymentMethod, PaymentStatus, WithdrawalStatus } from '@prisma/client';
 import { computeRefundImpact, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 import {
   computeAnticipation,
+  computeAnticipationByGross,
   totalAvailableGross,
   unitCost,
+  anticipatableUnits,
   type AnticipationUnit,
 } from './anticipation-engine';
 
@@ -974,11 +976,13 @@ export class RepasseService {
   async getAnticipationQuote(userId: string, eventId: string) {
     await this.assertAccess(userId, eventId);
     const prisma = this.prisma.getWriteClient();
-    const [units, monthlyRate, enabled] = await Promise.all([
+    const [allUnits, monthlyRate, enabled] = await Promise.all([
       this.loadAnticipatableUnits(eventId, prisma),
       this.loadAnticipationRate(eventId, prisma),
       this.loadAnticipationEnabled(eventId, prisma),
     ]);
+    // Fora o que custa >= o valor (não vale antecipar) — mesmo filtro do request.
+    const units = anticipatableUnits(allUnits, monthlyRate);
     // "Valor disponível" = total antecipável BRUTO (soma das unidades).
     const availableTotal = totalAvailableGross(units);
     // Líquido MÁXIMO (se antecipar tudo) — teto do que o organizador recebe hoje.
@@ -1019,6 +1023,8 @@ export class RepasseService {
     eventId: string,
     amount: number,
     clientIp?: string | null,
+    /** 'net' (legado): amount = quanto recebe. 'gross': amount = quanto antecipa (recebe amount − taxa). */
+    mode: 'net' | 'gross' = 'net',
   ) {
     await this.assertAccess(userId, eventId);
     if (!amount || amount <= 0) {
@@ -1029,11 +1035,13 @@ export class RepasseService {
     const anticipation = await prismaWrite.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${eventId}))`;
 
-      const [units, monthlyRate, enabled] = await Promise.all([
+      const [allUnits, monthlyRate, enabled] = await Promise.all([
         this.loadAnticipatableUnits(eventId, tx),
         this.loadAnticipationRate(eventId, tx),
         this.loadAnticipationEnabled(eventId, tx),
       ]);
+      // Mesmo filtro da cotação: o pedido só consome o que o organizador viu.
+      const units = anticipatableUnits(allUnits, monthlyRate);
 
       // Gate autoritativo: org com antecipação desligada não antecipa (mesmo que a
       // UI escape). Dentro da transação (sob advisory lock) para não correr com um
@@ -1044,14 +1052,28 @@ export class RepasseService {
         );
       }
 
-      // `amount` = quanto o organizador quer RECEBER hoje (líquido). Recálculo
-      // AUTORITATIVO: o motor escolhe as unidades mais baratas por INTEIRO.
-      const result = computeAnticipation(units, amount, monthlyRate);
+      // Recálculo AUTORITATIVO por unidades INTEIRAS. Modo líquido: `amount` = quanto
+      // quer RECEBER. Modo bruto: `amount` = quanto quer ANTECIPAR (recebe − taxa).
+      if (mode === 'gross') {
+        const available = totalAvailableGross(units);
+        if (amount > available) {
+          throw new BadRequestException(
+          `Valor acima do disponível para antecipação. Disponível: ${available} centavos, solicitado: ${amount} centavos`,
+          );
+        }
+      }
+      const result =
+        mode === 'gross'
+          ? computeAnticipationByGross(units, amount, monthlyRate)
+          : computeAnticipation(units, amount, monthlyRate);
       if (result.consumedGross <= 0) {
         throw new BadRequestException('Nenhum recebível disponível para antecipação.');
       }
-      // Teto: não dá pra receber mais do que o líquido total possível.
-      if (amount > result.recommendedNet) {
+      if (mode === 'gross' && result.receive <= 0) {
+        throw new BadRequestException('Valor muito baixo: a taxa de antecipação supera o valor informado.');
+      }
+      // Teto (modo líquido): não dá pra receber mais do que o líquido total possível.
+      if (mode === 'net' && amount > result.recommendedNet) {
         throw new BadRequestException(
           `Valor acima do disponível para antecipação. Máximo a receber: ${result.recommendedNet} centavos, solicitado: ${amount} centavos`,
         );

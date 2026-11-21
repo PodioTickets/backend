@@ -105,6 +105,16 @@ describe('ExportRegistrationsService — coluna fixa de ID da inscrição', () =
       .toBe('14/06/2026 - 22:00');
   });
 
+  it('"Relatório gerado em" sai em BRT, não no fuso do servidor', () => {
+    // 2026-06-15T01:00:00Z = 14/06 às 22:00 em Brasília (UTC-3).
+    jest.useFakeTimers().setSystemTime(new Date('2026-06-15T01:00:00.000Z'));
+    try {
+      expect(txtLines([reg], ['nome'])[0]).toContain('Relatório gerado em 14/06/2026, 22:00:00');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('data da compra: ausente → célula vazia', () => {
     expect(dataCompraCell({ id: 'x', order: {} })).toBe('');
   });

@@ -161,6 +161,7 @@ export class TicketsService {
           ageLimitMax: createTicketDto.ageLimit?.max,
           minPurchaseQuantity: createTicketDto.minPurchaseQuantity ?? null,
           maxPurchaseQuantity: createTicketDto.maxPurchaseQuantity ?? null,
+          autoSoldOutAt: createTicketDto.autoSoldOutAt ? new Date(createTicketDto.autoSoldOutAt) : null,
           hasKit: createTicketDto.hasKit || false,
           // kitId/produtos só existem quando o ingresso TEM kit. Sem esse gate, um payload
           // com hasKit=false + productIds/kitId criaria vínculos órfãos e o checkout exibiria
@@ -346,7 +347,7 @@ export class TicketsService {
       const totalSold = batches.reduce((sum, b) => sum + b.quantitySold, 0);
 
       const { batch: activeBatch, batchNumber, status: activeBatchStatus } =
-        resolveActiveBatch(batches, now);
+        resolveActiveBatch(batches, now, ticket.autoSoldOutAt);
 
       const label = batchOrdinalLabel(batchNumber, batches.length);
 
@@ -473,7 +474,7 @@ export class TicketsService {
     const totalSold = batches.reduce((sum, b) => sum + b.quantitySold, 0);
 
     const { batch: activeBatch, batchNumber, status: activeBatchStatus } =
-      resolveActiveBatch(batches, now);
+      resolveActiveBatch(batches, now, ticket.autoSoldOutAt);
 
     const label = batchOrdinalLabel(batchNumber, batches.length);
 
@@ -569,6 +570,10 @@ export class TicketsService {
     if ('ageLimit' in updateTicketDto) {
       updateData.ageLimitMin = updateTicketDto.ageLimit?.min ?? null;
       updateData.ageLimitMax = updateTicketDto.ageLimit?.max ?? null;
+    }
+    // Date (não a string ISO): a auditoria compara com o valor gravado via String().
+    if ('autoSoldOutAt' in updateTicketDto) {
+      updateData.autoSoldOutAt = updateTicketDto.autoSoldOutAt ? new Date(updateTicketDto.autoSoldOutAt) : null;
     }
 
     if (updateTicketDto.categoryId !== undefined) {
@@ -1011,6 +1016,7 @@ export class TicketsService {
           ageLimitMax: originalTicket.ageLimitMax,
           minPurchaseQuantity: originalTicket.minPurchaseQuantity,
           maxPurchaseQuantity: originalTicket.maxPurchaseQuantity,
+          autoSoldOutAt: originalTicket.autoSoldOutAt,
           hasKit: originalTicket.hasKit,
           kitId: originalTicket.kitId,
           eventId: originalTicket.eventId,

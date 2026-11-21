@@ -901,7 +901,7 @@ export class EventsService {
   }
 
   async search(searchDto: SearchEventsDto) {
-    const { page = 1, limit = 20, ...searchFilters } = searchDto;
+    const { page = 1, limit = 20, featuredFirst = true, ...searchFilters } = searchDto;
 
     // Pré-filtros por ID (texto via unaccent, preço via MIN comprável) rodam em
     // paralelo — independentes; o where combina ambos por interseção de `id`.
@@ -989,13 +989,15 @@ export class EventsService {
             skip: Math.min(skip, upcomingTotal),
             take: upcomingTake,
             select: searchSelect,
-            // Destaque PRIMEIRO (admin) e depois por data. `nulls: 'last'` mantém
-            // os não destacados depois. A ordenação explícita do usuário
-            // (nome/data-desc) é aplicada no client sobre a página.
+            // Destaque PRIMEIRO (admin) e depois por data — só sem filtro no front
+            // (`featuredFirst=false` desliga). `nulls: 'last'` mantém os não
+            // destacados depois. Nome/data-desc são aplicados no client.
             orderBy: [
-              { featuredOrder: { sort: 'asc', nulls: 'last' } },
-              { eventDate: 'asc' },
-              { id: 'asc' },
+              ...(featuredFirst
+                ? [{ featuredOrder: { sort: 'asc' as const, nulls: 'last' as const } }]
+                : []),
+              { eventDate: 'asc' as const },
+              { id: 'asc' as const },
             ],
           })
         : Promise.resolve([]),
@@ -5832,6 +5834,7 @@ export class EventsService {
           },
           coupon: { select: { type: true, value: true, appliesTo: true } },
           autoCoupon: { select: { type: true, value: true, appliesTo: true } },
+          extraAutoCoupons: { select: { discount: true, coupon: { select: { type: true, value: true, appliesTo: true } } } },
         },
       },
     };
@@ -5909,6 +5912,8 @@ export class EventsService {
       return {
         id: reg.id,
         status: reg.status,
+        // Trocada pelo admin (CANCELLED + voidedAt) → "Trocado" no export (formatStatus).
+        voidedAt: reg.voidedAt ?? null,
         user: participant,
         emergencyContact: {
           name: reg.emergencyContactName ?? null,
@@ -6053,6 +6058,7 @@ export class EventsService {
           },
           coupon: { select: { type: true, value: true, appliesTo: true } },
           autoCoupon: { select: { type: true, value: true, appliesTo: true } },
+          extraAutoCoupons: { select: { discount: true, coupon: { select: { type: true, value: true, appliesTo: true } } } },
         },
       },
     };
@@ -6074,6 +6080,8 @@ export class EventsService {
       return {
         id: reg.id,
         status: reg.status,
+        // Trocada pelo admin (CANCELLED + voidedAt) → "Trocado" no export (formatStatus).
+        voidedAt: reg.voidedAt ?? null,
         user: participant,
         emergencyContact: {
           name: reg.emergencyContactName ?? null,

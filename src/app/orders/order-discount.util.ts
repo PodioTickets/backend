@@ -149,6 +149,83 @@ export function rankAutoCouponCandidates<T extends { coupon: { id: string }; dis
 }
 
 /**
+ * Cupons automáticos que valem JUNTOS: só competem os que cobrem o mesmo ingresso. Percorre o
+ * ranking (maior desconto primeiro) e o cupom escolhido tira dos demais os ingressos dele.
+ * O 1º é o principal do pedido. O pay faz esta mesma passada intercalando a reserva de uso.
+ */
+export function selectAutoCoupons<T extends { coupon: { id: string }; discount: number; coveredTicketIds: string[] }>(
+  candidates: T[],
+  currentCouponId?: string | null,
+): T[] {
+  const taken = new Set<string>();
+  return rankAutoCouponCandidates(candidates, currentCouponId).filter((c) => {
+    if (c.coveredTicketIds.some((id) => taken.has(id))) return false;
+    c.coveredTicketIds.forEach((id) => taken.add(id));
+    return true;
+  });
+}
+
+/**
+ * Automático que vale junto de um cupom de código (manual). Regra de 2026-11-09: QUANTITY só com
+ * "Acumular descontos" (`allowStacking`); sem ela o manual tira o automático. AGE (legado) segue acumulando.
+ * 2026-11-11: o manual só tira o QUANTITY dos ingressos DELE; nos outros o automático segue valendo
+ * (antes saía do pedido inteiro se os dois dividissem algum ingresso).
+ *
+ * Devolve o cupom com o `appliesTo` reduzido (a faixa de quantidade passa a contar só esses
+ * ingressos), o próprio cupom quando nada muda, ou null quando não sobra ingresso.
+ * 2026-11-13: o bloqueio vale para a CATEGORIA inteira — ingresso da mesma categoria de um ingresso do
+ * manual também perde o automático (regra do usuário). `ticketCategories` = ingressos do evento com a
+ * categoria; sem categoria, só o próprio ingresso.
+ * `orderTicketIds` resolve o "all" do automático. Manual "all"/vazio cobre tudo → null.
+ */
+export function autoCouponScopeWithManual<T extends { couponType: string; allowStacking?: boolean | null; appliesTo?: string | null }>(
+  coupon: T,
+  manualAppliesTo: string | null | undefined,
+  orderTicketIds: string[],
+  ticketCategories: ReadonlyArray<{ id: string; categoryId?: string | null }> = [],
+): T | null {
+  if (coupon.couponType === 'AGE' || coupon.allowStacking) return coupon;
+  if (coupon.couponType !== 'QUANTITY') return null;
+  const manualIds = parseAppliesToArray(manualAppliesTo);
+  if (manualIds.length === 0) return null;
+  const blocked = manualBlockedTicketIds(manualIds, ticketCategories);
+  const autoIds = parseAppliesToArray(coupon.appliesTo);
+  const scope = autoIds.length > 0 ? autoIds : [...new Set(orderTicketIds)];
+  const remaining = scope.filter((id) => !blocked.has(id));
+  if (remaining.length === 0) return null;
+  if (autoIds.length > 0 && remaining.length === autoIds.length) return coupon;
+  return { ...coupon, appliesTo: JSON.stringify(remaining) };
+}
+
+/** Ingressos do manual + todos os da mesma categoria deles. */
+function manualBlockedTicketIds(
+  manualIds: string[],
+  ticketCategories: ReadonlyArray<{ id: string; categoryId?: string | null }>,
+): Set<string> {
+  const blocked = new Set(manualIds);
+  const categories = new Set(
+    ticketCategories.filter((t) => blocked.has(t.id) && t.categoryId).map((t) => t.categoryId as string),
+  );
+  for (const t of ticketCategories) if (t.categoryId && categories.has(t.categoryId)) blocked.add(t.id);
+  return blocked;
+}
+
+/** Ingressos (ticketId) das unidades `slots` — mesma ordem de unidades do `distributeDiscount`. */
+export function ticketIdsOfSlots(reservedTickets: any[], slots: number[]): string[] {
+  const units = reservedTickets.flatMap((rt) => Array(rt.quantity ?? 0).fill(rt.ticketId));
+  return [...new Set(slots.map((i) => units[i]).filter(Boolean))] as string[];
+}
+
+/** Soma por unidade o rateio de vários cupons (mesma ordem de unidades; entrada do merge). */
+export function sumUnitDiscounts(unitLists: any[][]): any[] {
+  return (unitLists[0] ?? []).map((u, i) => ({
+    ...u,
+    unitDiscount: unitLists.reduce((s, l) => s + (l[i]?.unitDiscount ?? 0), 0),
+    productsDiscount: unitLists.reduce((s, l) => s + (l[i]?.productsDiscount ?? 0), 0),
+  }));
+}
+
+/**
  * Desconto de cupom QUANTITY (all-or-nothing) — FONTE ÚNICA usada pelo caminho de
  * exibição (`evaluateAndApplyAutoCoupons` / `orderShape`) E pela cobrança (`pay`), para
  * que os dois NUNCA divirjam (regressão histórica: display escopava por `appliesTo`, o

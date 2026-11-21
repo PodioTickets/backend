@@ -253,6 +253,14 @@ export class CreateCouponDto {
     default: false,
   })
   applyToProducts?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  @ApiPropertyOptional({
+    description: 'QUANTITY: se true, acumula com cupom de código no mesmo pedido; senão o cupom de código tira este. Default: false.',
+    default: false,
+  })
+  allowStacking?: boolean;
 }
 
 export class UpdateCouponDto {
@@ -358,6 +366,10 @@ export class UpdateCouponDto {
   @IsOptional()
   @IsBoolean()
   applyToProducts?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  allowStacking?: boolean;
 }
 
 export class FilterCouponsDto {

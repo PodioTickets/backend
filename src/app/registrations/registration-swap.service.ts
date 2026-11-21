@@ -16,6 +16,7 @@ import {
   reverseRegistrationProductSale,
 } from '../../common/utils/product-stock.util';
 import { RegistrationsService } from './registrations.service';
+import { isEventDatePast } from '../../common/utils/event-status.util';
 import { swapEligibilityError, swapProductsError, SwapProductSelection } from './registration-swap.util';
 
 export interface SwapRegistrationTicketParams {
@@ -78,6 +79,10 @@ export class RegistrationSwapService {
         }
         if (reg.order?.status !== OrderStatus.PAID) {
           throw new BadRequestException('O pedido desta inscrição não está pago');
+        }
+        // Sem data = fail secure. Mesma regra de "evento concluído" (fim do dia em BRT).
+        if (!reg.event?.eventDate || isEventDatePast(reg.event.eventDate)) {
+          throw new BadRequestException('Não é possível trocar o ingresso depois da data do evento');
         }
 
         const oldRt = reg.tickets[0];
@@ -143,6 +148,7 @@ export class RegistrationSwapService {
         const { batch, status } = resolveActiveBatch(
           ticket.batches.map((b: any) => ({ ...b, quantitySold: soldMap.get(b.id) ?? 0 })),
           new Date(),
+          ticket.autoSoldOutAt,
         );
         if (status === 'SOLD_OUT') {
           throw new ConflictException(`Sem vagas disponíveis para o ingresso "${ticket.name}". Lote esgotado.`);

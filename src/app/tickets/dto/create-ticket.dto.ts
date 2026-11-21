@@ -148,6 +148,12 @@ export class CreateTicketDto {
   @ApiPropertyOptional({ description: 'Maximum units of this ticket per order', example: 4 })
   maxPurchaseQuantity?: number;
 
+  // Wall-clock como UTC (`...Z`), igual às datas do lote.
+  @IsOptional()
+  @IsDateString()
+  @ApiPropertyOptional({ description: 'Ticket becomes sold out at this date/time (wall-clock as UTC)' })
+  autoSoldOutAt?: string;
+
   @IsArray()
   @ArrayMinSize(1)
   @ValidateNested({ each: true })
@@ -238,6 +244,12 @@ export class UpdateTicketDto {
   @Max(20)
   @Type(() => Number)
   maxPurchaseQuantity?: number | null;
+
+  /** null = remove o esgotamento automático. */
+  @IsOptional()
+  @ValidateIf((o) => o.autoSoldOutAt !== null)
+  @IsDateString()
+  autoSoldOutAt?: string | null;
 
   @IsOptional()
   @IsArray()

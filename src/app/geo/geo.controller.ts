@@ -51,8 +51,8 @@ export class GeoController {
   }
 
   /**
-   * Localização aproximada (cidade) pelo IP do cliente — só para centralizar o mapa
-   * ao criar um evento. Resposta VARIA por IP → NUNCA cacheável em CDN compartilhada
+   * Localização aproximada (cidade) pelo IP do cliente — centraliza o mapa ao criar um
+   * evento e dá o "Perto de <cidade>" do card mobile. Resposta VARIA por IP → NUNCA cacheável em CDN compartilhada
    * (`private, no-store`), ao contrário dos estados/cidades (dado estático).
    */
   @Get('ip-location')

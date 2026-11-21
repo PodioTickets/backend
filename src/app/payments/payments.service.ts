@@ -1091,6 +1091,7 @@ export class PaymentsService {
         payment: true,
         coupon: true,
         autoCoupon: true,
+        extraAutoCoupons: { include: { coupon: true } },
         voucher: true,
         registrations: {
           include: {

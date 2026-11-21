@@ -139,6 +139,14 @@ export class AdminOrganizationsController {
     return this.organizationsService.createOrganization(dto);
   }
 
+  @Get('stats')
+  @NoCache()
+  @ApiOperation({ summary: '[Admin] Get organization aggregate stats (with/without events)' })
+  @ApiResponse({ status: 200, description: 'Aggregate counts' })
+  getOrganizationStats() {
+    return this.adminOrganizationsService.getOrganizationStats();
+  }
+
   @Get(':id')
   @NoCache()
   @ApiOperation({ summary: '[Admin] Get a single organization with full details' })

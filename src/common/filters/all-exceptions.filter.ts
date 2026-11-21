@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { HttpAdapterHost } from '@nestjs/core';
 import { Prisma } from '@prisma/client';
+import { parseErrorLocale, translateErrorList, translateErrorMessage } from '../i18n/error-translations';
 
 /**
  * Rótulos PT-BR para campos com unique constraint — usados na mensagem do P2002.
@@ -227,11 +228,15 @@ export class AllExceptionsFilter implements ExceptionFilter {
       );
     }
 
+    // Idioma do site público (o `ApiClient` manda `Accept-Language` en/es/pt-BR exato).
+    // Depois dos logs: o log fica sempre na mensagem original (PT).
+    const locale = parseErrorLocale(request?.headers?.['accept-language']);
+
     const responseBody: any = {
       statusCode: httpStatus,
       timestamp: new Date().toISOString(),
       path: httpAdapter.getRequestUrl(request),
-      message,
+      message: translateErrorMessage(message, locale),
     };
 
     // Campo aditivo — clientes que só leem `message` não são afetados
@@ -241,7 +246,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
     // Adicionar erros de validação se existirem
     if (errors) {
-      responseBody.errors = errors;
+      responseBody.errors = translateErrorList(errors, locale);
     }
 
     // Adicionar detalhes adicionais em desenvolvimento
