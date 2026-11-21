@@ -16,6 +16,7 @@ import {
   computeAnticipation,
   totalAvailableGross,
   unitCost,
+  anticipatableUnits,
   type AnticipationUnit,
 } from './anticipation-engine';
 
@@ -974,11 +975,13 @@ export class RepasseService {
   async getAnticipationQuote(userId: string, eventId: string) {
     await this.assertAccess(userId, eventId);
     const prisma = this.prisma.getWriteClient();
-    const [units, monthlyRate, enabled] = await Promise.all([
+    const [allUnits, monthlyRate, enabled] = await Promise.all([
       this.loadAnticipatableUnits(eventId, prisma),
       this.loadAnticipationRate(eventId, prisma),
       this.loadAnticipationEnabled(eventId, prisma),
     ]);
+    // Fora o que custa >= o valor (não vale antecipar) — mesmo filtro do request.
+    const units = anticipatableUnits(allUnits, monthlyRate);
     // "Valor disponível" = total antecipável BRUTO (soma das unidades).
     const availableTotal = totalAvailableGross(units);
     // Líquido MÁXIMO (se antecipar tudo) — teto do que o organizador recebe hoje.
@@ -1029,11 +1032,13 @@ export class RepasseService {
     const anticipation = await prismaWrite.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${eventId}))`;
 
-      const [units, monthlyRate, enabled] = await Promise.all([
+      const [allUnits, monthlyRate, enabled] = await Promise.all([
         this.loadAnticipatableUnits(eventId, tx),
         this.loadAnticipationRate(eventId, tx),
         this.loadAnticipationEnabled(eventId, tx),
       ]);
+      // Mesmo filtro da cotação: o pedido só consome o que o organizador viu.
+      const units = anticipatableUnits(allUnits, monthlyRate);
 
       // Gate autoritativo: org com antecipação desligada não antecipa (mesmo que a
       // UI escape). Dentro da transação (sob advisory lock) para não correr com um
