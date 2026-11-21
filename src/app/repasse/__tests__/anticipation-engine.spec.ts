@@ -1,4 +1,5 @@
 import {
+  anticipatableUnits,
   computeAnticipation,
   totalAvailableGross,
   unitCost,
@@ -199,5 +200,68 @@ describe('computeAnticipation — SELEÇÃO ÓTIMA (menor taxa, sem estouro do g
     expect(r.consumedGross).toBe(16000000);
     expect(r.recommendedNet).toBeGreaterThanOrEqual(15500000);
     expect(r.receive).toBe(15500000);
+  });
+});
+
+describe("anticipatableUnits — recebível que custa >= o valor", () => {
+  // Taxa de 25% a.m.: a unidade de 155 dias custa 129,17% do valor (líquido negativo).
+  const HIGH = 0.25;
+  const units = [
+    unit({ unitId: "perto", gross: 10000, daysUntilRelease: 10 }),
+    unit({ unitId: "longe", gross: 10000, daysUntilRelease: 155 }),
+    unit({ unitId: "exato", gross: 10000, daysUntilRelease: 120 }), // custo = valor
+  ];
+
+  it("tira as unidades com custo >= valor", () => {
+    expect(anticipatableUnits(units, HIGH).map((u) => u.unitId)).toEqual(["perto"]);
+    expect(anticipatableUnits(units, 0.02)).toHaveLength(3);
+  });
+
+  it("disponível, Antecipar tudo e recomendado batem depois do filtro", () => {
+    const ok = anticipatableUnits(units, HIGH);
+    const available = totalAvailableGross(ok);
+    const max = computeAnticipation(ok, available, HIGH).recommendedNet;
+    const all = computeAnticipation(ok, max, HIGH);
+    expect(all.consumedGross).toBe(available);
+    expect(all.recommendedNet).toBe(max);
+  });
+
+  it("sem o filtro (bug): o Valor total do Antecipar tudo ficava menor que o disponível", () => {
+    const available = totalAvailableGross(units);
+    const max = computeAnticipation(units, available, HIGH).recommendedNet;
+    const all = computeAnticipation(units, max, HIGH);
+    expect(all.consumedGross).toBeLessThan(available);
+    expect(all.recommendedNet).toBeGreaterThan(max);
+  });
+});
+
+describe('mais de 16 recebíveis (DP) — o conjunto escolhido cobre o pedido', () => {
+  // Regressão 20/11: com > 16 recebíveis a reconstrução da DP devolvia conjuntos que
+  // não cobriam o pedido (recomendado < pedido, valor total < disponível).
+  let seed = 7;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const rates = [0.02, 0.05, 0.1];
+
+  it('Antecipar tudo consome tudo e qualquer valor é coberto', () => {
+    for (let t = 0; t < 15; t++) {
+      const rate = rates[t % 3];
+      const units: AnticipationUnit[] = Array.from({ length: 17 + Math.floor(rnd() * 40) }, (_, i) => ({
+        unitId: 'u' + i,
+        orderId: 'o' + i,
+        paymentId: 'p' + i,
+        installmentNumber: null,
+        gross: 2000 + Math.floor(rnd() * 30000),
+        daysUntilRelease: 1 + Math.floor(rnd() * 330),
+      })).filter((u) => unitCost(u.gross, u.daysUntilRelease, rate) < u.gross);
+      const available = units.reduce((s, u) => s + u.gross, 0);
+      const max = computeAnticipation(units, available, rate).recommendedNet;
+      const all = computeAnticipation(units, max, rate);
+      expect(all.consumedGross).toBe(available);
+      expect(all.recommendedNet).toBe(max);
+      for (const req of [Math.floor(max / 3), Math.floor(max * rnd())]) {
+        if (req <= 0) continue;
+        expect(computeAnticipation(units, req, rate).recommendedNet).toBeGreaterThanOrEqual(req);
+      }
+    }
   });
 });
