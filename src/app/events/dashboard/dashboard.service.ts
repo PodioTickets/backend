@@ -11,6 +11,8 @@ import { DashboardOverviewQueryDto } from './dto/overview.dto';
 import { DashboardRankingsQueryDto } from './dto/rankings.dto';
 import { DashboardSecondaryQueryDto } from './dto/secondary.dto';
 import { lotDepletionStatus } from './lot-depletion.util';
+import { resolveActiveBatch } from '../../tickets/batch-active.util';
+import { eventWindowInstant } from '../../../common/utils/brt-date.util';
 import {
   DashboardPeriod,
   calculateDateRange,
@@ -1160,7 +1162,7 @@ export class DashboardService {
     const now = new Date();
     const allBatches = await prismaRead.ticketBatch.findMany({
       where: { ticket: { eventId, isActive: true }, quantity: { gt: 0 } },
-      include: { ticket: { select: { id: true, name: true, category: { select: { name: true } } } } },
+      include: { ticket: { select: { id: true, name: true, autoSoldOutAt: true, category: { select: { name: true } } } } },
       orderBy: [{ ticketId: 'asc' }, { sortOrder: 'asc' }],
     });
 
@@ -1172,19 +1174,27 @@ export class DashboardService {
       batchesByTicket.set(b.ticketId, list);
     }
     for (const [ticketId, tBatches] of batchesByTicket) {
-      const active = tBatches.find((b) => b.availableQuantity > 0);
-      if (active) {
+      // Mesma regra do checkout (fonte única). Antes era "1º lote com vaga": um lote por
+      // data já aberto não aparecia enquanto o anterior tinha vaga. Vendido = capacidade −
+      // saldo (o saldo já desconta reservas) — evita mais uma query por lote.
+      const { batch: active, batchNumber, status } = resolveActiveBatch(
+        tBatches.map((b) => ({ ...b, quantitySold: b.quantity - b.availableQuantity })),
+        now,
+        tBatches[0].ticket.autoSoldOutAt,
+      );
+      if (status === 'AVAILABLE') {
         activeBatchByTicket.set(ticketId, {
           id: active.id,
-          number: tBatches.indexOf(active) + 1,
+          number: batchNumber,
           count: tBatches.length, // "Lote 3 de 3" no card do dashboard
         });
       }
     }
 
+    // Datas do lote são wall-clock gravado como UTC → instante real em BRT (+3h).
     const batches = allBatches.filter((b) => {
-      if (b.startDate && new Date(b.startDate) > now) return false;
-      if (b.endDate && new Date(b.endDate) < now) return false;
+      if (b.startDate && now < eventWindowInstant(b.startDate)) return false;
+      if (b.endDate && now > eventWindowInstant(b.endDate)) return false;
       return true;
     });
 

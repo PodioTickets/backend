@@ -8,7 +8,8 @@ import {
   VoucherStatus,
 } from './dto/create-voucher.dto';
 import { buildDocumentList } from '../../common/utils/document.util';
-import { brtDayEndUtc, eventWindowInstant } from '../../common/utils/brt-date.util';
+import { brtDayEndUtc } from '../../common/utils/brt-date.util';
+import { resolveActiveBatch } from '../tickets/batch-active.util';
 import { OrganizationAuditService } from '../../common/services/organization-audit.service';
 
 @Injectable()
@@ -729,21 +730,8 @@ export class VouchersService {
     batches: Array<{ id: string; price: number; quantity: number; availableQuantity: number; startDate: Date | null; endDate: Date | null; sortOrder: number; triggerType: string; quantitySold: number }>,
   ): number | null {
     if (batches.length === 0) return null;
-    const sorted = [...batches].sort((a, b) => a.sortOrder - b.sortOrder);
-    const now = new Date();
-    let activeIdx = 0;
-    for (let i = 1; i < sorted.length; i++) {
-      const prev = sorted[activeIdx];
-      const curr = sorted[i];
-      if (curr.triggerType === 'AFTER_PREVIOUS_SOLD_OUT') {
-        if (prev.quantitySold >= prev.quantity) activeIdx = i;
-      } else {
-        // start é WALL-CLOCK (UTC) → instante real em BRT via `eventWindowInstant`
-        // (+3h), igual ao checkout/tela do evento; senão o lote virava 3h cedo.
-        if (curr.startDate && now >= eventWindowInstant(curr.startDate)) activeIdx = i;
-      }
-    }
-    return sorted[activeIdx].price;
+    // Mesma regra do checkout (fonte única) — a cópia local divergia do lote vendido.
+    return resolveActiveBatch(batches, new Date()).batch.price;
   }
 
   private parseAppliesTo(appliesTo: string | null): string | string[] | null {
