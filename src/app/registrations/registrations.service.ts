@@ -17,6 +17,16 @@ import { formatPdfAnswer } from '../../common/utils/pdf-answer.util';
 import { isQuantityInCouponRange } from '../orders/order-discount.util';
 import { formatEventHappensDate, formatEventCardAddress } from '../../common/utils/event-email-format.util';
 import {
+  buildVariationChoices,
+  buildVariationLabel,
+  describeRegistrationProductVariations,
+  describeSnapshotProductVariations,
+  isNoInterestVariation,
+  normalizeVariationIds,
+  resolveVariationSelection,
+} from '../../common/utils/product-variation.util';
+import { PRODUCT_VARIATIONS_INCLUDE, PRODUCT_VARIATION_LABEL_SELECT } from '../products/product.constants';
+import {
   holdsStock,
   acquireVariationHold,
   releaseVariationHold,
@@ -827,7 +837,11 @@ export class RegistrationsService {
             // productSnapshot (Json congelado no pay) carrega isIncludedInTicket, que o
             // receiptSnapshot.products legado não guardava — usado p/ expor o flag.
             productSnapshot: true,
+            variationId: true,
+            variationIds: true,
             variation: { select: { id: true, name: true, price: true } },
+            // Opções/grupos vivos p/ o rótulo do kit com várias variações.
+            product: { select: PRODUCT_VARIATION_LABEL_SELECT },
           },
         },
       },
@@ -896,10 +910,16 @@ export class RegistrationsService {
         const selectedVariation = baseSelected
           ? { ...baseSelected, price: rp?.unitPrice ?? baseSelected.price }
           : baseSelected;
+        // Kit com várias variações: opções escolhidas (ordem dos grupos) + rótulo único.
+        const chosen = rp
+          ? describeRegistrationProductVariations(rp)
+          : describeSnapshotProductVariations(p);
         return {
           ...p,
           variationEdited,
           selectedVariation,
+          variations: chosen.variations,
+          variationLabel: chosen.variationLabel || (selectedVariation?.name ?? ''),
           // Produto incluso no ingresso (custo embutido, não cobrado à parte). O
           // receiptSnapshot legado não guardava o flag → fallback p/ o productSnapshot
           // por-produto (congelado no pay). (2026-06-15.)
@@ -1278,7 +1298,8 @@ export class RegistrationsService {
           return {
             name: item.name || 'Produto',
             price: unitPrice,
-            variationName: item.selectedVariation?.name ?? undefined,
+            // Rótulo único (kit com várias variações: "Variação: opção · …").
+            variationName: item.variationLabel || item.selectedVariation?.name || undefined,
             imageUrl: imageUrl ?? undefined,
             isIncluded,
           };
@@ -1293,7 +1314,7 @@ export class RegistrationsService {
         return {
           name: item.product?.name || 'Produto',
           price,
-          variationName: item.variation?.name ?? item.variationName ?? undefined,
+          variationName: item.variationLabel || item.variation?.name || item.variationName || undefined,
           imageUrl: item.product?.image ?? undefined,
           isIncluded,
         };
@@ -1415,9 +1436,7 @@ export class RegistrationsService {
                   orderBy: { sortOrder: 'asc' },
                   include: {
                     product: {
-                      include: {
-                        variations: { orderBy: { sortOrder: 'asc' } },
-                      },
+                      include: PRODUCT_VARIATIONS_INCLUDE,
                     },
                   },
                 },
@@ -1457,9 +1476,7 @@ export class RegistrationsService {
         products: {
           include: {
             product: {
-              include: {
-                variations: { orderBy: { sortOrder: 'asc' } },
-              },
+              include: PRODUCT_VARIATIONS_INCLUDE,
             },
             variation: true,
           },
@@ -1479,9 +1496,13 @@ export class RegistrationsService {
     const reg = registration as any;
     const participant = await this.resolveParticipant(reg, prismaRead);
 
-    const pendingProductsMap = new Map<string, { variationId?: string; quantity: number }>();
+    const pendingProductsMap = new Map<string, { variationId?: string; variationIds: string[]; quantity: number }>();
     for (const pp of (reg.order?.pendingProducts as any[] | null) ?? []) {
-      pendingProductsMap.set(pp.productId, { variationId: pp.variationId, quantity: pp.quantity });
+      pendingProductsMap.set(pp.productId, {
+        variationId: normalizeVariationIds(pp)[0],
+        variationIds: normalizeVariationIds(pp),
+        quantity: pp.quantity,
+      });
     }
 
     const formattedRegistration = {
@@ -1518,6 +1539,11 @@ export class RegistrationsService {
             const selectedVariation = sel?.variationId
               ? (tp.product.variations || []).find((v: any) => v.id === sel.variationId) ?? null
               : null;
+            const selectedVariations = buildVariationChoices(
+              sel?.variationIds ?? [],
+              tp.product.variations ?? [],
+              tp.product.variationGroups ?? [],
+            );
             return {
               id: tp.product.id,
               name: tp.product.name,
@@ -1527,13 +1553,17 @@ export class RegistrationsService {
               selectedVariation: selectedVariation
                 ? { id: selectedVariation.id, name: selectedVariation.name, price: selectedVariation.price }
                 : null,
+              selectedVariations,
+              variationLabel: buildVariationLabel(selectedVariations),
               variations: (tp.product.variations || []).map((v: any) => ({
                 id: v.id,
                 name: v.name,
                 price: Math.round(v.price * 100),
                 stock: v.stock,
                 sortOrder: v.sortOrder,
+                groupId: v.groupId ?? null,
               })),
+              variationGroups: tp.product.variationGroups ?? [],
             };
           }),
         };
@@ -1588,6 +1618,8 @@ export class RegistrationsService {
           },
           variation: variationData,
           variationName: variationData?.name ?? null,
+          // Kit com várias variações: opções escolhidas (ordem dos grupos) + rótulo único.
+          ...describeRegistrationProductVariations(rp),
           quantity: rp.quantity,
           unitPrice: rp.unitPrice,
           totalPrice: rp.totalPrice,
@@ -1680,6 +1712,7 @@ export class RegistrationsService {
                 isIncludedInTicket: true,
                 isRequired: true,
                 variationType: true,
+                ...PRODUCT_VARIATION_LABEL_SELECT,
               },
             },
             variation: {
@@ -1820,6 +1853,8 @@ export class RegistrationsService {
             variationType: productData.variationType ?? null,
           },
           variation: variationData,
+          // Kit com várias variações: opções escolhidas (ordem dos grupos) + rótulo único.
+          ...describeRegistrationProductVariations(rp),
           quantity: rp.quantity,
           unitPrice: rp.unitPrice,
           totalPrice: rp.totalPrice,
@@ -1893,11 +1928,13 @@ export class RegistrationsService {
   async updateProductVariation(
     registrationId: string,
     productId: string,
-    variationId: string,
+    variationIdOrIds: string | string[],
     userId: string,
     clientIp?: string | null,
   ) {
     const prismaRead = this.prisma.getReadClient();
+    // Kit com várias variações: lista com 1 opção por variação; string = legado (1 opção).
+    const requestedIds = typeof variationIdOrIds === 'string' ? [variationIdOrIds] : variationIdOrIds ?? [];
 
     const registration = await prismaRead.registration.findUnique({
       where: { id: registrationId },
@@ -1914,7 +1951,8 @@ export class RegistrationsService {
                 isRequired: true,
                 buyerVariationEditAllowed: true,
                 variationEditDeadlineDays: true,
-                variations: { select: { id: true } },
+                variations: { select: { id: true, name: true, groupId: true, stock: true } },
+                variationGroups: { select: { id: true, name: true, sortOrder: true } },
               },
             },
           },
@@ -1947,7 +1985,8 @@ export class RegistrationsService {
         isRequired: true,
         buyerVariationEditAllowed: true,
         variationEditDeadlineDays: true,
-        variations: { select: { id: true } },
+        variations: { select: { id: true, name: true, groupId: true, stock: true } },
+        variationGroups: { select: { id: true, name: true, sortOrder: true } },
       },
     });
 
@@ -1955,14 +1994,19 @@ export class RegistrationsService {
       throw new NotFoundException('Produto não encontrado');
     }
 
-    // Produto deve ser incluso no ingresso
-    if (!product.isIncludedInTicket) {
-      throw new BadRequestException('Alteração de variação permitida apenas para produtos inclusos no ingresso');
-    }
-
     // Produto deve ter edição habilitada
     if (!product.buyerVariationEditAllowed) {
       throw new BadRequestException('Este produto não permite alteração de variação');
+    }
+
+    // Kit adicional (pago à parte): trocar por "Sem interesse" seria desistir do item já pago.
+    if (
+      !product.isIncludedInTicket &&
+      requestedIds.some((id) =>
+        isNoInterestVariation((product.variations ?? []).find((v: any) => v.id === id)),
+      )
+    ) {
+      throw new BadRequestException('Não é possível trocar um item já pago por "Sem interesse"');
     }
 
     // Só pode alterar uma vez (apenas se já existe um RegistrationProduct com variationEdited)
@@ -1999,13 +2043,14 @@ export class RegistrationsService {
     // Validação de variação + contabilização de estoque + escrita. Extraído p/
     // reuso pelo caminho do ORGANIZADOR (updateProductVariationAsOrganizer), que
     // pula os gates de COMPRADOR mas mantém a mesma correção de estoque.
-    const { previousVariationId } = await this.applyVariationChange({
+    const { previousVariationId, previousVariationIds, variationIds } = await this.applyVariationChange({
       registrationId,
       productId,
-      variationId,
+      variationIds: requestedIds,
       product,
       regProduct,
     });
+    const variationId = variationIds[0];
 
     // Email best-effort — log warn em caso de falha, nao aborta a operacao.
     // `userId` é repassado para regenerar o PDF do ingresso (findOne aplica o
@@ -2013,8 +2058,8 @@ export class RegistrationsService {
     void this.sendVariationChangedEmail({
       registrationId,
       productId,
-      variationId,
-      previousVariationId,
+      variationIds,
+      previousVariationIds,
       userId,
     }).catch((err) => {
       this.logger.warn(`Variation change email failed for reg ${registrationId}: ${err?.message ?? err}`);
@@ -2033,6 +2078,8 @@ export class RegistrationsService {
         productId,
         variationId,
         previousVariationId,
+        variationIds,
+        previousVariationIds,
         fieldsEdited: ['variation'],
       },
     });
@@ -2182,73 +2229,98 @@ export class RegistrationsService {
   }
 
   /**
-   * Núcleo compartilhado da troca de variação: valida a variação, contabiliza o
-   * estoque (A→B, espelhando finalize/estorno) e grava o RegistrationProduct
-   * (variationId + variationEdited). Usado pelo caminho do COMPRADOR (com gates)
-   * e pelo do ORGANIZADOR (sem gates). Retorna a variação anterior (p/ o e-mail).
+   * Núcleo compartilhado da troca de variação: valida a escolha (kit com várias
+   * variações: 1 opção por variação), contabiliza o estoque de CADA opção que mudou
+   * (A→B, espelhando finalize/estorno) e grava o RegistrationProduct (variationIds +
+   * variationId legado + variationEdited). Usado pelo caminho do COMPRADOR (com gates)
+   * e pelo do ORGANIZADOR (sem gates). Retorna as opções anteriores (p/ o e-mail).
    */
   private async applyVariationChange(params: {
     registrationId: string;
     productId: string;
-    variationId: string;
+    variationIds: string[];
     product: any;
     regProduct: any | null;
-  }): Promise<{ previousVariationId: string | null }> {
-    const { registrationId, productId, variationId, product, regProduct } = params;
+  }): Promise<{ previousVariationId: string | null; previousVariationIds: string[]; variationIds: string[] }> {
+    const { registrationId, productId, product, regProduct } = params;
     const prismaWrite = this.prisma.getWriteClient();
 
-    const validVariation = (product.variations ?? []).find((v: any) => v.id === variationId);
-    if (!validVariation) {
+    if (params.variationIds.length === 0) {
       throw new BadRequestException('Variação inválida para este produto');
     }
+    const selection = resolveVariationSelection(product, params.variationIds);
+    if (selection.error !== undefined) {
+      throw new BadRequestException(selection.error);
+    }
+    const chosen: any[] = selection.variations;
+    const variationIds = chosen.map((v) => v.id as string);
 
     // `held` (segurou estoque) vem CONGELADO do productSnapshot p/ o ciclo
     // venda→troca→estorno ficar balanceado; RegistrationProduct NOVO usa a política atual.
-    const previousVariationId = regProduct?.variationId ?? null;
+    const previousVariationIds = regProduct ? normalizeVariationIds(regProduct) : [];
+    const previousVariationId = previousVariationIds[0] ?? null;
     const qty = regProduct?.quantity ?? 1;
     const snap = (regProduct?.productSnapshot as any) ?? null;
     const held = regProduct
-      ? (typeof snap?.stockHeld === 'boolean'
-          ? snap.stockHeld
-          : !(product.isIncludedInTicket === true && product.isRequired === true))
+      ? (Array.isArray(snap?.heldVariationIds)
+          ? true
+          : typeof snap?.stockHeld === 'boolean'
+            ? snap.stockHeld
+            : !(product.isIncludedInTicket === true && product.isRequired === true))
       : holdsStock(product);
+    // Opções que seguraram estoque antes da troca (lista congelada ou regra antiga).
+    const prevHeld: string[] = Array.isArray(snap?.heldVariationIds)
+      ? snap.heldVariationIds
+      : held ? previousVariationIds : [];
+    const added = chosen.filter((v) => !previousVariationIds.includes(v.id));
+    const removed = previousVariationIds.filter((id) => !variationIds.includes(id));
+    const nextHeld = [
+      ...prevHeld.filter((id) => variationIds.includes(id)),
+      ...(held ? added.filter((v) => (v.stock ?? 0) > 0).map((v) => v.id as string) : []),
+    ];
 
     await prismaWrite.$transaction(async (tx: any) => {
-      // soldCount/availableStock só mudam se a variação realmente trocou.
-      if (previousVariationId !== variationId) {
-        if (held) {
-          const newVar = await tx.productVariation.findUnique({
-            where: { id: variationId },
-            select: { stock: true },
-          });
-          const bLimited = (newVar?.stock ?? 0) > 0;
-          if (bLimited) {
-            const acquired = await acquireVariationHold(tx, variationId, qty);
+      // soldCount/availableStock só mudam nas opções que realmente trocaram.
+      if (held) {
+        for (const v of added) {
+          if ((v.stock ?? 0) > 0) {
+            const acquired = await acquireVariationHold(tx, v.id, qty);
             if (acquired === 0) {
-              throw new UnprocessableEntityException('A variação escolhida está esgotada');
+              throw new UnprocessableEntityException(
+                chosen.length > 1 ? `A opção "${v.name}" está esgotada` : 'A variação escolhida está esgotada',
+              );
             }
           }
-          if (previousVariationId) {
-            await releaseVariationHold(tx, previousVariationId, qty);
-          }
         }
-        if (previousVariationId) {
-          await decrementVariationSold(tx, previousVariationId, qty);
-        }
-        await incrementVariationSold(tx, variationId, qty);
+      }
+      for (const id of removed) {
+        if (prevHeld.includes(id)) await releaseVariationHold(tx, id, qty);
+        await decrementVariationSold(tx, id, qty);
+      }
+      for (const v of added) {
+        await incrementVariationSold(tx, v.id, qty);
       }
 
       if (regProduct) {
         await tx.registrationProduct.update({
           where: { id: regProduct.id },
-          data: { variationId, variationEdited: true },
+          data: {
+            variationId: variationIds[0],
+            variationIds,
+            variationEdited: true,
+            // Snapshot novo (com lista de holds): mantém a lista em dia p/ o estorno.
+            ...(Array.isArray(snap?.heldVariationIds) && {
+              productSnapshot: { ...snap, heldVariationIds: nextHeld },
+            }),
+          },
         });
       } else {
         await tx.registrationProduct.create({
           data: {
             registrationId,
             productId,
-            variationId,
+            variationId: variationIds[0],
+            variationIds,
             variationEdited: true,
             quantity: 1,
             unitPrice: 0,
@@ -2258,13 +2330,14 @@ export class RegistrationsService {
               isIncludedInTicket: product.isIncludedInTicket,
               isRequired: product.isRequired,
               stockHeld: held,
+              heldVariationIds: nextHeld,
             },
           },
         });
       }
     });
 
-    return { previousVariationId };
+    return { previousVariationId, previousVariationIds, variationIds };
   }
 
   /**
@@ -2277,11 +2350,13 @@ export class RegistrationsService {
   async updateProductVariationAsOrganizer(
     registrationId: string,
     productId: string,
-    variationId: string,
+    variationIdOrIds: string | string[],
     userId: string,
     clientIp?: string | null,
   ) {
     const prismaRead = this.prisma.getReadClient();
+    // Kit com várias variações: lista com 1 opção por variação; string = legado (1 opção).
+    const requestedIds = typeof variationIdOrIds === 'string' ? [variationIdOrIds] : variationIdOrIds ?? [];
 
     const registration = await prismaRead.registration.findUnique({
       where: { id: registrationId },
@@ -2296,7 +2371,8 @@ export class RegistrationsService {
                 id: true,
                 isIncludedInTicket: true,
                 isRequired: true,
-                variations: { select: { id: true } },
+                variations: { select: { id: true, name: true, groupId: true, stock: true } },
+                variationGroups: { select: { id: true, name: true, sortOrder: true } },
               },
             },
           },
@@ -2324,15 +2400,13 @@ export class RegistrationsService {
         id: true,
         isIncludedInTicket: true,
         isRequired: true,
-        variations: { select: { id: true } },
+        variations: { select: { id: true, name: true, groupId: true, stock: true } },
+        variationGroups: { select: { id: true, name: true, sortOrder: true } },
       },
     });
 
     if (!product) {
       throw new NotFoundException('Produto não encontrado');
-    }
-    if (!product.isIncludedInTicket) {
-      throw new BadRequestException('Alteração de variação permitida apenas para produtos inclusos no ingresso');
     }
 
     const ticketId = registration.tickets[0]?.ticketId;
@@ -2345,7 +2419,14 @@ export class RegistrationsService {
       }
     }
 
-    const { previousVariationId } = await this.applyVariationChange({ registrationId, productId, variationId, product, regProduct });
+    const { previousVariationId, previousVariationIds, variationIds } = await this.applyVariationChange({
+      registrationId,
+      productId,
+      variationIds: requestedIds,
+      product,
+      regProduct,
+    });
+    const variationId = variationIds[0];
 
     // Auditoria (best-effort): troca de variação pelo organizador/admin concluída.
     await this.auditService.recordForEvent(eventId, {
@@ -2359,6 +2440,8 @@ export class RegistrationsService {
         productId,
         variationId,
         previousVariationId,
+        variationIds,
+        previousVariationIds,
         fieldsEdited: ['variation'],
       },
     });
@@ -2456,8 +2539,8 @@ export class RegistrationsService {
   private async sendVariationChangedEmail(args: {
     registrationId: string;
     productId: string;
-    variationId: string;
-    previousVariationId: string | null;
+    variationIds: string[];
+    previousVariationIds: string[];
     userId: string;
   }) {
     const prismaRead = this.prisma.getReadClient();
@@ -2497,18 +2580,19 @@ export class RegistrationsService {
       return images[idx] || product.image || images[0] || null;
     })();
 
-    const [prevVar, newVar] = await Promise.all([
-      args.previousVariationId
-        ? prismaRead.productVariation.findUnique({
-            where: { id: args.previousVariationId },
-            select: { name: true },
-          })
-        : Promise.resolve(null),
-      prismaRead.productVariation.findUnique({
-        where: { id: args.variationId },
-        select: { name: true },
-      }),
-    ]);
+    // Rótulos (kit com várias variações): 1 opção = nome; várias = "Variação: opção · …".
+    const optionRows = await prismaRead.productVariation.findMany({
+      where: { id: { in: [...args.previousVariationIds, ...args.variationIds] } },
+      select: { id: true, name: true, group: { select: { name: true } } },
+    });
+    const optionById = new Map(optionRows.map((o) => [o.id, o]));
+    const labelOf = (ids: string[]) =>
+      buildVariationLabel(
+        ids
+          .map((id) => optionById.get(id))
+          .filter((o): o is NonNullable<typeof o> => !!o)
+          .map((o) => ({ name: o.name, groupName: o.group?.name ?? null })),
+      );
 
     const ticket = reg.tickets[0]?.ticket;
     const ticketName = ticket
@@ -2533,8 +2617,8 @@ export class RegistrationsService {
       email: recipient,
       productName: product.name,
       productImageUrl: primaryImage,
-      previousVariationName: prevVar?.name ?? '',
-      newVariationName: newVar?.name ?? '',
+      previousVariationName: labelOf(args.previousVariationIds),
+      newVariationName: labelOf(args.variationIds),
       eventName: reg.order?.event?.name ?? '',
       ticketName,
       changedAt: new Date(),

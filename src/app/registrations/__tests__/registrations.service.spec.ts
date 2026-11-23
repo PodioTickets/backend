@@ -314,7 +314,8 @@ describe('RegistrationsService', () => {
       expect(result.data.registration.id).toBe(registrationId);
       // produto enriquecido com variationEdited (default false, sem edição)
       expect(result.data.registration.products).toEqual([
-        { id: 'p-1', name: 'Camiseta', variationEdited: false, isIncludedInTicket: false },
+        // Kit com várias variações: lista + rótulo único (vazios sem escolha).
+        { id: 'p-1', name: 'Camiseta', variationEdited: false, isIncludedInTicket: false, variations: [], variationLabel: '' },
       ]);
     });
 
@@ -349,6 +350,8 @@ describe('RegistrationsService', () => {
           variationEdited: true,
           selectedVariation: { id: 'v-G', name: 'G', price: 0 }, // ATUAL, não o snapshot "M"
           isIncludedInTicket: false,
+          variations: [{ id: 'v-G', name: 'G', groupId: null, groupName: null }],
+          variationLabel: 'G',
         },
       ]);
     });
@@ -690,7 +693,7 @@ describe('RegistrationsService', () => {
     const productId = 'prod-1';
 
     // Constrói registro confirmado com 1 produto incluso editável (variação A → B).
-    const buildReg = (over: { stockHeld?: boolean | null; variationId?: string | null; quantity?: number } = {}) => ({
+    const buildReg = (over: { stockHeld?: boolean | null; variationId?: string | null; quantity?: number; bStock?: number } = {}) => ({
       id: regId,
       userId,
       status: 'CONFIRMED',
@@ -710,7 +713,8 @@ describe('RegistrationsService', () => {
             isRequired: false,
             buyerVariationEditAllowed: true,
             variationEditDeadlineDays: 0,
-            variations: [{ id: 'A' }, { id: 'B' }],
+            // `stock` = limite da opção (lido junto com o produto; 0 = sem limite próprio).
+            variations: [{ id: 'A', name: 'A', stock: 0 }, { id: 'B', name: 'B', stock: over.bStock ?? 10 }],
           },
         },
       ],
@@ -766,7 +770,7 @@ describe('RegistrationsService', () => {
       expect(soldMinus[0].vals).toContain('A');
 
       expect(tx.registrationProduct.update).toHaveBeenCalledWith(
-        expect.objectContaining({ data: { variationId: 'B', variationEdited: true } }),
+        expect.objectContaining({ data: { variationId: 'B', variationIds: ['B'], variationEdited: true } }),
       );
     });
 
@@ -782,7 +786,7 @@ describe('RegistrationsService', () => {
     });
 
     it('B ilimitado (stock=0): NÃO mexe em availableStock de B, mas soldCount move (A−1, B+1)', async () => {
-      const reg = buildReg();
+      const reg = buildReg({ bStock: 0 });
       const { tx, execCalls } = makeTx(0); // B ilimitado
       setup(reg, tx);
 

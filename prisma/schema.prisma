@@ -1198,6 +1198,8 @@ model Product {
   images             String[]
   primaryImageIndex  Int       @default(0)
   isIncludedInTicket Boolean   @default(false)
+  /// Kit (vários itens com variações, aparece na seção de kits do ingresso) × produto avulso.
+  isKit              Boolean   @default(false)
   basePrice          Int       @default(0) // Preço base em centavos
   isRequired         Boolean   @default(false)
   variationType      String? // Tipo/nome da variação (ex: "Tamanhos", "Cores")
@@ -1211,6 +1213,8 @@ model Product {
 
   event         Event                 @relation(fields: [eventId], references: [id], onDelete: Cascade)
   variations    ProductVariation[]
+  /// Variações (perguntas) do kit, cada uma com suas opções (ProductVariation.groupId).
+  variationGroups ProductVariationGroup[]
   tickets       TicketProduct[]
   kitItems      KitItem[]
   registrations RegistrationProduct[]
@@ -1230,11 +1234,31 @@ model ProductVariation {
   soldCount Int      @default(0)
   /// Ordem de exibição (0 = primeira). Gravada a partir do índice do array recebido no create/update.
   sortOrder Int      @default(0)
+  /// Variação (grupo) a que a opção pertence. null = "Sem interesse" (opt-out do produto inteiro).
+  groupId   String?  @db.Uuid
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  product       Product               @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product       Product                @relation(fields: [productId], references: [id], onDelete: Cascade)
+  group         ProductVariationGroup? @relation(fields: [groupId], references: [id], onDelete: Cascade)
   registrations RegistrationProduct[]
+
+  @@index([productId])
+  @@index([groupId])
+}
+
+/// Variação de um kit (ex.: "Tamanho da camisa"). O nome é a pergunta que o participante vê;
+/// as opções são as ProductVariation com este groupId.
+model ProductVariationGroup {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId  String   @db.Uuid
+  name       String
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  product    Product            @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variations ProductVariation[]
 
   @@index([productId])
 }
@@ -1279,7 +1303,9 @@ model RegistrationProduct {
   id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   registrationId  String   @db.Uuid
   productId       String   @db.Uuid
-  variationId     String?  @db.Uuid // Variação escolhida (opcional, se o produto tiver variações)
+  variationId     String?  @db.Uuid // Variação escolhida (opcional, se o produto tiver variações) — legado = variationIds[0]
+  /// Todas as opções escolhidas (1 por variação/grupo), na ordem dos grupos.
+  variationIds    String[] @default([]) @db.Uuid
   variationEdited Boolean  @default(false) // true após o comprador alterar a variação (permitido apenas uma vez)
   quantity        Int      @default(1)
   unitPrice       Int // Preço unitário em centavos no momento da compra

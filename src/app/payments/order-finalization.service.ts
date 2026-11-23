@@ -38,6 +38,12 @@ import {
 } from '../../common/utils/participant-identity.util';
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
 import {
+  buildVariationChoices,
+  heldVariationIdsOf,
+  normalizeVariationIds,
+  pickPricingVariation,
+} from '../../common/utils/product-variation.util';
+import {
   incrementVariationSold,
   releaseVariationHold,
   reverseRegistrationProductSale,
@@ -280,7 +286,7 @@ export class OrderFinalizationService {
     // revertidos na própria troca — revertê-los de novo devolveria estoque em dobro.
     const regProducts = await tx.registrationProduct.findMany({
       where: { registration: { orderId, voidedAt: null } },
-      select: { variationId: true, quantity: true, productSnapshot: true },
+      select: { variationId: true, variationIds: true, quantity: true, productSnapshot: true },
     });
     for (const rp of regProducts) {
       await reverseRegistrationProductSale(tx, rp);
@@ -722,14 +728,22 @@ export class OrderFinalizationService {
           for (const item of participantProducts) {
             const product = await r.product.findUnique({
               where: { id: item.productId },
-              include: { variations: true },
+              include: { variations: true, variationGroups: true },
             });
             if (!product) continue;
             participantProductMap.set(product.id, product);
-            const selectedVariation = item.variationId
-              ? (product.variations ?? []).find((v: any) => v.id === item.variationId)
-              : null;
-            const unitPrice = resolveProductUnitPrice(product, selectedVariation);
+            // Kit com várias variações: `variationIds` (pedido novo) ou `variationId` (antigo).
+            const variationIds = normalizeVariationIds(item);
+            const chosenVariations = variationIds
+              .map((id) => (product.variations ?? []).find((v: any) => v.id === id))
+              .filter(Boolean) as any[];
+            const selectedVariation = chosenVariations[0] ?? null;
+            const selectedVariations = buildVariationChoices(
+              variationIds,
+              product.variations ?? [],
+              (product as any).variationGroups ?? [],
+            );
+            const unitPrice = resolveProductUnitPrice(product, pickPricingVariation(chosenVariations));
             const productSnapshot = {
               id: product.id,
               name: product.name,
@@ -741,16 +755,21 @@ export class OrderFinalizationService {
               variationType: (product as any).variationType ?? null,
               // Congela se este item segurou estoque (decidido no patchProducts) — usado pelo
               // estorno para saber se deve devolver availableStock.
-              stockHeld: item.stockHeld === true,
+              stockHeld: heldVariationIdsOf(item).length > 0,
+              // Opções que seguraram estoque (estorno devolve exatamente estas).
+              heldVariationIds: heldVariationIdsOf(item),
               selectedVariation: selectedVariation
                 ? { id: selectedVariation.id, name: selectedVariation.name, price: (selectedVariation as any).price }
                 : null,
+              // Todas as opções escolhidas (ordem dos grupos) — rótulo preservado mesmo se a opção for apagada.
+              selectedVariations,
             };
             await tx.registrationProduct.create({
               data: {
                 registrationId: reg.id,
                 productId: item.productId,
-                variationId: item.variationId ?? null,
+                variationId: variationIds[0] ?? null,
+                variationIds,
                 quantity: item.quantity ?? 1,
                 unitPrice,
                 totalPrice: unitPrice * (item.quantity ?? 1),
@@ -760,8 +779,8 @@ export class OrderFinalizationService {
             // Contabiliza a venda da variação. O availableStock NÃO é tocado aqui — o hold
             // (decremento) já foi feito no patchProducts (reserva) p/ TODO produto que segura
             // estoque, inclusive incluso+obrigatório; aqui só soldCount++ converte reserva→venda.
-            if (item.variationId) {
-              await incrementVariationSold(tx, item.variationId, item.quantity ?? 1);
+            for (const variationId of variationIds) {
+              await incrementVariationSold(tx, variationId, item.quantity ?? 1);
             }
           }
         }
@@ -810,9 +829,14 @@ export class OrderFinalizationService {
             variationType: prod.variationType ?? null,
             quantity: item.quantity ?? 1,
             unitPrice: prod.basePrice,
-            selectedVariation: item.variationId
-              ? (prod.variations ?? []).find((v: any) => v.id === item.variationId) ?? null
+            selectedVariation: normalizeVariationIds(item)[0]
+              ? (prod.variations ?? []).find((v: any) => v.id === normalizeVariationIds(item)[0]) ?? null
               : null,
+            selectedVariations: buildVariationChoices(
+              normalizeVariationIds(item),
+              prod.variations ?? [],
+              prod.variationGroups ?? [],
+            ),
           } : { id: item.productId, quantity: item.quantity ?? 1 };
         });
 
@@ -937,8 +961,10 @@ export class OrderFinalizationService {
     // vazar estoque. Mantém a invariante availableStock + soldCount == stock.
     for (let i = 0; i < pendingProducts.length; i++) {
       const item = pendingProducts[i];
-      if (consumedProductIdx.has(i) || !item?.stockHeld || !item.variationId) continue;
-      await releaseVariationHold(tx, item.variationId, item.quantity ?? 1);
+      if (consumedProductIdx.has(i)) continue;
+      for (const variationId of heldVariationIdsOf(item)) {
+        await releaseVariationHold(tx, variationId, item.quantity ?? 1);
+      }
     }
 
     this.logger.log(`finalizePaidOrder: ${createdRegs.length} inscrição(ões) criada(s) para order ${orderId}`);

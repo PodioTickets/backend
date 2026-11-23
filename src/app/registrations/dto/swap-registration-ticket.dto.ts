@@ -7,7 +7,17 @@ export class SwapProductItemDto {
   @IsUUID()
   productId: string;
 
-  @ApiPropertyOptional({ description: 'Variação escolhida (obrigatória se o produto tiver variações)' })
+  @ApiPropertyOptional({
+    description: 'Opções escolhidas, 1 por variação do kit (obrigatório se o produto tiver variações)',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsUUID('all', { each: true })
+  variationIds?: string[] | null;
+
+  @ApiPropertyOptional({ description: 'Legado = variationIds[0]' })
   @IsOptional()
   @IsUUID()
   variationId?: string | null;

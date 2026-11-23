@@ -1,4 +1,5 @@
 import { ReceiptPdfData, ReceiptPdfRegistrationRow } from './receipt-pdf.types';
+import { describeSnapshotProductVariations } from '../utils/product-variation.util';
 
 /**
  * Builder PURO e ÚNICO do `ReceiptPdfData` a partir de um pedido (Prisma `Order`
@@ -55,8 +56,10 @@ export function buildReceiptPdfData(
       const products = ((reg.products ?? []) as any[])
         .map((rp: any) => {
           const pSnap = (rp.productSnapshot ?? null) as Record<string, any> | null;
+          // Kit com várias variações: rótulo único congelado no snapshot ("Variação: opção · …").
           const variationName =
-            pSnap?.selectedVariation?.name ?? rp.variation?.name ?? undefined;
+            describeSnapshotProductVariations(pSnap).variationLabel ||
+            (rp.variation?.name ?? undefined);
           return {
             name: pSnap?.name ?? rp.product?.name ?? 'Produto',
             variationName,

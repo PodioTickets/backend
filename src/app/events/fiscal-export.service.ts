@@ -21,7 +21,11 @@ import {
   FiscalPeriod,
   FiscalValueRange,
 } from './dto/fiscal-export.dto';
-import { DEFAULT_NO_INTEREST_VARIATION_NAME } from '../products/product.constants';
+import {
+  DEFAULT_NO_INTEREST_VARIATION_NAME,
+  PRODUCT_VARIATION_LABEL_SELECT,
+} from '../products/product.constants';
+import { describeRegistrationProductVariations } from '../../common/utils/product-variation.util';
 
 /**
  * Quantas linhas (sem contar header) a exportação aceita antes de retornar 413.
@@ -467,8 +471,10 @@ export class FiscalExportService {
                 select: {
                   quantity: true,
                   productSnapshot: true,
-                  product: { select: { name: true } },
-                  variation: { select: { name: true } },
+                  variationId: true,
+                  variationIds: true,
+                  product: { select: { name: true, ...PRODUCT_VARIATION_LABEL_SELECT } },
+                  variation: { select: { id: true, name: true } },
                 },
               }
               : false,
@@ -640,7 +646,10 @@ export class FiscalExportService {
         // Variação: relação VIVA primeiro — reflete a troca de variação feita pelo
         // cliente (o snapshot fica congelado na compra → mostraria a ANTIGA). Igual
         // ao fix do export de inscrições. Snapshot só como fallback (variação deletada).
-        const variationName = p.variation?.name ?? snapshot?.variationName ?? null;
+        // Rótulo único (kit com várias variações: "Variação: opção · …").
+        const variationName =
+          describeRegistrationProductVariations(p).variationLabel ||
+          (p.variation?.name ?? snapshot?.variationName ?? null);
         if (!productName) continue;
         // "Sem interesse" = opt-out de produto opcional → NÃO listar (mesma convenção
         // do PDF do comprovante/ingresso e do orders.service).
