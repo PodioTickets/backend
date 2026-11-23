@@ -308,3 +308,44 @@ describe('resolveActiveBatch — esgotamento automático do ingresso (autoSoldOu
     expect(resolveActiveBatch([only], now).status).toBe('AVAILABLE');
   });
 });
+
+describe('resolveActiveBatch — lote POR DATA abre na data mesmo com lotes anteriores com vaga (23/11)', () => {
+  const start = new Date('2030-04-01T09:00:00.000Z'); // 09:00 BRT = 12:00Z real
+  const after = new Date('2030-04-01T12:00:00.000Z');
+
+  it('L1 com vaga + L2 por data → L2 vira o ativo na data', () => {
+    const l1 = batch({ id: 'l1', sortOrder: 0, quantity: 10, quantitySold: 3, availableQuantity: 7 });
+    const l2 = batch({ id: 'l2', sortOrder: 1, startDate: start, availableQuantity: 10 });
+    expect(resolveActiveBatch([l1, l2], new Date('2030-04-01T11:59:00.000Z')).batch.id).toBe('l1');
+    const r = resolveActiveBatch([l1, l2], after);
+    expect(r.batch.id).toBe('l2');
+    expect(r.batchNumber).toBe(2);
+    expect(r.status).toBe('AVAILABLE');
+  });
+
+  it('BUG: lote por esgotamento no meio (anterior com vaga) NÃO trava o lote por data seguinte', () => {
+    const l1 = batch({ id: 'l1', sortOrder: 0, quantity: 10, quantitySold: 3, availableQuantity: 7 });
+    const l2 = batch({ id: 'l2', sortOrder: 1, triggerType: 'AFTER_PREVIOUS_SOLD_OUT', availableQuantity: 10 });
+    const l3 = batch({ id: 'l3', sortOrder: 2, startDate: start, availableQuantity: 10 });
+    const r = resolveActiveBatch([l1, l2, l3], after);
+    expect(r.batch.id).toBe('l3');
+    expect(r.status).toBe('AVAILABLE');
+  });
+
+  it('lote por data anterior ainda futuro NÃO trava um posterior cuja data já chegou', () => {
+    const l1 = batch({ id: 'l1', sortOrder: 0, availableQuantity: 10 });
+    const l2 = batch({ id: 'l2', sortOrder: 1, startDate: new Date('2030-06-01T00:00:00.000Z'), availableQuantity: 10 });
+    const l3 = batch({ id: 'l3', sortOrder: 2, startDate: start, availableQuantity: 10 });
+    expect(resolveActiveBatch([l1, l2, l3], after).batch.id).toBe('l3');
+  });
+
+  it('lote por data esgota → fallback NÃO reabre lote por esgotamento que nunca abriu', () => {
+    const l1 = batch({ id: 'l1', sortOrder: 0, quantity: 10, quantitySold: 10, availableQuantity: 0 });
+    const l2 = batch({ id: 'l2', sortOrder: 1, startDate: new Date('2030-06-01T00:00:00.000Z'), availableQuantity: 10 });
+    const l3 = batch({ id: 'l3', sortOrder: 2, triggerType: 'AFTER_PREVIOUS_SOLD_OUT', availableQuantity: 10 });
+    const l4 = batch({ id: 'l4', sortOrder: 3, startDate: start, quantity: 5, quantitySold: 5, availableQuantity: 0 });
+    const r = resolveActiveBatch([l1, l2, l3, l4], after);
+    expect(r.batch.id).toBe('l4');
+    expect(r.status).toBe('SOLD_OUT');
+  });
+});
