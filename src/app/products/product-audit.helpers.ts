@@ -31,6 +31,8 @@ export type ProductVariationAuditSnapshot = {
   name: string;
   price: number;
   stock: number;
+  /** Nome da variação (grupo) da opção; ausente em "Sem interesse". */
+  group?: string;
 };
 
 /**
@@ -62,7 +64,10 @@ export function summarizeProductUpdateForAudit(
     });
   }
 
-  if (updateDto.variations !== undefined && newVariations != null) {
+  if (
+    (updateDto.variations !== undefined || updateDto.variationGroups !== undefined) &&
+    newVariations != null
+  ) {
     labels.push('variações');
     changes.push({
       field: 'variations',

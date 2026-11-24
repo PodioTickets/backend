@@ -682,7 +682,17 @@ const ProductCard = ({ product }: { product: TicketPdfProduct }) =>
         },
       },
       e(Text, { style: T.sb16 }, product.name),
-      product.variationName
+      // Kit com várias variações: o rótulo já traz os grupos ("Camisa: M · Short: G")
+      // → uma linha por variação, sem o prefixo "Tamanho:".
+      product.variationName && product.variationName.includes(': ')
+        ? e(
+            View,
+            { style: { alignItems: 'flex-end', gap: 2 } },
+            ...product.variationName
+              .split(' · ')
+              .map((part, i) => e(Text, { key: i, style: T.h16 }, part)),
+          )
+        : product.variationName
         ? e(
             View,
             {

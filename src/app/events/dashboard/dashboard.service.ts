@@ -1023,15 +1023,19 @@ export class DashboardService {
         product_id: string;
         variation_id: string | null;
         quantity: bigint;
+        units: bigint;
         net_sold: bigint;
       }[]
     >(Prisma.sql`
       SELECT
         rp."productId" AS product_id,
-        rp."variationId" AS variation_id,
+        x.vid::text AS variation_id,
         SUM(rp.quantity)::bigint AS quantity,
+        -- Kits vendidos (conta 1x por item, mesmo com várias opções escolhidas).
+        SUM(CASE WHEN x.ord = 1 THEN rp.quantity ELSE 0 END)::bigint AS units,
+        -- Valor do item rateado entre as opções escolhidas → a soma por produto não duplica.
         ROUND(SUM(
-          rp."totalPrice" * (
+          (rp."totalPrice"::numeric / GREATEST(cardinality(rp."variationIds"), 1)) * (
             CASE WHEN o."finalAmount" > 0
               THEN (GREATEST(o."finalAmount" - o."serviceFee", 0)::numeric / o."finalAmount") * (1 - COALESCE(o."organizerFeePercent"::numeric / 100, ${organizerFeeRate}::numeric))
               ELSE 0
@@ -1039,6 +1043,10 @@ export class DashboardService {
           )
         ))::bigint AS net_sold
       FROM "RegistrationProduct" rp
+      -- Kit com várias variações: uma linha por opção escolhida (variationIds; legado = variationId).
+      CROSS JOIN LATERAL unnest(
+        CASE WHEN cardinality(rp."variationIds") > 0 THEN rp."variationIds" ELSE ARRAY[rp."variationId"] END
+      ) WITH ORDINALITY AS x(vid, ord)
       INNER JOIN "Registration" r ON r.id = rp."registrationId"
       INNER JOIN "Order" o ON o.id = r."orderId"
       INNER JOIN "Payment" p ON p."orderId" = o.id
@@ -1047,7 +1055,7 @@ export class DashboardService {
         AND p.status = 'PAID'::"PaymentStatus"
         ${this.sqlDateFilter(dateRange, 'o')}
         ${this.sqlTicketIdsFilter(ticketIds, 'r')}
-      GROUP BY rp."productId", rp."variationId";
+      GROUP BY rp."productId", x.vid;
     `);
 
     if (salesRows.length === 0) return [];
@@ -1059,7 +1067,8 @@ export class DashboardService {
         id: true,
         name: true,
         image: true,
-        variations: { select: { id: true, name: true, stock: true }, orderBy: { name: 'asc' } },
+        variations: { select: { id: true, name: true, stock: true, groupId: true }, orderBy: { name: 'asc' } },
+        variationGroups: { select: { id: true, name: true } },
       },
     });
 
@@ -1069,6 +1078,7 @@ export class DashboardService {
       string,
       {
         totalSoldAmount: number;
+        totalUnits: number;
         byVariation: Map<string | null, number>;
       }
     >();
@@ -1076,9 +1086,11 @@ export class DashboardService {
     for (const row of salesRows) {
       const entry = grouped.get(row.product_id) ?? {
         totalSoldAmount: 0,
+        totalUnits: 0,
         byVariation: new Map<string | null, number>(),
       };
       entry.totalSoldAmount += Number(row.net_sold);
+      entry.totalUnits += Number(row.units);
       entry.byVariation.set(
         row.variation_id,
         (entry.byVariation.get(row.variation_id) ?? 0) + Number(row.quantity),
@@ -1091,10 +1103,16 @@ export class DashboardService {
         const product = productsById.get(productId);
         if (!product) return null;
 
-        const totalSold = Array.from(sales.byVariation.values()).reduce((s, v) => s + v, 0);
+        // Kits vendidos (não a soma das opções: com várias variações cada kit conta 1x por grupo).
+        const totalSold = sales.totalUnits;
+        const groupNameById = new Map(product.variationGroups.map((g) => [g.id, g.name]));
+        const multiGroup = product.variationGroups.length > 1;
         const variations: {
           variationId: string | null;
           variationName: string;
+          groupId: string | null;
+          groupName: string | null;
+          variationLabel: string;
           quantitySold: number;
           percentage: number;
           remainingStock: number | null;
@@ -1107,9 +1125,14 @@ export class DashboardService {
           const isUnlimited = v.stock === null || v.stock === 0;
           const remainingStock = isUnlimited ? null : v.stock;
           const totalStock = isUnlimited ? null : (v.stock ?? 0) + quantitySold;
+          const groupName = v.groupId ? groupNameById.get(v.groupId) ?? null : null;
           variations.push({
             variationId: v.id,
             variationName: v.name,
+            groupId: v.groupId ?? null,
+            groupName,
+            // Com 2+ variações, o nome do grupo identifica a opção ("Tamanho do short: M").
+            variationLabel: multiGroup && groupName ? `${groupName}: ${v.name}` : v.name,
             quantitySold,
             percentage,
             remainingStock,
@@ -1123,6 +1146,9 @@ export class DashboardService {
           variations.push({
             variationId: null,
             variationName: 'Sem variação',
+            groupId: null,
+            groupName: null,
+            variationLabel: 'Sem variação',
             quantitySold: noVariation,
             percentage,
             remainingStock: null,

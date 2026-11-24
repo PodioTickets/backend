@@ -12,9 +12,74 @@ import {
   ArrayMaxSize,
   IsInt,
   IsUUID,
+  ValidateIf,
 } from 'class-validator';
 import { Type, Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+
+/** Opção de uma variação (grupo) do kit. Sem preço próprio no fluxo novo (vale o basePrice). */
+export class ProductVariationGroupOptionDto {
+  /** UUID da opção existente (preserva o id). Omitir para criar. */
+  @IsOptional()
+  @IsUUID()
+  @ApiPropertyOptional({ description: 'UUID da opção existente (preserva o id). Omitir para criar.' })
+  id?: string;
+
+  @IsString()
+  @MaxLength(255)
+  @ApiProperty({ description: 'Nome da opção (ex.: "M")', example: 'M' })
+  name: string;
+
+  /** Ausente em opção existente = mantém o salvo; em opção nova = 0. */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Type(() => Number)
+  @ApiPropertyOptional({ description: 'Preço legado da opção (centavos). Ausente = mantém o salvo / 0 em opção nova.' })
+  price?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Type(() => Number)
+  @ApiPropertyOptional({ description: 'Limite de estoque da opção (0 = sem limite próprio)', default: 0 })
+  stock?: number;
+
+  /** Ignorado — o backend usa o índice do array. Aceito p/ o front poder ecoar. */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Type(() => Number)
+  sortOrder?: number;
+}
+
+/** Variação (pergunta) do kit, ex.: "Tamanho da camisa", com suas opções. */
+export class ProductVariationGroupDto {
+  /** UUID da variação existente (preserva o id). Omitir para criar. */
+  @IsOptional()
+  @IsUUID()
+  @ApiPropertyOptional({ description: 'UUID da variação existente (preserva o id). Omitir para criar.' })
+  id?: string;
+
+  @IsString()
+  @MaxLength(255)
+  @ApiProperty({ description: 'Nome da variação (pergunta exibida)', example: 'Tamanho da camisa' })
+  name: string;
+
+  @IsArray()
+  @ArrayMaxSize(100)
+  @ValidateNested({ each: true })
+  @Type(() => ProductVariationGroupOptionDto)
+  @ApiProperty({ type: [ProductVariationGroupOptionDto] })
+  variations: ProductVariationGroupOptionDto[];
+
+  /** Ignorado — o backend usa o índice do array. */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Type(() => Number)
+  sortOrder?: number;
+}
 
 export class ProductVariationDto {
   /** UUID da variação existente. Quando enviado, a variação é atualizada no lugar (preserva o ID). Omitir para criar uma nova variação. */
@@ -87,10 +152,10 @@ export class CreateProductDto {
 
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(7)
+  @ArrayMaxSize(10)
   @IsString({ each: true })
   @ApiPropertyOptional({
-    description: 'Array de até 5 fotos (data URL ou URL pública). Omitido quando vazio.',
+    description: 'Array de até 10 fotos (data URL ou URL pública). Omitido quando vazio.',
     type: [String],
   })
   images?: string[];
@@ -98,12 +163,12 @@ export class CreateProductDto {
   @IsOptional()
   @IsInt()
   @Min(0)
-  @Max(4)
+  @Max(9)
   @Type(() => Number)
   @ApiPropertyOptional({
     description: 'Índice (0-based) da imagem principal dentro de images. Omitido quando há apenas 1 foto.',
     minimum: 0,
-    maximum: 4,
+    maximum: 9,
   })
   primaryImageIndex?: number;
 
@@ -114,6 +179,12 @@ export class CreateProductDto {
     default: false,
   })
   isIncludedInTicket?: boolean;
+
+  /** Kit (seção de kits do ingresso) × produto avulso. Definido na criação; não muda depois. */
+  @IsOptional()
+  @IsBoolean()
+  @ApiPropertyOptional({ description: 'true = kit; false = produto avulso', default: false })
+  isKit?: boolean;
 
   @IsOptional()
   @IsNumber()
@@ -141,15 +212,26 @@ export class CreateProductDto {
   })
   variationType?: string;
 
+  /** Cliente antigo (1 variação). Dispensado quando `variationGroups` é enviado. */
+  @ValidateIf((o) => o.variationGroups === undefined)
   @IsArray()
   @ArrayMinSize(1)
   @ValidateNested({ each: true })
   @Type(() => ProductVariationDto)
-  @ApiProperty({
-    description: 'Product variations (sizes, colors, etc.)',
+  @ApiPropertyOptional({
+    description: 'Product variations (sizes, colors, etc.). Legado — ignorado quando variationGroups é enviado.',
     type: [ProductVariationDto],
   })
-  variations: ProductVariationDto[];
+  variations?: ProductVariationDto[];
+
+  /** Kit com várias variações. Quando enviado, manda (vale sobre variationType/variations). `[]` = sem variação. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => ProductVariationGroupDto)
+  @ApiPropertyOptional({ type: [ProductVariationGroupDto] })
+  variationGroups?: ProductVariationGroupDto[];
 
   @IsOptional()
   @IsBoolean()
@@ -186,14 +268,14 @@ export class UpdateProductDto {
 
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(7)
+  @ArrayMaxSize(10)
   @IsString({ each: true })
   images?: string[];
 
   @IsOptional()
   @IsInt()
   @Min(0)
-  @Max(4)
+  @Max(9)
   @Type(() => Number)
   primaryImageIndex?: number;
 
@@ -220,6 +302,14 @@ export class UpdateProductDto {
   @ValidateNested({ each: true })
   @Type(() => ProductVariationDto)
   variations?: ProductVariationDto[];
+
+  /** Kit com várias variações. Quando enviado, manda (ids preservados; ausente = removido). */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => ProductVariationGroupDto)
+  variationGroups?: ProductVariationGroupDto[];
 
   @IsOptional()
   @IsBoolean()

@@ -15,7 +15,16 @@ import {
   type ProductBeforeAudit,
   type ProductVariationAuditSnapshot,
 } from './product-audit.helpers';
-import { DEFAULT_NO_INTEREST_VARIATION_NAME } from './product.constants';
+import { DEFAULT_NO_INTEREST_VARIATION_NAME, PRODUCT_VARIATIONS_INCLUDE } from './product.constants';
+import type { ProductVariationGroupDto } from './dto/create-product.dto';
+import { isNoInterestVariation } from '../../common/utils/product-variation.util';
+
+/** Grupo normalizado (trim) pronto p/ sincronizar. */
+type NormalizedVariationGroup = {
+  id?: string;
+  name: string;
+  variations: { id?: string; name: string; price?: number; stock?: number }[];
+};
 
 @Injectable()
 export class ProductsService {
@@ -110,24 +119,6 @@ export class ProductsService {
   }
 
   /**
-   * Para produtos não obrigatórios, garante que exista a variação padrão "Sem interesse".
-   */
-  private ensureDefaultNoInterestVariation(
-    isRequired: boolean,
-    variations: ProductVariationDto[],
-  ): ProductVariationDto[] {
-    if (isRequired) return variations;
-    const hasNoInterest = variations.some(
-      (v) => v.name.trim().toLowerCase() === DEFAULT_NO_INTEREST_VARIATION_NAME.toLowerCase(),
-    );
-    if (hasNoInterest) return variations;
-    return [
-      { name: DEFAULT_NO_INTEREST_VARIATION_NAME, price: 0, stock: 0 },
-      ...variations,
-    ];
-  }
-
-  /**
    * Recalcula o `availableStock` (restante) de uma variação quando o organizador altera o
    * LIMITE (`stock`). Aplica o DELTA do limite sobre o restante atual e faz clamp em [0, novoStock],
    * preservando vendas/holds em andamento — em vez de sobrescrever o restante com o novo limite.
@@ -140,6 +131,219 @@ export class ProductsService {
   ): number {
     const delta = (newStock ?? 0) - (oldStock ?? 0);
     return Math.max(0, Math.min((oldAvailable ?? 0) + delta, newStock ?? 0));
+  }
+
+  /**
+   * Valida e normaliza `variationGroups` (400 em pt-BR): nome da variação obrigatório e único
+   * no kit, ao menos 1 opção, nomes de opção obrigatórios e únicos na variação (trim +
+   * case-insensitive). "Sem interesse" é reservado — o back cria/remove sozinho.
+   */
+  private normalizeVariationGroups(groups: ProductVariationGroupDto[]): NormalizedVariationGroup[] {
+    const seenGroups = new Set<string>();
+    return groups.map((g) => {
+      const name = (g.name ?? '').trim();
+      if (!name) throw new BadRequestException('Informe o nome de todas as variações do kit.');
+      if (seenGroups.has(name.toLowerCase())) {
+        throw new BadRequestException(`Já existe uma variação chamada "${name}" neste kit.`);
+      }
+      seenGroups.add(name.toLowerCase());
+      if (!g.variations?.length) {
+        throw new BadRequestException(`A variação "${name}" precisa de pelo menos uma opção.`);
+      }
+      const seenOptions = new Set<string>();
+      return {
+        id: g.id,
+        name,
+        variations: g.variations.map((o) => {
+          const optionName = (o.name ?? '').trim();
+          if (!optionName) {
+            throw new BadRequestException(`Informe o nome de todas as opções da variação "${name}".`);
+          }
+          if (isNoInterestVariation({ name: optionName })) {
+            throw new BadRequestException(
+              `"${DEFAULT_NO_INTEREST_VARIATION_NAME}" é reservado e não pode ser usado como opção.`,
+            );
+          }
+          if (seenOptions.has(optionName.toLowerCase())) {
+            throw new BadRequestException(`A opção "${optionName}" está repetida na variação "${name}".`);
+          }
+          seenOptions.add(optionName.toLowerCase());
+          return { id: o.id, name: optionName, price: o.price, stock: o.stock };
+        }),
+      };
+    });
+  }
+
+  /**
+   * Cliente antigo (`variationType` + `variations`): tudo num único grupo — o 1º existente
+   * (preserva o id) ou um novo. "Sem interesse" sai da lista (é tratado à parte).
+   */
+  private legacyVariationsToGroups(
+    variationType: string | null | undefined,
+    variations: ProductVariationDto[],
+    firstGroup?: { id: string; name: string } | null,
+  ): ProductVariationGroupDto[] {
+    const options = variations.filter((v) => !isNoInterestVariation(v));
+    if (options.length === 0) return [];
+    return [
+      {
+        id: firstGroup?.id,
+        name: variationType?.trim() || firstGroup?.name || 'Variação',
+        variations: options.map((o) => ({ id: o.id, name: o.name, price: o.price, stock: o.stock })),
+      },
+    ];
+  }
+
+  /**
+   * "Sem interesse" no fluxo com `variationGroups`: `isRequired` explícito manda (regra de
+   * sempre: opcional ⇒ opt-out); sem o campo (saiu do modal), kit NÃO incluso tem opt-out e
+   * incluso não tem.
+   */
+  private wantsNoInterest(isRequired: boolean | undefined, isIncludedInTicket: boolean): boolean {
+    return isRequired !== undefined ? !isRequired : !isIncludedInTicket;
+  }
+
+  /** Ids de opções do produto já usadas em compras (variationId legado + variationIds). */
+  private async findReferencedVariationIds(client: any, productId: string): Promise<Set<string>> {
+    const rows = (await client.$queryRaw(Prisma.sql`
+      SELECT DISTINCT x.id::text AS id
+      FROM "RegistrationProduct" rp
+      CROSS JOIN LATERAL unnest(array_append(rp."variationIds", rp."variationId")) AS x(id)
+      WHERE rp."productId" = ${productId}::uuid AND x.id IS NOT NULL
+    `)) as { id: string }[];
+    return new Set((rows ?? []).map((r) => r.id));
+  }
+
+  /**
+   * Aplica `groups` ao produto: grupos/opções com id são atualizados no lugar (preserva FKs),
+   * novos são criados e ausentes removidos. Opção com venda NUNCA é apagada (mesma regra de
+   * antes): sai do grupo (`groupId = null`) e some de `variationGroups`, preservando o histórico.
+   * "Sem interesse" (sem grupo) é mantido/criado quando `wantNoInterest`; senão removido (se
+   * não tiver venda) — nunca apagado só por não vir em `variationGroups`.
+   * @returns snapshot das opções p/ auditoria.
+   */
+  private async syncVariationGroups(
+    tx: any,
+    productId: string,
+    existing: {
+      variations: {
+        id: string;
+        name: string;
+        price: number;
+        stock: number;
+        availableStock: number;
+        groupId: string | null;
+      }[];
+      variationGroups: { id: string; name: string }[];
+    },
+    groups: NormalizedVariationGroup[],
+    wantNoInterest: boolean,
+  ): Promise<ProductVariationAuditSnapshot[]> {
+    const referenced =
+      existing.variations.length > 0
+        ? await this.findReferencedVariationIds(tx, productId)
+        : new Set<string>();
+    const existingGroupIds = new Set(existing.variationGroups.map((g) => g.id));
+    const kept = new Set<string>();
+    const keptGroups = new Set<string>();
+    const audit: ProductVariationAuditSnapshot[] = [];
+
+    if (wantNoInterest) {
+      const noInterest = existing.variations.find((v) => !v.groupId && isNoInterestVariation(v));
+      if (noInterest) {
+        kept.add(noInterest.id);
+      } else {
+        await tx.productVariation.create({
+          data: {
+            productId,
+            name: DEFAULT_NO_INTEREST_VARIATION_NAME,
+            price: 0,
+            stock: 0,
+            availableStock: 0,
+            sortOrder: 0,
+          },
+        });
+      }
+      audit.push({ name: DEFAULT_NO_INTEREST_VARIATION_NAME, price: 0, stock: 0 });
+    }
+
+    // sortOrder = índice no array (grupos e opções).
+    for (const [gi, g] of groups.entries()) {
+      let groupId: string;
+      if (g.id && existingGroupIds.has(g.id) && !keptGroups.has(g.id)) {
+        await tx.productVariationGroup.update({
+          where: { id: g.id },
+          data: { name: g.name, sortOrder: gi },
+        });
+        groupId = g.id;
+      } else {
+        const created = await tx.productVariationGroup.create({
+          data: { productId, name: g.name, sortOrder: gi },
+          select: { id: true },
+        });
+        groupId = created.id;
+      }
+      keptGroups.add(groupId);
+
+      for (const [oi, o] of g.variations.entries()) {
+        // Match por id; sem id (cliente antigo), pelo nome no mesmo grupo (ou opção sem grupo).
+        const byId = o.id
+          ? existing.variations.find((v) => v.id === o.id && !kept.has(v.id) && !isNoInterestVariation(v))
+          : undefined;
+        const match =
+          byId ??
+          (!o.id
+            ? existing.variations.find(
+                (v) =>
+                  !kept.has(v.id) &&
+                  !isNoInterestVariation(v) &&
+                  (v.groupId === groupId || !v.groupId) &&
+                  v.name.trim().toLowerCase() === o.name.toLowerCase(),
+              )
+            : undefined);
+        if (match) {
+          const price = o.price !== undefined ? Math.round(o.price) : match.price;
+          const stock = o.stock ?? match.stock;
+          // Ajusta o restante pelo DELTA do limite (preserva vendas/holds em andamento).
+          const availableStock = this.computeNextAvailableStock(match.stock, match.availableStock, stock);
+          await tx.productVariation.update({
+            where: { id: match.id },
+            data: { name: o.name, price, stock, availableStock, sortOrder: oi, groupId },
+          });
+          kept.add(match.id);
+          audit.push({ name: o.name, price, stock, group: g.name });
+        } else {
+          const price = Math.round(o.price ?? 0);
+          const stock = o.stock ?? 0;
+          await tx.productVariation.create({
+            data: { productId, groupId, name: o.name, price, stock, availableStock: stock, sortOrder: oi },
+          });
+          audit.push({ name: o.name, price, stock, group: g.name });
+        }
+      }
+    }
+
+    // Opções que saíram: com venda → só desliga do grupo; sem venda → apaga.
+    const removed = existing.variations.filter((v) => !kept.has(v.id));
+    const toDetach = removed.filter((v) => referenced.has(v.id) && v.groupId);
+    const toDelete = removed.filter((v) => !referenced.has(v.id));
+    if (toDetach.length > 0) {
+      await tx.productVariation.updateMany({
+        where: { id: { in: toDetach.map((v) => v.id) } },
+        data: { groupId: null },
+      });
+    }
+    if (toDelete.length > 0) {
+      await tx.productVariation.deleteMany({ where: { id: { in: toDelete.map((v) => v.id) } } });
+    }
+    // Grupos que saíram (as opções com venda já foram desligadas → o cascade não as apaga).
+    const groupsToDelete = existing.variationGroups.filter((g) => !keptGroups.has(g.id));
+    if (groupsToDelete.length > 0) {
+      await tx.productVariationGroup.deleteMany({
+        where: { id: { in: groupsToDelete.map((g) => g.id) } },
+      });
+    }
+    return audit;
   }
 
   private normalizeBuyerVariationEditForCreate(dto: CreateProductDto): {
@@ -228,13 +432,19 @@ export class ProductsService {
     const prismaWrite = this.prisma.getWriteClient();
     const prismaRead = this.prisma.getReadClient();
     const isRequired = createProductDto.isRequired ?? false;
-    const variations = this.ensureDefaultNoInterestVariation(
-      isRequired,
-      createProductDto.variations,
+    const withGroups = createProductDto.variationGroups !== undefined;
+    // Com `variationGroups` ele manda; sem (cliente antigo), variationType + variations viram 1 grupo.
+    const groups = this.normalizeVariationGroups(
+      withGroups
+        ? createProductDto.variationGroups!
+        : this.legacyVariationsToGroups(createProductDto.variationType, createProductDto.variations ?? []),
     );
+    const wantNoInterest = withGroups
+      ? this.wantsNoInterest(createProductDto.isRequired, createProductDto.isIncludedInTicket ?? false)
+      : !isRequired;
 
-    // Validações
-    if (variations.length === 0) {
+    // Validações (cliente antigo: ao menos uma variação, como antes)
+    if (!withGroups && groups.length === 0 && !wantNoInterest) {
       throw new BadRequestException('Product must have at least one variation');
     }
 
@@ -242,33 +452,36 @@ export class ProductsService {
 
     const { image, images, primaryImageIndex } = await this.resolveImageFields(createProductDto);
 
-    const product = await prismaWrite.product.create({
-      data: {
-        name: createProductDto.name,
-        image,
-        images,
-        primaryImageIndex,
-        isIncludedInTicket: createProductDto.isIncludedInTicket ?? false,
-        basePrice: Math.round(createProductDto.basePrice ?? 0), // entrada já em centavos (INT)
-        isRequired: createProductDto.isRequired ?? false,
-        variationType: createProductDto.variationType,
-        buyerVariationEditAllowed: buyerVariation.buyerVariationEditAllowed,
-        variationEditDeadlineDays: buyerVariation.variationEditDeadlineDays,
-        eventId,
-        variations: {
-          // sortOrder = posição no array recebido (já vem na ordem desejada do front).
-          create: variations.map((v, i) => ({
-            name: v.name,
-            price: Math.round(v.price ?? 0), // entrada já em centavos (INT)
-            stock: v.stock ?? 0,
-            availableStock: v.stock ?? 0, // restante parte igual ao limite (nada vendido ainda)
-            sortOrder: i,
-          })),
+    const product = await prismaWrite.$transaction(async (tx: any) => {
+      const created = await tx.product.create({
+        data: {
+          name: createProductDto.name,
+          image,
+          images,
+          primaryImageIndex,
+          isIncludedInTicket: createProductDto.isIncludedInTicket ?? false,
+          isKit: createProductDto.isKit ?? false,
+          basePrice: Math.round(createProductDto.basePrice ?? 0), // entrada já em centavos (INT)
+          isRequired,
+          // Legado: nome da 1ª variação.
+          variationType: groups[0]?.name ?? (withGroups ? null : createProductDto.variationType ?? null),
+          buyerVariationEditAllowed: buyerVariation.buyerVariationEditAllowed,
+          variationEditDeadlineDays: buyerVariation.variationEditDeadlineDays,
+          eventId,
         },
-      },
-      include: {
-        variations: { orderBy: { sortOrder: 'asc' } },
-      },
+        select: { id: true },
+      });
+      await this.syncVariationGroups(
+        tx,
+        created.id,
+        { variations: [], variationGroups: [] },
+        groups,
+        wantNoInterest,
+      );
+      return tx.product.findUnique({
+        where: { id: created.id },
+        include: PRODUCT_VARIATIONS_INCLUDE,
+      });
     });
 
     const eventRecord = await prismaRead.event.findUnique({
@@ -299,10 +512,14 @@ export class ProductsService {
                 variationType: product.variationType,
                 buyerVariationEditAllowed: product.buyerVariationEditAllowed,
                 variationEditDeadlineDays: product.variationEditDeadlineDays,
-                variations: product.variations.map((v) => ({
+                variations: product.variations.map((v: any) => ({
                   name: v.name,
                   price: v.price,
                   stock: v.stock,
+                })),
+                variationGroups: product.variationGroups.map((g: any) => ({
+                  name: g.name,
+                  variations: g.variations.map((v: any) => v.name),
                 })),
               },
             },
@@ -379,28 +596,44 @@ export class ProductsService {
    */
   private async overrideVariationSoldCounts(
     prismaRead: any,
-    products: { variations?: { id: string; soldCount?: number }[] }[],
+    products: {
+      id: string;
+      variations?: { id: string; soldCount?: number }[];
+      variationGroups?: { variations?: { id: string; soldCount?: number }[] }[];
+    }[],
   ): Promise<void> {
     const variationIds = products.flatMap((p) => (p.variations ?? []).map((v) => v.id));
     if (variationIds.length === 0) return;
+    // Filtro por produto (indexado) antes do unnest — evita varrer a tabela inteira.
+    const productIds = products.map((p) => p.id);
 
+    // Cada opção escolhida conta (kit com várias variações): `variationIds`, ou o
+    // `variationId` legado quando a lista está vazia.
     const rows = (await prismaRead.$queryRaw(Prisma.sql`
-      SELECT rp."variationId" AS "variationId", SUM(rp.quantity)::bigint AS sold
+      SELECT x.vid::text AS "variationId", SUM(rp.quantity)::bigint AS sold
       FROM "RegistrationProduct" rp
+      CROSS JOIN LATERAL unnest(
+        CASE WHEN cardinality(rp."variationIds") > 0 THEN rp."variationIds" ELSE ARRAY[rp."variationId"] END
+      ) AS x(vid)
       INNER JOIN "Registration" r ON r.id = rp."registrationId"
       INNER JOIN "Order" o ON o.id = r."orderId"
       INNER JOIN "Payment" p ON p."orderId" = o.id
-      WHERE rp."variationId" = ANY(${variationIds}::uuid[])
+      WHERE rp."productId" = ANY(${productIds}::uuid[])
+        AND x.vid = ANY(${variationIds}::uuid[])
         AND r.status::text IN ('CONFIRMED', 'COMPLETED')
         AND p.status::text = 'PAID'
-      GROUP BY rp."variationId"
+      GROUP BY x.vid
     `)) as { variationId: string; sold: bigint }[];
 
     const soldMap = new Map<string, number>(
       rows.map((row) => [row.variationId, Number(row.sold)]),
     );
     for (const p of products) {
-      for (const v of p.variations ?? []) {
+      const all = [
+        ...(p.variations ?? []),
+        ...(p.variationGroups ?? []).flatMap((g) => g.variations ?? []),
+      ];
+      for (const v of all) {
         v.soldCount = soldMap.get(v.id) ?? 0;
       }
     }
@@ -425,11 +658,7 @@ export class ProductsService {
         where: activeWhere,
         skip,
         take: limit,
-        include: {
-          variations: {
-            orderBy: { sortOrder: 'asc' },
-          },
-        },
+        include: PRODUCT_VARIATIONS_INCLUDE,
         orderBy: [{ name: 'asc' }, { id: 'asc' }],
       }),
       prismaRead.product.count({ where: activeWhere }),
@@ -463,9 +692,7 @@ export class ProductsService {
     const product = await prismaRead.product.findUnique({
       where: { id },
       include: {
-        variations: {
-          orderBy: { sortOrder: 'asc' },
-        },
+        ...PRODUCT_VARIATIONS_INCLUDE,
         event: {
           select: {
             id: true,
@@ -510,7 +737,11 @@ export class ProductsService {
       include: {
         tickets: true,
         variations: {
-          select: { id: true, name: true, price: true, stock: true, availableStock: true },
+          select: { id: true, name: true, price: true, stock: true, availableStock: true, groupId: true },
+          orderBy: { sortOrder: 'asc' },
+        },
+        variationGroups: {
+          select: { id: true, name: true },
           orderBy: { sortOrder: 'asc' },
         },
       },
@@ -525,6 +756,7 @@ export class ProductsService {
 
     const updateData: Record<string, unknown> = { ...updateProductDto };
     delete updateData.variations;
+    delete updateData.variationGroups;
     delete updateData.buyerVariationEditAllowed;
     delete updateData.variationEditDeadlineDays;
     // Campos de imagem são resolvidos separadamente abaixo
@@ -566,87 +798,58 @@ export class ProductsService {
     const scalarOnlyForAudit = { ...updateData };
     let newVariationsSnapshot: ProductVariationAuditSnapshot[] | null = null;
 
-    if (updateProductDto.variations) {
-      const isRequired = updateProductDto.isRequired ?? product.isRequired;
-      const variations = this.ensureDefaultNoInterestVariation(
-        isRequired,
-        updateProductDto.variations,
+    // Com `variationGroups` ele manda; sem (cliente antigo), `variations` vira 1 grupo (o 1Âº).
+    const withGroups = updateProductDto.variationGroups !== undefined;
+    let groups: NormalizedVariationGroup[] | null = null;
+    let wantNoInterest = false;
+    if (withGroups) {
+      groups = this.normalizeVariationGroups(updateProductDto.variationGroups!);
+      wantNoInterest = this.wantsNoInterest(
+        updateProductDto.isRequired,
+        updateProductDto.isIncludedInTicket ?? product.isIncludedInTicket,
       );
-
-      if (variations.length === 0) {
+      // Legado: nome da 1Âª variaÃ§Ã£o.
+      updateData.variationType = groups[0]?.name ?? null;
+    } else if (updateProductDto.variations) {
+      groups = this.normalizeVariationGroups(
+        this.legacyVariationsToGroups(
+          updateProductDto.variationType,
+          updateProductDto.variations,
+          product.variationGroups[0] ?? null,
+        ),
+      );
+      wantNoInterest = !(updateProductDto.isRequired ?? product.isRequired);
+      if (groups.length === 0 && !wantNoInterest) {
         throw new BadRequestException('Product must have at least one variation');
       }
+      if (groups[0]) updateData.variationType = groups[0].name;
+    }
 
-      newVariationsSnapshot = variations.map((v) => ({
-        name: v.name,
-        price: Math.round(v.price ?? 0),
-        stock: v.stock ?? 0,
-      }));
-
-      // IDs de variações referenciadas por compras — nunca podem ser deletadas
-      const referencedRows = await prismaWrite.registrationProduct.findMany({
-        where: { productId, variationId: { not: null } },
-        select: { variationId: true },
-        distinct: ['variationId'],
-      });
-      const referencedVariationIds = new Set(referencedRows.map((r) => r.variationId as string));
-
-      // Upsert: atualiza variações existentes no lugar (por id ou por nome como fallback)
-      // e cria as novas. Nunca recria com novo ID — preserva FKs em RegistrationProduct.
-      const incomingIds = new Set(variations.map((v) => v.id).filter(Boolean) as string[]);
-      // `i` = posição na lista recebida → recomputa o sortOrder (permite reordenar arrastando).
-      for (const [i, v] of variations.entries()) {
-        const price = Math.round(v.price ?? 0);
-        const stock = v.stock ?? 0;
-
-        if (v.id) {
-          // Atualizar pelo ID explícito
-          const exists = product.variations.find((pv) => pv.id === v.id);
-          if (exists) {
-            // Ajusta o restante pelo DELTA do limite (preserva vendas/holds em andamento),
-            // nunca sobrescreve availableStock cegamente.
-            const availableStock = this.computeNextAvailableStock(exists.stock, exists.availableStock, stock);
-            await prismaWrite.productVariation.update({
-              where: { id: v.id },
-              data: { name: v.name, price, stock, availableStock, sortOrder: i },
-            });
-          } else {
-            // ID enviado mas não existe — criar como nova (restante = limite)
-            await prismaWrite.productVariation.create({
-              data: { productId, name: v.name, price, stock, availableStock: stock, sortOrder: i },
-            });
-          }
-        } else {
-          // Sem ID: tenta match por nome (backwards-compat) antes de criar
-          const byName = product.variations.find((pv) => pv.name === v.name);
-          if (byName) {
-            const availableStock = this.computeNextAvailableStock(byName.stock, byName.availableStock, stock);
-            await prismaWrite.productVariation.update({
-              where: { id: byName.id },
-              data: { price, stock, availableStock, sortOrder: i },
-            });
-            incomingIds.add(byName.id);
-          } else {
-            await prismaWrite.productVariation.create({
-              data: { productId, name: v.name, price, stock, availableStock: stock, sortOrder: i },
-            });
-          }
+    const updatedProduct = await prismaWrite.$transaction(async (tx: any) => {
+      if (groups) {
+        newVariationsSnapshot = await this.syncVariationGroups(
+          tx,
+          productId,
+          product,
+          groups,
+          wantNoInterest,
+        );
+      } else if (updateProductDto.variationType !== undefined && product.variationGroups[0]) {
+        // Cliente antigo renomeando sÃ³ o tipo: renomeia o 1Âº grupo (variationType = legado dele).
+        const name = updateProductDto.variationType?.trim();
+        if (name) {
+          await tx.productVariationGroup.update({
+            where: { id: product.variationGroups[0].id },
+            data: { name },
+          });
         }
       }
-
-      // Remover variações que saíram da lista e não têm compras vinculadas
-      const toDelete = product.variations.filter(
-        (pv) => !incomingIds.has(pv.id) && !referencedVariationIds.has(pv.id),
-      );
-      if (toDelete.length > 0) {
-        await prismaWrite.productVariation.deleteMany({
-          where: { id: { in: toDelete.map((v) => v.id) } },
-        });
-      }
-
-      // Não usa o campo `variations` no updateData — as operações acima já aplicaram tudo
-      delete updateData.variations;
-    }
+      return tx.product.update({
+        where: { id: productId },
+        data: updateData as Prisma.ProductUpdateInput,
+        include: PRODUCT_VARIATIONS_INCLUDE,
+      });
+    });
 
     const { labels: auditLabels, changes: auditChanges } =
       summarizeProductUpdateForAudit(
@@ -655,14 +858,6 @@ export class ProductsService {
         updateProductDto,
         newVariationsSnapshot,
       );
-
-    const updatedProduct = await prismaWrite.product.update({
-      where: { id: productId },
-      data: updateData as Prisma.ProductUpdateInput,
-      include: {
-        variations: { orderBy: { sortOrder: 'asc' } },
-      },
-    });
 
     const eventRecord = await prismaRead.event.findUnique({
       where: { id: eventId },

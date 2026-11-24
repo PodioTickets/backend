@@ -1,10 +1,18 @@
-import { IsArray, IsEmail, IsInt, IsOptional, IsUUID, Min, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsEmail, IsInt, IsOptional, IsUUID, Min, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class OrderProductItemDto {
   @IsUUID()
   productId: string;
 
+  /** Kit com várias variações: 1 opção por variação (ordem dos grupos). Teto evita payload abusivo. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsUUID('all', { each: true })
+  variationIds?: string[];
+
+  /** Legado = `variationIds[0]`. */
   @IsOptional()
   @IsUUID()
   variationId?: string;

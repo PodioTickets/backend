@@ -16,6 +16,8 @@
  * Todas as escritas são SQL atômico (mesmo padrão dos ingressos), seguras sob concorrência.
  */
 
+import { normalizeVariationIds } from './product-variation.util';
+
 /**
  * Política ATUAL: TODO produto segura o próprio estoque da variação — inclusive
  * incluso+obrigatório. Antes esse caso era gated SÓ pela vaga do ingresso; agora
@@ -92,16 +94,33 @@ export function decrementVariationSold(tx: any, variationId: string, qty: number
  */
 export async function reverseRegistrationProductSale(
   tx: any,
-  rp: { variationId: string | null; quantity: number | null; productSnapshot: unknown },
+  rp: {
+    variationId: string | null;
+    variationIds?: string[] | null;
+    quantity: number | null;
+    productSnapshot: unknown;
+  },
 ): Promise<void> {
-  if (!rp.variationId) return;
+  // Kit com várias variações: reverte CADA opção escolhida (`variationIds`; legado = variationId).
+  const ids = normalizeVariationIds(rp);
+  if (ids.length === 0) return;
   const qty = rp.quantity ?? 1;
-  await decrementVariationSold(tx, rp.variationId, qty);
   const snap = (rp.productSnapshot as any) ?? {};
-  const held =
-    typeof snap.stockHeld === 'boolean'
-      ? snap.stockHeld
-      : !(snap.isIncludedInTicket === true && snap.isRequired === true);
-  // releaseVariationHold tem guard `stock > 0` → no-op seguro p/ variação ilimitada.
-  if (held) await releaseVariationHold(tx, rp.variationId, qty);
+  // Opções que seguraram estoque: lista congelada (pedido novo) ou a regra antiga (todas
+  // as escolhidas, se o item segurou).
+  let heldIds: string[];
+  if (Array.isArray(snap.heldVariationIds)) {
+    heldIds = snap.heldVariationIds;
+  } else {
+    const held =
+      typeof snap.stockHeld === 'boolean'
+        ? snap.stockHeld
+        : !(snap.isIncludedInTicket === true && snap.isRequired === true);
+    heldIds = held ? ids : [];
+  }
+  for (const id of ids) {
+    await decrementVariationSold(tx, id, qty);
+    // releaseVariationHold tem guard `stock > 0` → no-op seguro p/ variação ilimitada.
+    if (heldIds.includes(id)) await releaseVariationHold(tx, id, qty);
+  }
 }

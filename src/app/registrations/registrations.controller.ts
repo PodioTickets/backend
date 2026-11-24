@@ -19,6 +19,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PaymentsService } from '../payments/payments.service';
 import { NoCache } from 'src/common/decorators/cache.decorator';
 import { getClientIp } from '../../common/utils/client-ip.util';
+import { parseVariationIdsBody } from '../../common/utils/product-variation.util';
 
 @ApiTags('Registrations')
 @Controller('api/v1/registrations')
@@ -79,7 +80,15 @@ export class RegistrationsController {
   })
   @ApiParam({ name: 'registrationId', description: 'UUID da inscrição' })
   @ApiParam({ name: 'productId', description: 'UUID do produto' })
-  @ApiBody({ schema: { type: 'object', properties: { variationId: { type: 'string', format: 'uuid' } }, required: ['variationId'] } })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        variationIds: { type: 'array', items: { type: 'string', format: 'uuid' }, description: '1 opção por variação do kit' },
+        variationId: { type: 'string', format: 'uuid', description: 'Legado = variationIds[0]' },
+      },
+    },
+  })
   @ApiResponse({ status: 200, description: 'Variação atualizada com sucesso' })
   @ApiResponse({ status: 400, description: 'Alteração não permitida' })
   @ApiResponse({ status: 404, description: 'Inscrição ou produto não encontrado' })
@@ -88,8 +97,9 @@ export class RegistrationsController {
     @Param('registrationId') registrationId: string,
     @Param('productId') productId: string,
     @Body('variationId') variationId: string,
+    @Body('variationIds') variationIds: unknown,
   ) {
-    return this.registrationsService.updateProductVariation(registrationId, productId, variationId, req.user.id, getClientIp(req));
+    return this.registrationsService.updateProductVariation(registrationId, productId, parseVariationIdsBody(variationIds, variationId), req.user.id, getClientIp(req));
   }
 
   @Patch(':registrationId/participant')
@@ -146,7 +156,15 @@ export class RegistrationsController {
   })
   @ApiParam({ name: 'registrationId', description: 'UUID da inscrição' })
   @ApiParam({ name: 'productId', description: 'UUID do produto' })
-  @ApiBody({ schema: { type: 'object', properties: { variationId: { type: 'string', format: 'uuid' } }, required: ['variationId'] } })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        variationIds: { type: 'array', items: { type: 'string', format: 'uuid' }, description: '1 opção por variação do kit' },
+        variationId: { type: 'string', format: 'uuid', description: 'Legado = variationIds[0]' },
+      },
+    },
+  })
   @ApiResponse({ status: 200, description: 'Variação atualizada com sucesso' })
   @ApiResponse({ status: 400, description: 'Alteração não permitida' })
   @ApiResponse({ status: 403, description: 'Sem permissão de edição no evento' })
@@ -156,8 +174,9 @@ export class RegistrationsController {
     @Param('registrationId') registrationId: string,
     @Param('productId') productId: string,
     @Body('variationId') variationId: string,
+    @Body('variationIds') variationIds: unknown,
   ) {
-    return this.registrationsService.updateProductVariationAsOrganizer(registrationId, productId, variationId, req.user.id, getClientIp(req));
+    return this.registrationsService.updateProductVariationAsOrganizer(registrationId, productId, parseVariationIdsBody(variationIds, variationId), req.user.id, getClientIp(req));
   }
 
   @Get(':id')

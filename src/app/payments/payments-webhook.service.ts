@@ -11,6 +11,8 @@ import { OrderFinalizationService, OrderFinalizationAbortError } from './order-f
 import { PaymentCompensationService } from './payment-compensation.service';
 import { PaymentMethod, PaymentStatus } from '@prisma/client';
 import { formatEventHappensDate, formatEventCardAddress } from '../../common/utils/event-email-format.util';
+import { PRODUCT_VARIATION_LABEL_SELECT } from '../products/product.constants';
+import { describeRegistrationProductVariations } from '../../common/utils/product-variation.util';
 
 interface CieloWebhookEvent {
   PaymentId: string;
@@ -225,7 +227,7 @@ export class PaymentsWebhookService {
             include: {
               user: true,
               tickets: { include: { ticket: { include: { category: true } } } },
-              products: { include: { product: true, variation: true } },
+              products: { include: { product: { include: PRODUCT_VARIATION_LABEL_SELECT }, variation: true } },
               questionAnswers: { include: { question: true } },
             },
           },
@@ -300,7 +302,8 @@ export class PaymentsWebhookService {
               products: (reg.products ?? []).map((rp: any) => ({
                 name: rp.product?.name ?? rp.productSnapshot?.name ?? '',
                 price: rp.unitPrice ?? 0,
-                variationName: rp.variation?.name ?? rp.productSnapshot?.variationName,
+                // Rótulo único (kit com várias variações: "Variação: opção · …").
+                variationName: describeRegistrationProductVariations(rp).variationLabel || (rp.variation?.name ?? rp.productSnapshot?.variationName),
                 imageUrl: rp.product?.images?.[rp.product?.primaryImageIndex ?? 0],
                 isIncluded: rp.product?.isIncludedInTicket ?? false,
               }))
@@ -537,7 +540,7 @@ export class PaymentsWebhookService {
             include: {
               user: true,
               tickets: { include: { ticket: { include: { category: true } } } },
-              products: { include: { product: true, variation: true } },
+              products: { include: { product: { include: PRODUCT_VARIATION_LABEL_SELECT }, variation: true } },
               questionAnswers: { include: { question: true } },
             },
           },
@@ -612,7 +615,8 @@ export class PaymentsWebhookService {
               products: (reg.products ?? []).map((rp: any) => ({
                 name: rp.product?.name ?? rp.productSnapshot?.name ?? '',
                 price: rp.unitPrice ?? 0,
-                variationName: rp.variation?.name ?? rp.productSnapshot?.variationName,
+                // Rótulo único (kit com várias variações: "Variação: opção · …").
+                variationName: describeRegistrationProductVariations(rp).variationLabel || (rp.variation?.name ?? rp.productSnapshot?.variationName),
                 imageUrl: rp.product?.images?.[rp.product?.primaryImageIndex ?? 0],
                 isIncluded: rp.product?.isIncludedInTicket ?? false,
               }))

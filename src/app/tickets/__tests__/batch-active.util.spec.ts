@@ -11,7 +11,7 @@
  *  janela de inscrição (orders.reserve / registrations).
  * ============================================================================
  */
-import { resolveActiveBatch, type BatchWithSold } from '../batch-active.util';
+import { findDuplicateBatchPeriod, resolveActiveBatch, type BatchWithSold } from '../batch-active.util';
 
 /** Lote BY_TIME com defaults; sobrescreva o que o caso precisar. */
 function batch(over: Partial<BatchWithSold> = {}): BatchWithSold {
@@ -347,5 +347,39 @@ describe('resolveActiveBatch — lote POR DATA abre na data mesmo com lotes ante
     const r = resolveActiveBatch([l1, l2, l3, l4], after);
     expect(r.batch.id).toBe('l4');
     expect(r.status).toBe('SOLD_OUT');
+  });
+});
+
+describe('findDuplicateBatchPeriod — mesma janela em dois lotes por data (24/11)', () => {
+  const p = (startDate: string, endDate: string, triggerType = 'BY_TIME') => ({ startDate, endDate, triggerType });
+
+  it('acusa o par com início e término iguais', () => {
+    expect(
+      findDuplicateBatchPeriod([
+        p('2030-01-01T00:00:00Z', '2030-01-10T23:59:00Z'),
+        p('2030-01-11T00:00:00Z', '2030-01-20T23:59:00Z'),
+        p('2030-01-01T00:00:00Z', '2030-01-10T23:59:00Z'),
+      ]),
+    ).toEqual([0, 2]);
+  });
+
+  it('aceita só o início igual, ou só o término igual', () => {
+    expect(
+      findDuplicateBatchPeriod([
+        p('2030-01-01T00:00:00Z', '2030-01-10T23:59:00Z'),
+        p('2030-01-01T00:00:00Z', '2030-01-12T23:59:00Z'),
+        p('2030-01-05T00:00:00Z', '2030-01-10T23:59:00Z'),
+      ]),
+    ).toBeNull();
+  });
+
+  it('ignora lote "ao esgotar o anterior" e lote sem janela completa', () => {
+    expect(
+      findDuplicateBatchPeriod([
+        p('2030-01-01T00:00:00Z', '2030-01-10T23:59:00Z'),
+        p('2030-01-01T00:00:00Z', '2030-01-10T23:59:00Z', 'AFTER_PREVIOUS_SOLD_OUT'),
+        { startDate: '2030-01-01T00:00:00Z', endDate: null, triggerType: 'BY_TIME' },
+      ]),
+    ).toBeNull();
   });
 });

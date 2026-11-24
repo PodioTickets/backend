@@ -1,3 +1,8 @@
+import {
+  normalizeVariationIds,
+  resolveVariationSelection,
+} from '../../common/utils/product-variation.util';
+
 /**
  * Regras puras da troca de ingresso pelo admin (anula a inscrição antiga e cria uma nova).
  * Espelham as do checkout (InformationStep.getParticipantValidationErrors no front) para
@@ -65,11 +70,16 @@ export interface SwapAllowedProduct {
   id: string;
   name: string;
   isRequired: boolean;
-  variations: Array<{ id: string }>;
+  variations: Array<{ id: string; name?: string; groupId?: string | null }>;
+  /** Variações (grupos) do kit — 1 opção por grupo. */
+  variationGroups?: Array<{ id: string; name: string; sortOrder?: number }>;
 }
 
 export interface SwapProductSelection {
   productId: string;
+  /** Kit com várias variações: 1 opção por variação. */
+  variationIds?: string[] | null;
+  /** Legado = variationIds[0]. */
   variationId?: string | null;
 }
 
@@ -89,12 +99,19 @@ export function swapProductsError(
     if (!product) return 'Produto não disponível para o ingresso escolhido';
     if (seen.has(item.productId)) return `Produto "${product.name}" repetido`;
     seen.add(item.productId);
+    const ids = normalizeVariationIds(item);
     if (product.variations.length > 0) {
-      if (!item.variationId) return `Escolha a opção de "${product.name}"`;
-      if (!product.variations.some((v) => v.id === item.variationId)) {
+      if (ids.length === 0) return `Escolha a opção de "${product.name}"`;
+      if (ids.some((id) => !product.variations.some((v) => v.id === id))) {
         return `Opção inválida para "${product.name}"`;
       }
-    } else if (item.variationId) {
+      // 1 opção por variação (e todas as variações respondidas), "Sem interesse" sozinho.
+      const selectionError = resolveVariationSelection(
+        { ...product, variations: product.variations.map((v) => ({ name: '', ...v })) },
+        ids,
+      ).error;
+      if (selectionError) return selectionError;
+    } else if (ids.length > 0) {
       return `Opção inválida para "${product.name}"`;
     }
   }

@@ -40,6 +40,16 @@ import {
   resolveDocument,
 } from '../../common/utils/document.util';
 import { resolveProductUnitPrice } from '../../common/utils/product-price.util';
+import {
+  buildVariationChoices,
+  buildVariationLabel,
+  describeRegistrationProductVariations,
+  heldVariationIdsOf,
+  normalizeVariationIds,
+  pickPricingVariation,
+  resolveVariationSelection,
+} from '../../common/utils/product-variation.util';
+import { PRODUCT_VARIATIONS_INCLUDE, PRODUCT_VARIATION_LABEL_SELECT } from '../products/product.constants';
 import { eventWindowInstant } from '../../common/utils/brt-date.util';
 import { resolveActiveBatch } from '../tickets/batch-active.util';
 import {
@@ -251,7 +261,7 @@ export function computePartialCouponDiscount(
 
 /**
  * Subtotal (centavos) dos produtos adicionais no carrinho do pedido (PENDING).
- * Lê `order.pendingProducts` (Json) — formato `{ productId, variationId?, quantity, unitPrice, participantEmail }`.
+ * Lê `order.pendingProducts` (Json) — formato `{ productId, variationIds?, variationId?, heldVariationIds?, quantity, unitPrice, participantEmail }`.
  */
 function computePendingProductsSubtotal(order: any): number {
   return ((order?.pendingProducts as any[] | null) ?? []).reduce(
@@ -1494,7 +1504,7 @@ export class OrdersService {
             include: {
               user: true,
               tickets: { include: { ticket: { include: { category: true } }, batch: true } },
-              products: { include: { product: true, variation: true } },
+              products: { include: { product: { include: PRODUCT_VARIATION_LABEL_SELECT }, variation: true } },
               questionAnswers: { include: { question: true } },
             },
           },
@@ -1556,7 +1566,8 @@ export class OrdersService {
             products: (reg.products ?? []).map((rp: any) => ({
               name: rp.product?.name ?? '',
               price: rp.unitPrice ?? 0,
-              variationName: rp.variation?.name,
+              // Rótulo único (kit com várias variações: "Variação: opção · …").
+              variationName: describeRegistrationProductVariations(rp).variationLabel || rp.variation?.name,
               imageUrl: rp.product?.images?.[rp.product?.primaryImageIndex ?? 0],
               isIncluded: rp.product?.isIncludedInTicket ?? false,
             }))
@@ -1735,7 +1746,7 @@ export class OrdersService {
                         orderBy: { sortOrder: 'asc' },
                         include: {
                           product: {
-                            include: { variations: { orderBy: { sortOrder: 'asc' } } },
+                            include: PRODUCT_VARIATIONS_INCLUDE,
                           },
                         },
                       },
@@ -1768,7 +1779,16 @@ export class OrdersService {
                       buyerVariationEditAllowed: true,
                       variationEditDeadlineDays: true,
                       // Opções vivas pra montar o seletor de variação no recibo (ordenadas).
-                      variations: { select: { id: true, name: true, price: true, stock: true, availableStock: true, soldCount: true, sortOrder: true }, orderBy: { sortOrder: 'asc' } },
+                      variations: { select: { id: true, name: true, price: true, stock: true, availableStock: true, soldCount: true, sortOrder: true, groupId: true }, orderBy: { sortOrder: 'asc' } },
+                      variationGroups: {
+                        select: {
+                          id: true,
+                          name: true,
+                          sortOrder: true,
+                          variations: { select: { id: true, name: true, price: true, stock: true, availableStock: true, soldCount: true, sortOrder: true, groupId: true }, orderBy: { sortOrder: 'asc' } },
+                        },
+                        orderBy: { sortOrder: 'asc' },
+                      },
                     },
                   },
                   variation: true,
@@ -1816,6 +1836,11 @@ export class OrdersService {
     for (const reg of order.registrations as any[]) {
       for (const rp of reg.products ?? []) {
         if (!rp.variation && rp.variationId) orphanVariationIds.add(rp.variationId);
+        // Kit com várias variações: opções escolhidas que não vieram na lista viva do produto.
+        const liveIds = new Set((rp.product?.variations ?? []).map((v: any) => v.id));
+        for (const id of normalizeVariationIds(rp)) {
+          if (!liveIds.has(id) && id !== rp.variation?.id) orphanVariationIds.add(id);
+        }
       }
     }
     const orphanVariationMap = new Map<string, any>();
@@ -1860,10 +1885,14 @@ export class OrdersService {
           }
         : (metadata.billingAddress ?? null);
 
-    // Build a map of productId → { variationId, quantity } from the order's pending products
-    const pendingProductsMap = new Map<string, { variationId?: string; quantity: number }>();
+    // Build a map of productId → { variationIds, quantity } from the order's pending products
+    const pendingProductsMap = new Map<string, { variationId?: string; variationIds: string[]; quantity: number }>();
     for (const pp of (order.pendingProducts as any[] | null) ?? []) {
-      pendingProductsMap.set(pp.productId, { variationId: pp.variationId, quantity: pp.quantity });
+      pendingProductsMap.set(pp.productId, {
+        variationId: pp.variationId,
+        variationIds: normalizeVariationIds(pp),
+        quantity: pp.quantity,
+      });
     }
 
     const eventDate = new Date((order as any).event?.eventDate ?? 0);
@@ -2136,10 +2165,17 @@ export class OrdersService {
                   const regProduct = (reg.products ?? []).find((rp: any) => rp.productId === tp.product.id);
                   const variationEdited = regProduct?.variationEdited ?? false;
 
-                  const resolvedVariationId =
-                    regProduct?.variationId
-                    ?? pendingProductsMap.get(tp.product.id)?.variationId
-                    ?? null;
+                  const resolvedVariationIds = regProduct
+                    ? normalizeVariationIds(regProduct)
+                    : (pendingProductsMap.get(tp.product.id)?.variationIds ?? []);
+                  const resolvedVariationId = resolvedVariationIds[0] ?? null;
+                  // Todas as opções escolhidas (ordem dos grupos) + rótulo único.
+                  const selectedVariations = buildVariationChoices(
+                    resolvedVariationIds,
+                    [...(tp.product.variations ?? []), ...orphanVariationMap.values()],
+                    tp.product.variationGroups ?? [],
+                    regProduct?.variation ?? null,
+                  );
 
                   const selectedVariation: any =
                     regProduct?.variation
@@ -2157,8 +2193,7 @@ export class OrdersService {
                   const canEditVariation =
                     (tp.product.buyerVariationEditAllowed ?? false) &&
                     !variationEdited &&
-                    editWindowOpen &&
-                    tp.product.isIncludedInTicket === true;
+                    editWindowOpen;
 
                   return {
                     id: tp.product.id,
@@ -2167,7 +2202,7 @@ export class OrdersService {
                     basePrice: tp.product.basePrice,
                     isIncludedInTicket: tp.product.isIncludedInTicket ?? false,
                     isRequired: tp.product.isRequired ?? false,
-                    variationType: tp.product.variationType ?? null,
+                    variationType: tp.product.variationGroups?.[0]?.name ?? tp.product.variationType ?? null,
                     buyerVariationEditAllowed: tp.product.buyerVariationEditAllowed ?? false,
                     variationEditDeadline,
                     variationEdited,
@@ -2175,6 +2210,8 @@ export class OrdersService {
                     selectedVariation: selectedVariation
                       ? { id: selectedVariation.id, name: selectedVariation.name, price: selectedVariation.price }
                       : null,
+                    selectedVariations,
+                    variationLabel: buildVariationLabel(selectedVariations),
                     variations: (tp.product.variations ?? []).map((v: any) => ({
                       id: v.id,
                       name: v.name,
@@ -2183,7 +2220,9 @@ export class OrdersService {
                       availableStock: v.availableStock,
                       soldCount: v.soldCount,
                       sortOrder: v.sortOrder,
+                      groupId: v.groupId ?? null,
                     })),
+                    variationGroups: tp.product.variationGroups ?? [],
                   };
                 }),
               }
@@ -2226,6 +2265,14 @@ export class OrdersService {
             const selectedVarPriced = selectedVar
               ? { ...selectedVar, price: rp.unitPrice }
               : null;
+            // Opções escolhidas: vivas + órfãs (opção apagada) → snapshot como último recurso.
+            const chosen = describeRegistrationProductVariations({
+              ...rp,
+              product: {
+                ...liveP,
+                variations: [...(liveP?.variations ?? []), ...orphanVariationMap.values()],
+              },
+            });
 
             // Janela de edição = config VIVA do produto (snapshot não serve: flags/prazo
             // podem ter mudado e as opções de variação precisam ser as atuais). Espelha
@@ -2240,8 +2287,7 @@ export class OrdersService {
             const canEditVariation =
               (liveP?.buyerVariationEditAllowed ?? false) &&
               !variationEdited &&
-              editWindowOpen &&
-              liveP?.isIncludedInTicket === true;
+              editWindowOpen;
 
             return {
               id: rp.id,
@@ -2257,6 +2303,9 @@ export class OrdersService {
               },
               variation: selectedVarPriced,
               variationName: selectedVar?.name ?? null,
+              // Kit com várias variações: opções escolhidas (ordem dos grupos) + rótulo único.
+              variations: chosen.variations,
+              variationLabel: chosen.variationLabel || (selectedVar?.name ?? ''),
               quantity: rp.quantity,
               unitPrice: rp.unitPrice,
               totalPrice: rp.totalPrice,
@@ -2266,13 +2315,16 @@ export class OrdersService {
               variationEdited,
               canEditVariation,
               // Opções vivas pro seletor (vazio quando o produto não tem variações), ordenadas.
-              variations: (liveP?.variations ?? []).map((v: any) => ({
+              // (`variations` agora são as ESCOLHIDAS — contrato kit com várias variações.)
+              variationOptions: (liveP?.variations ?? []).map((v: any) => ({
                 id: v.id,
                 name: v.name,
                 price: v.price,
                 stock: v.stock,
                 sortOrder: v.sortOrder,
+                groupId: v.groupId ?? null,
               })),
+              variationGroups: liveP?.variationGroups ?? [],
             };
           })
           // "Sem interesse" = opt-out de produto opcional → NÃO exibir nem somar (spec §6.1).
@@ -3300,7 +3352,7 @@ export class OrdersService {
 
       const product = await w.product.findUnique({
         where: { id: item.productId },
-        include: { variations: true },
+        include: { variations: true, variationGroups: true },
       });
       if (!product) throw new NotFoundException(`Produto ${item.productId} não encontrado`);
       // Escopo por evento: sem esta checagem dava pra injetar produto de OUTRO
@@ -3312,28 +3364,32 @@ export class OrdersService {
         );
       }
 
-      let variation: any = null;
-      if (item.variationId) {
-        variation = product.variations.find((v: any) => v.id === item.variationId);
-        if (!variation) {
-          throw new UnprocessableEntityException(
-            `Variação selecionada não encontrada para "${product.name}". Selecione uma opção válida.`,
-          );
-        }
+      // Kit com várias variações: `variationIds` (1 opção por variação); `variationId` = legado.
+      const selection = resolveVariationSelection(product, normalizeVariationIds(item));
+      if (selection.error !== undefined) {
+        throw new UnprocessableEntityException(selection.error);
       }
-      const unitPrice = resolveProductUnitPrice(product, variation);
+      const chosen: any[] = selection.variations;
+      const unitPrice = resolveProductUnitPrice(product, pickPricingVariation(chosen));
       productsSubtotal += unitPrice * item.quantity;
-      // Segura estoque quando: tem variação selecionada e o estoque é LIMITADO (stock > 0).
+      // Segura estoque de CADA opção escolhida com estoque LIMITADO (stock > 0).
       // TODO produto segura agora (inclusive incluso+obrigatório — holdsStock=true);
       // ilimitado (stock=0) nunca segura. A marca persiste no JSON p/ release no
       // cancel/expire e é congelada no productSnapshot (estorno/chargeback).
-      const stockHeld = holdsStock(product) && !!variation && (variation.stock ?? 0) > 0;
-      if (stockHeld && item.variationId) {
-        variationLabels.set(item.variationId, `${product.name} — ${variation.name}`);
+      const heldVariationIds = holdsStock(product)
+        ? chosen.filter((v) => (v.stock ?? 0) > 0).map((v) => v.id as string)
+        : [];
+      for (const v of chosen) {
+        if (heldVariationIds.includes(v.id)) variationLabels.set(v.id, `${product.name} — ${v.name}`);
       }
+      const variationIds = chosen.map((v) => v.id as string);
+      const stockHeld = heldVariationIds.length > 0;
       enrichedProducts.push({
         productId: item.productId,
-        variationId: item.variationId ?? null,
+        variationIds,
+        // Legado (pedidos/leitores antigos) = 1ª opção.
+        variationId: variationIds[0] ?? null,
+        heldVariationIds,
         quantity: item.quantity,
         participantEmail: item.participantEmail,
         // Índice do slot (participante↔ingresso). Persistido p/ o finalize vincular o
@@ -3374,8 +3430,10 @@ export class OrdersService {
     const sumHeldByVariation = (items: any[]): Map<string, number> => {
       const m = new Map<string, number>();
       for (const it of items ?? []) {
-        if (!it?.stockHeld || !it.variationId) continue;
-        m.set(it.variationId, (m.get(it.variationId) ?? 0) + (it.quantity ?? 1));
+        // heldVariationIds (pedido novo) ou stockHeld + variationId (pedido antigo).
+        for (const id of heldVariationIdsOf(it)) {
+          m.set(id, (m.get(id) ?? 0) + (it.quantity ?? 1));
+        }
       }
       return m;
     };
@@ -3629,10 +3687,9 @@ export class OrdersService {
           include: { variations: true },
         });
         if (product) {
-          const variation = item.variationId
-            ? product.variations.find((v: any) => v.id === item.variationId)
-            : null;
-          const unitPrice = resolveProductUnitPrice(product, variation);
+          const ids = normalizeVariationIds(item);
+          const chosen = product.variations.filter((v: any) => ids.includes(v.id));
+          const unitPrice = resolveProductUnitPrice(product, pickPricingVariation(chosen));
           productsSubtotal += unitPrice * item.quantity;
           pricedPendingProducts.push({ ...item, unitPrice });
         }
@@ -4646,7 +4703,7 @@ export class OrdersService {
             include: {
               user: true,
               tickets: { include: { ticket: { include: { category: true } }, batch: true } },
-              products: { include: { product: true, variation: true } },
+              products: { include: { product: { include: PRODUCT_VARIATION_LABEL_SELECT }, variation: true } },
               questionAnswers: { include: { question: true } },
             },
           },
@@ -4729,7 +4786,8 @@ export class OrdersService {
               products: (reg.products ?? []).map((rp: any) => ({
                 name: rp.product?.name ?? '',
                 price: rp.unitPrice ?? 0,
-                variationName: rp.variation?.name,
+                // Rótulo único (kit com várias variações: "Variação: opção · …").
+                variationName: describeRegistrationProductVariations(rp).variationLabel || rp.variation?.name,
                 imageUrl: rp.product?.images?.[rp.product?.primaryImageIndex ?? 0],
                 isIncluded: rp.product?.isIncludedInTicket ?? false,
               }))
@@ -5167,8 +5225,10 @@ export class OrdersService {
   private async releaseProductHolds(tx: any, pendingProducts: any[] | null): Promise<void> {
     const heldByVariation = new Map<string, number>();
     for (const it of pendingProducts ?? []) {
-      if (!it?.stockHeld || !it.variationId) continue;
-      heldByVariation.set(it.variationId, (heldByVariation.get(it.variationId) ?? 0) + (it.quantity ?? 1));
+      // heldVariationIds (pedido novo) ou stockHeld + variationId (pedido antigo).
+      for (const id of heldVariationIdsOf(it)) {
+        heldByVariation.set(id, (heldByVariation.get(id) ?? 0) + (it.quantity ?? 1));
+      }
     }
     for (const [variationId, qty] of heldByVariation) {
       await releaseVariationHold(tx, variationId, qty);

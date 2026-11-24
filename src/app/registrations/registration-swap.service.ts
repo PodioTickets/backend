@@ -15,6 +15,11 @@ import {
   incrementVariationSold,
   reverseRegistrationProductSale,
 } from '../../common/utils/product-stock.util';
+import {
+  buildVariationChoices,
+  normalizeVariationIds,
+  resolveVariationSelection,
+} from '../../common/utils/product-variation.util';
 import { RegistrationsService } from './registrations.service';
 import { isEventDatePast } from '../../common/utils/event-status.util';
 import { swapEligibilityError, swapProductsError, SwapProductSelection } from './registration-swap.util';
@@ -97,7 +102,7 @@ export class RegistrationSwapService {
             category: { select: { id: true, name: true } },
             batches: true,
             products: {
-              include: { product: { include: { variations: true } } },
+              include: { product: { include: { variations: true, variationGroups: true } } },
             },
           },
         });
@@ -129,6 +134,7 @@ export class RegistrationSwapService {
             name: p.name,
             isRequired: !!p.isRequired,
             variations: p.variations ?? [],
+            variationGroups: p.variationGroups ?? [],
           })),
           products,
         );
@@ -290,16 +296,22 @@ export class RegistrationSwapService {
         const receiptProducts: any[] = [];
         for (const item of products) {
           const product = productById.get(item.productId);
-          const variation = item.variationId
-            ? (product.variations ?? []).find((v: any) => v.id === item.variationId)
-            : null;
-          if (variation && (variation.stock ?? 0) > 0) {
-            const acquired = await acquireVariationHold(tx, variation.id, 1);
-            if (acquired === 0) {
-              throw new UnprocessableEntityException(`"${product.name}" (${variation.name}) está esgotado`);
+          // Kit com várias variações: hold + venda de CADA opção escolhida (ordem dos grupos).
+          const chosen: any[] =
+            resolveVariationSelection(product, normalizeVariationIds(item)).variations ?? [];
+          const variation = chosen[0] ?? null;
+          const heldVariationIds: string[] = [];
+          for (const v of chosen) {
+            if ((v.stock ?? 0) > 0) {
+              const acquired = await acquireVariationHold(tx, v.id, 1);
+              if (acquired === 0) {
+                throw new UnprocessableEntityException(`"${product.name}" (${v.name}) está esgotado`);
+              }
+              heldVariationIds.push(v.id);
             }
+            await incrementVariationSold(tx, v.id, 1);
           }
-          if (variation) await incrementVariationSold(tx, variation.id, 1);
+          const variationIds = chosen.map((v) => v.id as string);
           const productSnapshot = {
             id: product.id,
             name: product.name,
@@ -310,15 +322,22 @@ export class RegistrationSwapService {
             isRequired: product.isRequired,
             variationType: product.variationType ?? null,
             stockHeld: true,
+            heldVariationIds,
             selectedVariation: variation
               ? { id: variation.id, name: variation.name, price: variation.price }
               : null,
+            selectedVariations: buildVariationChoices(
+              variationIds,
+              product.variations ?? [],
+              product.variationGroups ?? [],
+            ),
           };
           await tx.registrationProduct.create({
             data: {
               registrationId: newReg.id,
               productId: product.id,
               variationId: variation?.id ?? null,
+              variationIds,
               quantity: 1,
               unitPrice: 0,
               totalPrice: 0,

@@ -1,5 +1,11 @@
-import { IsString, IsOptional, IsBoolean, IsArray, IsInt, Min } from 'class-validator';
+import { IsString, IsOptional, IsBoolean, IsArray, IsInt, Min, IsIn } from 'class-validator';
 import { Type } from 'class-transformer';
+
+/**
+ * Tipos que o checkout sabe desenhar (`InformationStep.renderQuestionField`). Outro tipo
+ * virava pergunta INVISÍVEL — e, se obrigatória, travava a inscrição sem dizer o porquê.
+ */
+export const QUESTION_TYPES = ['text', 'select', 'multiple_choice', 'true_false', 'number'] as const;
 
 export class CreateQuestionDto {
   @IsString()
@@ -10,8 +16,8 @@ export class CreateQuestionDto {
   description?: string;
 
   @IsOptional()
-  @IsString()
-  type?: string; // text, select, checkbox, radio
+  @IsIn(QUESTION_TYPES)
+  type?: string;
 
   @IsOptional()
   @IsArray()
@@ -41,7 +47,7 @@ export class UpdateQuestionDto {
   description?: string;
 
   @IsOptional()
-  @IsString()
+  @IsIn(QUESTION_TYPES)
   type?: string;
 
   @IsOptional()

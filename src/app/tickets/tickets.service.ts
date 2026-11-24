@@ -15,8 +15,9 @@ import {
 } from './ticket-audit.helpers';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { stripDeletedTicketFromKitSelectionDisplay } from '../events/kit-selection-display.prune';
-import { resolveActiveBatch, type BatchWithSold } from './batch-active.util';
+import { findDuplicateBatchPeriod, resolveActiveBatch, type BatchWithSold } from './batch-active.util';
 import { assertPurchaseQuantityRange } from './purchase-quantity.util';
+import { PRODUCT_VARIATIONS_INCLUDE } from '../products/product.constants';
 
 function resolveImageUrl(url: string | null | undefined, baseUrl: string): string | null | undefined {
   if (!url) return url;
@@ -78,6 +79,16 @@ export class TicketsService {
     return `tickets:list:${eventId}:org:${isOrganizer ? 1 : 0}:cat:${categoryId ?? 'all'}:p:${page}:l:${limit}:inact:${includeInactive ? 1 : 0}:base:${baseUrl ?? ''}`;
   }
 
+  /** Dois lotes por data com a mesma janela (início e término) no mesmo ingresso → 400. */
+  private assertNoDuplicateBatchPeriod(batches: Parameters<typeof findDuplicateBatchPeriod>[0]): void {
+    const dup = findDuplicateBatchPeriod(batches);
+    if (dup) {
+      throw new BadRequestException(
+        `Os lotes ${dup[0] + 1} e ${dup[1] + 1} têm a mesma data de início e término. Altere o período de um deles.`,
+      );
+    }
+  }
+
   async create(
     userId: string,
     eventId: string,
@@ -93,6 +104,7 @@ export class TicketsService {
     if (createTicketDto.batches.length === 0) {
       throw new BadRequestException('Ingresso deve ter pelo menos um lote');
     }
+    this.assertNoDuplicateBatchPeriod(createTicketDto.batches);
 
     // Validar ageLimit
     if (createTicketDto.ageLimit && !createTicketDto.ageLimit.min && !createTicketDto.ageLimit.max) {
@@ -281,9 +293,7 @@ export class TicketsService {
             orderBy: { sortOrder: 'asc' },
             include: {
               product: {
-                include: {
-                  variations: { orderBy: { sortOrder: 'asc' } },
-                },
+                include: PRODUCT_VARIATIONS_INCLUDE,
               },
             },
           },
@@ -419,9 +429,7 @@ export class TicketsService {
           orderBy: { sortOrder: 'asc' },
           include: {
             product: {
-              include: {
-                variations: { orderBy: { sortOrder: 'asc' } },
-              },
+              include: PRODUCT_VARIATIONS_INCLUDE,
             },
           },
         },
@@ -552,6 +560,7 @@ export class TicketsService {
     if (updateTicketDto.batches && updateTicketDto.batches.length === 0) {
       throw new BadRequestException('Ingresso deve ter pelo menos um lote');
     }
+    if (updateTicketDto.batches) this.assertNoDuplicateBatchPeriod(updateTicketDto.batches);
 
     if (updateTicketDto.ageLimit && !updateTicketDto.ageLimit.min && !updateTicketDto.ageLimit.max) {
       throw new BadRequestException('ageLimit must have at least min or max');

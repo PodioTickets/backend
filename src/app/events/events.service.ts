@@ -58,6 +58,8 @@ import { RepasseService, RETENTION_DAYS, calendarDaysUntil, loadAnticipatedByUni
 import { CacheRedisService } from '../../common/services/cache-redis.service';
 import { isChargeback, resolveOrderOrganizerFeePercent } from '../../common/utils/refund.util';
 import { brtDayStartUtc, brtDayEndUtc, eventWindowInstant } from '../../common/utils/brt-date.util';
+import { PRODUCT_VARIATIONS_INCLUDE, PRODUCT_VARIATION_LABEL_SELECT } from '../products/product.constants';
+import { describeRegistrationProductVariations } from '../../common/utils/product-variation.util';
 import { withPastEventsAsCompleted as markPastEventsCompleted, isEventDatePast, pastEventDateCutoff, publicSearchPastEventCutoff } from '../../common/utils/event-status.util';
 
 /**
@@ -1812,7 +1814,7 @@ export class EventsService {
         questions: { orderBy: { order: 'asc' } },
         ticketCategories: { orderBy: { order: 'asc' } },
         products: {
-          include: { variations: { orderBy: { name: 'asc' } } },
+          include: { ...PRODUCT_VARIATIONS_INCLUDE, variations: { orderBy: { name: 'asc' } } },
           orderBy: { createdAt: 'desc' },
         },
       },
@@ -1825,7 +1827,7 @@ export class EventsService {
         batches: { orderBy: { price: 'asc' } },
         products: {
           orderBy: { sortOrder: 'asc' },
-          include: { product: { include: { variations: { orderBy: { sortOrder: 'asc' } } } } },
+          include: { product: { include: PRODUCT_VARIATIONS_INCLUDE } },
         },
         category: true,
         kit: { include: { items: { include: { product: true } } } },
@@ -4344,6 +4346,7 @@ export class EventsService {
             select: {
               id: true,
               name: true,
+              ...PRODUCT_VARIATION_LABEL_SELECT,
             },
           },
           variation: {
@@ -4617,6 +4620,8 @@ export class EventsService {
           id: rp.id,
           product: { id: rp.product.id, name: rp.product.name },
           variation: rp.variation ? { id: rp.variation.id, name: rp.variation.name } : null,
+          // Kit com várias variações: todas as opções escolhidas + rótulo único.
+          ...describeRegistrationProductVariations(rp),
           quantity: rp.quantity,
           unitPrice: rp.unitPrice,
           totalPrice: rp.totalPrice,
@@ -5800,7 +5805,7 @@ export class EventsService {
       },
       products: {
         include: {
-          product: { select: { id: true, name: true } },
+          product: { select: { id: true, name: true, ...PRODUCT_VARIATION_LABEL_SELECT } },
           variation: { select: { id: true, name: true } },
         },
       },
@@ -5945,7 +5950,10 @@ export class EventsService {
             // variação feita pelo cliente (o snapshot fica congelado na compra e
             // mostraria a variação ANTIGA). Igual ao que o organizador vê em
             // getRegistrations. Snapshot só como fallback (variação deletada). [[project_registration_snapshots]]
-            variationName: rp.variation?.name ?? snap?.selectedVariation?.name ?? null,
+            // Rótulo único (1 opção = nome; várias = "Variação: opção · …").
+            variationName:
+              describeRegistrationProductVariations(rp).variationLabel ||
+              (rp.variation?.name ?? snap?.selectedVariation?.name ?? null),
           };
         }),
         questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => {
@@ -6028,7 +6036,7 @@ export class EventsService {
       },
       products: {
         include: {
-          product: { select: { id: true, name: true } },
+          product: { select: { id: true, name: true, ...PRODUCT_VARIATION_LABEL_SELECT } },
           variation: { select: { id: true, name: true } },
         },
       },
@@ -6105,7 +6113,10 @@ export class EventsService {
           const snap = rp.productSnapshot as Record<string, any> | null;
           return {
             product: { name: snap?.name ?? rp.product?.name ?? '' },
-            variationName: rp.variation?.name ?? snap?.selectedVariation?.name ?? null,
+            // Rótulo único (1 opção = nome; várias = "Variação: opção · …").
+            variationName:
+              describeRegistrationProductVariations(rp).variationLabel ||
+              (rp.variation?.name ?? snap?.selectedVariation?.name ?? null),
           };
         }),
         questionAnswers: (reg.questionAnswers ?? []).map((qa: any) => {

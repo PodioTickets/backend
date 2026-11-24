@@ -26,9 +26,22 @@ describe('ProductsService — sortOrder das variações', () => {
         findUnique: jest.fn(),
         update: jest.fn().mockResolvedValue({ id: 'p1', name: 'Camiseta', image: null, images: [], variations: [] }),
       },
-      productVariation: { update: jest.fn().mockResolvedValue({}), create: jest.fn().mockResolvedValue({}), deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
+      productVariation: {
+        update: jest.fn().mockResolvedValue({}),
+        create: jest.fn().mockResolvedValue({}),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+      // Kit com várias variações: cada variação vira um grupo (opções criadas com groupId).
+      productVariationGroup: {
+        create: jest.fn().mockImplementation(({ data }: any) => ({ id: `g-${data.name}`, ...data })),
+        update: jest.fn().mockResolvedValue({}),
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
       registrationProduct: { findMany: jest.fn().mockResolvedValue([]) },
     };
+    client.$transaction = jest.fn((fn: any) => fn(client));
+    client.$queryRaw = jest.fn().mockResolvedValue([]); // opções já vendidas: nenhuma
     mockPrisma.getReadClient.mockReturnValue(client);
     mockPrisma.getWriteClient.mockReturnValue(client);
 
@@ -46,11 +59,15 @@ describe('ProductsService — sortOrder das variações', () => {
 
   afterEach(() => jest.clearAllMocks());
 
+  /** Opções criadas (na ordem), no formato `data` de cada `productVariation.create`. */
+  const createdOptions = () => client.productVariation.create.mock.calls.map((c: any[]) => c[0].data);
+
   it('CREATE: grava sortOrder pela ordem do array (P=0, M=1, G=2)', async () => {
     let captured: any;
     client.product.create.mockImplementation(({ data }: any) => {
       captured = data;
-      return { id: 'p1', name: data.name, image: null, images: [], variations: [] };
+      client.product.findUnique.mockResolvedValue({ id: 'p1', name: data.name, image: null, images: [], variations: [], variationGroups: [] });
+      return { id: 'p1' };
     });
 
     await service.create('admin-1', 'evt-1', {
@@ -63,7 +80,8 @@ describe('ProductsService — sortOrder das variações', () => {
       ],
     } as any);
 
-    expect(captured.variations.create).toEqual([
+    expect(captured.isKit).toBe(false); // sem isKit no payload = produto avulso
+    expect(createdOptions()).toEqual([
       expect.objectContaining({ name: 'P', sortOrder: 0 }),
       expect.objectContaining({ name: 'M', sortOrder: 1 }),
       expect.objectContaining({ name: 'G', sortOrder: 2 }),
@@ -74,7 +92,8 @@ describe('ProductsService — sortOrder das variações', () => {
     let captured: any;
     client.product.create.mockImplementation(({ data }: any) => {
       captured = data;
-      return { id: 'p1', name: data.name, image: null, images: [], variations: [] };
+      client.product.findUnique.mockResolvedValue({ id: 'p1', name: data.name, image: null, images: [], variations: [], variationGroups: [] });
+      return { id: 'p1' };
     });
 
     await service.create('admin-1', 'evt-1', {
@@ -86,7 +105,8 @@ describe('ProductsService — sortOrder das variações', () => {
       ],
     } as any);
 
-    expect(captured.variations.create).toEqual([
+    expect(captured.name).toBe('Camiseta');
+    expect(createdOptions()).toEqual([
       expect.objectContaining({ name: 'P', stock: 10, availableStock: 10 }),
       expect.objectContaining({ name: 'Ilimitada', stock: 0, availableStock: 0 }),
     ]);
@@ -97,7 +117,7 @@ describe('ProductsService — sortOrder das variações', () => {
     // v-b: limite 10→8  com 3 já fora (restante 7) → restante 5.
     // v-c: limite 10→10 (restante 2) → restante 2 (inalterado).
     client.product.findUnique.mockResolvedValue({
-      id: 'p1', eventId: 'evt-1', isRequired: true, tickets: [],
+      id: 'p1', eventId: 'evt-1', isRequired: true, tickets: [], variationGroups: [],
       variations: [
         { id: 'v-a', name: 'A', price: 0, stock: 10, availableStock: 6 },
         { id: 'v-b', name: 'B', price: 0, stock: 10, availableStock: 7 },
@@ -122,7 +142,7 @@ describe('ProductsService — sortOrder das variações', () => {
 
   it('UPDATE: recomputa sortOrder pela NOVA ordem do array (reordenar G,P,M)', async () => {
     client.product.findUnique.mockResolvedValue({
-      id: 'p1', eventId: 'evt-1', isRequired: true, tickets: [],
+      id: 'p1', eventId: 'evt-1', isRequired: true, tickets: [], variationGroups: [],
       variations: [
         { id: 'v-p', name: 'P', price: 0, stock: 10 },
         { id: 'v-m', name: 'M', price: 0, stock: 10 },
