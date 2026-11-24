@@ -189,9 +189,12 @@ export function describeRegistrationProductVariations(rp: any): {
   const snapChoices: VariationChoice[] | null = Array.isArray(snap.selectedVariations)
     ? snap.selectedVariations
     : null;
+  // `rp.variation` vem PRIMEIRO: costuma ser carregada enxuta ({id,name}, sem groupId) e,
+  // no Map por id, a última vence — senão apagava o grupo da 1ª opção (export saía
+  // "Short: G · M" em vez de "Camisa: M · Short: G").
   const liveVariations = [
-    ...(rp?.product?.variations ?? []),
     ...(rp?.variation ? [rp.variation] : []),
+    ...(rp?.product?.variations ?? []),
   ];
   let variations = buildVariationChoices(
     ids,

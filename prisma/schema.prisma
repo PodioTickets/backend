@@ -1198,7 +1198,7 @@ model Product {
   images             String[]
   primaryImageIndex  Int       @default(0)
   isIncludedInTicket Boolean   @default(false)
-  /// Kit (vários itens com variações, aparece na seção de kits do ingresso) × produto avulso.
+  /// Kit (vários itens como variações; editado no modal de kit) × produto. Para o participante, iguais.
   isKit              Boolean   @default(false)
   basePrice          Int       @default(0) // Preço base em centavos
   isRequired         Boolean   @default(false)

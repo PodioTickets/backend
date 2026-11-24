@@ -60,10 +60,6 @@ UPDATE "RegistrationProduct"
 SET "variationIds" = ARRAY["variationId"]
 WHERE "variationId" IS NOT NULL;
 
--- Kit × produto avulso (23/11/2026). Até aqui todo produto existia só como conteúdo do kit de
--- um ingresso (o vínculo exigia hasKit) → os existentes viram kit; novos nascem avulsos.
+-- Kit × produto (23/11/2026): só diz qual modal edita o item (kit = vários itens como variações).
+-- Para o participante kit e produto aparecem iguais. Existentes = produtos (criados no modal de produto).
 ALTER TABLE "Product" ADD COLUMN "isKit" BOOLEAN NOT NULL DEFAULT false;
-UPDATE "Product" SET "isKit" = true;
--- Vínculos órfãos (ingresso SEM kit com produto): nunca foram exibidos (gate do front/back).
--- Apagar antes de o ingresso sem kit passar a exibir produtos avulsos.
-DELETE FROM "TicketProduct" tp USING "Ticket" t WHERE tp."ticketId" = t."id" AND t."hasKit" = false;

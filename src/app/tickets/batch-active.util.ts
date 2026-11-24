@@ -121,3 +121,27 @@ export function resolveActiveBatch(
   // Nenhuma transição válida → esgotado/encerrado.
   return { batch: active, batchNumber: activeIdx + 1, status: 'SOLD_OUT' };
 }
+
+/**
+ * Lotes POR DATA (BY_TIME) com a MESMA janela (início e término iguais) no mesmo
+ * ingresso — regra do usuário 2026-11-24: não pode. Lote "ao esgotar o anterior"
+ * não tem janela própria e fica de fora. Compara o instante (data + hora).
+ * @returns índices (0-based) do 1º par repetido, ou null.
+ */
+export function findDuplicateBatchPeriod(
+  batches: Array<{ startDate?: string | Date | null; endDate?: string | Date | null; triggerType?: string | null }>,
+): [number, number] | null {
+  const seen = new Map<string, number>();
+  for (let i = 0; i < batches.length; i++) {
+    const b = batches[i];
+    if (b.triggerType === 'AFTER_PREVIOUS_SOLD_OUT' || !b.startDate || !b.endDate) continue;
+    const start = new Date(b.startDate).getTime();
+    const end = new Date(b.endDate).getTime();
+    if (Number.isNaN(start) || Number.isNaN(end)) continue;
+    const key = `${start}|${end}`;
+    const prev = seen.get(key);
+    if (prev !== undefined) return [prev, i];
+    seen.set(key, i);
+  }
+  return null;
+}
