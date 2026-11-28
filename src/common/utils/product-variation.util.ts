@@ -54,9 +54,12 @@ export interface VariationGroupLike {
  * Valida a escolha de opções de um produto e devolve as opções NA ORDEM DOS GRUPOS.
  * Regras (contrato 20/11):
  * - toda opção pertence ao produto;
- * - "Sem interesse" vai sozinha (recusa o kit inteiro);
+ * - kit obrigatório (`isRequired`) não aceita "Sem interesse" (nem que sobre a opção no banco);
+ * - "Sem interesse" sozinho recusa o kit inteiro;
+ * - "Sem interesse" + opções (27/11): cada variação tem "Sem interesse" no checkout; as
+ *   variações sem opção escolhida ficam com "Sem interesse" (não exige uma por grupo);
  * - no máximo 1 opção por grupo;
- * - produto com grupos (e escolha ≠ "Sem interesse") → exatamente 1 por grupo, desde que
+ * - produto com grupos (sem "Sem interesse") → exatamente 1 por grupo, desde que
  *   alguma opção tenha sido enviada. Lista vazia continua aceita (comportamento atual: o
  *   front decide se o kit é obrigatório; aqui só barramos escolhas inconsistentes).
  * Opções antigas sem grupo (produto ainda não migrado) contam como um grupo único implícito.
@@ -65,6 +68,7 @@ export interface VariationGroupLike {
 export function resolveVariationSelection(
   product: {
     name?: string;
+    isRequired?: boolean | null;
     variations?: VariationOptionLike[] | null;
     variationGroups?: VariationGroupLike[] | null;
   },
@@ -81,12 +85,17 @@ export function resolveVariationSelection(
     }
     chosen.push(v);
   }
-  if (chosen.some(isNoInterestVariation)) {
-    if (chosen.length > 1) {
-      return { error: `"${NO_INTEREST_VARIATION_NAME}" não pode ser escolhido junto com outras opções${label}.` };
-    }
-    return { variations: chosen };
+  const noInterest = chosen.filter(isNoInterestVariation);
+  // Fail secure: o front não oferece, mas o cliente poderia mandar e deixar de levar/pagar o kit.
+  if (noInterest.length > 0 && product?.isRequired) {
+    return { error: `"${NO_INTEREST_VARIATION_NAME}" não está disponível${label}: o kit é obrigatório.` };
   }
+  if (noInterest.length > 1) {
+    return { error: `"${NO_INTEREST_VARIATION_NAME}" repetido${label}.` };
+  }
+  if (noInterest.length === 1 && chosen.length === 1) return { variations: chosen };
+  const partialOptOut = noInterest.length === 1;
+  if (partialOptOut) chosen.splice(chosen.indexOf(noInterest[0]), 1);
   const groupKey = (v: VariationOptionLike) => v.groupId ?? '__sem_grupo__';
   const seen = new Set<string>();
   for (const v of chosen) {
@@ -106,13 +115,15 @@ export function resolveVariationSelection(
     if (detached) {
       return { error: `A opção "${detached.name}" não está mais disponível${label}.` };
     }
-    const missing = groups.find((g) => !seen.has(g.id));
+    const missing = partialOptOut ? undefined : groups.find((g) => !seen.has(g.id));
     if (missing) {
       return { error: `Escolha uma opção de "${missing.name}"${label}.` };
     }
     const order = new Map(groups.map((g, i) => [g.id, i]));
     chosen.sort((a, b) => (order.get(a.groupId ?? '') ?? 999) - (order.get(b.groupId ?? '') ?? 999));
   }
+  // "Sem interesse" parcial vai por ÚLTIMO: variationId (= 1ª) continua sendo uma opção real.
+  if (partialOptOut) chosen.push(noInterest[0]);
   return { variations: chosen };
 }
 
@@ -149,6 +160,14 @@ export function buildVariationChoices(
   }
   if (out.length === 0 && fallback?.name) {
     out.push({ id: fallback.id ?? '', name: fallback.name, groupId: null, groupName: null });
+  }
+  const optOutIdx = out.findIndex((c) => isNoInterestVariation(c) && !c.groupId);
+  if (optOutIdx >= 0 && out.length > 1 && gList.length > 0) {
+    const [optOut] = out.splice(optOutIdx, 1);
+    const picked = new Set(out.map((c) => c.groupId));
+    for (const g of gList) {
+      if (!picked.has(g.id)) out.push({ id: optOut.id, name: optOut.name, groupId: g.id, groupName: g.name });
+    }
   }
   const order = new Map(
     [...gList].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0)).map((g, i) => [g.id, i]),
@@ -216,7 +235,11 @@ export function pickPricingVariation<T extends { name?: string; price?: number }
   variations: T[],
 ): T | null {
   if (variations.length === 0) return null;
-  return variations.find((v) => isNoInterestVariation(v)) ?? variations.find((v) => (v.price ?? 0) > 0) ?? variations[0];
+  // "Sem interesse" só zera o preço quando recusa o kit inteiro (sozinho). Junto de opções
+  // reais (variação em "Sem interesse"), o kit é cobrado normalmente.
+  const real = variations.filter((v) => !isNoInterestVariation(v));
+  if (real.length === 0) return variations[0];
+  return real.find((v) => (v.price ?? 0) > 0) ?? real[0];
 }
 
 /**
