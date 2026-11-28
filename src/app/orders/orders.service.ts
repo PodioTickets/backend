@@ -3334,6 +3334,21 @@ export class OrdersService {
     const validEmails = new Set(participants.map((p: any) => p.email?.toLowerCase()));
     const reservedTickets = (order.reservedTickets as any[]) ?? [];
 
+    // Produto precisa estar vinculado ao INGRESSO do participante (não só ao evento): sem isso
+    // dava para pôr no pedido um kit incluso (grátis) de outro ingresso, ou manter um kit
+    // desvinculado no meio da compra. Slot posicional = mesma regra do finalize.
+    const slotTicketIds: string[] = reservedTickets.flatMap((rt: any) =>
+      Array(rt?.quantity ?? 0).fill(rt.ticketId),
+    );
+    const ticketByEmail = buildParticipantTicketMap(reservedTickets, participants);
+    const ticketLinks: { ticketId: string; productId: string }[] = dto.products.length
+      ? await w.ticketProduct.findMany({
+          where: { ticketId: { in: [...new Set(slotTicketIds)] } },
+          select: { ticketId: true, productId: true },
+        })
+      : [];
+    const linkedToTicket = new Set(ticketLinks.map((l) => `${l.ticketId}:${l.productId}`));
+
     // Recalculate product subtotal validando produtos e participantes.
     // Enriquecemos cada item com `unitPrice` calculado para gravar no JSON
     // pendingProducts — é o snapshot do preço usado por patchParticipants e por
@@ -3361,6 +3376,15 @@ export class OrdersService {
       if (product.eventId !== order.eventId) {
         throw new UnprocessableEntityException(
           `Produto "${product.name}" não pertence ao evento deste pedido.`,
+        );
+      }
+      const participantTicketId =
+        typeof item.participantIndex === 'number'
+          ? slotTicketIds[item.participantIndex]
+          : ticketByEmail.get(item.participantEmail.toLowerCase());
+      if (!participantTicketId || !linkedToTicket.has(`${participantTicketId}:${product.id}`)) {
+        throw new UnprocessableEntityException(
+          `Produto "${product.name}" não está disponível para o ingresso deste participante.`,
         );
       }
 
